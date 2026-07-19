@@ -24,8 +24,11 @@ class TeamOversight_Fees {
         if (!in_array($gender, array('mens', 'womens', 'mixed'), true)) {
             $gender = 'mixed';
         }
-        $max_age = isset($_POST['team_max_age']) ? max(0, min(99, intval($_POST['team_max_age']))) : 0;
-        return array('gender' => $gender, 'max_age' => $max_age);
+        $age_rule = isset($_POST['team_age_rule']) ? sanitize_text_field($_POST['team_age_rule']) : '';
+        if (!array_key_exists($age_rule, TeamOversight_Database::get_age_rules())) {
+            $age_rule = '';
+        }
+        return array('gender' => $gender, 'age_rule' => $age_rule);
     }
     
     public function import_price_matrix($season = null) {
@@ -403,10 +406,14 @@ class TeamOversight_Fees {
                                         </td>
                                     </tr>
                                     <tr>
-                                        <th><label for="team-max-age">Age Limit</label></th>
+                                        <th><label for="team-age-rule">Age Eligibility</label></th>
                                         <td>
-                                            <input type="number" id="team-max-age" name="team_max_age" min="0" max="99" placeholder="0" style="width: 70px;">
-                                            <span class="description">Under-X on 31 Dec of the season year; 0 or blank = open age</span>
+                                            <select id="team-age-rule" name="team_age_rule">
+                                                <?php foreach (TeamOversight_Database::get_age_rules() as $rule_key => $rule_label): ?>
+                                                    <option value="<?php echo esc_attr($rule_key); ?>"><?php echo esc_html($rule_label); ?></option>
+                                                <?php endforeach; ?>
+                                            </select>
+                                            <p class="description">DOB cutoffs follow the VVL By-Laws and shift automatically each season.</p>
                                         </td>
                                     </tr>
                                 </table>
@@ -426,7 +433,7 @@ class TeamOversight_Fees {
                                         <th style="width: 100px;">Team Code</th>
                                         <th>Team Name</th>
                                         <th style="width: 90px;">Gender</th>
-                                        <th style="width: 80px;">Age Limit</th>
+                                        <th style="width: 80px;">Age</th>
                                         <th style="width: 140px;">Actions</th>
                                     </tr>
                                 </thead>
@@ -452,8 +459,12 @@ class TeamOversight_Fees {
                                                 </select>
                                             </td>
                                             <td class="team-age-cell">
-                                                <span class="display-value"><?php echo $team['max_age'] ? 'U' . intval($team['max_age']) : 'Open'; ?></span>
-                                                <input type="number" class="edit-value" value="<?php echo intval($team['max_age']); ?>" min="0" max="99" style="display: none; width: 60px;">
+                                                <span class="display-value"><?php echo $team['age_rule'] ? strtoupper($team['age_rule']) : 'Open'; ?></span>
+                                                <select class="edit-value" style="display: none;">
+                                                    <?php foreach (TeamOversight_Database::get_age_rules() as $rule_key => $rule_label): ?>
+                                                        <option value="<?php echo esc_attr($rule_key); ?>" <?php selected($team['age_rule'], $rule_key); ?>><?php echo esc_html($rule_key ? strtoupper($rule_key) : 'Open'); ?></option>
+                                                    <?php endforeach; ?>
+                                                </select>
                                             </td>
                                             <td>
                                                 <button type="button" class="button button-small edit-team-btn" onclick="editTeam('<?php echo esc_js($code); ?>')">Edit</button>
@@ -520,7 +531,7 @@ class TeamOversight_Fees {
             const teamCode = document.getElementById('team-code').value.trim();
             const teamName = document.getElementById('team-name').value.trim();
             const teamGender = document.getElementById('team-gender').value;
-            const teamMaxAge = document.getElementById('team-max-age').value || '0';
+            const teamAgeRule = document.getElementById('team-age-rule').value;
 
             if (!teamCode || !teamName) {
                 alert('Please fill in both team code and team name.');
@@ -532,7 +543,7 @@ class TeamOversight_Fees {
             formData.append('team_code', teamCode);
             formData.append('team_name', teamName);
             formData.append('team_gender', teamGender);
-            formData.append('team_max_age', teamMaxAge);
+            formData.append('team_age_rule', teamAgeRule);
             formData.append('team_nonce', '<?php echo wp_create_nonce('save_team'); ?>');
             
             const statusDiv = document.getElementById('team-save-status');
@@ -552,10 +563,10 @@ class TeamOversight_Fees {
                     // Reset form
                     document.getElementById('team-code').value = '';
                     document.getElementById('team-name').value = '';
-                    document.getElementById('team-max-age').value = '';
+                    document.getElementById('team-age-rule').value = '';
 
                     // Add new row to teams table
-                    addTeamRow(teamCode, teamName, teamGender, parseInt(teamMaxAge, 10) || 0);
+                    addTeamRow(teamCode, teamName, teamGender, teamAgeRule);
                 } else {
                     statusDiv.textContent = '✗ Error: ' + (data.data || 'Unknown error');
                     statusDiv.style.color = '#dc3232';
@@ -568,7 +579,7 @@ class TeamOversight_Fees {
             });
         }
         
-        function addTeamRow(code, name, gender, maxAge) {
+        function addTeamRow(code, name, gender, ageRule) {
             const genderLabels = {mens: "Men's", womens: "Women's", mixed: 'Mixed'};
             const tbody = document.getElementById('teams-tbody');
             const newRow = document.createElement('tr');
@@ -588,8 +599,13 @@ class TeamOversight_Fees {
                     </select>
                 </td>
                 <td class="team-age-cell">
-                    <span class="display-value">${maxAge ? 'U' + maxAge : 'Open'}</span>
-                    <input type="number" class="edit-value" value="${maxAge}" min="0" max="99" style="display: none; width: 60px;">
+                    <span class="display-value">${ageRule ? ageRule.toUpperCase() : 'Open'}</span>
+                    <select class="edit-value" style="display: none;">
+                        <option value=""${ageRule === '' ? ' selected' : ''}>Open</option>
+                        <option value="u19"${ageRule === 'u19' ? ' selected' : ''}>U19</option>
+                        <option value="u17"${ageRule === 'u17' ? ' selected' : ''}>U17</option>
+                        <option value="u15"${ageRule === 'u15' ? ' selected' : ''}>U15</option>
+                    </select>
                 </td>
                 <td>
                     <button type="button" class="button button-small edit-team-btn" onclick="editTeam('${escapeHtml(code)}')">Edit</button>
@@ -624,7 +640,7 @@ class TeamOversight_Fees {
             const row = document.querySelector(`tr[data-team-code="${teamCode}"]`);
             const newName = row.querySelector('.team-name-cell .edit-value').value.trim();
             const newGender = row.querySelector('.team-gender-cell .edit-value').value;
-            const newMaxAge = row.querySelector('.team-age-cell .edit-value').value || '0';
+            const newAgeRule = row.querySelector('.team-age-cell .edit-value').value;
 
             if (!newName) {
                 alert('Team name cannot be empty.');
@@ -636,7 +652,7 @@ class TeamOversight_Fees {
             formData.append('team_code', teamCode);
             formData.append('team_name', newName);
             formData.append('team_gender', newGender);
-            formData.append('team_max_age', newMaxAge);
+            formData.append('team_age_rule', newAgeRule);
             formData.append('team_nonce', '<?php echo wp_create_nonce('update_team'); ?>');
 
             fetch(ajaxurl, {
@@ -649,7 +665,7 @@ class TeamOversight_Fees {
                     const genderLabels = {mens: "Men's", womens: "Women's", mixed: 'Mixed'};
                     row.querySelector('.team-name-cell .display-value').textContent = newName;
                     row.querySelector('.team-gender-cell .display-value').textContent = genderLabels[newGender] || newGender;
-                    row.querySelector('.team-age-cell .display-value').textContent = parseInt(newMaxAge, 10) ? 'U' + parseInt(newMaxAge, 10) : 'Open';
+                    row.querySelector('.team-age-cell .display-value').textContent = newAgeRule ? newAgeRule.toUpperCase() : 'Open';
                     cancelTeamEdit(teamCode);
                 } else {
                     alert('Error updating team: ' + (data.data || 'Unknown error'));
@@ -1167,7 +1183,7 @@ class TeamOversight_Fees {
         $meta = array();
         foreach ($defaults as $code => $team) {
             $names[$code] = $team['name'];
-            $meta[$code] = array('gender' => $team['gender'], 'max_age' => $team['max_age']);
+            $meta[$code] = array('gender' => $team['gender'], 'age_rule' => $team['age_rule']);
         }
         update_option('team_oversight_teams', $names);
         update_option('team_oversight_team_meta', $meta);

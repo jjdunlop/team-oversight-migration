@@ -334,9 +334,9 @@ class TeamOversight_Trials {
                                     <div class="team-group">
                                         <h4><?php echo esc_html($group_label); ?></h4>
                                         <?php foreach ($group_teams as $code => $team): ?>
-                                            <label class="team-option" data-gender="<?php echo esc_attr($team['gender']); ?>" data-max-age="<?php echo intval($team['max_age']); ?>">
+                                            <label class="team-option" data-gender="<?php echo esc_attr($team['gender']); ?>" data-age-rule="<?php echo esc_attr($team['age_rule']); ?>">
                                                 <input type="checkbox" name="interested_teams[]" value="<?php echo esc_attr($code); ?>">
-                                                <?php echo esc_html($team['name']); ?><?php echo $team['max_age'] ? ' (Under ' . intval($team['max_age']) . ')' : ''; ?><span class="ineligible-reason"></span>
+                                                <?php echo esc_html($team['name']); ?><span class="ineligible-reason"></span>
                                             </label><br>
                                         <?php endforeach; ?>
                                     </div>
@@ -408,33 +408,43 @@ class TeamOversight_Trials {
         jQuery(document).ready(function($) {
             // Team eligibility: grey out teams the player can't trial for,
             // based on competition (profile gender or the form question) and
-            // each team's age limit at 31 Dec of the selected season.
+            // each team's VVL age rule. Cutoffs follow the VVL By-Laws:
+            // U19 = born on/after 1 Jan (season-18); U17/U15 (YSL) = born
+            // on/after 1 Sep of (season-17)/(season-15).
             var murvcDob = '<?php echo esc_js($prefill['birth_date']); ?>';
             var murvcComp = '<?php echo esc_js($competition['competition'] ? $competition['competition'] : ''); ?>';
 
-            function murvcAgeAtSeasonEnd(seasonYear) {
-                if (!murvcDob) return null;
-                var d = new Date(murvcDob.replace(/\//g, '-') + 'T00:00:00');
-                if (isNaN(d.getTime())) return null;
-                // Age on 31 Dec of the season year — every birthday has passed.
-                return seasonYear - d.getFullYear();
+            function murvcDobCutoff(rule, seasonYear) {
+                if (rule === 'u19') return (seasonYear - 18) + '-01-01';
+                if (rule === 'u17') return (seasonYear - 17) + '-09-01';
+                if (rule === 'u15') return (seasonYear - 15) + '-09-01';
+                return null;
+            }
+
+            function murvcFormatDate(iso) {
+                var p = iso.split('-');
+                return p[2] + '/' + p[1] + '/' + p[0];
             }
 
             function updateTeamEligibility() {
                 var seasonYear = parseInt($('#season').val(), 10);
                 var comp = murvcComp || $('input[name="gender_trialling"]:checked').val() || '';
-                var age = murvcAgeAtSeasonEnd(seasonYear);
+                var dob = murvcDob ? new Date(murvcDob.replace(/\//g, '-') + 'T00:00:00') : null;
+                if (dob && isNaN(dob.getTime())) { dob = null; }
 
                 $('.team-option').each(function() {
                     var $opt = $(this);
                     var gender = $opt.attr('data-gender');
-                    var maxAge = parseInt($opt.attr('data-max-age'), 10) || 0;
+                    var rule = $opt.attr('data-age-rule');
                     var reason = '';
 
                     if (comp && gender !== 'mixed' && gender !== comp) {
                         reason = gender === 'mens' ? "men's team" : "women's team";
-                    } else if (maxAge && age !== null && age >= maxAge) {
-                        reason = 'age limit: must be under ' + maxAge + ' in ' + seasonYear;
+                    } else if (rule && dob) {
+                        var cutoff = murvcDobCutoff(rule, seasonYear);
+                        if (cutoff && dob < new Date(cutoff + 'T00:00:00')) {
+                            reason = rule.toUpperCase() + ': must be born on or after ' + murvcFormatDate(cutoff);
+                        }
                     }
 
                     var $cb = $opt.find('input');
@@ -804,21 +814,22 @@ class TeamOversight_Trials {
         // Eligibility is enforced server-side: the greyed-out checkboxes are
         // a courtesy, this is the authority.
         $prefill = self::get_prefill_data($user->ID);
-        $age_at_season_end = null;
+        $dob_normalized = null;
         if (!empty($prefill['birth_date'])) {
             $birth_ts = strtotime(str_replace('/', '-', $prefill['birth_date']));
             if ($birth_ts) {
-                $age_at_season_end = intval($season) - intval(date('Y', $birth_ts));
+                $dob_normalized = date('Y-m-d', $birth_ts);
             }
         }
 
         foreach ($interested_teams as $team_code) {
             $team = $teams_config[$team_code];
             if ($team['gender'] !== 'mixed' && $gender_trialling && $team['gender'] !== $gender_trialling) {
-                wp_send_json_error(array('message' => $team_code . ' is a ' . ($team['gender'] === 'mens' ? "men's" : "women's") . ' team and does not match the competition you are trialling for.'));
+                wp_send_json_error(array('message' => $team['name'] . ' is a ' . ($team['gender'] === 'mens' ? "men's" : "women's") . ' team and does not match the competition you are trialling for.'));
             }
-            if ($team['max_age'] && $age_at_season_end !== null && $age_at_season_end >= $team['max_age']) {
-                wp_send_json_error(array('message' => $team_code . ' is an Under-' . $team['max_age'] . ' team; you must be under ' . $team['max_age'] . ' on 31 December ' . intval($season) . ' to trial for it.'));
+            $cutoff = TeamOversight_Database::get_dob_cutoff($team['age_rule'], $season);
+            if ($cutoff && $dob_normalized && $dob_normalized < $cutoff) {
+                wp_send_json_error(array('message' => $team['name'] . ' is a ' . strtoupper($team['age_rule']) . ' team; for the ' . intval($season) . ' season you must be born on or after ' . date('j F Y', strtotime($cutoff)) . ' to play in it.'));
             }
         }
 

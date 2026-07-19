@@ -251,32 +251,65 @@ class TeamOversight_Database {
     
     /**
      * The current club team list, seeded when no teams are configured.
-     * gender: mens|womens|mixed. max_age: player must be UNDER this age on
-     * 31 Dec of the season year (0 = open age).
+     * gender: mens|womens|mixed. age_rule: see get_age_rules().
      */
     public static function get_default_teams() {
         return array(
-            'PL1M' => array('name' => 'Premier League 1 Men', 'gender' => 'mens', 'max_age' => 0),
-            'PL1W' => array('name' => 'Premier League 1 Women', 'gender' => 'womens', 'max_age' => 0),
-            'PL2M' => array('name' => 'Premier League 2 Men', 'gender' => 'mens', 'max_age' => 0),
-            'PL2W' => array('name' => 'Premier League 2 Women', 'gender' => 'womens', 'max_age' => 0),
-            'SL1M-B' => array('name' => 'State League 1 Men Blue', 'gender' => 'mens', 'max_age' => 0),
-            'SL1M-W' => array('name' => 'State League 1 Men White', 'gender' => 'mens', 'max_age' => 0),
-            'SL1W-B' => array('name' => 'State League 1 Women Blue', 'gender' => 'womens', 'max_age' => 0),
-            'SL1W-W' => array('name' => 'State League 1 Women White', 'gender' => 'womens', 'max_age' => 0),
-            'SL2M' => array('name' => 'State League 2 Men', 'gender' => 'mens', 'max_age' => 0),
-            'SL2W' => array('name' => 'State League 2 Women', 'gender' => 'womens', 'max_age' => 0),
-            'SL3M-R' => array('name' => 'State League 3 Men Red', 'gender' => 'mens', 'max_age' => 0),
-            'SL3M-B' => array('name' => 'State League 3 Men Blue', 'gender' => 'mens', 'max_age' => 0),
-            'SL3W' => array('name' => 'State League 3 Women', 'gender' => 'womens', 'max_age' => 0),
-            'JPLM' => array('name' => 'Junior Premier League Men', 'gender' => 'mens', 'max_age' => 19),
-            'JPLW' => array('name' => 'Junior Premier League Women', 'gender' => 'womens', 'max_age' => 19),
-            'YSL17B1-B' => array('name' => 'Youth State League 17 Boys Blue', 'gender' => 'mens', 'max_age' => 17),
-            'YSL17B1-R' => array('name' => 'Youth State League 17 Boys Red', 'gender' => 'mens', 'max_age' => 17),
-            'YSL17G1' => array('name' => 'Youth State League 17 Girls', 'gender' => 'womens', 'max_age' => 17),
-            'YSL15B' => array('name' => 'Youth State League 15 Boys', 'gender' => 'mens', 'max_age' => 15),
-            'YSL15G' => array('name' => 'Youth State League 15 Girls', 'gender' => 'womens', 'max_age' => 15),
+            'PL1M' => array('name' => 'Premier League 1 Men', 'gender' => 'mens', 'age_rule' => ''),
+            'PL1W' => array('name' => 'Premier League 1 Women', 'gender' => 'womens', 'age_rule' => ''),
+            'PL2M' => array('name' => 'Premier League 2 Men', 'gender' => 'mens', 'age_rule' => ''),
+            'PL2W' => array('name' => 'Premier League 2 Women', 'gender' => 'womens', 'age_rule' => ''),
+            'SL1M-B' => array('name' => 'State League 1 Men Blue', 'gender' => 'mens', 'age_rule' => ''),
+            'SL1M-W' => array('name' => 'State League 1 Men White', 'gender' => 'mens', 'age_rule' => ''),
+            'SL1W-B' => array('name' => 'State League 1 Women Blue', 'gender' => 'womens', 'age_rule' => ''),
+            'SL1W-W' => array('name' => 'State League 1 Women White', 'gender' => 'womens', 'age_rule' => ''),
+            'SL2M' => array('name' => 'State League 2 Men', 'gender' => 'mens', 'age_rule' => ''),
+            'SL2W' => array('name' => 'State League 2 Women', 'gender' => 'womens', 'age_rule' => ''),
+            'SL3M-R' => array('name' => 'State League 3 Men Red', 'gender' => 'mens', 'age_rule' => ''),
+            'SL3M-B' => array('name' => 'State League 3 Men Blue', 'gender' => 'mens', 'age_rule' => ''),
+            'SL3W' => array('name' => 'State League 3 Women', 'gender' => 'womens', 'age_rule' => ''),
+            'JPLM' => array('name' => 'Junior Premier League Men', 'gender' => 'mens', 'age_rule' => 'u19'),
+            'JPLW' => array('name' => 'Junior Premier League Women', 'gender' => 'womens', 'age_rule' => 'u19'),
+            'YSL17B1-B' => array('name' => 'Youth State League 17 Boys Blue', 'gender' => 'mens', 'age_rule' => 'u17'),
+            'YSL17B1-R' => array('name' => 'Youth State League 17 Boys Red', 'gender' => 'mens', 'age_rule' => 'u17'),
+            'YSL17G1' => array('name' => 'Youth State League 17 Girls', 'gender' => 'womens', 'age_rule' => 'u17'),
+            'YSL15B' => array('name' => 'Youth State League 15 Boys', 'gender' => 'mens', 'age_rule' => 'u15'),
+            'YSL15G' => array('name' => 'Youth State League 15 Girls', 'gender' => 'womens', 'age_rule' => 'u15'),
         );
+    }
+
+    /**
+     * Age eligibility rules per the VVL By-Laws. The DOB cutoff is computed
+     * from the season year (get_dob_cutoff), so nothing needs updating when
+     * the season rolls over:
+     *  - u19 (JPL/junior): must not turn 19 during the season's calendar year
+     *  - u17 (YSL): age 16 or younger as of 31 August of the season year
+     *  - u15 (YSL): age 14 or younger as of 31 August of the season year
+     */
+    public static function get_age_rules() {
+        return array(
+            '' => 'Open age',
+            'u19' => 'U19 — Junior (JPL: no 19th birthday in the season year)',
+            'u17' => 'U17 — YSL (16 or younger on 31 August)',
+            'u15' => 'U15 — YSL (14 or younger on 31 August)',
+        );
+    }
+
+    /**
+     * Earliest allowed date of birth for an age rule in a given season.
+     * Players must be born ON or AFTER this date. Null = no restriction.
+     */
+    public static function get_dob_cutoff($age_rule, $season) {
+        $season = intval($season);
+        switch ($age_rule) {
+            case 'u19':
+                return ($season - 18) . '-01-01';
+            case 'u17':
+                return ($season - 17) . '-09-01';
+            case 'u15':
+                return ($season - 15) . '-09-01';
+        }
+        return null;
     }
 
     public function get_teams() {
@@ -290,7 +323,7 @@ class TeamOversight_Database {
             $meta = array();
             foreach ($defaults as $code => $team) {
                 $names[$code] = $team['name'];
-                $meta[$code] = array('gender' => $team['gender'], 'max_age' => $team['max_age']);
+                $meta[$code] = array('gender' => $team['gender'], 'age_rule' => $team['age_rule']);
             }
             update_option('team_oversight_teams', $names);
             update_option('team_oversight_team_meta', $meta);
@@ -301,10 +334,10 @@ class TeamOversight_Database {
     }
 
     /**
-     * Teams with their gender and age-limit metadata:
-     * code => array(name, gender: mens|womens|mixed, max_age: int, 0 = open).
-     * Gender falls back to a guess from the team code for teams saved before
-     * metadata existed.
+     * Teams with their gender and age-rule metadata:
+     * code => array(name, gender: mens|womens|mixed, age_rule: ''|u19|u17|u15).
+     * Gender falls back to a guess from the team code, and legacy max_age
+     * metadata maps onto the matching rule.
      */
     public function get_teams_config() {
         $names = $this->get_teams();
@@ -316,10 +349,21 @@ class TeamOversight_Database {
             $gender = isset($team_meta['gender']) && in_array($team_meta['gender'], array('mens', 'womens', 'mixed'), true)
                 ? $team_meta['gender']
                 : self::derive_team_gender($code);
+
+            $age_rule = '';
+            if (isset($team_meta['age_rule']) && array_key_exists($team_meta['age_rule'], self::get_age_rules())) {
+                $age_rule = $team_meta['age_rule'];
+            } elseif (!empty($team_meta['max_age'])) {
+                // Teams saved before age rules existed used a plain age number.
+                $legacy_map = array(19 => 'u19', 18 => 'u19', 17 => 'u17', 16 => 'u17', 15 => 'u15', 14 => 'u15');
+                $legacy_age = intval($team_meta['max_age']);
+                $age_rule = isset($legacy_map[$legacy_age]) ? $legacy_map[$legacy_age] : '';
+            }
+
             $config[$code] = array(
                 'name' => $name,
                 'gender' => $gender,
-                'max_age' => isset($team_meta['max_age']) ? intval($team_meta['max_age']) : 0,
+                'age_rule' => $age_rule,
             );
         }
         return $config;
