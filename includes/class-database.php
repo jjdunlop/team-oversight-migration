@@ -381,10 +381,10 @@ class TeamOversight_Database {
      */
     public static function get_default_teams() {
         return array(
-            'PL1M' => array('name' => 'Premier League 1 Men', 'gender' => 'mens', 'age_rule' => ''),
-            'PL1W' => array('name' => 'Premier League 1 Women', 'gender' => 'womens', 'age_rule' => ''),
-            'PL2M' => array('name' => 'Premier League 2 Men', 'gender' => 'mens', 'age_rule' => ''),
-            'PL2W' => array('name' => 'Premier League 2 Women', 'gender' => 'womens', 'age_rule' => ''),
+            'PL1M' => array('name' => 'Premier League 1 Men', 'gender' => 'mens', 'age_rule' => '', 'shirts' => 2),
+            'PL1W' => array('name' => 'Premier League 1 Women', 'gender' => 'womens', 'age_rule' => '', 'shirts' => 2),
+            'PL2M' => array('name' => 'Premier League 2 Men', 'gender' => 'mens', 'age_rule' => '', 'shirts' => 2),
+            'PL2W' => array('name' => 'Premier League 2 Women', 'gender' => 'womens', 'age_rule' => '', 'shirts' => 2),
             'SL1M-B' => array('name' => 'State League 1 Men Blue', 'gender' => 'mens', 'age_rule' => ''),
             'SL1M-W' => array('name' => 'State League 1 Men White', 'gender' => 'mens', 'age_rule' => ''),
             'SL1W-B' => array('name' => 'State League 1 Women Blue', 'gender' => 'womens', 'age_rule' => ''),
@@ -396,11 +396,11 @@ class TeamOversight_Database {
             'SL3W' => array('name' => 'State League 3 Women', 'gender' => 'womens', 'age_rule' => ''),
             'JPLM' => array('name' => 'Junior Premier League Men', 'gender' => 'mens', 'age_rule' => 'u19'),
             'JPLW' => array('name' => 'Junior Premier League Women', 'gender' => 'womens', 'age_rule' => 'u19'),
-            'YSL17B1-B' => array('name' => 'Youth State League 17 Boys Blue', 'gender' => 'mens', 'age_rule' => 'u17'),
-            'YSL17B1-R' => array('name' => 'Youth State League 17 Boys Red', 'gender' => 'mens', 'age_rule' => 'u17'),
-            'YSL17G1' => array('name' => 'Youth State League 17 Girls', 'gender' => 'womens', 'age_rule' => 'u17'),
-            'YSL15B' => array('name' => 'Youth State League 15 Boys', 'gender' => 'mens', 'age_rule' => 'u15'),
-            'YSL15G' => array('name' => 'Youth State League 15 Girls', 'gender' => 'womens', 'age_rule' => 'u15'),
+            'YSL17B1-B' => array('name' => 'Youth State League 17 Boys Blue', 'gender' => 'mens', 'age_rule' => 'u17', 'shirts' => 0),
+            'YSL17B1-R' => array('name' => 'Youth State League 17 Boys Red', 'gender' => 'mens', 'age_rule' => 'u17', 'shirts' => 0),
+            'YSL17G1' => array('name' => 'Youth State League 17 Girls', 'gender' => 'womens', 'age_rule' => 'u17', 'shirts' => 0),
+            'YSL15B' => array('name' => 'Youth State League 15 Boys', 'gender' => 'mens', 'age_rule' => 'u15', 'shirts' => 0),
+            'YSL15G' => array('name' => 'Youth State League 15 Girls', 'gender' => 'womens', 'age_rule' => 'u15', 'shirts' => 0),
         );
     }
 
@@ -449,7 +449,11 @@ class TeamOversight_Database {
             $meta = array();
             foreach ($defaults as $code => $team) {
                 $names[$code] = $team['name'];
-                $meta[$code] = array('gender' => $team['gender'], 'age_rule' => $team['age_rule']);
+                $meta[$code] = array(
+                    'gender' => $team['gender'],
+                    'age_rule' => $team['age_rule'],
+                    'shirts' => isset($team['shirts']) ? $team['shirts'] : 1,
+                );
             }
             update_option('team_oversight_teams', $names);
             update_option('team_oversight_team_meta', $meta);
@@ -490,6 +494,9 @@ class TeamOversight_Database {
                 'name' => $name,
                 'gender' => $gender,
                 'age_rule' => $age_rule,
+                // Playing shirts a player must purchase for this team
+                // (Premier teams 2, YSL 0 — supplied; default 1).
+                'shirts' => isset($team_meta['shirts']) ? max(0, intval($team_meta['shirts'])) : 1,
             );
         }
         return $config;

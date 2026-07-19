@@ -28,7 +28,8 @@ class TeamOversight_Fees {
         if (!array_key_exists($age_rule, TeamOversight_Database::get_age_rules())) {
             $age_rule = '';
         }
-        return array('gender' => $gender, 'age_rule' => $age_rule);
+        $shirts = isset($_POST['team_shirts']) ? max(0, min(5, intval($_POST['team_shirts']))) : 1;
+        return array('gender' => $gender, 'age_rule' => $age_rule, 'shirts' => $shirts);
     }
     
     /**
@@ -498,6 +499,13 @@ class TeamOversight_Fees {
                                             <p class="description">DOB cutoffs follow the VVL By-Laws and shift automatically each season.</p>
                                         </td>
                                     </tr>
+                                    <tr>
+                                        <th><label for="team-shirts">Playing Shirts</label></th>
+                                        <td>
+                                            <input type="number" id="team-shirts" name="team_shirts" value="1" min="0" max="5" style="width: 60px;">
+                                            <span class="description">Shirts a player must purchase for this team (Premier 2, YSL 0 — supplied).</span>
+                                        </td>
+                                    </tr>
                                 </table>
                                 <p style="margin: 15px 0 0 0;">
                                     <button type="button" id="save-team" class="button button-primary" onclick="saveTeam()">Add Team</button>
@@ -516,6 +524,7 @@ class TeamOversight_Fees {
                                         <th>Team Name</th>
                                         <th style="width: 90px;">Gender</th>
                                         <th style="width: 80px;">Age</th>
+                                        <th style="width: 70px;">Shirts</th>
                                         <th style="width: 140px;">Actions</th>
                                     </tr>
                                 </thead>
@@ -547,6 +556,10 @@ class TeamOversight_Fees {
                                                         <option value="<?php echo esc_attr($rule_key); ?>" <?php selected($team['age_rule'], $rule_key); ?>><?php echo esc_html($rule_key ? strtoupper($rule_key) : 'Open'); ?></option>
                                                     <?php endforeach; ?>
                                                 </select>
+                                            </td>
+                                            <td class="team-shirts-cell">
+                                                <span class="display-value"><?php echo intval($team['shirts']); ?></span>
+                                                <input type="number" class="edit-value" value="<?php echo intval($team['shirts']); ?>" min="0" max="5" style="display: none; width: 55px;">
                                             </td>
                                             <td>
                                                 <button type="button" class="button button-small edit-team-btn" onclick="editTeam('<?php echo esc_js($code); ?>')">Edit</button>
@@ -614,6 +627,7 @@ class TeamOversight_Fees {
             const teamName = document.getElementById('team-name').value.trim();
             const teamGender = document.getElementById('team-gender').value;
             const teamAgeRule = document.getElementById('team-age-rule').value;
+            const teamShirts = document.getElementById('team-shirts').value || '1';
 
             if (!teamCode || !teamName) {
                 alert('Please fill in both team code and team name.');
@@ -626,6 +640,7 @@ class TeamOversight_Fees {
             formData.append('team_name', teamName);
             formData.append('team_gender', teamGender);
             formData.append('team_age_rule', teamAgeRule);
+            formData.append('team_shirts', teamShirts);
             formData.append('team_nonce', '<?php echo wp_create_nonce('save_team'); ?>');
             
             const statusDiv = document.getElementById('team-save-status');
@@ -648,7 +663,7 @@ class TeamOversight_Fees {
                     document.getElementById('team-age-rule').value = '';
 
                     // Add new row to teams table
-                    addTeamRow(teamCode, teamName, teamGender, teamAgeRule);
+                    addTeamRow(teamCode, teamName, teamGender, teamAgeRule, parseInt(teamShirts, 10) || 0);
                 } else {
                     statusDiv.textContent = '✗ Error: ' + (data.data || 'Unknown error');
                     statusDiv.style.color = '#dc3232';
@@ -661,7 +676,7 @@ class TeamOversight_Fees {
             });
         }
         
-        function addTeamRow(code, name, gender, ageRule) {
+        function addTeamRow(code, name, gender, ageRule, shirts) {
             const genderLabels = {mens: "Men's", womens: "Women's", mixed: 'Mixed'};
             const tbody = document.getElementById('teams-tbody');
             const newRow = document.createElement('tr');
@@ -688,6 +703,10 @@ class TeamOversight_Fees {
                         <option value="u17"${ageRule === 'u17' ? ' selected' : ''}>U17</option>
                         <option value="u15"${ageRule === 'u15' ? ' selected' : ''}>U15</option>
                     </select>
+                </td>
+                <td class="team-shirts-cell">
+                    <span class="display-value">${shirts}</span>
+                    <input type="number" class="edit-value" value="${shirts}" min="0" max="5" style="display: none; width: 55px;">
                 </td>
                 <td>
                     <button type="button" class="button button-small edit-team-btn" onclick="editTeam('${escapeHtml(code)}')">Edit</button>
@@ -723,6 +742,7 @@ class TeamOversight_Fees {
             const newName = row.querySelector('.team-name-cell .edit-value').value.trim();
             const newGender = row.querySelector('.team-gender-cell .edit-value').value;
             const newAgeRule = row.querySelector('.team-age-cell .edit-value').value;
+            const newShirts = row.querySelector('.team-shirts-cell .edit-value').value || '0';
 
             if (!newName) {
                 alert('Team name cannot be empty.');
@@ -735,6 +755,7 @@ class TeamOversight_Fees {
             formData.append('team_name', newName);
             formData.append('team_gender', newGender);
             formData.append('team_age_rule', newAgeRule);
+            formData.append('team_shirts', newShirts);
             formData.append('team_nonce', '<?php echo wp_create_nonce('update_team'); ?>');
 
             fetch(ajaxurl, {
@@ -748,6 +769,7 @@ class TeamOversight_Fees {
                     row.querySelector('.team-name-cell .display-value').textContent = newName;
                     row.querySelector('.team-gender-cell .display-value').textContent = genderLabels[newGender] || newGender;
                     row.querySelector('.team-age-cell .display-value').textContent = newAgeRule ? newAgeRule.toUpperCase() : 'Open';
+                    row.querySelector('.team-shirts-cell .display-value').textContent = parseInt(newShirts, 10) || 0;
                     cancelTeamEdit(teamCode);
                 } else {
                     alert('Error updating team: ' + (data.data || 'Unknown error'));
@@ -1269,7 +1291,11 @@ class TeamOversight_Fees {
         $meta = array();
         foreach ($defaults as $code => $team) {
             $names[$code] = $team['name'];
-            $meta[$code] = array('gender' => $team['gender'], 'age_rule' => $team['age_rule']);
+            $meta[$code] = array(
+                'gender' => $team['gender'],
+                'age_rule' => $team['age_rule'],
+                'shirts' => isset($team['shirts']) ? $team['shirts'] : 1,
+            );
         }
         update_option('team_oversight_teams', $names);
         update_option('team_oversight_team_meta', $meta);

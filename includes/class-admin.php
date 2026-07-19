@@ -94,6 +94,15 @@ class TeamOversight_Admin {
             'team-oversight-invoices',
             array($this, 'invoices_page')
         );
+
+        add_submenu_page(
+            'team-oversight',
+            'Player Readiness',
+            'Player Readiness',
+            'manage_options',
+            'team-oversight-readiness',
+            array($this, 'readiness_page')
+        );
         
         add_submenu_page(
             'team-oversight',
@@ -343,6 +352,11 @@ class TeamOversight_Admin {
         }
     }
     
+    public function readiness_page() {
+        $readiness = new TeamOversight_Readiness();
+        $readiness->render_admin_page($this->get_current_season());
+    }
+
     public function fees_page() {
         $fees = new TeamOversight_Fees();
         $fees->render_fee_matrix_page();
