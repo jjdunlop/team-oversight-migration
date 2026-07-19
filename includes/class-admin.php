@@ -1,0 +1,2330 @@
+<?php
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+class TeamOversight_Admin {
+    
+    public function __construct() {
+        add_action('admin_menu', array($this, 'add_admin_menu'));
+        add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
+        add_action('wp_ajax_search_users', array($this, 'ajax_search_users'));
+        add_action('wp_ajax_update_assignment', array($this, 'ajax_update_assignment'));
+        add_action('wp_ajax_delete_assignment', array($this, 'ajax_delete_assignment'));
+        add_action('wp_ajax_update_invoice', array($this, 'ajax_update_invoice'));
+        add_action('wp_ajax_delete_invoice', array($this, 'ajax_delete_invoice'));
+        add_action('wp_ajax_export_single_invoice', array($this, 'ajax_export_single_invoice'));
+        add_action('wp_ajax_bulk_accept_trials', array($this, 'ajax_bulk_accept_trials'));
+        add_action('wp_ajax_bulk_reject_trials', array($this, 'ajax_bulk_reject_trials'));
+    }
+    
+    public function add_admin_menu() {
+        add_menu_page(
+            'Team Oversight',
+            'Team Oversight',
+            'manage_options',
+            'team-oversight',
+            array($this, 'dashboard_page'),
+            'dashicons-groups',
+            30
+        );
+        
+        add_submenu_page(
+            'team-oversight',
+            'Dashboard',
+            'Dashboard',
+            'manage_options',
+            'team-oversight',
+            array($this, 'dashboard_page')
+        );
+        
+        add_submenu_page(
+            'team-oversight',
+            'Trial Applications',
+            'Trial Applications',
+            'manage_options',
+            'team-oversight-trials',
+            array($this, 'trials_page')
+        );
+        
+        add_submenu_page(
+            'team-oversight',
+            'Team Assignments',
+            'Team Assignments',
+            'manage_options',
+            'team-oversight-assignments',
+            array($this, 'assignments_page')
+        );
+        
+        add_submenu_page(
+            'team-oversight',
+            'Invoice Management',
+            'Invoice Management',
+            'manage_options',
+            'team-oversight-invoices',
+            array($this, 'invoices_page')
+        );
+        
+        add_submenu_page(
+            'team-oversight',
+            'Configuration',
+            'Configuration',
+            'manage_options',
+            'team-oversight-fees',
+            array($this, 'fees_page')
+        );
+        
+        add_submenu_page(
+            'team-oversight',
+            'Import Data',
+            'Import Data',
+            'manage_options',
+            'team-oversight-import',
+            array($this, 'import_page')
+        );
+        
+        add_submenu_page(
+            'team-oversight',
+            'Export Data',
+            'Export Data',
+            'manage_options',
+            'team-oversight-export',
+            array($this, 'export_page')
+        );
+    }
+    
+    public function enqueue_admin_scripts() {
+        if (isset($_GET['page']) && strpos($_GET['page'], 'team-oversight') !== false) {
+            wp_enqueue_style('team-oversight-admin', TEAM_OVERSIGHT_PLUGIN_URL . 'assets/admin.css', array(), TEAM_OVERSIGHT_VERSION);
+            wp_enqueue_script('team-oversight-admin', TEAM_OVERSIGHT_PLUGIN_URL . 'assets/admin.js', array('jquery'), TEAM_OVERSIGHT_VERSION, true);
+        }
+    }
+    
+    public function dashboard_page() {
+        global $wpdb;
+        
+        $seasons = $this->get_available_seasons('main');
+        $current_season = $this->get_current_season();
+        
+        ?>
+        <div class="wrap">
+            <h1>Team Oversight Dashboard</h1>
+            
+            <div class="season-filter">
+                <label for="season-select">Season:</label>
+                <select id="season-select" onchange="location.href=this.value;">
+                    <?php foreach ($seasons as $season): ?>
+                        <option value="<?php echo admin_url('admin.php?page=team-oversight&season=' . $season); ?>" 
+                                <?php selected($current_season, $season); ?>>
+                            <?php echo esc_html($season); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            
+            <?php $this->render_team_summary_table($current_season); ?>
+            <?php $this->render_team_detail_table($current_season); ?>
+        </div>
+        <?php
+    }
+    
+    public function trials_page() {
+        if (isset($_POST['action']) && ($_POST['action'] === 'accept_trial' || $_POST['action'] === 'reject_trial' || $_POST['action'] === 'undo_trial')) {
+            $this->process_trial_action();
+        }
+        
+        $this->render_trials_table();
+    }
+    
+    public function assignments_page() {
+        if (isset($_POST['action']) && ($_POST['action'] === 'add_assignment' || $_POST['action'] === 'deactivate_assignment')) {
+            $this->save_team_assignment();
+        }
+        
+        $this->render_assignments_table();
+    }
+    
+    public function invoices_page() {
+        $this->render_invoices_table();
+    }
+    
+    public function fees_page() {
+        $fees = new TeamOversight_Fees();
+        $fees->render_fee_matrix_page();
+    }
+    
+    public function import_page() {
+        $imports = new TeamOversight_Imports();
+        $imports->render_import_page();
+    }
+    
+    public function export_page() {
+        $exports = new TeamOversight_Exports();
+        $exports->render_export_page();
+    }
+    
+    private function get_seasons() {
+        global $wpdb;
+        
+        $seasons = $wpdb->get_col("
+            SELECT DISTINCT season 
+            FROM {$wpdb->prefix}team_assignments 
+            ORDER BY season DESC
+        ");
+        
+        if (empty($seasons)) {
+            $current_year = date('Y');
+            $seasons = array($current_year, $current_year - 1, $current_year - 2);
+        }
+        
+        return $seasons;
+    }
+    
+    private function get_remembered_season() {
+        $user_id = get_current_user_id();
+        if ($user_id > 0) {
+            return get_user_meta($user_id, 'team_oversight_selected_season', true);
+        }
+        return false;
+    }
+    
+    private function remember_season($season) {
+        $user_id = get_current_user_id();
+        if ($user_id > 0 && !empty($season)) {
+            update_user_meta($user_id, 'team_oversight_selected_season', $season);
+        }
+    }
+    
+    private function get_current_season() {
+        // Priority: URL parameter -> user memory -> current year
+        if (isset($_GET['season']) && !empty($_GET['season'])) {
+            $season = sanitize_text_field($_GET['season']);
+            $this->remember_season($season); // Remember the selection
+            return $season;
+        }
+        
+        $remembered_season = $this->get_remembered_season();
+        if (!empty($remembered_season)) {
+            return $remembered_season;
+        }
+        
+        return date('Y');
+    }
+
+    public function get_available_seasons($type = 'main') {
+        global $wpdb;
+        
+        // Get all seasons from database (from multiple tables for comprehensive list)
+        $seasons_assignments = $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}team_assignments ORDER BY season DESC");
+        $seasons_invoices = $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}team_invoices ORDER BY season DESC");
+        $seasons_trials = $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}trial_applications ORDER BY season DESC");
+        
+        // Merge and deduplicate all seasons from different tables
+        $all_seasons = array_unique(array_merge($seasons_assignments, $seasons_invoices, $seasons_trials));
+        rsort($all_seasons); // Sort descending
+        
+        $current_year = date('Y');
+        $next_year = $current_year + 1;
+        $previous_year = $current_year - 1;
+        
+        // Always ensure current and next year are available
+        if (!in_array($current_year, $all_seasons)) {
+            $all_seasons[] = $current_year;
+        }
+        if (!in_array($next_year, $all_seasons)) {
+            $all_seasons[] = $next_year;
+        }
+        
+        rsort($all_seasons); // Re-sort after adding current/next year
+        
+        if ($type === 'export') {
+            // Export interfaces show all seasons with data
+            return empty($all_seasons) ? array($next_year, $current_year, $previous_year) : $all_seasons;
+        } else {
+            // Main interfaces show limited recent seasons (previous, current, next)
+            $recent_seasons = array($next_year, $current_year, $previous_year);
+            // Also include any seasons from database that fall within this range
+            $filtered_seasons = array();
+            foreach ($all_seasons as $season) {
+                if (in_array($season, $recent_seasons)) {
+                    $filtered_seasons[] = $season;
+                }
+            }
+            // Ensure we have at least the three key years
+            foreach ($recent_seasons as $year) {
+                if (!in_array($year, $filtered_seasons)) {
+                    $filtered_seasons[] = $year;
+                }
+            }
+            rsort($filtered_seasons);
+            return $filtered_seasons;
+        }
+    }
+    
+    private function render_team_summary_table($season) {
+        global $wpdb;
+        
+        $database = new TeamOversight_Database();
+        $teams = $database->get_teams();
+        
+        $team_stats = array();
+        
+        foreach ($teams as $team_code => $team_name) {
+            // Get team members count (approved players)
+            $member_count = $wpdb->get_var($wpdb->prepare("
+                SELECT COUNT(DISTINCT ta.email) 
+                FROM {$wpdb->prefix}team_assignments ta
+                WHERE ta.team = %s AND ta.season = %s AND ta.is_active = 1 
+                AND ta.role IN ('playing_member', 'team_manager', 'coach', 'assistant_coach')
+            ", $team_code, $season));
+            
+            if ($member_count > 0) {
+                // Get accreditation percentage
+                $accredited_count = $wpdb->get_var($wpdb->prepare("
+                    SELECT COUNT(DISTINCT ta.email) 
+                    FROM {$wpdb->prefix}team_assignments ta
+                    JOIN {$wpdb->prefix}team_accreditations acc ON ta.email = acc.email
+                    WHERE ta.team = %s AND ta.season = %s AND ta.is_active = 1
+                    AND ta.role IN ('playing_member', 'team_manager', 'coach', 'assistant_coach')
+                    AND acc.vvid IS NOT NULL AND acc.accreditation_list IS NOT NULL
+                ", $team_code, $season));
+                
+                $accredited_percentage = $member_count > 0 ? round(($accredited_count / $member_count) * 100, 1) : 0;
+                
+                // Get outstanding fees percentage and total
+                $outstanding_data = $wpdb->get_row($wpdb->prepare("
+                    SELECT 
+                        COUNT(DISTINCT CASE WHEN inv.outstanding_amount > 0 THEN inv.email END) as outstanding_count,
+                        SUM(CASE WHEN inv.outstanding_amount > 0 THEN inv.outstanding_amount ELSE 0 END) as total_outstanding
+                    FROM {$wpdb->prefix}team_assignments ta
+                    LEFT JOIN {$wpdb->prefix}team_invoices inv ON ta.email = inv.email AND inv.season = ta.season
+                    WHERE ta.team = %s AND ta.season = %s AND ta.is_active = 1
+                    AND ta.role IN ('playing_member', 'team_manager', 'coach', 'assistant_coach')
+                ", $team_code, $season));
+                
+                $outstanding_percentage = $member_count > 0 ? round(($outstanding_data->outstanding_count / $member_count) * 100, 1) : 0;
+                $total_outstanding = $outstanding_data->total_outstanding ?: 0;
+                
+                $team_stats[$team_code] = array(
+                    'name' => $team_name,
+                    'member_count' => $member_count,
+                    'accredited_percentage' => $accredited_percentage,
+                    'outstanding_percentage' => $outstanding_percentage,
+                    'total_outstanding' => $total_outstanding
+                );
+            }
+        }
+        
+        ?>
+        <div style="margin-bottom: 30px;">
+            <h2>Team Summary</h2>
+            <table class="wp-list-table widefat fixed striped">
+                <thead>
+                    <tr>
+                        <th>Team</th>
+                        <th>Total Approved Players</th>
+                        <th>% Accredited</th>
+                        <th>% Outstanding Fees</th>
+                        <th>Total Outstanding Amount</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($team_stats as $team_code => $stats): ?>
+                        <tr>
+                            <td><strong><?php echo esc_html($stats['name']); ?></strong></td>
+                            <td><?php echo $stats['member_count']; ?></td>
+                            <td>
+                                <span style="color: <?php echo $stats['accredited_percentage'] >= 80 ? 'green' : ($stats['accredited_percentage'] >= 50 ? 'orange' : 'red'); ?>">
+                                    <?php echo $stats['accredited_percentage']; ?>%
+                                </span>
+                            </td>
+                            <td>
+                                <span style="color: <?php echo $stats['outstanding_percentage'] <= 20 ? 'green' : ($stats['outstanding_percentage'] <= 50 ? 'orange' : 'red'); ?>">
+                                    <?php echo $stats['outstanding_percentage']; ?>%
+                                </span>
+                            </td>
+                            <td>$<?php echo number_format($stats['total_outstanding'], 2); ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+    
+    private function render_team_detail_table($season) {
+        global $wpdb;
+        
+        $database = new TeamOversight_Database();
+        $teams = $database->get_teams();
+        
+        ?>
+        <div>
+            <h2>Team Details</h2>
+            <?php foreach ($teams as $team_code => $team_name): 
+                
+                $team_members = $wpdb->get_results($wpdb->prepare("
+                    SELECT 
+                        ta.email,
+                        ta.team,
+                        u.display_name as name,
+                        ta.role,
+                        acc.vvid,
+                        acc.accreditation_list,
+                        inv.invoice_amount,
+                        inv.outstanding_amount,
+                        inv.invoice_reference,
+                        um_degree1.meta_value as degree1_type,
+                        um_inst1.meta_value as institution1,
+                        um_birthdate.meta_value as birth_date
+                    FROM {$wpdb->prefix}team_assignments ta
+                    JOIN {$wpdb->users} u ON ta.email = u.user_email
+                    LEFT JOIN {$wpdb->prefix}team_accreditations acc ON ta.email = acc.email
+                    LEFT JOIN {$wpdb->prefix}team_invoices inv ON ta.email = inv.email AND inv.season = ta.season
+                    LEFT JOIN {$wpdb->usermeta} um_degree1 ON u.ID = um_degree1.user_id AND um_degree1.meta_key = 'degree1type'
+                    LEFT JOIN {$wpdb->usermeta} um_inst1 ON u.ID = um_inst1.user_id AND um_inst1.meta_key = 'institution1'
+                    LEFT JOIN {$wpdb->usermeta} um_birthdate ON u.ID = um_birthdate.user_id AND um_birthdate.meta_key = 'birth_date'
+                    WHERE ta.team = %s AND ta.season = %s AND ta.is_active = 1
+                    ORDER BY ta.role, u.display_name
+                ", $team_code, $season));
+                
+                if (!empty($team_members)): 
+            ?>
+                <div style="margin-bottom: 40px;">
+                    <h3><?php echo esc_html($team_name); ?></h3>
+                    <table class="wp-list-table widefat fixed striped">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Role</th>
+                                <th>MUS Category</th>
+                                <th>Payment Status</th>
+                                <th>Outstanding</th>
+                                <th>Accreditations</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($team_members as $member): 
+                                $fees = new TeamOversight_Fees();
+                                $mus_category = $fees->determine_fee_class($member->email);
+                                
+                                $payment_status = 'N/A';
+                                $outstanding = 0;
+                                if ($member->outstanding_amount !== null) {
+                                    $outstanding = $member->outstanding_amount;
+                                    if ($outstanding <= 0) {
+                                        $payment_status = '✓ Paid';
+                                    } elseif ($outstanding < $member->invoice_amount) {
+                                        $payment_status = '◐ Partial';
+                                    } else {
+                                        $payment_status = '⚠ Outstanding';
+                                    }
+                                }
+                                
+                                $accreditations = $this->get_member_accreditations($member, $mus_category);
+                            ?>
+                                <tr>
+                                    <td><?php echo esc_html($member->name); ?></td>
+                                    <td><?php echo esc_html(str_replace('_', ' ', ucwords($member->role, '_'))); ?></td>
+                                    <td>
+                                        <?php if ($mus_category === 'Unknown'): ?>
+                                            <a href="<?php echo home_url('/account/'); ?>" target="_blank" style="color: #d63384;"><?php echo esc_html($mus_category); ?></a>
+                                        <?php else: ?>
+                                            <?php echo esc_html($mus_category); ?>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <span style="color: <?php echo strpos($payment_status, '✓') !== false ? 'green' : (strpos($payment_status, '◐') !== false ? 'orange' : (strpos($payment_status, '⚠') !== false ? 'red' : 'gray')); ?>">
+                                            <?php echo $payment_status; ?>
+                                        </span>
+                                    </td>
+                                    <td>$<?php echo number_format($outstanding, 2); ?></td>
+                                    <td><?php echo $accreditations; ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; endforeach; ?>
+        </div>
+        <?php
+    }
+    
+    private function get_member_accreditations($member, $mus_category) {
+        // Handle both JSON format (legacy) and plain text format (current)
+        if ($member->accreditation_list) {
+            // Try JSON format first (for any legacy data)
+            $accreditation_data = json_decode($member->accreditation_list, true);
+            if ($accreditation_data && is_array($accreditation_data)) {
+                // Handle JSON format (legacy logic)
+                $accreditations = array();
+                foreach ($accreditation_data as $accreditation) {
+                    if (isset($accreditation['Type']) && isset($accreditation['Level']) && isset($accreditation['Status'])) {
+                        if ($accreditation['Status'] === 'Current' && in_array($accreditation['Type'], ['VA Coach', 'VA Referee'])) {
+                            $type_abbrev = $accreditation['Type'] === 'VA Coach' ? 'VV' : 'VV';
+                            $role = $accreditation['Type'] === 'VA Coach' ? 'Coach' : 'Referee';
+                            $accreditations[] = $type_abbrev . ' ' . $accreditation['Level'] . ' ' . $role;
+                        }
+                    }
+                }
+                return implode(', ', $accreditations);
+            } else {
+                // Handle plain text format (current CSV import format)
+                return esc_html($member->accreditation_list);
+            }
+        }
+        
+        // Return empty string if no accreditations
+        return '';
+    }
+    
+    private function render_trials_table() {
+        global $wpdb;
+        
+        $season = $this->get_current_season();
+        
+        $trials = $wpdb->get_results($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}trial_applications 
+            WHERE season = %s 
+            ORDER BY created_date DESC
+        ", $season));
+        
+        ?>
+        <div class="wrap">
+            <h1>Trial Applications</h1>
+            
+            <div class="season-filter">
+                <label for="season-select">Season:</label>
+                <select id="season-select" onchange="location.href=this.value;">
+                    <?php 
+                    $available_seasons = $this->get_available_seasons('main');
+                    foreach ($available_seasons as $available_season): ?>
+                        <option value="<?php echo admin_url('admin.php?page=team-oversight-trials&season=' . $available_season); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            
+            <?php if (!empty($trials)): ?>
+                <div class="trials-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
+                    <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
+                        <div>
+                            <label for="search-trials">Search:</label>
+                            <input type="text" id="search-trials" placeholder="Search name, email, teams..." style="width: 200px;">
+                        </div>
+                        <div>
+                            <label for="filter-status">Status:</label>
+                            <select id="filter-status">
+                                <option value="">All Statuses</option>
+                                <option value="pending">Pending</option>
+                                <option value="accepted">Accepted</option>
+                                <option value="rejected">Rejected</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="filter-transfer">Transfer Player:</label>
+                            <select id="filter-transfer">
+                                <option value="">All</option>
+                                <option value="1">Yes</option>
+                                <option value="0">No</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Bulk Actions -->
+                <div class="bulk-actions" style="margin: 10px 0; padding: 15px; background: #f0f8ff; border: 1px solid #007cba; border-radius: 4px;">
+                    <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
+                        <div>
+                            <strong>Bulk Actions:</strong>
+                        </div>
+                        <div>
+                            <label for="bulk-team-select">Assign Selected to Team:</label>
+                            <select id="bulk-team-select" style="width: 200px;">
+                                <option value="">Select Team</option>
+                                <?php 
+                                $database = new TeamOversight_Database();
+                                $teams = $database->get_teams();
+                                foreach ($teams as $code => $name): 
+                                ?>
+                                    <option value="<?php echo esc_attr($code); ?>"><?php echo esc_html($code); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                            <button type="button" id="bulk-accept-btn" class="button button-primary" disabled>Accept Selected</button>
+                        </div>
+                        <div>
+                            <button type="button" id="bulk-reject-btn" class="button" disabled>Reject Selected</button>
+                        </div>
+                        <div>
+                            <span id="selected-count" style="font-style: italic; color: #666;">0 selected</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <table class="wp-list-table widefat fixed striped" id="trials-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 40px;">
+                                <input type="checkbox" id="select-all-trials" title="Select all visible trials">
+                            </th>
+                            <th>Name</th>
+                            <th>Email</th>
+                            <th>Interested Teams</th>
+                            <th>Positions</th>
+                            <th>Transfer Player</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($trials as $trial): 
+                            $interested_teams = json_decode($trial->interested_teams, true);
+                            $positions = json_decode($trial->preferred_positions, true);
+                        ?>
+                            <tr data-trial-id="<?php echo $trial->id; ?>" data-status="<?php echo esc_attr($trial->application_status); ?>" data-transfer="<?php echo $trial->is_transfer_player ? '1' : '0'; ?>">
+                                <td>
+                                    <?php if ($trial->application_status === 'pending'): ?>
+                                        <input type="checkbox" class="trial-checkbox" value="<?php echo $trial->id; ?>" data-email="<?php echo esc_attr($trial->email); ?>" data-season="<?php echo esc_attr($trial->season); ?>">
+                                    <?php endif; ?>
+                                </td>
+                                <td><?php echo esc_html($trial->name); ?></td>
+                                <td><?php echo esc_html($trial->email); ?></td>
+                                <td><?php echo esc_html(implode(', ', $interested_teams)); ?></td>
+                                <td><?php echo esc_html(implode(', ', $positions)); ?></td>
+                                <td><?php echo $trial->is_transfer_player ? 'Yes' : 'No'; ?></td>
+                                <td>
+                                    <span class="status-<?php echo esc_attr($trial->application_status); ?>">
+                                        <?php echo esc_html(ucfirst($trial->application_status)); ?>
+                                    </span>
+                                </td>
+                                <td>
+                                    <?php if ($trial->application_status === 'pending'): ?>
+                                        <form method="post" style="display: inline;">
+                                            <select name="assigned_team" required style="max-width: 150px; font-size: 12px;">
+                                                <option value="">Select Team</option>
+                                                <?php 
+                                                $database = new TeamOversight_Database();
+                                                $teams = $database->get_teams();
+                                                foreach ($teams as $code => $name): 
+                                                ?>
+                                                    <option value="<?php echo esc_attr($code); ?>" title="<?php echo esc_attr($name); ?>"><?php echo esc_html($code); ?></option>
+                                                <?php endforeach; ?>
+                                            </select>
+                                            <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
+                                            <input type="hidden" name="action" value="accept_trial">
+                                            <input type="submit" class="button button-primary" value="Accept">
+                                            <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
+                                        </form>
+                                        
+                                        <form method="post" style="display: inline;">
+                                            <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
+                                            <input type="hidden" name="action" value="reject_trial">
+                                            <input type="submit" class="button" value="Reject" onclick="return confirm('Are you sure?')">
+                                            <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
+                                        </form>
+                                    <?php elseif ($trial->application_status === 'accepted'): ?>
+                                        <span><?php echo esc_html($trial->assigned_team); ?></span>
+                                        <form method="post" style="display: inline; margin-left: 10px;">
+                                            <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
+                                            <input type="hidden" name="action" value="undo_trial">
+                                            <input type="submit" class="button" value="Undo Assignment" onclick="return confirm('Are you sure you want to undo this assignment?')">
+                                            <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
+                                        </form>
+                                    <?php elseif ($trial->application_status === 'rejected'): ?>
+                                        <span>Rejected</span>
+                                        <form method="post" style="display: inline; margin-left: 10px;">
+                                            <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
+                                            <input type="hidden" name="action" value="undo_trial">
+                                            <input type="submit" class="button" value="Undo Rejection" onclick="return confirm('Are you sure you want to undo this rejection?')">
+                                            <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
+                                        </form>
+                                    <?php else: ?>
+                                        <?php echo esc_html($trial->assigned_team ?: 'N/A'); ?>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php else: ?>
+                <p>No trial applications found for this season.</p>
+            <?php endif; ?>
+            
+            <style>
+            .bulk-actions {
+                background: linear-gradient(135deg, #f0f8ff 0%, #e6f3ff 100%);
+                border-left: 4px solid #007cba;
+            }
+            .bulk-actions button:disabled {
+                opacity: 0.6;
+                cursor: not-allowed;
+            }
+            .trial-checkbox {
+                transform: scale(1.2);
+                margin: 0;
+            }
+            #select-all-trials {
+                transform: scale(1.2);
+                margin: 0;
+            }
+            .status-pending {
+                color: #856404;
+                background-color: #fff3cd;
+                border: 1px solid #ffeaa7;
+                padding: 2px 8px;
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            .status-accepted {
+                color: #155724;
+                background-color: #d4edda;
+                border: 1px solid #c3e6cb;
+                padding: 2px 8px;
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            .status-rejected {
+                color: #721c24;
+                background-color: #f8d7da;
+                border: 1px solid #f5c6cb;
+                padding: 2px 8px;
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            #selected-count {
+                font-weight: bold;
+                padding: 5px 10px;
+                background: rgba(0, 124, 186, 0.1);
+                border-radius: 3px;
+            }
+            </style>
+            
+            <script>
+            // Trial applications filtering
+            function filterTrials() {
+                const search = document.getElementById('search-trials').value.toLowerCase();
+                const statusFilter = document.getElementById('filter-status').value;
+                const transferFilter = document.getElementById('filter-transfer').value;
+                
+                const rows = document.querySelectorAll('#trials-table tbody tr');
+                let visiblePendingCount = 0;
+                
+                rows.forEach(row => {
+                    const text = row.textContent.toLowerCase();
+                    const status = row.dataset.status;
+                    const transfer = row.dataset.transfer;
+                    
+                    const matchesSearch = search === '' || text.includes(search);
+                    const matchesStatus = statusFilter === '' || status === statusFilter;
+                    const matchesTransfer = transferFilter === '' || transfer === transferFilter;
+                    
+                    const visible = matchesSearch && matchesStatus && matchesTransfer;
+                    row.style.display = visible ? '' : 'none';
+                    
+                    if (visible && status === 'pending') {
+                        visiblePendingCount++;
+                    }
+                });
+                
+                // Update select all checkbox and bulk actions based on filtered results
+                updateSelectAllState();
+                updateBulkActionButtons();
+            }
+            
+            // Bulk operations functionality
+            function updateSelectedCount() {
+                const selectedCheckboxes = document.querySelectorAll('.trial-checkbox:checked');
+                const count = selectedCheckboxes.length;
+                document.getElementById('selected-count').textContent = count + ' selected';
+                updateBulkActionButtons();
+            }
+            
+            function updateBulkActionButtons() {
+                const selectedCheckboxes = document.querySelectorAll('.trial-checkbox:checked');
+                const hasSelection = selectedCheckboxes.length > 0;
+                
+                document.getElementById('bulk-accept-btn').disabled = !hasSelection;
+                document.getElementById('bulk-reject-btn').disabled = !hasSelection;
+            }
+            
+            function updateSelectAllState() {
+                const visibleCheckboxes = Array.from(document.querySelectorAll('.trial-checkbox')).filter(cb => {
+                    return cb.closest('tr').style.display !== 'none';
+                });
+                const checkedCheckboxes = visibleCheckboxes.filter(cb => cb.checked);
+                const selectAllCheckbox = document.getElementById('select-all-trials');
+                
+                if (visibleCheckboxes.length === 0) {
+                    selectAllCheckbox.indeterminate = false;
+                    selectAllCheckbox.checked = false;
+                } else if (checkedCheckboxes.length === visibleCheckboxes.length) {
+                    selectAllCheckbox.indeterminate = false;
+                    selectAllCheckbox.checked = true;
+                } else if (checkedCheckboxes.length > 0) {
+                    selectAllCheckbox.indeterminate = true;
+                    selectAllCheckbox.checked = false;
+                } else {
+                    selectAllCheckbox.indeterminate = false;
+                    selectAllCheckbox.checked = false;
+                }
+            }
+            
+            // Select all functionality
+            document.getElementById('select-all-trials').addEventListener('change', function() {
+                const visibleCheckboxes = Array.from(document.querySelectorAll('.trial-checkbox')).filter(cb => {
+                    return cb.closest('tr').style.display !== 'none';
+                });
+                
+                visibleCheckboxes.forEach(checkbox => {
+                    checkbox.checked = this.checked;
+                });
+                
+                updateSelectedCount();
+            });
+            
+            // Individual checkbox change
+            document.addEventListener('change', function(e) {
+                if (e.target.classList.contains('trial-checkbox')) {
+                    updateSelectedCount();
+                    updateSelectAllState();
+                }
+            });
+            
+            // Bulk accept functionality
+            document.getElementById('bulk-accept-btn').addEventListener('click', function() {
+                const selectedCheckboxes = document.querySelectorAll('.trial-checkbox:checked');
+                const teamSelect = document.getElementById('bulk-team-select');
+                
+                if (selectedCheckboxes.length === 0) {
+                    alert('Please select at least one trial application.');
+                    return;
+                }
+                
+                if (!teamSelect.value) {
+                    alert('Please select a team for the assignments.');
+                    teamSelect.focus();
+                    return;
+                }
+                
+                if (!confirm(`Accept ${selectedCheckboxes.length} trial application(s) and assign to ${teamSelect.options[teamSelect.selectedIndex].text}?`)) {
+                    return;
+                }
+                
+                performBulkAction('bulk_accept', selectedCheckboxes, teamSelect.value);
+            });
+            
+            // Bulk reject functionality
+            document.getElementById('bulk-reject-btn').addEventListener('click', function() {
+                const selectedCheckboxes = document.querySelectorAll('.trial-checkbox:checked');
+                
+                if (selectedCheckboxes.length === 0) {
+                    alert('Please select at least one trial application.');
+                    return;
+                }
+                
+                if (!confirm(`Reject ${selectedCheckboxes.length} trial application(s)?`)) {
+                    return;
+                }
+                
+                performBulkAction('bulk_reject', selectedCheckboxes);
+            });
+            
+            // Perform bulk action via AJAX
+            function performBulkAction(action, checkboxes, team = null) {
+                const trialIds = Array.from(checkboxes).map(cb => cb.value);
+                const button = action === 'bulk_accept' ? document.getElementById('bulk-accept-btn') : document.getElementById('bulk-reject-btn');
+                
+                // Disable buttons and show loading
+                button.disabled = true;
+                button.textContent = button.textContent.replace('Selected', 'Processing...');
+                
+                const formData = new FormData();
+                formData.append('action', action + '_trials');
+                formData.append('trial_ids', JSON.stringify(trialIds));
+                if (team) {
+                    formData.append('assigned_team', team);
+                }
+                formData.append('bulk_trial_nonce', '<?php echo wp_create_nonce('bulk_trial_action'); ?>');
+                
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert(data.data.message);
+                        location.reload(); // Refresh the page to show updated status
+                    } else {
+                        alert('Error: ' + (data.data || 'Unknown error occurred'));
+                    }
+                })
+                .catch(error => {
+                    alert('Error: ' + error.message);
+                })
+                .finally(() => {
+                    // Reset button states
+                    button.disabled = false;
+                    button.textContent = button.textContent.replace('Processing...', 'Selected');
+                });
+            }
+            
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                if (e.ctrlKey && e.key === 'a' && e.target.closest('#trials-table')) {
+                    e.preventDefault();
+                    document.getElementById('select-all-trials').click();
+                }
+            });
+            
+            // Event listeners for filtering
+            document.getElementById('search-trials').addEventListener('input', filterTrials);
+            document.getElementById('filter-status').addEventListener('change', filterTrials);
+            document.getElementById('filter-transfer').addEventListener('change', filterTrials);
+            
+            // Initialize bulk action buttons state
+            updateBulkActionButtons();
+            </script>
+        </div>
+        <?php
+    }
+    
+    private function render_invoices_table() {
+        global $wpdb;
+        
+        $season = $this->get_current_season();
+        
+        $invoices = $wpdb->get_results($wpdb->prepare("
+            SELECT 
+                inv.*,
+                u.display_name as name,
+                ta.team,
+                ta.role
+            FROM {$wpdb->prefix}team_invoices inv
+            LEFT JOIN {$wpdb->users} u ON inv.email = u.user_email
+            LEFT JOIN {$wpdb->prefix}team_assignments ta ON inv.email = ta.email AND inv.season = ta.season AND ta.is_active = 1
+            WHERE inv.season = %s
+            ORDER BY inv.created_date DESC
+        ", $season));
+        
+        $database = new TeamOversight_Database();
+        $teams = $database->get_teams();
+        
+        ?>
+        <div class="wrap">
+            <h1>Invoice Management</h1>
+            
+            <div class="season-filter">
+                <label for="season-select">Season:</label>
+                <select id="season-select" onchange="location.href=this.value;">
+                    <?php 
+                    $available_seasons = $this->get_available_seasons('main');
+                    foreach ($available_seasons as $available_season): ?>
+                        <option value="<?php echo admin_url('admin.php?page=team-oversight-invoices&season=' . $available_season); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            
+            <?php if (!empty($invoices)): ?>
+                <div class="invoices-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
+                    <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
+                        <div>
+                            <label for="search-invoices">Search:</label>
+                            <input type="text" id="search-invoices" placeholder="Search name, email, invoice number..." style="width: 200px;">
+                        </div>
+                        <div>
+                            <label for="filter-team">Team:</label>
+                            <select id="filter-team">
+                                <option value="">All Teams</option>
+                                <?php foreach ($teams as $code => $name): ?>
+                                    <option value="<?php echo esc_attr($code); ?>"><?php echo esc_html($code); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="filter-status">Payment Status:</label>
+                            <select id="filter-status">
+                                <option value="">All Statuses</option>
+                                <option value="paid">Paid</option>
+                                <option value="partial">Partial</option>
+                                <option value="outstanding">Outstanding</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <table class="wp-list-table widefat fixed striped" id="invoices-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Name</th>
+                            <th>Email</th>
+                            <th>Team</th>
+                            <th>Fee Info</th>
+                            <th>Invoice Amount</th>
+                            <th>Outstanding Amount</th>
+                            <th>Invoice Number</th>
+                            <th>Created Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($invoices as $invoice): 
+                            $payment_status = 'outstanding';
+                            if ($invoice->outstanding_amount <= 0) {
+                                $payment_status = 'paid';
+                            } elseif ($invoice->outstanding_amount < $invoice->invoice_amount) {
+                                $payment_status = 'partial';
+                            }
+                            
+                            // Get user meta for fee calculation transparency
+                            $user = get_user_by('email', $invoice->email);
+                            $fee_info = 'N/A';
+                            if ($user) {
+                                $birth_date = get_user_meta($user->ID, 'birth_date', true);
+                                $institution1 = get_user_meta($user->ID, 'institution1', true);
+                                $degree1_type = get_user_meta($user->ID, 'degree1type', true);
+                                $degree1_enddate = get_user_meta($user->ID, 'degree1enddate', true);
+                                
+                                $age = 'N/A';
+                                if ($birth_date) {
+                                    $today = new DateTime();
+                                    $birthdate_obj = new DateTime($birth_date);
+                                    $age = $today->diff($birthdate_obj)->y;
+                                }
+                                
+                                $institution_short = '';
+                                if ($institution1 === 'Melbourne University') {
+                                    $institution_short = 'Melb Uni';
+                                } elseif ($institution1 === 'Other University') {
+                                    $institution_short = 'Other Uni';
+                                } elseif ($institution1 === 'Other') {
+                                    $institution_short = 'Other';
+                                }
+                                
+                                $degree_short = '';
+                                if ($degree1_type === 'Undergraduate') {
+                                    $degree_short = 'UG';
+                                } elseif ($degree1_type === 'Postgraduate') {
+                                    $degree_short = 'PG';
+                                } elseif ($degree1_type === 'Staff') {
+                                    $degree_short = 'Staff';
+                                }
+                                
+                                $status = 'Current';
+                                if ($degree1_enddate && strtotime($degree1_enddate) < time()) {
+                                    $status = 'Alumni';
+                                }
+                                
+                                // Calculate fee class using the updated logic
+                                $fees = new TeamOversight_Fees();
+                                $calculated_fee_class = $fees->determine_fee_class($invoice->email, $invoice->season);
+                                
+                                $fee_info = "Age: {$age} | {$institution_short} | {$degree_short} | {$status} → {$calculated_fee_class}";
+                            }
+                        ?>
+                            <tr data-invoice-id="<?php echo $invoice->id; ?>" data-team="<?php echo esc_attr($invoice->team ?: ''); ?>" data-status="<?php echo $payment_status; ?>">
+                                <td><?php echo $invoice->id; ?></td>
+                                <td><?php echo esc_html($invoice->name); ?></td>
+                                <td><?php echo esc_html($invoice->email); ?></td>
+                                <td><?php echo esc_html($invoice->team ?: 'N/A'); ?></td>
+                                <td style="font-size: 11px; max-width: 200px;" title="<?php echo esc_attr($fee_info); ?>"><?php echo esc_html($fee_info); ?></td>
+                                <td class="editable-invoice-amount" data-field="invoice_amount" data-value="<?php echo esc_attr($invoice->invoice_amount); ?>">
+                                    <span class="display-value">$<?php echo number_format($invoice->invoice_amount, 2); ?></span>
+                                    <input type="number" class="edit-value" value="<?php echo $invoice->invoice_amount; ?>" step="0.01" min="0" style="display: none; width: 80px;">
+                                </td>
+                                <td class="editable-outstanding-amount" data-field="outstanding_amount" data-value="<?php echo esc_attr($invoice->outstanding_amount); ?>">
+                                    <span class="display-value">$<?php echo number_format($invoice->outstanding_amount, 2); ?></span>
+                                    <input type="number" class="edit-value" value="<?php echo $invoice->outstanding_amount; ?>" step="0.01" min="0" style="display: none; width: 80px;">
+                                </td>
+                                <td><?php echo esc_html("VVL-{$invoice->season}-" . (5023 + ($invoice->id - 1))); ?></td>
+                                <td><?php echo date('Y-m-d H:i', strtotime($invoice->created_date)); ?></td>
+                                <td>
+                                    <button type="button" class="button edit-invoice" onclick="editInvoice(this)">Edit</button>
+                                    <button type="button" class="button button-primary save-invoice" onclick="saveInvoice(this)" style="display: none;">Save</button>
+                                    <button type="button" class="button cancel-edit-invoice" onclick="cancelEditInvoice(this)" style="display: none;">Cancel</button>
+                                    <button type="button" class="button button-link-delete delete-invoice" onclick="deleteInvoice(this)" style="display: none; color: #a00;">Delete</button>
+                                    <button type="button" class="button export-single" onclick="exportSingleInvoice(<?php echo $invoice->id; ?>)">Export</button>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php else: ?>
+                <p>No invoices found for this season.</p>
+            <?php endif; ?>
+            
+            <script>
+            // Invoice filtering
+            function filterInvoices() {
+                const search = document.getElementById('search-invoices').value.toLowerCase();
+                const teamFilter = document.getElementById('filter-team').value;
+                const statusFilter = document.getElementById('filter-status').value;
+                
+                const rows = document.querySelectorAll('#invoices-table tbody tr');
+                rows.forEach(row => {
+                    const text = row.textContent.toLowerCase();
+                    const team = row.dataset.team;
+                    const status = row.dataset.status;
+                    
+                    const matchesSearch = search === '' || text.includes(search);
+                    const matchesTeam = teamFilter === '' || team === teamFilter;
+                    const matchesStatus = statusFilter === '' || status === statusFilter;
+                    
+                    row.style.display = matchesSearch && matchesTeam && matchesStatus ? '' : 'none';
+                });
+            }
+            
+            document.getElementById('search-invoices').addEventListener('input', filterInvoices);
+            document.getElementById('filter-team').addEventListener('change', filterInvoices);
+            document.getElementById('filter-status').addEventListener('change', filterInvoices);
+            
+            // Invoice inline editing
+            function editInvoice(button) {
+                const row = button.closest('tr');
+                row.querySelectorAll('.display-value').forEach(span => span.style.display = 'none');
+                row.querySelectorAll('.edit-value').forEach(input => input.style.display = 'inline-block');
+                row.querySelector('.edit-invoice').style.display = 'none';
+                row.querySelector('.save-invoice').style.display = 'inline-block';
+                row.querySelector('.cancel-edit-invoice').style.display = 'inline-block';
+                row.querySelector('.delete-invoice').style.display = 'inline-block';
+            }
+            
+            function cancelEditInvoice(button) {
+                const row = button.closest('tr');
+                row.querySelectorAll('.display-value').forEach(span => span.style.display = 'inline-block');
+                row.querySelectorAll('.edit-value').forEach(input => input.style.display = 'none');
+                row.querySelector('.edit-invoice').style.display = 'inline-block';
+                row.querySelector('.save-invoice').style.display = 'none';
+                row.querySelector('.cancel-edit-invoice').style.display = 'none';
+                row.querySelector('.delete-invoice').style.display = 'none';
+            }
+            
+            function saveInvoice(button) {
+                const row = button.closest('tr');
+                const invoiceId = row.dataset.invoiceId;
+                const data = {
+                    action: 'update_invoice',
+                    invoice_id: invoiceId,
+                    invoice_amount: row.querySelector('.editable-invoice-amount .edit-value').value,
+                    outstanding_amount: row.querySelector('.editable-outstanding-amount .edit-value').value,
+                    nonce: '<?php echo wp_create_nonce('update_invoice'); ?>'
+                };
+                
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: Object.keys(data).map(key => key + '=' + encodeURIComponent(data[key])).join('&')
+                })
+                .then(response => response.json())
+                .then(response => {
+                    if (response.success) {
+                        // Update display values
+                        row.querySelector('.editable-invoice-amount .display-value').textContent = '$' + parseFloat(data.invoice_amount).toFixed(2);
+                        row.querySelector('.editable-outstanding-amount .display-value').textContent = '$' + parseFloat(data.outstanding_amount).toFixed(2);
+                        
+                        // Update payment status
+                        const outstanding = parseFloat(data.outstanding_amount);
+                        const invoice = parseFloat(data.invoice_amount);
+                        let status = 'outstanding';
+                        if (outstanding <= 0) {
+                            status = 'paid';
+                        } else if (outstanding < invoice) {
+                            status = 'partial';
+                        }
+                        row.dataset.status = status;
+                        
+                        cancelEditInvoice(button);
+                        alert('Invoice updated successfully');
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+            
+            function deleteInvoice(button) {
+                if (!confirm('Are you sure you want to delete this invoice? This action cannot be undone.')) {
+                    return;
+                }
+                
+                const row = button.closest('tr');
+                const invoiceId = row.dataset.invoiceId;
+                
+                const data = {
+                    action: 'delete_invoice',
+                    invoice_id: invoiceId,
+                    nonce: '<?php echo wp_create_nonce('delete_invoice'); ?>'
+                };
+                
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: Object.keys(data).map(key => key + '=' + encodeURIComponent(data[key])).join('&')
+                })
+                .then(response => response.json())
+                .then(response => {
+                    if (response.success) {
+                        row.remove();
+                        alert('Invoice deleted successfully');
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+            
+            function exportSingleInvoice(invoiceId) {
+                const data = {
+                    action: 'export_single_invoice',
+                    invoice_id: invoiceId,
+                    nonce: '<?php echo wp_create_nonce('export_single_invoice'); ?>'
+                };
+                
+                // Create form and submit for download
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = ajaxurl;
+                
+                Object.keys(data).forEach(key => {
+                    const input = document.createElement('input');
+                    input.type = 'hidden';
+                    input.name = key;
+                    input.value = data[key];
+                    form.appendChild(input);
+                });
+                
+                document.body.appendChild(form);
+                form.submit();
+                document.body.removeChild(form);
+            }
+            </script>
+        </div>
+        <?php
+    }
+    
+    private function render_assignments_table() {
+        global $wpdb;
+        
+        $season = $this->get_current_season();
+        
+        $assignments = $wpdb->get_results($wpdb->prepare("
+            SELECT 
+                ta.*,
+                u.display_name as name
+            FROM {$wpdb->prefix}team_assignments ta
+            JOIN {$wpdb->users} u ON ta.email = u.user_email
+            WHERE ta.season = %s
+            ORDER BY ta.is_active DESC, ta.team, ta.role, u.display_name
+        ", $season));
+        
+        ?>
+        <div class="wrap">
+            <h1>Team Assignments</h1>
+            
+            <div class="season-filter">
+                <label for="season-select">Season:</label>
+                <select id="season-select" onchange="location.href=this.value;">
+                    <?php 
+                    $available_seasons = $this->get_available_seasons('main');
+                    foreach ($available_seasons as $available_season): ?>
+                        <option value="<?php echo admin_url('admin.php?page=team-oversight-assignments&season=' . $available_season); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            
+            <div class="add-assignment-form">
+                <h3>Add New Assignment</h3>
+                <form method="post">
+                    <table class="form-table-compact">
+                        <tr>
+                            <th><label for="user_name">User Name</label></th>
+                            <td>
+                                <input type="text" name="user_name" id="user_name" placeholder="Search by name..." autocomplete="off">
+                                <div id="name-suggestions" style="display: none; position: absolute; background: white; border: 1px solid #ccc; max-height: 200px; overflow-y: auto; z-index: 1000; width: 300px;"></div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label for="user_email">User Email</label></th>
+                            <td>
+                                <input type="email" name="user_email" id="user_email" required autocomplete="off" placeholder="Search by email...">
+                                <div id="email-suggestions" style="display: none; position: absolute; background: white; border: 1px solid #ccc; max-height: 200px; overflow-y: auto; z-index: 1000; width: 300px;"></div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label for="team">Team</label></th>
+                            <td>
+                                <select name="team" required>
+                                    <option value="">Select Team</option>
+                                    <?php 
+                                    $database = new TeamOversight_Database();
+                                    $teams = $database->get_teams();
+                                    foreach ($teams as $code => $name): 
+                                    ?>
+                                        <option value="<?php echo esc_attr($code); ?>"><?php echo esc_html($code); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label for="role">Role</label></th>
+                            <td>
+                                <select name="role" required>
+                                    <option value="">Select Role</option>
+                                    <?php 
+                                    $roles = $database->get_roles();
+                                    foreach ($roles as $key => $role_name): 
+                                    ?>
+                                        <option value="<?php echo esc_attr($key); ?>"><?php echo esc_html($role_name); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label for="start_date">Start Date</label></th>
+                            <td><input type="date" name="start_date" value="<?php echo date('Y-m-d'); ?>" required></td>
+                        </tr>
+                    </table>
+                    
+                    <p>
+                        <input type="submit" class="button button-primary" value="Add Assignment">
+                        <input type="hidden" name="action" value="add_assignment">
+                        <input type="hidden" name="season" value="<?php echo esc_attr($season); ?>">
+                        <?php wp_nonce_field('add_assignment', 'assignment_nonce'); ?>
+                    </p>
+                </form>
+            </div>
+            
+            <?php if (!empty($assignments)): ?>
+                <div class="assignments-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
+                    <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
+                        <div>
+                            <label for="search-assignments">Search:</label>
+                            <input type="text" id="search-assignments" placeholder="Search name, email, team..." style="width: 200px;">
+                        </div>
+                        <div>
+                            <label for="filter-team">Team:</label>
+                            <select id="filter-team">
+                                <option value="">All Teams</option>
+                                <?php foreach ($teams as $code => $name): ?>
+                                    <option value="<?php echo esc_attr($code); ?>"><?php echo esc_html($code); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="filter-role">Role:</label>
+                            <select id="filter-role">
+                                <option value="">All Roles</option>
+                                <?php foreach ($roles as $key => $role_name): ?>
+                                    <option value="<?php echo esc_attr($key); ?>"><?php echo esc_html($role_name); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="filter-status">Status:</label>
+                            <select id="filter-status">
+                                <option value="">All Statuses</option>
+                                <option value="active">Active</option>
+                                <option value="inactive">Inactive</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <table class="wp-list-table widefat fixed striped" id="assignments-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Email</th>
+                            <th>Team</th>
+                            <th>Role</th>
+                            <th>Start Date</th>
+                            <th>End Date</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($assignments as $assignment): ?>
+                            <tr data-assignment-id="<?php echo $assignment->id; ?>" data-team="<?php echo esc_attr($assignment->team); ?>" data-role="<?php echo esc_attr($assignment->role); ?>" data-status="<?php echo esc_attr($assignment->registration_status); ?>" <?php echo !$assignment->is_active ? 'style="opacity: 0.6; background-color: #f9f9f9;"' : ''; ?>>
+                                <td><?php echo esc_html($assignment->name); ?></td>
+                                <td><?php echo esc_html($assignment->email); ?></td>
+                                <td class="editable-team" data-field="team" data-value="<?php echo esc_attr($assignment->team); ?>">
+                                    <span class="display-value"><?php echo esc_html($assignment->team); ?></span>
+                                    <select class="edit-value" style="display: none;">
+                                        <?php foreach ($teams as $code => $name): ?>
+                                            <option value="<?php echo esc_attr($code); ?>" <?php selected($assignment->team, $code); ?>><?php echo esc_html($code); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </td>
+                                <td class="editable-role" data-field="role" data-value="<?php echo esc_attr($assignment->role); ?>">
+                                    <span class="display-value"><?php echo esc_html(str_replace('_', ' ', ucwords($assignment->role, '_'))); ?></span>
+                                    <select class="edit-value" style="display: none;">
+                                        <?php foreach ($roles as $key => $role_name): ?>
+                                            <option value="<?php echo esc_attr($key); ?>" <?php selected($assignment->role, $key); ?>><?php echo esc_html($role_name); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </td>
+                                <td class="editable-date" data-field="start_date" data-value="<?php echo esc_attr($assignment->start_date); ?>">
+                                    <span class="display-value"><?php echo esc_html($assignment->start_date); ?></span>
+                                    <input type="date" class="edit-value" value="<?php echo esc_attr($assignment->start_date); ?>" style="display: none;">
+                                </td>
+                                <?php if (current_user_can('manage_options')): ?>
+                                    <td class="editable-end-date" data-field="end_date" data-value="<?php echo esc_attr($assignment->end_date); ?>">
+                                        <span class="display-value"><?php echo esc_html($assignment->end_date ?: ''); ?></span>
+                                        <input type="date" class="edit-value" value="<?php echo esc_attr($assignment->end_date); ?>" style="display: none;">
+                                    </td>
+                                <?php else: ?>
+                                    <td><?php echo esc_html($assignment->end_date ?: ''); ?></td>
+                                <?php endif; ?>
+                                <td class="editable-status" data-field="registration_status" data-value="<?php echo esc_attr($assignment->registration_status); ?>">
+                                    <span class="display-value">
+                                        <?php 
+                                        $status_display = ucfirst($assignment->registration_status);
+                                        $status_icon = $assignment->registration_status === 'active' ? '🟢' : '🔴';
+                                        $end_date_indicator = '';
+                                        if ($assignment->end_date && $assignment->end_date < date('Y-m-d')) {
+                                            $end_date_indicator = ' (End: ' . $assignment->end_date . ')';
+                                        }
+                                        echo $status_icon . ' ' . $status_display . $end_date_indicator;
+                                        ?>
+                                    </span>
+                                    <select class="edit-value" style="display: none;">
+                                        <option value="active" <?php selected($assignment->registration_status, 'active'); ?>>Active</option>
+                                        <option value="inactive" <?php selected($assignment->registration_status, 'inactive'); ?>>Inactive</option>
+                                    </select>
+                                </td>
+                                <td>
+                                    <button type="button" class="button edit-assignment" onclick="editAssignment(this)">Edit</button>
+                                    <button type="button" class="button button-primary save-assignment" onclick="saveAssignment(this)" style="display: none;">Save</button>
+                                    <button type="button" class="button cancel-edit" onclick="cancelEdit(this)" style="display: none;">Cancel</button>
+                                    <button type="button" class="button button-link-delete delete-assignment" onclick="deleteAssignment(this)" style="display: none; color: #a00;">Delete</button>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php else: ?>
+                <p>No team assignments found for this season.</p>
+            <?php endif; ?>
+            
+            <script>
+            // Name search functionality
+            document.getElementById('user_name').addEventListener('input', function() {
+                const query = this.value;
+                if (query.length < 2) {
+                    document.getElementById('name-suggestions').style.display = 'none';
+                    return;
+                }
+                
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: 'action=search_users&query=' + encodeURIComponent(query) + '&search_type=name&nonce=' + '<?php echo wp_create_nonce('search_users'); ?>'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    const suggestions = document.getElementById('name-suggestions');
+                    if (data.success && data.data.length > 0) {
+                        suggestions.innerHTML = data.data.map(user => 
+                            `<div class="user-suggestion" onclick="selectUser('${user.email}', '${user.name}', 'name')" style="padding: 8px; cursor: pointer; border-bottom: 1px solid #eee;">
+                                <strong>${user.name}</strong><br><small>${user.email}</small>
+                            </div>`
+                        ).join('');
+                        suggestions.style.display = 'block';
+                    } else {
+                        suggestions.style.display = 'none';
+                    }
+                });
+            });
+
+            // Email search functionality
+            document.getElementById('user_email').addEventListener('input', function() {
+                const query = this.value;
+                if (query.length < 2) {
+                    document.getElementById('email-suggestions').style.display = 'none';
+                    return;
+                }
+                
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: 'action=search_users&query=' + encodeURIComponent(query) + '&search_type=email&nonce=' + '<?php echo wp_create_nonce('search_users'); ?>'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    const suggestions = document.getElementById('email-suggestions');
+                    if (data.success && data.data.length > 0) {
+                        suggestions.innerHTML = data.data.map(user => 
+                            `<div class="user-suggestion" onclick="selectUser('${user.email}', '${user.name}', 'email')" style="padding: 8px; cursor: pointer; border-bottom: 1px solid #eee;">
+                                <strong>${user.name}</strong><br><small>${user.email}</small>
+                            </div>`
+                        ).join('');
+                        suggestions.style.display = 'block';
+                    } else {
+                        suggestions.style.display = 'none';
+                    }
+                });
+            });
+            
+            function selectUser(email, name, source) {
+                document.getElementById('user_email').value = email;
+                document.getElementById('user_name').value = name;
+                document.getElementById('email-suggestions').style.display = 'none';
+                document.getElementById('name-suggestions').style.display = 'none';
+            }
+            
+            // Hide suggestions when clicking outside
+            document.addEventListener('click', function(e) {
+                if (!e.target.closest('#user_email') && !e.target.closest('#email-suggestions')) {
+                    document.getElementById('email-suggestions').style.display = 'none';
+                }
+                if (!e.target.closest('#user_name') && !e.target.closest('#name-suggestions')) {
+                    document.getElementById('name-suggestions').style.display = 'none';
+                }
+            });
+            
+            // Table filtering
+            function filterTable() {
+                const search = document.getElementById('search-assignments').value.toLowerCase();
+                const teamFilter = document.getElementById('filter-team').value;
+                const roleFilter = document.getElementById('filter-role').value;
+                const statusFilter = document.getElementById('filter-status').value;
+                
+                const rows = document.querySelectorAll('#assignments-table tbody tr');
+                rows.forEach(row => {
+                    const text = row.textContent.toLowerCase();
+                    const team = row.dataset.team;
+                    const role = row.dataset.role;
+                    const status = row.dataset.status;
+                    
+                    const matchesSearch = search === '' || text.includes(search);
+                    const matchesTeam = teamFilter === '' || team === teamFilter;
+                    const matchesRole = roleFilter === '' || role === roleFilter;
+                    const matchesStatus = statusFilter === '' || status === statusFilter;
+                    
+                    row.style.display = matchesSearch && matchesTeam && matchesRole && matchesStatus ? '' : 'none';
+                });
+            }
+            
+            document.getElementById('search-assignments').addEventListener('input', filterTable);
+            document.getElementById('filter-team').addEventListener('change', filterTable);
+            document.getElementById('filter-role').addEventListener('change', filterTable);
+            document.getElementById('filter-status').addEventListener('change', filterTable);
+            
+            // Inline editing
+            function editAssignment(button) {
+                const row = button.closest('tr');
+                row.querySelectorAll('.display-value').forEach(span => span.style.display = 'none');
+                row.querySelectorAll('.edit-value').forEach(input => input.style.display = 'inline-block');
+                row.querySelector('.edit-assignment').style.display = 'none';
+                row.querySelector('.save-assignment').style.display = 'inline-block';
+                row.querySelector('.cancel-edit').style.display = 'inline-block';
+                row.querySelector('.delete-assignment').style.display = 'inline-block';
+            }
+            
+            function cancelEdit(button) {
+                const row = button.closest('tr');
+                row.querySelectorAll('.display-value').forEach(span => span.style.display = 'inline-block');
+                row.querySelectorAll('.edit-value').forEach(input => input.style.display = 'none');
+                row.querySelector('.edit-assignment').style.display = 'inline-block';
+                row.querySelector('.save-assignment').style.display = 'none';
+                row.querySelector('.cancel-edit').style.display = 'none';
+                row.querySelector('.delete-assignment').style.display = 'none';
+            }
+            
+            function saveAssignment(button) {
+                const row = button.closest('tr');
+                const assignmentId = row.dataset.assignmentId;
+                const data = {
+                    action: 'update_assignment',
+                    assignment_id: assignmentId,
+                    team: row.querySelector('.editable-team .edit-value').value,
+                    role: row.querySelector('.editable-role .edit-value').value,
+                    start_date: row.querySelector('.editable-date .edit-value').value,
+                    registration_status: row.querySelector('.editable-status .edit-value').value,
+                    nonce: '<?php echo wp_create_nonce('update_assignment'); ?>'
+                };
+                
+                // Add end_date if the field exists (admin only)
+                const endDateField = row.querySelector('.editable-end-date .edit-value');
+                if (endDateField) {
+                    data.end_date = endDateField.value;
+                }
+                
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: Object.keys(data).map(key => key + '=' + encodeURIComponent(data[key])).join('&')
+                })
+                .then(response => response.json())
+                .then(response => {
+                    if (response.success) {
+                        // Update display values
+                        row.querySelector('.editable-team .display-value').textContent = data.team;
+                        row.querySelector('.editable-role .display-value').textContent = row.querySelector('.editable-role .edit-value option:checked').textContent;
+                        row.querySelector('.editable-date .display-value').textContent = data.start_date;
+                        row.querySelector('.editable-status .display-value').textContent = row.querySelector('.editable-status .edit-value option:checked').textContent;
+                        
+                        // Update data attributes
+                        row.dataset.team = data.team;
+                        row.dataset.role = data.role;
+                        row.dataset.status = data.registration_status;
+                        
+                        cancelEdit(button);
+                        alert('Assignment updated successfully');
+                        
+                        // Refresh page to show updated status indicators
+                        location.reload();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+            
+            function deleteAssignment(button) {
+                if (!confirm('Are you sure you want to delete this assignment? This action cannot be undone.')) {
+                    return;
+                }
+                
+                const row = button.closest('tr');
+                const assignmentId = row.dataset.assignmentId;
+                
+                const data = {
+                    action: 'delete_assignment',
+                    assignment_id: assignmentId,
+                    nonce: '<?php echo wp_create_nonce('delete_assignment'); ?>'
+                };
+                
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: Object.keys(data).map(key => key + '=' + encodeURIComponent(data[key])).join('&')
+                })
+                .then(response => response.json())
+                .then(response => {
+                    if (response.success) {
+                        row.remove();
+                        alert('Assignment deleted successfully');
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+            </script>
+        </div>
+        <?php
+    }
+    
+    private function process_trial_action() {
+        if (!wp_verify_nonce($_POST['trial_nonce'], 'process_trial')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+        
+        global $wpdb;
+        $trial_id = intval($_POST['trial_id']);
+        $action = sanitize_text_field($_POST['action']);
+        
+        if ($action === 'accept_trial') {
+            $assigned_team = sanitize_text_field($_POST['assigned_team']);
+            
+            if (empty($assigned_team)) {
+                echo '<div class="notice notice-error"><p>Please select a team.</p></div>';
+                return;
+            }
+            
+            $trial = $wpdb->get_row($wpdb->prepare("
+                SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d
+            ", $trial_id));
+            
+            if ($trial && $trial->application_status === 'pending') {
+                $wpdb->update(
+                    $wpdb->prefix . 'trial_applications',
+                    array(
+                        'application_status' => 'accepted',
+                        'assigned_team' => $assigned_team
+                    ),
+                    array('id' => $trial_id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+                
+                $wpdb->insert(
+                    $wpdb->prefix . 'team_assignments',
+                    array(
+                        'email' => $trial->email,
+                        'season' => $trial->season,
+                        'team' => $assigned_team,
+                        'role' => 'playing_member',
+                        'registration_status' => 'active',
+                        'start_date' => date('Y-m-d'),
+                        'is_active' => 1
+                    ),
+                    array('%s', '%s', '%s', '%s', '%s', '%s', '%d')
+                );
+                
+                $fees = new TeamOversight_Fees();
+                $fees->generate_invoice($trial->email, $trial->season);
+                
+                echo '<div class="notice notice-success"><p>Trial application accepted and player assigned to team.</p></div>';
+            }
+            
+        } elseif ($action === 'reject_trial') {
+            $wpdb->update(
+                $wpdb->prefix . 'trial_applications',
+                array('application_status' => 'rejected'),
+                array('id' => $trial_id),
+                array('%s'),
+                array('%d')
+            );
+            
+            echo '<div class="notice notice-success"><p>Trial application rejected.</p></div>';
+            
+        } elseif ($action === 'undo_trial') {
+            // Get trial info
+            $trial = $wpdb->get_row($wpdb->prepare("
+                SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d
+            ", $trial_id));
+            
+            if ($trial && $trial->application_status === 'accepted') {
+                // Remove team assignment
+                $wpdb->delete(
+                    $wpdb->prefix . 'team_assignments',
+                    array(
+                        'email' => $trial->email,
+                        'season' => $trial->season,
+                        'team' => $trial->assigned_team
+                    ),
+                    array('%s', '%s', '%s')
+                );
+                
+                // Remove invoice if exists
+                $wpdb->delete(
+                    $wpdb->prefix . 'team_invoices',
+                    array(
+                        'email' => $trial->email,
+                        'season' => $trial->season
+                    ),
+                    array('%s', '%s')
+                );
+                
+                // Reset trial to pending
+                $wpdb->update(
+                    $wpdb->prefix . 'trial_applications',
+                    array(
+                        'application_status' => 'pending',
+                        'assigned_team' => null
+                    ),
+                    array('id' => $trial_id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+                
+                echo '<div class="notice notice-success"><p>Trial assignment undone successfully. Player returned to pending status.</p></div>';
+            } elseif ($trial && $trial->application_status === 'rejected') {
+                // Reset rejected trial to pending
+                $wpdb->update(
+                    $wpdb->prefix . 'trial_applications',
+                    array('application_status' => 'pending'),
+                    array('id' => $trial_id),
+                    array('%s'),
+                    array('%d')
+                );
+                
+                echo '<div class="notice notice-success"><p>Trial rejection undone successfully. Player returned to pending status.</p></div>';
+            }
+        }
+    }
+    
+    public function ajax_bulk_accept_trials() {
+        // Security check
+        if (!wp_verify_nonce($_POST['bulk_trial_nonce'], 'bulk_trial_action')) {
+            wp_send_json_error('Security check failed.');
+            return;
+        }
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions.');
+            return;
+        }
+        
+        global $wpdb;
+        
+        $trial_ids = json_decode(stripslashes($_POST['trial_ids']), true);
+        $assigned_team = sanitize_text_field($_POST['assigned_team']);
+        
+        if (empty($trial_ids) || !is_array($trial_ids)) {
+            wp_send_json_error('No trial applications selected.');
+            return;
+        }
+        
+        if (empty($assigned_team)) {
+            wp_send_json_error('Please select a team.');
+            return;
+        }
+        
+        $success_count = 0;
+        $error_count = 0;
+        $errors = array();
+        
+        // Start transaction
+        $wpdb->query('START TRANSACTION');
+        
+        try {
+            foreach ($trial_ids as $trial_id) {
+                $trial_id = intval($trial_id);
+                
+                // Get trial info
+                $trial = $wpdb->get_row($wpdb->prepare("
+                    SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d
+                ", $trial_id));
+                
+                if (!$trial) {
+                    $errors[] = "Trial ID $trial_id not found.";
+                    $error_count++;
+                    continue;
+                }
+                
+                if ($trial->application_status !== 'pending') {
+                    $errors[] = "Trial for {$trial->name} is not pending.";
+                    $error_count++;
+                    continue;
+                }
+                
+                // Update trial status
+                $update_result = $wpdb->update(
+                    $wpdb->prefix . 'trial_applications',
+                    array(
+                        'application_status' => 'accepted',
+                        'assigned_team' => $assigned_team
+                    ),
+                    array('id' => $trial_id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+                
+                if ($update_result === false) {
+                    $errors[] = "Failed to update trial for {$trial->name}.";
+                    $error_count++;
+                    continue;
+                }
+                
+                // Create team assignment
+                $assignment_result = $wpdb->insert(
+                    $wpdb->prefix . 'team_assignments',
+                    array(
+                        'email' => $trial->email,
+                        'season' => $trial->season,
+                        'team' => $assigned_team,
+                        'role' => 'playing_member',
+                        'registration_status' => 'active',
+                        'start_date' => date('Y-m-d'),
+                        'is_active' => 1
+                    ),
+                    array('%s', '%s', '%s', '%s', '%s', '%s', '%d')
+                );
+                
+                if ($assignment_result === false) {
+                    $errors[] = "Failed to create assignment for {$trial->name}.";
+                    $error_count++;
+                    continue;
+                }
+                
+                // Generate invoice
+                $fees = new TeamOversight_Fees();
+                $invoice_result = $fees->generate_invoice($trial->email, $trial->season);
+                
+                if (!$invoice_result) {
+                    $errors[] = "Failed to generate invoice for {$trial->name}.";
+                    $error_count++;
+                    continue;
+                }
+                
+                $success_count++;
+            }
+            
+            if ($error_count === 0) {
+                $wpdb->query('COMMIT');
+                $message = "Successfully accepted $success_count trial application(s) and assigned to team.";
+                wp_send_json_success(array('message' => $message));
+            } else {
+                $wpdb->query('ROLLBACK');
+                $error_summary = "Processed $success_count successfully, $error_count failed. Errors: " . implode(' ', $errors);
+                wp_send_json_error($error_summary);
+            }
+            
+        } catch (Exception $e) {
+            $wpdb->query('ROLLBACK');
+            wp_send_json_error('Database error: ' . $e->getMessage());
+        }
+    }
+    
+    public function ajax_bulk_reject_trials() {
+        // Security check
+        if (!wp_verify_nonce($_POST['bulk_trial_nonce'], 'bulk_trial_action')) {
+            wp_send_json_error('Security check failed.');
+            return;
+        }
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions.');
+            return;
+        }
+        
+        global $wpdb;
+        
+        $trial_ids = json_decode(stripslashes($_POST['trial_ids']), true);
+        
+        if (empty($trial_ids) || !is_array($trial_ids)) {
+            wp_send_json_error('No trial applications selected.');
+            return;
+        }
+        
+        $success_count = 0;
+        $error_count = 0;
+        $errors = array();
+        
+        // Start transaction
+        $wpdb->query('START TRANSACTION');
+        
+        try {
+            foreach ($trial_ids as $trial_id) {
+                $trial_id = intval($trial_id);
+                
+                // Get trial info
+                $trial = $wpdb->get_row($wpdb->prepare("
+                    SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d
+                ", $trial_id));
+                
+                if (!$trial) {
+                    $errors[] = "Trial ID $trial_id not found.";
+                    $error_count++;
+                    continue;
+                }
+                
+                if ($trial->application_status !== 'pending') {
+                    $errors[] = "Trial for {$trial->name} is not pending.";
+                    $error_count++;
+                    continue;
+                }
+                
+                // Update trial status
+                $update_result = $wpdb->update(
+                    $wpdb->prefix . 'trial_applications',
+                    array('application_status' => 'rejected'),
+                    array('id' => $trial_id),
+                    array('%s'),
+                    array('%d')
+                );
+                
+                if ($update_result === false) {
+                    $errors[] = "Failed to reject trial for {$trial->name}.";
+                    $error_count++;
+                    continue;
+                }
+                
+                $success_count++;
+            }
+            
+            if ($error_count === 0) {
+                $wpdb->query('COMMIT');
+                $message = "Successfully rejected $success_count trial application(s).";
+                wp_send_json_success(array('message' => $message));
+            } else {
+                $wpdb->query('ROLLBACK');
+                $error_summary = "Processed $success_count successfully, $error_count failed. Errors: " . implode(' ', $errors);
+                wp_send_json_error($error_summary);
+            }
+            
+        } catch (Exception $e) {
+            $wpdb->query('ROLLBACK');
+            wp_send_json_error('Database error: ' . $e->getMessage());
+        }
+    }
+    
+    private function save_team_assignment() {
+        if (!wp_verify_nonce($_POST['assignment_nonce'], $_POST['action'])) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+        
+        global $wpdb;
+        
+        if ($_POST['action'] === 'add_assignment') {
+            $user_email = sanitize_email($_POST['user_email']);
+            $team = sanitize_text_field($_POST['team']);
+            $role = sanitize_text_field($_POST['role']);
+            $season = sanitize_text_field($_POST['season']);
+            $start_date = sanitize_text_field($_POST['start_date']);
+            
+            if (!is_email($user_email)) {
+                echo '<div class="notice notice-error"><p>Invalid email address.</p></div>';
+                return;
+            }
+            
+            $user = get_user_by('email', $user_email);
+            if (!$user) {
+                echo '<div class="notice notice-error"><p>User not found. Please ensure the user has an account first.</p></div>';
+                return;
+            }
+            
+            $existing = $wpdb->get_var($wpdb->prepare("
+                SELECT id FROM {$wpdb->prefix}team_assignments 
+                WHERE email = %s AND team = %s AND role = %s AND season = %s AND is_active = 1
+            ", $user_email, $team, $role, $season));
+            
+            if ($existing) {
+                echo '<div class="notice notice-error"><p>This assignment already exists.</p></div>';
+                return;
+            }
+            
+            $result = $wpdb->insert(
+                $wpdb->prefix . 'team_assignments',
+                array(
+                    'email' => $user_email,
+                    'season' => $season,
+                    'team' => $team,
+                    'role' => $role,
+                    'registration_status' => 'active',
+                    'start_date' => $start_date,
+                    'is_active' => 1
+                ),
+                array('%s', '%s', '%s', '%s', '%s', '%s', '%d')
+            );
+            
+            if ($result) {
+                $fees = new TeamOversight_Fees();
+                $invoice_result = $fees->generate_invoice($user_email, $season);
+                
+                if ($invoice_result) {
+                    echo '<div class="notice notice-success"><p>Team assignment added successfully and invoice generated.</p></div>';
+                } else {
+                    echo '<div class="notice notice-warning"><p>Team assignment added successfully but invoice could not be generated. Please check fee matrix configuration.</p></div>';
+                }
+            } else {
+                echo '<div class="notice notice-error"><p>Failed to add team assignment.</p></div>';
+            }
+            
+        } elseif ($_POST['action'] === 'deactivate_assignment') {
+            $assignment_id = intval($_POST['assignment_id']);
+            
+            $result = $wpdb->update(
+                $wpdb->prefix . 'team_assignments',
+                array(
+                    'is_active' => 0,
+                    'end_date' => date('Y-m-d')
+                ),
+                array('id' => $assignment_id),
+                array('%d', '%s'),
+                array('%d')
+            );
+            
+            if ($result) {
+                echo '<div class="notice notice-success"><p>Assignment deactivated successfully.</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Failed to deactivate assignment.</p></div>';
+            }
+        }
+    }
+    
+    public function ajax_search_users() {
+        if (!wp_verify_nonce($_POST['nonce'], 'search_users')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        $query = sanitize_text_field($_POST['query']);
+        $search_type = sanitize_text_field($_POST['search_type'] ?? 'both');
+        
+        if (strlen($query) < 2) {
+            wp_send_json_error('Query too short');
+        }
+        
+        global $wpdb;
+        
+        // Build search conditions based on search type
+        $search_condition = '';
+        if ($search_type === 'name') {
+            $search_condition = 'u.display_name LIKE %s';
+            $params = ['%' . $query . '%'];
+        } elseif ($search_type === 'email') {
+            $search_condition = 'u.user_email LIKE %s';
+            $params = ['%' . $query . '%'];
+        } else {
+            $search_condition = '(u.user_email LIKE %s OR u.display_name LIKE %s)';
+            $params = ['%' . $query . '%', '%' . $query . '%'];
+        }
+        
+        $users = $wpdb->get_results($wpdb->prepare("
+            SELECT u.user_email as email, u.display_name as name
+            FROM {$wpdb->users} u
+            WHERE {$search_condition}
+            AND EXISTS (SELECT 1 FROM {$wpdb->usermeta} um WHERE um.user_id = u.ID AND um.meta_key = 'account_status' AND um.meta_value = 'approved')
+            ORDER BY u.display_name
+            LIMIT 6
+        ", ...$params));
+        
+        wp_send_json_success($users);
+    }
+    
+    public function ajax_update_assignment() {
+        if (!wp_verify_nonce($_POST['nonce'], 'update_assignment')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        
+        global $wpdb;
+        
+        $assignment_id = intval($_POST['assignment_id']);
+        $team = sanitize_text_field($_POST['team']);
+        $role = sanitize_text_field($_POST['role']);
+        $start_date = sanitize_text_field($_POST['start_date']);
+        $registration_status = sanitize_text_field($_POST['registration_status']);
+        $end_date = sanitize_text_field($_POST['end_date'] ?? '');
+        
+        // Prepare update data
+        $update_data = array(
+            'team' => $team,
+            'role' => $role,
+            'start_date' => $start_date,
+            'registration_status' => $registration_status
+        );
+        $update_format = array('%s', '%s', '%s', '%s');
+        
+        // Handle end_date and status logic
+        if (current_user_can('manage_options') && isset($_POST['end_date'])) {
+            if (!empty($end_date)) {
+                $update_data['end_date'] = $end_date;
+                $update_format[] = '%s';
+                
+                // Auto-set status to inactive if end date is in the past
+                if ($end_date < date('Y-m-d')) {
+                    $update_data['registration_status'] = 'inactive';
+                    $update_data['is_active'] = 0;
+                    $update_format[] = '%d';
+                } else {
+                    $update_data['is_active'] = $registration_status === 'active' ? 1 : 0;
+                    $update_format[] = '%d';
+                }
+            } else {
+                // Clear end_date if empty string provided
+                $update_data['end_date'] = null;
+                $update_format[] = '%s';
+                $update_data['is_active'] = $registration_status === 'active' ? 1 : 0;
+                $update_format[] = '%d';
+            }
+        } else {
+            // Regular status update - set end_date if changing to inactive
+            if ($registration_status === 'inactive') {
+                // Get current assignment to check if end_date is already set
+                $current_assignment = $wpdb->get_row($wpdb->prepare(
+                    "SELECT end_date FROM {$wpdb->prefix}team_assignments WHERE id = %d",
+                    $assignment_id
+                ));
+                
+                if (!$current_assignment->end_date) {
+                    $update_data['end_date'] = date('Y-m-d');
+                    $update_format[] = '%s';
+                }
+            }
+            $update_data['is_active'] = $registration_status === 'active' ? 1 : 0;
+            $update_format[] = '%d';
+        }
+        
+        $result = $wpdb->update(
+            $wpdb->prefix . 'team_assignments',
+            $update_data,
+            array('id' => $assignment_id),
+            $update_format,
+            array('%d')
+        );
+        
+        if ($result !== false) {
+            wp_send_json_success('Assignment updated successfully');
+        } else {
+            wp_send_json_error('Failed to update assignment');
+        }
+    }
+    
+    public function ajax_delete_assignment() {
+        if (!wp_verify_nonce($_POST['nonce'], 'delete_assignment')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        
+        global $wpdb;
+        
+        $assignment_id = intval($_POST['assignment_id']);
+        
+        $result = $wpdb->delete(
+            $wpdb->prefix . 'team_assignments',
+            array('id' => $assignment_id),
+            array('%d')
+        );
+        
+        if ($result !== false) {
+            wp_send_json_success('Assignment deleted successfully');
+        } else {
+            wp_send_json_error('Failed to delete assignment');
+        }
+    }
+    
+    public function ajax_update_invoice() {
+        if (!wp_verify_nonce($_POST['nonce'], 'update_invoice')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        
+        global $wpdb;
+        
+        $invoice_id = intval($_POST['invoice_id']);
+        $invoice_amount = floatval($_POST['invoice_amount']);
+        $outstanding_amount = floatval($_POST['outstanding_amount']);
+        
+        $result = $wpdb->update(
+            $wpdb->prefix . 'team_invoices',
+            array(
+                'invoice_amount' => $invoice_amount,
+                'outstanding_amount' => $outstanding_amount
+            ),
+            array('id' => $invoice_id),
+            array('%f', '%f'),
+            array('%d')
+        );
+        
+        if ($result !== false) {
+            wp_send_json_success('Invoice updated successfully');
+        } else {
+            wp_send_json_error('Failed to update invoice');
+        }
+    }
+    
+    public function ajax_delete_invoice() {
+        if (!wp_verify_nonce($_POST['nonce'], 'delete_invoice')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        
+        global $wpdb;
+        
+        $invoice_id = intval($_POST['invoice_id']);
+        
+        $result = $wpdb->delete(
+            $wpdb->prefix . 'team_invoices',
+            array('id' => $invoice_id),
+            array('%d')
+        );
+        
+        if ($result !== false) {
+            wp_send_json_success('Invoice deleted successfully');
+        } else {
+            wp_send_json_error('Failed to delete invoice');
+        }
+    }
+    
+    public function ajax_export_single_invoice() {
+        if (!wp_verify_nonce($_POST['nonce'], 'export_single_invoice')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        
+        global $wpdb;
+        
+        $invoice_id = intval($_POST['invoice_id']);
+        
+        $invoice = $wpdb->get_row($wpdb->prepare("
+            SELECT inv.*, ta.team, ta.role 
+            FROM {$wpdb->prefix}team_invoices inv
+            LEFT JOIN {$wpdb->prefix}team_assignments ta ON inv.email = ta.email AND inv.season = ta.season AND ta.is_active = 1
+            WHERE inv.id = %d
+        ", $invoice_id));
+        
+        if (!$invoice) {
+            wp_die('Invoice not found');
+        }
+        
+        $invoice_number = "VVL-{$invoice->season}-" . (5023 + ($invoice->id - 1));
+        $filename = "xero_invoice_{$invoice_number}_" . date('Y-m-d') . ".csv";
+        
+        // Clean output buffer
+        if (ob_get_length()) {
+            ob_end_clean();
+        }
+        
+        header('Content-Type: text/csv');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+        
+        $output = fopen('php://output', 'w');
+        
+        // Use same header as bulk Xero export
+        $header = array(
+            'ContactName', 'EmailAddress', 'POAddressLine1', 'POAddressLine2', 
+            'POAddressLine3', 'POAddressLine4', 'POCity', 'PORegion', 
+            'POPostalCode', 'POCountry', 'InvoiceNumber', 'Reference', 
+            'InvoiceDate', 'DueDate', 'InventoryItemCode', 'Description', 
+            'Quantity', 'UnitAmount', 'Discount', 'AccountCode', 'TaxType', 
+            'TrackingName1', 'TrackingOption1', 'TrackingName2', 'TrackingOption2', 
+            'Currency', 'BrandingTheme'
+        );
+        
+        fputcsv($output, $header);
+        
+        // Determine fee class and description like in bulk export
+        $fees = new TeamOversight_Fees();
+        $fee_class = $fees->determine_fee_class($invoice->email);
+        $is_junior_league = (strpos($invoice->team, 'YSL') === 0 || strpos($invoice->team, 'JPL') === 0);
+        $league_type = $is_junior_league ? 'YSL/JPL' : 'VVL';
+        $account_code = '4003';
+        $description = "{$fee_class} - {$league_type}";
+        
+        // Use current date for invoice date and April 1st next year for due date
+        $invoice_date = date('Y-m-d');
+        $due_date = date('Y-04-01', strtotime('+1 year'));
+        
+        // Generate Xero invoice number format
+        $xero_invoice_number = "VVL-{$invoice->season}-" . (5023 + ($invoice->id - 1));
+        
+        $row = array(
+            $invoice->name,                    // ContactName
+            $invoice->email,                   // EmailAddress
+            '', '', '', '', '', '',            // PO Address fields (empty)
+            '', '',                            // POPostalCode, POCountry (empty)
+            $xero_invoice_number,              // InvoiceNumber
+            '',                                // Reference
+            $invoice_date,                     // InvoiceDate
+            $due_date,                         // DueDate
+            '',                                // InventoryItemCode (empty)
+            $description,                      // Description
+            '1',                               // Quantity
+            number_format($invoice->invoice_amount, 2, '.', ''), // UnitAmount
+            '',                                // Discount (empty)
+            $account_code,                     // AccountCode
+            'GST on Income',                   // TaxType
+            '', '', '', '',                    // Tracking fields (empty)
+            '', ''                             // Currency, BrandingTheme (empty)
+        );
+        
+        fputcsv($output, $row);
+        
+        fclose($output);
+        exit;
+    }
+}

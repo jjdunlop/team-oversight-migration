@@ -1,0 +1,37 @@
+Class,Role,Price
+Junior U/19 (VVL),supporter,25
+Junior U/19 (VVL),training_only,408
+Junior U/19 (VVL),playing_member,515
+Junior U/19 (VVL),team_manager,515
+Junior U/19 (VVL),coach,25
+Junior U/19 (VVL),assistant_coach,25
+Other Student,supporter,30
+Other Student,training_only,441
+Other Student,playing_member,551
+Other Student,team_manager,551
+Other Student,coach,30
+Other Student,assistant_coach,30
+Melb Uni Student,supporter,25
+Melb Uni Student,training_only,420
+Melb Uni Student,playing_member,515
+Melb Uni Student,team_manager,515
+Melb Uni Student,coach,25
+Melb Uni Student,assistant_coach,25
+Full Adult,supporter,35
+Full Adult,training_only,494
+Full Adult,playing_member,599
+Full Adult,team_manager,599
+Full Adult,coach,35
+Full Adult,assistant_coach,35
+JPL/YSL,playing_member,472
+JPL/YSL,training_only,408
+JPL/YSL,supporter,25
+JPL/YSL,team_manager,472
+JPL/YSL,coach,25
+JPL/YSL,assistant_coach,25
+Unknown,supporter,0
+Unknown,training_only,0
+Unknown,playing_member,0
+Unknown,team_manager,0
+Unknown,coach,0
+Unknown,assistant_coach,0

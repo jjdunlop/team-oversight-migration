@@ -1,0 +1,15 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Logs / temp
+*.log
+*.tmp
+
+# Never commit WordPress secrets or DB dumps if they ever land here
+wp-config.php
+*.sql
