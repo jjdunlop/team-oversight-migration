@@ -2113,16 +2113,20 @@ class TeamOversight_Admin {
             ", $trial_id));
             
             if ($trial && $trial->application_status === 'accepted') {
-                // Remove team assignment
-                $wpdb->delete(
-                    $wpdb->prefix . 'team_assignments',
-                    array(
-                        'email' => $trial->email,
-                        'season' => $trial->season,
-                        'team' => $trial->assigned_team
-                    ),
-                    array('%s', '%s', '%s')
-                );
+                // Remove only the PLAYING assignments the acceptance created
+                // — never staff roles (a playing coach keeps coaching).
+                // assigned_team may be a multi-team list like "SL2M, JPLM (T/O)".
+                $undo_teams = array_filter(array_map(function ($team_code) {
+                    return trim(str_replace('(T/O)', '', $team_code));
+                }, explode(',', (string) $trial->assigned_team)));
+
+                foreach ($undo_teams as $undo_team) {
+                    $wpdb->query($wpdb->prepare("
+                        DELETE FROM {$wpdb->prefix}team_assignments
+                        WHERE email = %s AND season = %s AND team = %s
+                            AND role IN ('playing_member', 'training_only')
+                    ", $trial->email, $trial->season, $undo_team));
+                }
                 
                 // Remove invoice if exists
                 $wpdb->delete(
