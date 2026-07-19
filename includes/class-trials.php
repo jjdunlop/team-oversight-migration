@@ -113,9 +113,19 @@ class TeamOversight_Trials {
             $login_url = function_exists('um_get_core_page')
                 ? add_query_arg('redirect_to', urlencode(get_permalink()), um_get_core_page('login'))
                 : wp_login_url(get_permalink());
-            return '<div class="trial-login-required" style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px; background: #f9f9f9;">'
-                . '<p><strong>You must be logged in with your club account to submit a trial application.</strong></p>'
-                . '<p><a class="button button-primary" href="' . esc_url($login_url) . '">Log in to continue</a></p>'
+            $register_url = function_exists('um_get_core_page') ? um_get_core_page('register') : wp_registration_url();
+            return '<div class="trial-login-required" style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 25px; background: #f9f9f9; max-width: 640px;">'
+                . '<h3 style="margin-top: 0;">Trial registrations are linked to your club account</h3>'
+                . '<p>Please log in before filling out the trial form. We do this so that:</p>'
+                . '<ul style="margin: 10px 0 15px 20px; list-style: disc;">'
+                . '<li>we have up-to-date <strong>contact and emergency details</strong> for you at trials and training;</li>'
+                . '<li>your details are <strong>filled in for you</strong> — no retyping your name, phone number and date of birth;</li>'
+                . '<li>your application, trial fee payment and any team offer are all <strong>kept together</strong> on your membership.</li>'
+                . '</ul>'
+                . '<p>'
+                . '<a class="button button-primary" href="' . esc_url($login_url) . '">Log in to continue</a> '
+                . '<a class="button" href="' . esc_url($register_url) . '" style="margin-left: 8px;">New to the club? Create an account</a>'
+                . '</p>'
                 . '</div>';
         }
         
