@@ -154,37 +154,35 @@ class TeamOversight_Coach_Portal {
 
                 <h4>Current Team (<?php echo count($roster); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?>)</h4>
                 <?php if (!empty($roster) || !empty($selection_roster)): ?>
-                    <div class="coach-table-wrap">
-                    <table class="coach-portal-table">
+                    <table class="coach-portal-table coach-roster-table">
                         <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Email</th><th>Mobile</th></tr></thead>
                         <tbody>
                             <?php foreach ($roster as $member): ?>
                                 <tr>
-                                    <td><?php echo esc_html($member->name ?: $member->email); ?></td>
-                                    <td><?php echo esc_html(str_replace('_', ' ', ucwords($member->role, '_'))); ?></td>
-                                    <td><span class="verdict-chip verdict-chip-confirmed">Confirmed</span></td>
-                                    <td><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
-                                    <td><?php echo esc_html($member->mobile ?: ''); ?></td>
+                                    <td data-label="Name"><?php echo esc_html($member->name ?: $member->email); ?></td>
+                                    <td data-label="Role"><?php echo esc_html(str_replace('_', ' ', ucwords($member->role, '_'))); ?></td>
+                                    <td data-label="Status"><span class="verdict-chip verdict-chip-confirmed">Confirmed</span></td>
+                                    <td data-label="Email"><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
+                                    <td data-label="Mobile"><?php echo esc_html($member->mobile ?: ''); ?></td>
                                 </tr>
                             <?php endforeach; ?>
                             <?php foreach ($selection_roster as $member): ?>
                                 <tr class="verdict-<?php echo esc_attr($member->status); ?>">
-                                    <td><?php echo esc_html($member->name); ?> <small>#<?php echo intval($member->trial_number); ?></small></td>
-                                    <td>Playing Member</td>
-                                    <td>
+                                    <td data-label="Name"><?php echo esc_html($member->name); ?> <small>#<?php echo intval($member->trial_number); ?></small></td>
+                                    <td data-label="Role">Playing Member</td>
+                                    <td data-label="Status">
                                         <?php if ($member->status === 'selected'): ?>
                                             <span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>
                                         <?php else: ?>
                                             <span class="verdict-chip verdict-chip-tentative">Tentative</span>
                                         <?php endif; ?>
                                     </td>
-                                    <td><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
-                                    <td><?php echo esc_html($member->mobile ?: ''); ?></td>
+                                    <td data-label="Email"><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
+                                    <td data-label="Mobile"><?php echo esc_html($member->mobile ?: ''); ?></td>
                                 </tr>
                             <?php endforeach; ?>
                         </tbody>
                     </table>
-                    </div>
                     <form method="post">
                         <input type="hidden" name="coach_action" value="export_roster">
                         <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
@@ -208,25 +206,34 @@ class TeamOversight_Coach_Portal {
                 </p>
 
                 <?php if (!empty($applicants)): ?>
-                    <div class="coach-table-wrap">
-                    <table class="coach-portal-table" id="coach-applicants-table">
-                        <thead><tr>
-                            <th style="width: 55px;">Trial #</th>
-                            <th>Name</th>
-                            <th style="width: 40px;">Age</th>
-                            <th>Positions</th>
-                            <th>Teams Selected</th>
-                            <th>Verdicts (all teams)</th>
-                            <th>Notes</th>
-                            <th style="width: 190px;">My Team</th>
-                        </tr></thead>
-                        <tbody>
-                            <?php foreach ($applicants as $a): ?>
-                                <tr class="<?php echo $a['my_status'] ? 'verdict-' . esc_attr($a['my_status']) : ''; ?>" data-has-verdict="<?php echo $a['my_status'] ? '1' : '0'; ?>">
-                                    <td><strong>#<?php echo intval($a['trial_number']); ?></strong></td>
-                                    <td>
-                                        <?php echo $a['picked_mine'] ? '★ ' : ''; ?><?php echo esc_html($a['name']); ?><br>
-                                        <small><a href="mailto:<?php echo esc_attr($a['email']); ?>"><?php echo esc_html($a['email']); ?></a></small>
+                    <div id="coach-applicant-list">
+                        <?php foreach ($applicants as $a): ?>
+                            <div class="coach-applicant-card <?php echo $a['my_status'] ? 'verdict-' . esc_attr($a['my_status']) : ''; ?>" data-has-verdict="<?php echo $a['my_status'] ? '1' : '0'; ?>">
+                                <div class="cac-header">
+                                    <span class="cac-number">#<?php echo intval($a['trial_number']); ?></span>
+                                    <span class="cac-name"><?php echo $a['picked_mine'] ? '★ ' : ''; ?><?php echo esc_html($a['name']); ?></span>
+                                    <span class="cac-chips">
+                                        <?php if (!empty($a['selections'])): ?>
+                                            <?php foreach ($a['selections'] as $sel): ?>
+                                                <span class="verdict-chip verdict-chip-<?php echo esc_attr($sel['status']); ?>" title="<?php echo esc_attr($sel['team_name'] . ' — ' . ucfirst($sel['status'])); ?>">
+                                                    <?php echo esc_html($sel['team']); ?>: <?php echo esc_html(ucfirst($sel['status'])); ?>
+                                                </span>
+                                            <?php endforeach; ?>
+                                        <?php else: ?>
+                                            <span class="cac-unclaimed">Unclaimed</span>
+                                        <?php endif; ?>
+                                    </span>
+                                </div>
+
+                                <div class="cac-meta">
+                                    <a href="mailto:<?php echo esc_attr($a['email']); ?>"><?php echo esc_html($a['email']); ?></a>
+                                    <?php if ($a['age'] !== ''): ?> &middot; Age <?php echo esc_html($a['age']); ?><?php endif; ?>
+                                    <?php if ($a['positions']): ?> &middot; <?php echo esc_html($a['positions']); ?><?php endif; ?>
+                                    &middot; <span title="<?php echo esc_attr($a['teams_selected_names']); ?>">Applied for: <?php echo esc_html($a['teams_selected']); ?></span>
+                                </div>
+
+                                <div class="cac-footer">
+                                    <span class="cac-expanders">
                                         <?php if (!empty($a['form_data'])): ?>
                                             <details class="coach-app-details">
                                                 <summary>Application</summary>
@@ -240,22 +247,6 @@ class TeamOversight_Coach_Portal {
                                                 </dl>
                                             </details>
                                         <?php endif; ?>
-                                    </td>
-                                    <td><?php echo esc_html($a['age']); ?></td>
-                                    <td><?php echo esc_html($a['positions']); ?></td>
-                                    <td title="<?php echo esc_attr($a['teams_selected_names']); ?>"><?php echo esc_html($a['teams_selected']); ?></td>
-                                    <td class="coach-verdicts-cell">
-                                        <?php if (!empty($a['selections'])): ?>
-                                            <?php foreach ($a['selections'] as $sel): ?>
-                                                <span class="verdict-chip verdict-chip-<?php echo esc_attr($sel['status']); ?>" title="<?php echo esc_attr($sel['team_name'] . ' — ' . ucfirst($sel['status'])); ?>">
-                                                    <?php echo esc_html($sel['team']); ?>: <?php echo esc_html(ucfirst($sel['status'])); ?>
-                                                </span>
-                                            <?php endforeach; ?>
-                                        <?php else: ?>
-                                            <small style="color: #999;">Unclaimed</small>
-                                        <?php endif; ?>
-                                    </td>
-                                    <td>
                                         <details class="coach-app-details">
                                             <summary>Notes (<?php echo count($a['notes']); ?>)</summary>
                                             <?php foreach ($a['notes'] as $note): ?>
@@ -271,61 +262,55 @@ class TeamOversight_Coach_Portal {
                                                 <button type="submit" class="button button-small">Add Note</button>
                                             </form>
                                         </details>
-                                    </td>
-                                    <td class="coach-actions-cell">
+                                    </span>
+                                    <span class="cac-actions">
+                                        <?php
+                                        $buttons = array('tentative' => 'Tentative', 'selected' => 'Select', 'rejected' => 'Reject');
+                                        foreach ($buttons as $status => $label):
+                                            if ($a['my_status'] === $status) { continue; }
+                                        ?>
+                                            <form method="post">
+                                                <input type="hidden" name="coach_action" value="set_selection">
+                                                <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
+                                                <input type="hidden" name="selection_status" value="<?php echo esc_attr($status); ?>">
+                                                <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                                <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                                <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                                                <button type="submit" class="button button-small"><?php echo esc_html($label); ?></button>
+                                            </form>
+                                        <?php endforeach; ?>
                                         <?php if ($a['my_status']): ?>
-                                            <span class="verdict-chip verdict-chip-<?php echo esc_attr($a['my_status']); ?>"><?php echo esc_html(ucfirst($a['my_status'])); ?></span>
+                                            <form method="post">
+                                                <input type="hidden" name="coach_action" value="set_selection">
+                                                <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
+                                                <input type="hidden" name="selection_status" value="clear">
+                                                <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                                <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                                <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                                                <button type="submit" class="button button-small">Clear</button>
+                                            </form>
                                         <?php endif; ?>
-                                        <span class="coach-action-buttons">
-                                            <?php
-                                            $buttons = array('tentative' => 'Tentative', 'selected' => 'Select', 'rejected' => 'Reject');
-                                            foreach ($buttons as $status => $label):
-                                                if ($a['my_status'] === $status) { continue; }
-                                            ?>
-                                                <form method="post" style="display: inline;">
-                                                    <input type="hidden" name="coach_action" value="set_selection">
-                                                    <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
-                                                    <input type="hidden" name="selection_status" value="<?php echo esc_attr($status); ?>">
-                                                    <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
-                                                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
-                                                    <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                                                    <button type="submit" class="button button-small"><?php echo esc_html($label); ?></button>
-                                                </form>
-                                            <?php endforeach; ?>
-                                            <?php if ($a['my_status']): ?>
-                                                <form method="post" style="display: inline;">
-                                                    <input type="hidden" name="coach_action" value="set_selection">
-                                                    <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
-                                                    <input type="hidden" name="selection_status" value="clear">
-                                                    <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
-                                                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
-                                                    <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                                                    <button type="submit" class="button button-small">Clear</button>
-                                                </form>
-                                            <?php endif; ?>
-                                        </span>
-                                    </td>
-                                </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
+                                    </span>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
                     </div>
 
                     <script>
                     (function() {
                         var search = document.getElementById('coach-search');
                         var mineOnly = document.getElementById('coach-filter-mine');
-                        function filterCoachTable() {
+                        function filterCoachList() {
                             var q = search.value.toLowerCase();
                             var mine = mineOnly.checked;
-                            document.querySelectorAll('#coach-applicants-table tbody tr').forEach(function(row) {
-                                var matchesSearch = q === '' || row.textContent.toLowerCase().indexOf(q) !== -1;
-                                var matchesMine = !mine || row.getAttribute('data-has-verdict') === '1';
-                                row.style.display = (matchesSearch && matchesMine) ? '' : 'none';
+                            document.querySelectorAll('#coach-applicant-list .coach-applicant-card').forEach(function(card) {
+                                var matchesSearch = q === '' || card.textContent.toLowerCase().indexOf(q) !== -1;
+                                var matchesMine = !mine || card.getAttribute('data-has-verdict') === '1';
+                                card.style.display = (matchesSearch && matchesMine) ? '' : 'none';
                             });
                         }
-                        search.addEventListener('input', filterCoachTable);
-                        mineOnly.addEventListener('change', filterCoachTable);
+                        search.addEventListener('input', filterCoachList);
+                        mineOnly.addEventListener('change', filterCoachList);
                     })();
                     </script>
                 <?php else: ?>
@@ -473,31 +458,117 @@ class TeamOversight_Coach_Portal {
             margin: 1px 2px 1px 0;
         }
 
-        /* Mobile: tables scroll sideways inside their wrapper instead of
-           breaking the page; controls grow to comfortable touch targets. */
-        .coach-table-wrap {
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-            margin-bottom: 20px;
+        /* Applicant cards: flow at any width, no horizontal scrolling. */
+        .coach-applicant-card {
+            border: 1px solid #e0e0e0;
+            border-left: 4px solid #ccc;
+            border-radius: 6px;
+            padding: 10px 14px;
+            margin-bottom: 10px;
+            background: #fff;
         }
 
-        .coach-table-wrap .coach-portal-table {
-            margin-bottom: 0;
+        .coach-applicant-card.verdict-selected { border-left-color: #46b450; background: #f7fcf7; }
+        .coach-applicant-card.verdict-tentative { border-left-color: #f0b429; background: #fffdf5; }
+        .coach-applicant-card.verdict-rejected { border-left-color: #dc3232; background: #fdf8f8; opacity: 0.8; }
+
+        .cac-header {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 8px;
         }
 
-        #coach-applicants-table {
-            min-width: 900px;
+        .cac-number {
+            font-weight: 700;
+            font-size: 16px;
+            color: #1d3d6e;
+        }
+
+        .cac-name {
+            font-weight: 600;
+            font-size: 15px;
+        }
+
+        .cac-chips {
+            margin-left: auto;
+        }
+
+        .cac-unclaimed {
+            color: #999;
+            font-size: 12px;
+        }
+
+        .cac-meta {
+            font-size: 13px;
+            color: #555;
+            margin: 4px 0;
+        }
+
+        .cac-footer {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            gap: 12px;
+            margin-top: 6px;
+        }
+
+        .cac-expanders {
+            flex: 1 1 250px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .cac-expanders details[open] {
+            flex-basis: 100%;
+        }
+
+        .cac-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-left: auto;
+        }
+
+        .cac-actions form {
+            margin: 0;
+            display: inline;
+        }
+
+        /* Roster table stacks into labelled blocks on small screens. */
+        @media (max-width: 640px) {
+            .coach-roster-table thead {
+                display: none;
+            }
+
+            .coach-roster-table tr {
+                display: block;
+                border: 1px solid #e8e8e8;
+                border-radius: 6px;
+                margin-bottom: 10px;
+                padding: 6px 12px;
+            }
+
+            .coach-roster-table td {
+                display: flex;
+                gap: 10px;
+                border-bottom: none;
+                padding: 3px 0;
+            }
+
+            .coach-roster-table td::before {
+                content: attr(data-label);
+                font-weight: 600;
+                color: #555;
+                min-width: 62px;
+                flex-shrink: 0;
+            }
         }
 
         @media (max-width: 782px) {
             .coach-team-section {
                 padding: 12px;
-            }
-
-            .coach-portal-table th,
-            .coach-portal-table td {
-                padding: 6px;
-                font-size: 13px;
             }
 
             .coach-team-tab {
@@ -513,7 +584,17 @@ class TeamOversight_Coach_Portal {
                 font-size: 16px; /* prevents iOS zoom-on-focus */
             }
 
-            .coach-actions-cell .button-small,
+            .cac-chips {
+                margin-left: 0;
+                flex-basis: 100%;
+            }
+
+            .cac-actions {
+                margin-left: 0;
+                width: 100%;
+            }
+
+            .cac-actions .button-small,
             .coach-note-form .button-small {
                 padding: 8px 12px;
                 font-size: 13px;
