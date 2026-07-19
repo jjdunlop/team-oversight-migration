@@ -147,6 +147,40 @@ class TeamOversight_Database {
             dbDelta($sql);
         }
 
+        // Coach selection board tables (added in 1.6.0): per-team verdicts on
+        // applications (tentative/selected/rejected) and shared coach notes.
+        $selections_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_trial_selections'");
+        if (!$selections_exists) {
+            $charset_collate = $wpdb->get_charset_collate();
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta("CREATE TABLE {$wpdb->prefix}team_trial_selections (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                application_id int(11) NOT NULL,
+                season varchar(10) NOT NULL,
+                team varchar(50) NOT NULL,
+                status varchar(20) NOT NULL DEFAULT 'tentative',
+                created_by bigint(20) unsigned DEFAULT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                updated_date datetime DEFAULT NULL,
+                PRIMARY KEY (id),
+                UNIQUE KEY app_team (application_id, team),
+                KEY season (season),
+                KEY team (team)
+            ) $charset_collate;");
+            dbDelta("CREATE TABLE {$wpdb->prefix}team_trial_notes (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                application_id int(11) NOT NULL,
+                author_id bigint(20) unsigned NOT NULL,
+                note text NOT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY application_id (application_id)
+            ) $charset_collate;");
+        }
+
+        // Widen assigned_team so multi-team finalisation fits (added in 1.6.0).
+        $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications MODIFY COLUMN assigned_team varchar(255) DEFAULT NULL");
+
         // Import price matrix if fee_matrix table is empty
         $existing_fees = $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}fee_matrix WHERE is_active = 1");
         if ($existing_fees == 0) {
@@ -242,7 +276,34 @@ class TeamOversight_Database {
                     KEY is_active (is_active)
                 ) $charset_collate;
             ",
-            'trial_applications' => "
+            'team_trial_selections' => "
+            CREATE TABLE {$wpdb->prefix}team_trial_selections (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                application_id int(11) NOT NULL,
+                season varchar(10) NOT NULL,
+                team varchar(50) NOT NULL,
+                status varchar(20) NOT NULL DEFAULT 'tentative',
+                created_by bigint(20) unsigned DEFAULT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                updated_date datetime DEFAULT NULL,
+                PRIMARY KEY (id),
+                UNIQUE KEY app_team (application_id, team),
+                KEY season (season),
+                KEY team (team)
+            ) $charset_collate;
+        ",
+        'team_trial_notes' => "
+            CREATE TABLE {$wpdb->prefix}team_trial_notes (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                application_id int(11) NOT NULL,
+                author_id bigint(20) unsigned NOT NULL,
+                note text NOT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY application_id (application_id)
+            ) $charset_collate;
+        ",
+        'trial_applications' => "
                 CREATE TABLE {$wpdb->prefix}trial_applications (
                     id int(11) NOT NULL AUTO_INCREMENT,
                     user_id int(11) NOT NULL,
@@ -255,7 +316,7 @@ class TeamOversight_Database {
                     is_transfer_player tinyint(1) DEFAULT 0,
                 form_data longtext DEFAULT NULL,
                     application_status varchar(20) DEFAULT 'pending',
-                    assigned_team varchar(50) DEFAULT NULL,
+                    assigned_team varchar(255) DEFAULT NULL,
                     order_id bigint(20) unsigned DEFAULT NULL,
                     created_date datetime DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (id),

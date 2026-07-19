@@ -173,11 +173,103 @@ class TeamOversight_Admin {
             $this->save_trial_settings();
         }
 
+        if (isset($_POST['action']) && $_POST['action'] === 'finalise_selections') {
+            $this->finalise_selections();
+        }
+
         if (isset($_POST['action']) && in_array($_POST['action'], array('accept_trial', 'reject_trial', 'undo_trial', 'mark_trial_paid'), true)) {
             $this->process_trial_action();
         }
 
         $this->render_trials_table();
+    }
+
+    /**
+     * Convert coach "Selected" verdicts into real team assignments + fee
+     * invoices, and mark the applications accepted. Idempotent: existing
+     * active assignments are skipped, so it can be run repeatedly as
+     * coaches make late additions.
+     */
+    private function finalise_selections() {
+        if (!isset($_POST['finalise_nonce']) || !wp_verify_nonce($_POST['finalise_nonce'], 'finalise_selections')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
+        global $wpdb;
+        $season = $this->get_current_season();
+
+        $selected = $wpdb->get_results($wpdb->prepare("
+            SELECT s.application_id, s.team, a.user_id, a.email
+            FROM {$wpdb->prefix}team_trial_selections s
+            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+            WHERE s.status = 'selected'
+                AND a.season = %s
+                AND a.application_status IN ('pending', 'accepted')
+            ORDER BY s.application_id, s.team
+        ", $season));
+
+        if (empty($selected)) {
+            echo '<div class="notice notice-info"><p>No confirmed coach selections to finalise for ' . esc_html($season) . '.</p></div>';
+            return;
+        }
+
+        $by_app = array();
+        foreach ($selected as $row) {
+            $by_app[$row->application_id]['user_id'] = intval($row->user_id);
+            $by_app[$row->application_id]['email'] = $row->email;
+            $by_app[$row->application_id]['teams'][] = $row->team;
+        }
+
+        $fees = new TeamOversight_Fees();
+        $assignments_created = 0;
+
+        foreach ($by_app as $application_id => $info) {
+            foreach ($info['teams'] as $team) {
+                $exists = $wpdb->get_var($wpdb->prepare("
+                    SELECT id FROM {$wpdb->prefix}team_assignments
+                    WHERE email = %s AND season = %s AND team = %s AND is_active = 1
+                ", $info['email'], $season, $team));
+
+                if (!$exists) {
+                    $wpdb->insert(
+                        $wpdb->prefix . 'team_assignments',
+                        array(
+                            'user_id' => $info['user_id'],
+                            'email' => $info['email'],
+                            'season' => $season,
+                            'team' => $team,
+                            'role' => 'playing_member',
+                            'registration_status' => 'active',
+                            'start_date' => date('Y-m-d'),
+                            'is_active' => 1
+                        ),
+                        array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d')
+                    );
+                    $assignments_created++;
+                }
+            }
+
+            $fees->generate_invoice($info['email'], $season);
+
+            $wpdb->update(
+                $wpdb->prefix . 'trial_applications',
+                array(
+                    'application_status' => 'accepted',
+                    'assigned_team' => implode(', ', $info['teams'])
+                ),
+                array('id' => $application_id),
+                array('%s', '%s'),
+                array('%d')
+            );
+        }
+
+        echo '<div class="notice notice-success"><p>Finalised ' . count($by_app) . ' application(s): ' . $assignments_created . ' new team assignment(s) created, invoices generated, applications marked accepted.</p></div>';
     }
 
     private function save_trial_settings() {
@@ -560,6 +652,23 @@ class TeamOversight_Admin {
             ORDER BY created_date DESC
         ", $season));
 
+        // Coach selection verdicts for this season, keyed by application.
+        $selections_by_app = array();
+        $selection_rows = $wpdb->get_results($wpdb->prepare("
+            SELECT application_id, team, status FROM {$wpdb->prefix}team_trial_selections
+            WHERE season = %s ORDER BY team
+        ", $season));
+        foreach ($selection_rows as $selection) {
+            $selections_by_app[$selection->application_id][] = $selection;
+        }
+
+        $awaiting_finalise = intval($wpdb->get_var($wpdb->prepare("
+            SELECT COUNT(DISTINCT s.application_id)
+            FROM {$wpdb->prefix}team_trial_selections s
+            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+            WHERE s.status = 'selected' AND a.season = %s AND a.application_status = 'pending'
+        ", $season)));
+
         ?>
         <div class="wrap">
             <h1>Trial Applications</h1>
@@ -613,6 +722,17 @@ class TeamOversight_Admin {
                     </p>
                 </form>
             </details>
+
+            <?php if ($awaiting_finalise): ?>
+                <div class="notice notice-info" style="padding: 10px 15px; display: flex; align-items: center; gap: 15px;">
+                    <span><strong><?php echo $awaiting_finalise; ?> application(s)</strong> have confirmed coach selections awaiting finalisation (team assignment + fee invoice).</span>
+                    <form method="post" style="margin: 0;" onsubmit="return confirm('Finalise all coach-selected applications for <?php echo esc_attr($season); ?>?\n\nThis creates team assignments for every Selected verdict, generates fee invoices, and marks the applications accepted. Safe to run repeatedly.');">
+                        <input type="hidden" name="action" value="finalise_selections">
+                        <?php wp_nonce_field('finalise_selections', 'finalise_nonce'); ?>
+                        <input type="submit" class="button button-primary" value="Finalise Coach Selections">
+                    </form>
+                </div>
+            <?php endif; ?>
 
             <?php if (!empty($trials)): ?>
                 <div class="trials-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
@@ -708,6 +828,14 @@ class TeamOversight_Admin {
                                 <td>
                                     <?php echo esc_html(implode(', ', $interested_teams)); ?>
                                     <?php if ($gender_trialling): ?><br><small>(<?php echo esc_html($gender_trialling); ?>)</small><?php endif; ?>
+                                    <?php if (!empty($selections_by_app[$trial->id])): ?>
+                                        <br>
+                                        <?php foreach ($selections_by_app[$trial->id] as $selection):
+                                            $chip_class = $selection->status === 'selected' ? 'status-accepted' : ($selection->status === 'tentative' ? 'status-pending' : 'status-rejected');
+                                        ?>
+                                            <span class="<?php echo $chip_class; ?>" style="margin-right: 3px;"><?php echo esc_html($selection->team . ': ' . ucfirst($selection->status)); ?></span>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
                                 </td>
                                 <td><?php echo esc_html(implode(', ', $positions)); ?></td>
                                 <td><?php echo $trial->is_transfer_player ? 'Yes' : 'No'; ?></td>

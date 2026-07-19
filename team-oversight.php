@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Team Oversight
  * Description: MURVC club management - club membership tiers (Club Membership menu) and VVL team oversight: trials, assignments, fees and dashboard (VVL Oversight menu).
- * Version: 1.5.0
+ * Version: 1.6.0
  * Author: Team Management System
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.5.0');
+define('TEAM_OVERSIGHT_VERSION', '1.6.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -137,6 +137,33 @@ function team_oversight_create_tables() {
                 KEY order_item_id (order_item_id)
             ) $charset_collate;
         ",
+        'team_trial_selections' => "
+            CREATE TABLE {$wpdb->prefix}team_trial_selections (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                application_id int(11) NOT NULL,
+                season varchar(10) NOT NULL,
+                team varchar(50) NOT NULL,
+                status varchar(20) NOT NULL DEFAULT 'tentative',
+                created_by bigint(20) unsigned DEFAULT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                updated_date datetime DEFAULT NULL,
+                PRIMARY KEY (id),
+                UNIQUE KEY app_team (application_id, team),
+                KEY season (season),
+                KEY team (team)
+            ) $charset_collate;
+        ",
+        'team_trial_notes' => "
+            CREATE TABLE {$wpdb->prefix}team_trial_notes (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                application_id int(11) NOT NULL,
+                author_id bigint(20) unsigned NOT NULL,
+                note text NOT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY application_id (application_id)
+            ) $charset_collate;
+        ",
         'trial_applications' => "
             CREATE TABLE {$wpdb->prefix}trial_applications (
                 id int(11) NOT NULL AUTO_INCREMENT,
@@ -150,7 +177,7 @@ function team_oversight_create_tables() {
                 is_transfer_player tinyint(1) DEFAULT 0,
                 form_data longtext DEFAULT NULL,
                 application_status varchar(20) DEFAULT 'pending',
-                assigned_team varchar(50) DEFAULT NULL,
+                assigned_team varchar(255) DEFAULT NULL,
                 order_id bigint(20) unsigned DEFAULT NULL,
                 created_date datetime DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),

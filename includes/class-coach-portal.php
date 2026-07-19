@@ -8,22 +8,37 @@ if (!defined('ABSPATH')) {
  * Front-end portal for coaches: [team_coach_portal]
  *
  * Visible only to logged-in users holding an active coach or assistant
- * coach team assignment. Shows, for each of their teams: the current
- * roster and the trial applications that selected that team. Strictly
- * limited to the viewer's own teams.
+ * coach team assignment. Coaches work one team at a time (switcher for
+ * multi-team coaches) and run their selections from here:
+ *
+ *  - roster for the active team, with CSV export
+ *  - the full applicant pool for the team's competition (searchable)
+ *  - per-team selection verdicts: Tentative / Selected / Rejected.
+ *    Verdicts are per TEAM, not global — a player can be Selected by
+ *    several teams (e.g. YSL + JPL) and Rejected by another, and every
+ *    coach sees every team's verdicts.
+ *  - shared notes on applications (visible to all coaches and admins)
+ *
+ * Selections are a working shortlist: converting Selected players into
+ * actual team assignments + fee invoices is done by the club admin from
+ * the Trial Applications page (finalisation), so fees don't fire while
+ * coaches are still trading players mid-trials.
  */
 class TeamOversight_Coach_Portal {
 
     const COACH_ROLES = "'coach', 'assistant_coach'";
+    const SELECTION_STATUSES = array('tentative', 'selected', 'rejected');
 
     public function __construct() {
         add_shortcode('team_coach_portal', array($this, 'render'));
+        // CSV export must run before the theme outputs anything.
+        add_action('template_redirect', array($this, 'maybe_export_roster'));
     }
 
-    /**
-     * Active coach/assistant-coach assignments for a user, matched by
-     * user ID with an email fallback for rows predating user_id keying.
-     */
+    // ------------------------------------------------------------------
+    // Access
+    // ------------------------------------------------------------------
+
     private function get_coach_assignments($user) {
         global $wpdb;
 
@@ -35,6 +50,28 @@ class TeamOversight_Coach_Portal {
             ORDER BY season DESC, team
         ", $user->ID, $user->user_email));
     }
+
+    /**
+     * Teams coached by the current user for a season, or empty array.
+     */
+    private function get_my_teams($season = null) {
+        if (!is_user_logged_in()) {
+            return array();
+        }
+
+        $assignments = $this->get_coach_assignments(wp_get_current_user());
+        $teams = array();
+        foreach ($assignments as $assignment) {
+            if ($season === null || $assignment->season === $season) {
+                $teams[$assignment->team] = $assignment->role;
+            }
+        }
+        return $teams;
+    }
+
+    // ------------------------------------------------------------------
+    // Rendering
+    // ------------------------------------------------------------------
 
     public function render() {
         if (!is_user_logged_in()) {
@@ -52,7 +89,7 @@ class TeamOversight_Coach_Portal {
             return '<div class="coach-portal-notice"><p>This page is for team coaches. Your account does not have a coach or assistant coach assignment — if that\'s wrong, please contact the club.</p></div>';
         }
 
-        // Season selection, limited to seasons where they actually coach.
+        // Season + active team selection, limited to what they coach.
         $seasons = array_values(array_unique(array_map(function ($a) {
             return $a->season;
         }, $coach_assignments)));
@@ -61,20 +98,29 @@ class TeamOversight_Coach_Portal {
             ? $_GET['coach_season']
             : $seasons[0];
 
-        $my_teams = array();
-        foreach ($coach_assignments as $assignment) {
-            if ($assignment->season === $season) {
-                $my_teams[$assignment->team] = $assignment->role;
-            }
-        }
+        $my_teams = $this->get_my_teams($season);
+        $my_team_codes = array_keys($my_teams);
+
+        $active_team = (isset($_GET['coach_team']) && in_array($_GET['coach_team'], $my_team_codes, true))
+            ? $_GET['coach_team']
+            : $my_team_codes[0];
+
+        // Handle selection/note submissions before building the page.
+        $action_notice = $this->handle_actions($my_team_codes, $season);
 
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config();
+        $active_config = isset($teams_config[$active_team]) ? $teams_config[$active_team] : array('name' => $active_team, 'gender' => 'mixed', 'age_rule' => '');
+        $roster = $this->get_roster($active_team, $season);
+        $applicants = $this->get_applicants_by_gender($active_config['gender'], $season, $active_team, $my_team_codes);
+
+        $base_url = remove_query_arg(array('coach_team', 'coach_season'));
 
         ob_start();
         ?>
         <div class="coach-portal">
             <h2>Coach Portal</h2>
+            <?php echo $action_notice; ?>
 
             <?php if (count($seasons) > 1): ?>
                 <p>
@@ -83,111 +129,188 @@ class TeamOversight_Coach_Portal {
                         <?php if ($s === $season): ?>
                             <strong><?php echo esc_html($s); ?></strong>
                         <?php else: ?>
-                            <a href="<?php echo esc_url(add_query_arg('coach_season', $s)); ?>"><?php echo esc_html($s); ?></a>
+                            <a href="<?php echo esc_url(add_query_arg('coach_season', $s, $base_url)); ?>"><?php echo esc_html($s); ?></a>
                         <?php endif; ?>
                     <?php endforeach; ?>
                 </p>
             <?php endif; ?>
 
-            <?php foreach ($my_teams as $team_code => $coach_role): ?>
-                <?php
-                $team_name = isset($teams_config[$team_code]) ? $teams_config[$team_code]['name'] : $team_code;
-                $roster = $this->get_roster($team_code, $season);
-                ?>
-                <div class="coach-team-section">
-                    <h3><?php echo esc_html($team_name); ?> <small>(<?php echo esc_html($season); ?> — you are <?php echo esc_html(str_replace('_', ' ', $coach_role)); ?>)</small></h3>
-
-                    <h4>Current Team (<?php echo count($roster); ?>)</h4>
-                    <?php if (!empty($roster)): ?>
-                        <table class="coach-portal-table">
-                            <thead><tr><th>Name</th><th>Role</th><th>Email</th><th>Mobile</th></tr></thead>
-                            <tbody>
-                                <?php foreach ($roster as $member): ?>
-                                    <tr>
-                                        <td><?php echo esc_html($member->name ?: $member->email); ?></td>
-                                        <td><?php echo esc_html(str_replace('_', ' ', ucwords($member->role, '_'))); ?></td>
-                                        <td><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
-                                        <td><?php echo esc_html($member->mobile ?: ''); ?></td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    <?php else: ?>
-                        <p>No active members assigned yet.</p>
-                    <?php endif; ?>
+            <?php if (count($my_team_codes) > 1): ?>
+                <div class="coach-team-switcher">
+                    <?php foreach ($my_team_codes as $code): ?>
+                        <?php $label = isset($teams_config[$code]) ? $teams_config[$code]['name'] : $code; ?>
+                        <?php if ($code === $active_team): ?>
+                            <span class="coach-team-tab active"><?php echo esc_html($label); ?></span>
+                        <?php else: ?>
+                            <a class="coach-team-tab" href="<?php echo esc_url(add_query_arg(array('coach_season' => $season, 'coach_team' => $code), $base_url)); ?>"><?php echo esc_html($label); ?></a>
+                        <?php endif; ?>
+                    <?php endforeach; ?>
                 </div>
-            <?php endforeach; ?>
+            <?php endif; ?>
 
-            <?php
-            // Applicant pools are gender-wide, not per-team: players are
-            // sometimes redirected between trials, and borderline-age players
-            // can attend with a VV exemption — coaches need to see everyone
-            // in their competition. Applicants who picked one of the coach's
-            // teams sort first.
-            $my_team_codes = array_keys($my_teams);
-            $genders_coached = array();
-            foreach ($my_team_codes as $code) {
-                $g = isset($teams_config[$code]) ? $teams_config[$code]['gender'] : 'mixed';
-                if ($g === 'mixed') {
-                    $genders_coached['mens'] = true;
-                    $genders_coached['womens'] = true;
-                } else {
-                    $genders_coached[$g] = true;
-                }
-            }
-            ?>
+            <div class="coach-team-section">
+                <h3><?php echo esc_html($active_config['name']); ?> <small>(<?php echo esc_html($season); ?> — you are <?php echo esc_html(str_replace('_', ' ', $my_teams[$active_team])); ?>)</small></h3>
 
-            <?php foreach (array_keys($genders_coached) as $gender): ?>
-                <?php
-                $applicants = $this->get_applicants_by_gender($gender, $season, $my_team_codes);
-                $gender_label = $gender === 'mens' ? "Men's" : "Women's";
-                ?>
-                <div class="coach-team-section">
-                    <h3>Trial Applicants — <?php echo esc_html($gender_label); ?> (<?php echo count($applicants); ?>)</h3>
-                    <p class="coach-portal-hint">All <?php echo esc_html(strtolower($gender_label)); ?> applicants for <?php echo esc_html($season); ?> are shown — including players outside your team's age group or who selected other teams, since players are sometimes redirected between trials and VV can grant age exemptions. Those who selected your team<?php echo count($my_team_codes) > 1 ? 's' : ''; ?> (★) are listed first.</p>
+                <h4>Current Team (<?php echo count($roster); ?>)</h4>
+                <?php if (!empty($roster)): ?>
+                    <table class="coach-portal-table">
+                        <thead><tr><th>Name</th><th>Role</th><th>Email</th><th>Mobile</th></tr></thead>
+                        <tbody>
+                            <?php foreach ($roster as $member): ?>
+                                <tr>
+                                    <td><?php echo esc_html($member->name ?: $member->email); ?></td>
+                                    <td><?php echo esc_html(str_replace('_', ' ', ucwords($member->role, '_'))); ?></td>
+                                    <td><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
+                                    <td><?php echo esc_html($member->mobile ?: ''); ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                    <form method="post">
+                        <input type="hidden" name="coach_action" value="export_roster">
+                        <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                        <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                        <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                        <button type="submit" class="button">Export team list (CSV)</button>
+                    </form>
+                <?php else: ?>
+                    <p>No active members assigned yet.</p>
+                <?php endif; ?>
+            </div>
 
-                    <?php if (!empty($applicants)): ?>
-                        <table class="coach-portal-table">
-                            <thead><tr><th style="width: 60px;">Trial #</th><th>Name</th><th style="width: 45px;">Age</th><th>Positions</th><th>Teams Selected</th><th>Status</th><th>Details</th></tr></thead>
-                            <tbody>
-                                <?php foreach ($applicants as $applicant): ?>
-                                    <tr<?php echo $applicant['picked_mine'] ? ' class="picked-my-team"' : ''; ?>>
-                                        <td><strong>#<?php echo intval($applicant['trial_number']); ?></strong></td>
-                                        <td>
-                                            <?php echo $applicant['picked_mine'] ? '★ ' : ''; ?><?php echo esc_html($applicant['name']); ?><br>
-                                            <small><a href="mailto:<?php echo esc_attr($applicant['email']); ?>"><?php echo esc_html($applicant['email']); ?></a></small>
-                                        </td>
-                                        <td><?php echo esc_html($applicant['age']); ?></td>
-                                        <td><?php echo esc_html($applicant['positions']); ?></td>
-                                        <td title="<?php echo esc_attr($applicant['teams_selected_names']); ?>"><?php echo esc_html($applicant['teams_selected']); ?></td>
-                                        <td>
-                                            <?php echo esc_html($applicant['status']); ?>
-                                            <?php if ($applicant['assigned_team']): ?><br><small>→ <?php echo esc_html($applicant['assigned_team']); ?></small><?php endif; ?>
-                                        </td>
-                                        <td>
-                                            <?php if (!empty($applicant['form_data'])): ?>
-                                                <details>
-                                                    <summary>View application</summary>
-                                                    <dl class="coach-application-details">
-                                                        <?php foreach ($applicant['form_data'] as $question => $answer): ?>
-                                                            <?php if ($answer !== '' && $answer !== null): ?>
-                                                                <dt><?php echo esc_html($question); ?></dt>
-                                                                <dd><?php echo nl2br(esc_html(is_array($answer) ? implode(', ', $answer) : $answer)); ?></dd>
-                                                            <?php endif; ?>
-                                                        <?php endforeach; ?>
-                                                    </dl>
-                                                </details>
+            <div class="coach-team-section">
+                <h3>Trial Applicants — <?php echo $active_config['gender'] === 'womens' ? "Women's" : ($active_config['gender'] === 'mens' ? "Men's" : 'All'); ?> (<?php echo count($applicants); ?>)</h3>
+                <p class="coach-portal-hint">Every applicant in this competition is shown — including players outside your age group or who selected other teams, since players get redirected between trials and VV can grant age exemptions. Your verdicts apply to <strong><?php echo esc_html($active_config['name']); ?></strong> only; a player can be Selected by multiple teams (e.g. YSL and JPL) and every coach sees every team's verdicts. Selected players become official (team assignment + fees) when the club finalises selections.</p>
+
+                <p>
+                    <label for="coach-search">Search:</label>
+                    <input type="text" id="coach-search" placeholder="Name, email, position, team..." style="width: 240px;">
+                    <label style="margin-left: 12px;"><input type="checkbox" id="coach-filter-mine"> Only my verdicts</label>
+                </p>
+
+                <?php if (!empty($applicants)): ?>
+                    <table class="coach-portal-table" id="coach-applicants-table">
+                        <thead><tr>
+                            <th style="width: 55px;">Trial #</th>
+                            <th>Name</th>
+                            <th style="width: 40px;">Age</th>
+                            <th>Positions</th>
+                            <th>Teams Selected</th>
+                            <th>Verdicts (all teams)</th>
+                            <th>Notes</th>
+                            <th style="width: 190px;">My Team</th>
+                        </tr></thead>
+                        <tbody>
+                            <?php foreach ($applicants as $a): ?>
+                                <tr class="<?php echo $a['my_status'] ? 'verdict-' . esc_attr($a['my_status']) : ''; ?>" data-has-verdict="<?php echo $a['my_status'] ? '1' : '0'; ?>">
+                                    <td><strong>#<?php echo intval($a['trial_number']); ?></strong></td>
+                                    <td>
+                                        <?php echo $a['picked_mine'] ? '★ ' : ''; ?><?php echo esc_html($a['name']); ?><br>
+                                        <small><a href="mailto:<?php echo esc_attr($a['email']); ?>"><?php echo esc_html($a['email']); ?></a></small>
+                                        <?php if (!empty($a['form_data'])): ?>
+                                            <details class="coach-app-details">
+                                                <summary>Application</summary>
+                                                <dl class="coach-application-details">
+                                                    <?php foreach ($a['form_data'] as $question => $answer): ?>
+                                                        <?php if ($answer !== '' && $answer !== null): ?>
+                                                            <dt><?php echo esc_html($question); ?></dt>
+                                                            <dd><?php echo nl2br(esc_html(is_array($answer) ? implode(', ', $answer) : $answer)); ?></dd>
+                                                        <?php endif; ?>
+                                                    <?php endforeach; ?>
+                                                </dl>
+                                            </details>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td><?php echo esc_html($a['age']); ?></td>
+                                    <td><?php echo esc_html($a['positions']); ?></td>
+                                    <td title="<?php echo esc_attr($a['teams_selected_names']); ?>"><?php echo esc_html($a['teams_selected']); ?></td>
+                                    <td class="coach-verdicts-cell">
+                                        <?php if (!empty($a['selections'])): ?>
+                                            <?php foreach ($a['selections'] as $sel): ?>
+                                                <span class="verdict-chip verdict-chip-<?php echo esc_attr($sel['status']); ?>" title="<?php echo esc_attr($sel['team_name'] . ' — ' . ucfirst($sel['status'])); ?>">
+                                                    <?php echo esc_html($sel['team']); ?>: <?php echo esc_html(ucfirst($sel['status'])); ?>
+                                                </span>
+                                            <?php endforeach; ?>
+                                        <?php else: ?>
+                                            <small style="color: #999;">Unclaimed</small>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <details class="coach-app-details">
+                                            <summary>Notes (<?php echo count($a['notes']); ?>)</summary>
+                                            <?php foreach ($a['notes'] as $note): ?>
+                                                <p class="coach-note"><strong><?php echo esc_html($note['author']); ?></strong> <small><?php echo esc_html($note['date']); ?></small><br><?php echo nl2br(esc_html($note['note'])); ?></p>
+                                            <?php endforeach; ?>
+                                            <form method="post" class="coach-note-form">
+                                                <input type="hidden" name="coach_action" value="add_note">
+                                                <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
+                                                <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                                <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                                <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                                                <textarea name="coach_note" rows="2" placeholder="Add a note visible to all coaches..." required></textarea>
+                                                <button type="submit" class="button button-small">Add Note</button>
+                                            </form>
+                                        </details>
+                                    </td>
+                                    <td class="coach-actions-cell">
+                                        <?php if ($a['my_status']): ?>
+                                            <span class="verdict-chip verdict-chip-<?php echo esc_attr($a['my_status']); ?>"><?php echo esc_html(ucfirst($a['my_status'])); ?></span>
+                                        <?php endif; ?>
+                                        <span class="coach-action-buttons">
+                                            <?php
+                                            $buttons = array('tentative' => 'Tentative', 'selected' => 'Select', 'rejected' => 'Reject');
+                                            foreach ($buttons as $status => $label):
+                                                if ($a['my_status'] === $status) { continue; }
+                                            ?>
+                                                <form method="post" style="display: inline;">
+                                                    <input type="hidden" name="coach_action" value="set_selection">
+                                                    <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
+                                                    <input type="hidden" name="selection_status" value="<?php echo esc_attr($status); ?>">
+                                                    <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                                    <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                                                    <button type="submit" class="button button-small"><?php echo esc_html($label); ?></button>
+                                                </form>
+                                            <?php endforeach; ?>
+                                            <?php if ($a['my_status']): ?>
+                                                <form method="post" style="display: inline;">
+                                                    <input type="hidden" name="coach_action" value="set_selection">
+                                                    <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
+                                                    <input type="hidden" name="selection_status" value="clear">
+                                                    <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                                    <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                                                    <button type="submit" class="button button-small">Clear</button>
+                                                </form>
                                             <?php endif; ?>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    <?php else: ?>
-                        <p>No trial applications yet.</p>
-                    <?php endif; ?>
-                </div>
-            <?php endforeach; ?>
+                                        </span>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+
+                    <script>
+                    (function() {
+                        var search = document.getElementById('coach-search');
+                        var mineOnly = document.getElementById('coach-filter-mine');
+                        function filterCoachTable() {
+                            var q = search.value.toLowerCase();
+                            var mine = mineOnly.checked;
+                            document.querySelectorAll('#coach-applicants-table tbody tr').forEach(function(row) {
+                                var matchesSearch = q === '' || row.textContent.toLowerCase().indexOf(q) !== -1;
+                                var matchesMine = !mine || row.getAttribute('data-has-verdict') === '1';
+                                row.style.display = (matchesSearch && matchesMine) ? '' : 'none';
+                            });
+                        }
+                        search.addEventListener('input', filterCoachTable);
+                        mineOnly.addEventListener('change', filterCoachTable);
+                    })();
+                    </script>
+                <?php else: ?>
+                    <p>No trial applications yet.</p>
+                <?php endif; ?>
+            </div>
         </div>
 
         <style>
@@ -196,6 +319,35 @@ class TeamOversight_Coach_Portal {
             border-radius: 8px;
             padding: 20px;
             background: #f9f9f9;
+        }
+
+        .coach-portal-success {
+            border: 1px solid #46b450;
+            background: #f0f7f0;
+            border-radius: 4px;
+            padding: 10px 15px;
+            margin-bottom: 15px;
+        }
+
+        .coach-team-switcher {
+            margin: 15px 0;
+        }
+
+        .coach-team-tab {
+            display: inline-block;
+            padding: 8px 14px;
+            margin-right: 6px;
+            margin-bottom: 6px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            text-decoration: none;
+        }
+
+        .coach-team-tab.active {
+            background: #1d3d6e;
+            color: #fff;
+            border-color: #1d3d6e;
+            font-weight: 600;
         }
 
         .coach-team-section {
@@ -229,6 +381,38 @@ class TeamOversight_Coach_Portal {
             border-bottom: 2px solid #ddd;
         }
 
+        .coach-portal-table tr.verdict-selected {
+            background: #f0f7f0;
+        }
+
+        .coach-portal-table tr.verdict-tentative {
+            background: #fff8e1;
+        }
+
+        .coach-portal-table tr.verdict-rejected {
+            background: #fbf0f0;
+            opacity: 0.75;
+        }
+
+        .verdict-chip {
+            display: inline-block;
+            padding: 1px 7px;
+            margin: 1px 2px 1px 0;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .verdict-chip-selected { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .verdict-chip-tentative { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
+        .verdict-chip-rejected { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+
+        .coach-app-details summary {
+            cursor: pointer;
+            font-size: 12px;
+        }
+
         .coach-application-details {
             margin: 10px 0 0 0;
             font-size: 13px;
@@ -244,18 +428,172 @@ class TeamOversight_Coach_Portal {
             color: #444;
         }
 
+        .coach-note {
+            font-size: 13px;
+            margin: 8px 0;
+            padding: 6px 8px;
+            background: #f7f7f7;
+            border-radius: 4px;
+        }
+
+        .coach-note-form textarea {
+            width: 100%;
+            margin: 6px 0 4px 0;
+            font-size: 13px;
+        }
+
         .coach-portal-hint {
             color: #666;
             font-size: 13px;
         }
 
-        .coach-portal-table tr.picked-my-team {
-            background: #f0f7f0;
+        .coach-actions-cell .button-small {
+            margin: 1px 2px 1px 0;
         }
         </style>
         <?php
         return ob_get_clean();
     }
+
+    // ------------------------------------------------------------------
+    // Actions (selections + notes), processed during shortcode render
+    // ------------------------------------------------------------------
+
+    private function handle_actions($my_team_codes, $season) {
+        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'add_note'), true)) {
+            return '';
+        }
+
+        if (!isset($_POST['coach_nonce']) || !wp_verify_nonce($_POST['coach_nonce'], 'coach_portal_action')) {
+            return '<div class="coach-portal-notice"><p>Security check failed — please try again.</p></div>';
+        }
+
+        $team = isset($_POST['coach_team']) ? sanitize_text_field($_POST['coach_team']) : '';
+        if (!in_array($team, $my_team_codes, true)) {
+            return '<div class="coach-portal-notice"><p>You can only act for teams you coach.</p></div>';
+        }
+
+        global $wpdb;
+        $application_id = intval($_POST['application_id']);
+
+        // The application must exist, be actionable, and match the season.
+        $application = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}trial_applications
+            WHERE id = %d AND season = %s AND application_status IN ('pending', 'accepted')
+        ", $application_id, $season));
+
+        if (!$application) {
+            return '<div class="coach-portal-notice"><p>Application not found.</p></div>';
+        }
+
+        if ($_POST['coach_action'] === 'add_note') {
+            $note = isset($_POST['coach_note']) ? sanitize_textarea_field($_POST['coach_note']) : '';
+            if ($note === '') {
+                return '';
+            }
+            $wpdb->insert($wpdb->prefix . 'team_trial_notes', array(
+                'application_id' => $application_id,
+                'author_id' => get_current_user_id(),
+                'note' => $note,
+            ), array('%d', '%d', '%s'));
+
+            return '<div class="coach-portal-success"><p>Note added for ' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ').</p></div>';
+        }
+
+        // set_selection
+        $status = sanitize_text_field($_POST['selection_status']);
+
+        if ($status === 'clear') {
+            $wpdb->delete($wpdb->prefix . 'team_trial_selections', array(
+                'application_id' => $application_id,
+                'team' => $team,
+            ), array('%d', '%s'));
+            return '<div class="coach-portal-success"><p>Verdict cleared for ' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ').</p></div>';
+        }
+
+        if (!in_array($status, self::SELECTION_STATUSES, true)) {
+            return '';
+        }
+
+        $existing = $wpdb->get_var($wpdb->prepare("
+            SELECT id FROM {$wpdb->prefix}team_trial_selections
+            WHERE application_id = %d AND team = %s
+        ", $application_id, $team));
+
+        if ($existing) {
+            $wpdb->update(
+                $wpdb->prefix . 'team_trial_selections',
+                array('status' => $status, 'created_by' => get_current_user_id(), 'updated_date' => current_time('mysql')),
+                array('id' => $existing),
+                array('%s', '%d', '%s'),
+                array('%d')
+            );
+        } else {
+            $wpdb->insert($wpdb->prefix . 'team_trial_selections', array(
+                'application_id' => $application_id,
+                'season' => $season,
+                'team' => $team,
+                'status' => $status,
+                'created_by' => get_current_user_id(),
+            ), array('%d', '%s', '%s', '%s', '%d'));
+        }
+
+        return '<div class="coach-portal-success"><p>' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ') marked <strong>' . esc_html(ucfirst($status)) . '</strong> for ' . esc_html($team) . '.</p></div>';
+    }
+
+    // ------------------------------------------------------------------
+    // Roster CSV export (runs on template_redirect, before any output)
+    // ------------------------------------------------------------------
+
+    public function maybe_export_roster() {
+        if (!isset($_POST['coach_action']) || $_POST['coach_action'] !== 'export_roster') {
+            return;
+        }
+
+        if (!is_user_logged_in()
+            || !isset($_POST['coach_nonce'])
+            || !wp_verify_nonce($_POST['coach_nonce'], 'coach_portal_action')) {
+            return;
+        }
+
+        $season = isset($_POST['coach_season']) ? sanitize_text_field($_POST['coach_season']) : date('Y');
+        $team = isset($_POST['coach_team']) ? sanitize_text_field($_POST['coach_team']) : '';
+
+        $my_teams = $this->get_my_teams($season);
+        if (!isset($my_teams[$team])) {
+            return;
+        }
+
+        $roster = $this->get_roster($team, $season);
+
+        $filename = 'team_list_' . sanitize_file_name($team) . "_{$season}.csv";
+
+        header('Content-Type: text/csv');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+
+        $output = fopen('php://output', 'w');
+        // UTF-8 BOM so Excel reads accents/dashes correctly.
+        fwrite($output, "\xEF\xBB\xBF");
+        fputcsv($output, array('Name', 'Role', 'Email', 'Mobile'));
+
+        foreach ($roster as $member) {
+            fputcsv($output, array(
+                $member->name ?: $member->email,
+                str_replace('_', ' ', ucwords($member->role, '_')),
+                $member->email,
+                $member->mobile ?: '',
+            ));
+        }
+
+        fclose($output);
+        exit;
+    }
+
+    // ------------------------------------------------------------------
+    // Data
+    // ------------------------------------------------------------------
 
     private function get_roster($team_code, $season) {
         global $wpdb;
@@ -273,13 +611,11 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
-     * All paid/reviewable applicants in a competition (mens/womens) for a
-     * season. Applicant competition comes from their stored answer, falling
-     * back to profile gender; applicants whose competition can't be
-     * determined are included in both pools rather than hidden.
-     * Sorted with those who selected one of the coach's teams first.
+     * All paid/reviewable applicants in a competition for a season, with
+     * every team's selection verdicts and all shared notes attached.
+     * Sorted: picked-my-active-team first, then by trial number.
      */
-    private function get_applicants_by_gender($gender, $season, $my_team_codes) {
+    private function get_applicants_by_gender($gender, $season, $active_team, $my_team_codes) {
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare("
@@ -289,13 +625,52 @@ class TeamOversight_Coach_Portal {
             ORDER BY trial_number
         ", $season));
 
+        if (empty($rows)) {
+            return array();
+        }
+
+        $app_ids = wp_list_pluck($rows, 'id');
+        $id_list = implode(',', array_map('intval', $app_ids));
+
+        // Batch: all selections and notes for these applications.
+        $selection_rows = $wpdb->get_results("
+            SELECT * FROM {$wpdb->prefix}team_trial_selections
+            WHERE application_id IN ({$id_list})
+            ORDER BY team
+        ");
+        $note_rows = $wpdb->get_results("
+            SELECT n.*, u.display_name AS author
+            FROM {$wpdb->prefix}team_trial_notes n
+            LEFT JOIN {$wpdb->users} u ON u.ID = n.author_id
+            WHERE n.application_id IN ({$id_list})
+            ORDER BY n.created_date
+        ");
+
         $positions = TeamOversight_Trials::get_position_options();
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config();
 
+        $selections_by_app = array();
+        foreach ($selection_rows as $sel) {
+            $selections_by_app[$sel->application_id][] = array(
+                'team' => $sel->team,
+                'team_name' => isset($teams_config[$sel->team]) ? $teams_config[$sel->team]['name'] : $sel->team,
+                'status' => $sel->status,
+            );
+        }
+
+        $notes_by_app = array();
+        foreach ($note_rows as $note) {
+            $notes_by_app[$note->application_id][] = array(
+                'author' => $note->author ?: 'Unknown',
+                'date' => date('j M Y', strtotime($note->created_date)),
+                'note' => $note->note,
+            );
+        }
+
         $applicants = array();
         foreach ($rows as $row) {
-            // Which competition is this applicant in?
+            // Which competition is this applicant in? Unknown -> shown everywhere.
             $comp = null;
             $form_data = $row->form_data ? json_decode($row->form_data, true) : array();
             if (!empty($form_data['Trialling For'])) {
@@ -309,7 +684,7 @@ class TeamOversight_Coach_Portal {
                 $profile = TeamOversight_Trials::get_competition_from_profile($row->user_id);
                 $comp = $profile['competition'];
             }
-            if ($comp !== null && $comp !== $gender) {
+            if ($gender !== 'mixed' && $comp !== null && $comp !== $gender) {
                 continue;
             }
 
@@ -328,16 +703,25 @@ class TeamOversight_Coach_Portal {
             }, $position_keys);
 
             $selected_codes = json_decode($row->interested_teams, true) ?: array();
-            $picked_mine = (bool) array_intersect($selected_codes, $my_team_codes);
+            $picked_mine = in_array($active_team, $selected_codes, true);
 
             $selected_display = array();
             $selected_names = array();
             foreach ($selected_codes as $code) {
-                $selected_display[] = (in_array($code, $my_team_codes, true) ? '★' : '') . $code;
+                $selected_display[] = ($code === $active_team ? '★' : '') . $code;
                 $selected_names[] = isset($teams_config[$code]) ? $teams_config[$code]['name'] : $code;
             }
 
+            $selections = isset($selections_by_app[$row->id]) ? $selections_by_app[$row->id] : array();
+            $my_status = '';
+            foreach ($selections as $sel) {
+                if ($sel['team'] === $active_team) {
+                    $my_status = $sel['status'];
+                }
+            }
+
             $applicants[] = array(
+                'id' => intval($row->id),
                 'trial_number' => intval($row->trial_number),
                 'name' => $row->name,
                 'email' => $row->email,
@@ -346,8 +730,9 @@ class TeamOversight_Coach_Portal {
                 'teams_selected' => implode(', ', $selected_display),
                 'teams_selected_names' => implode(', ', $selected_names),
                 'picked_mine' => $picked_mine,
-                'status' => ucwords(str_replace('_', ' ', $row->application_status)),
-                'assigned_team' => $row->assigned_team ?: '',
+                'selections' => $selections,
+                'my_status' => $my_status,
+                'notes' => isset($notes_by_app[$row->id]) ? $notes_by_app[$row->id] : array(),
                 'form_data' => $form_data,
             );
         }
