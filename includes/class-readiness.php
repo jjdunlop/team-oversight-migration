@@ -32,6 +32,45 @@ class TeamOversight_Readiness {
 
     public function __construct() {
         add_shortcode('ready_to_play', array($this, 'render_shortcode'));
+        // Ticks are processed before output and answered with a redirect
+        // (Post/Redirect/Get), so refreshing never resubmits the form.
+        add_action('template_redirect', array($this, 'maybe_handle_toggle'));
+    }
+
+    /**
+     * Handle a manual step tick/untick, then redirect back to the page.
+     * The form sends the explicit target state, so even a resubmission
+     * is idempotent rather than a toggle-flip.
+     */
+    public function maybe_handle_toggle() {
+        if (!isset($_POST['murvc_rtp_toggle'], $_POST['murvc_rtp_nonce']) || !is_user_logged_in()) {
+            return;
+        }
+        if (!wp_verify_nonce($_POST['murvc_rtp_nonce'], 'murvc_rtp')) {
+            return;
+        }
+
+        $user = wp_get_current_user();
+        $current_year = intval(date('Y'));
+        $seasons = array((string) $current_year, (string) ($current_year + 1));
+
+        $step = sanitize_text_field($_POST['murvc_rtp_toggle']);
+        $season = isset($_POST['murvc_rtp_season']) ? sanitize_text_field($_POST['murvc_rtp_season']) : $seasons[0];
+        $target_done = isset($_POST['murvc_rtp_value']) && $_POST['murvc_rtp_value'] === '1';
+
+        if (in_array($step, array('vv', 'kit'), true) && in_array($season, $seasons, true)) {
+            $manual = get_user_meta($user->ID, 'murvc_rtp_' . $season, true);
+            $manual = is_array($manual) ? $manual : array();
+            if ($target_done && !in_array($step, $manual, true)) {
+                $manual[] = $step;
+            } elseif (!$target_done) {
+                $manual = array_values(array_diff($manual, array($step)));
+            }
+            update_user_meta($user->ID, 'murvc_rtp_' . $season, $manual);
+        }
+
+        wp_safe_redirect($_SERVER['REQUEST_URI']);
+        exit;
     }
 
     // ------------------------------------------------------------------
@@ -312,26 +351,10 @@ class TeamOversight_Readiness {
 
         // Selections for NEXT season happen during the current year (trials
         // run pre-season), so check the current season and the next one and
-        // render a panel for each the player is selected in.
+        // render a panel for each the player is selected in. Tick submissions
+        // are handled on template_redirect (Post/Redirect/Get).
         $current_year = intval(date('Y'));
         $seasons = array((string) $current_year, (string) ($current_year + 1));
-
-        // Manual tick/untick.
-        if (isset($_POST['murvc_rtp_toggle'], $_POST['murvc_rtp_nonce'])
-            && wp_verify_nonce($_POST['murvc_rtp_nonce'], 'murvc_rtp')) {
-            $step = sanitize_text_field($_POST['murvc_rtp_toggle']);
-            $toggle_season = isset($_POST['murvc_rtp_season']) ? sanitize_text_field($_POST['murvc_rtp_season']) : $seasons[0];
-            if (in_array($step, array('vv', 'kit'), true) && in_array($toggle_season, $seasons, true)) {
-                $manual = get_user_meta($user->ID, 'murvc_rtp_' . $toggle_season, true);
-                $manual = is_array($manual) ? $manual : array();
-                if (in_array($step, $manual, true)) {
-                    $manual = array_values(array_diff($manual, array($step)));
-                } else {
-                    $manual[] = $step;
-                }
-                update_user_meta($user->ID, 'murvc_rtp_' . $toggle_season, $manual);
-            }
-        }
 
         $output = '';
         foreach ($seasons as $season) {
@@ -428,6 +451,7 @@ class TeamOversight_Readiness {
                                 <form method="post" style="display: inline;">
                                     <input type="hidden" name="murvc_rtp_toggle" value="<?php echo esc_attr($step_key); ?>">
                                     <input type="hidden" name="murvc_rtp_season" value="<?php echo esc_attr($season); ?>">
+                                    <input type="hidden" name="murvc_rtp_value" value="<?php echo $step['done'] ? '0' : '1'; ?>">
                                     <?php wp_nonce_field('murvc_rtp', 'murvc_rtp_nonce'); ?>
                                     <?php if ($step['done']): ?>
                                         <button type="submit" class="button rtp-untick">Undo — not done yet</button>

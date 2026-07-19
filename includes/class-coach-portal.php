@@ -42,6 +42,34 @@ class TeamOversight_Coach_Portal {
         add_shortcode('team_coach_portal', array($this, 'render'));
         // CSV export must run before the theme outputs anything.
         add_action('template_redirect', array($this, 'maybe_export_roster'));
+        // Verdicts and notes use Post/Redirect/Get: processed before output,
+        // answered with a redirect, so refreshing never resubmits (which
+        // would duplicate notes).
+        add_action('template_redirect', array($this, 'maybe_handle_actions'));
+    }
+
+    /**
+     * Process verdict/note submissions before output, stash the result
+     * notice for the next render, and redirect back to the page.
+     */
+    public function maybe_handle_actions() {
+        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'add_note'), true)) {
+            return;
+        }
+        if (!is_user_logged_in()) {
+            return;
+        }
+
+        $season = isset($_POST['coach_season']) ? sanitize_text_field($_POST['coach_season']) : '';
+        $my_teams = $this->get_my_teams($season);
+
+        $notice = $this->handle_actions(array_keys($my_teams), $season);
+        if ($notice !== '') {
+            set_transient('murvc_coach_flash_' . get_current_user_id(), $notice, 60);
+        }
+
+        wp_safe_redirect($_SERVER['REQUEST_URI']);
+        exit;
     }
 
     // ------------------------------------------------------------------
@@ -114,8 +142,13 @@ class TeamOversight_Coach_Portal {
             ? $_GET['coach_team']
             : $my_team_codes[0];
 
-        // Handle selection/note submissions before building the page.
-        $action_notice = $this->handle_actions($my_team_codes, $season);
+        // Action results arrive via a flash notice set before the redirect.
+        $action_notice = '';
+        $flash = get_transient('murvc_coach_flash_' . get_current_user_id());
+        if ($flash) {
+            $action_notice = $flash;
+            delete_transient('murvc_coach_flash_' . get_current_user_id());
+        }
 
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config();
