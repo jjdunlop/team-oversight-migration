@@ -54,6 +54,10 @@ A comprehensive volleyball club management system for WordPress with Ultimate Me
 - Add the shortcode `[team_trial_form]` to display the trial application form
 - Publish the page for users to access
 
+### 2b. Create Coach Portal Page (optional)
+- Create a page with the shortcode `[team_coach_portal]`
+- Only logged-in users holding an active coach or assistant coach team assignment see anything; each coach sees only their own team's roster (with contact details) and the trial applications that selected their team (with full application details)
+
 ### 3. Add Team Assignments
 - Go to Team Oversight > Team Assignments
 - Add team assignments for existing users
