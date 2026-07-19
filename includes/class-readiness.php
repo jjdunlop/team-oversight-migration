@@ -281,6 +281,7 @@ class TeamOversight_Readiness {
             'paid' => round(max(0, $invoiced_total - $outstanding), 2),
             'outstanding' => round($outstanding, 2),
             'overdue' => round($overdue, 2),
+            'paid_through' => TeamOversight_Payments::get_paid_through_date($invoiced_total, $outstanding, $season),
         );
 
         $ready = true;
@@ -387,8 +388,9 @@ class TeamOversight_Readiness {
                                 <tr><th>Season fee</th><td>$<?php echo number_format($step['invoiced'], 2); ?></td></tr>
                                 <tr><th>Paid so far</th><td>$<?php echo number_format($step['paid'], 2); ?></td></tr>
                                 <tr class="rtp-fees-owing"><th>Remaining</th><td>$<?php echo number_format($step['outstanding'], 2); ?></td></tr>
-                                <?php if ($step['overdue'] > 0): ?>
-                                    <tr class="rtp-fees-overdue"><th>Overdue now</th><td>$<?php echo number_format($step['overdue'], 2); ?></td></tr>
+                                <tr class="<?php echo $step['overdue'] > 0 ? 'rtp-fees-overdue' : ''; ?>"><th>Overdue now</th><td>$<?php echo number_format($step['overdue'], 2); ?></td></tr>
+                                <?php if ($step['overdue'] <= 0 && $step['outstanding'] > 0 && !empty($step['paid_through'])): ?>
+                                    <tr class="rtp-fees-uptodate"><th>Up to date until</th><td><?php echo esc_html(date('j M Y', strtotime($step['paid_through']))); ?></td></tr>
                                 <?php endif; ?>
                             </table>
 
@@ -554,6 +556,11 @@ class TeamOversight_Readiness {
         .rtp-fees-overdue th, .rtp-fees-overdue td {
             color: #a00;
             font-weight: 700;
+        }
+
+        .rtp-fees-uptodate th, .rtp-fees-uptodate td {
+            color: #155724;
+            font-weight: 600;
         }
 
         .rtp-pay-form {

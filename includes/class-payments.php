@@ -77,6 +77,28 @@ class TeamOversight_Payments {
         return round(max(0, min($expected - $paid, floatval($outstanding_amount))), 2);
     }
 
+    /**
+     * The date up to which current payments keep the member on schedule:
+     * the point where the linear accrual catches up with what they've paid.
+     * Null without season dates or a fee; capped to the season window.
+     */
+    public static function get_paid_through_date($invoice_amount, $outstanding_amount, $season) {
+        $dates = TeamOversight_Fees::get_season_dates($season);
+        $invoice_amount = floatval($invoice_amount);
+        if (!$dates || $invoice_amount <= 0) {
+            return null;
+        }
+
+        $start = strtotime($dates['start']);
+        $end = strtotime($dates['end']);
+        if ($end <= $start) {
+            return null;
+        }
+
+        $paid_fraction = max(0, min(1, ($invoice_amount - floatval($outstanding_amount)) / $invoice_amount));
+        return date('Y-m-d', $start + (int) round($paid_fraction * ($end - $start)));
+    }
+
     public static function get_payment_product() {
         if (!function_exists('wc_get_product')) {
             return null;
@@ -147,8 +169,10 @@ class TeamOversight_Payments {
                         <tr><th>Season fee</th><td>$<?php echo number_format($invoice->invoice_amount, 2); ?></td></tr>
                         <tr><th>Paid so far</th><td>$<?php echo number_format(max(0, $paid), 2); ?></td></tr>
                         <tr class="member-fees-owing"><th>Remaining</th><td>$<?php echo number_format($invoice->outstanding_amount, 2); ?></td></tr>
-                        <?php if ($overdue > 0): ?>
-                            <tr class="member-fees-overdue"><th>Overdue now</th><td>$<?php echo number_format($overdue, 2); ?></td></tr>
+                        <tr class="<?php echo $overdue > 0 ? 'member-fees-overdue' : ''; ?>"><th>Overdue now</th><td>$<?php echo number_format($overdue, 2); ?></td></tr>
+                        <?php $paid_through = self::get_paid_through_date($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season); ?>
+                        <?php if ($overdue <= 0 && floatval($invoice->outstanding_amount) > 0 && $paid_through): ?>
+                            <tr class="member-fees-uptodate"><th>Up to date until</th><td><?php echo esc_html(date('j M Y', strtotime($paid_through))); ?></td></tr>
                         <?php endif; ?>
                     </table>
                 </div>
@@ -224,6 +248,11 @@ class TeamOversight_Payments {
         .member-fees-overdue th, .member-fees-overdue td {
             color: #a00;
             font-weight: 700;
+        }
+
+        .member-fees-uptodate th, .member-fees-uptodate td {
+            color: #155724;
+            font-weight: 600;
         }
 
         .member-fees-pay-form input[type="number"] {
