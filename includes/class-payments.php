@@ -120,7 +120,7 @@ class TeamOversight_Payments {
         $invoices = self::get_user_invoices($user);
 
         if (empty($invoices)) {
-            return '<div class="member-fees-panel"><p>You have no club fees on record. Once you are confirmed into a team your season fee will appear here.</p></div>';
+            return '<div class="member-fees-panel"><p>If you had any outstanding VVL fees, they would appear here.</p></div>';
         }
 
         $payment_product = self::get_payment_product();
