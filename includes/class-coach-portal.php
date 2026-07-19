@@ -415,9 +415,38 @@ class TeamOversight_Coach_Portal {
         .verdict-chip-rejected { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .verdict-chip-confirmed { background: #e2e6ea; color: #1b1e21; border: 1px solid #c6c8ca; }
 
+        /* Application / Notes toggles look like buttons, not plain text. */
         .coach-app-details summary {
+            display: inline-block;
             cursor: pointer;
-            font-size: 12px;
+            font-size: 13px;
+            font-weight: 600;
+            padding: 5px 12px;
+            border: 1px solid #1d3d6e;
+            border-radius: 4px;
+            color: #1d3d6e;
+            background: #fff;
+            list-style: none;
+            user-select: none;
+        }
+
+        .coach-app-details summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .coach-app-details summary::after {
+            content: " ▾";
+            font-size: 11px;
+        }
+
+        .coach-app-details[open] summary::after {
+            content: " ▴";
+        }
+
+        .coach-app-details summary:hover,
+        .coach-app-details[open] summary {
+            background: #1d3d6e;
+            color: #fff;
         }
 
         .coach-application-details {
