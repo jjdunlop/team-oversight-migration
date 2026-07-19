@@ -1,3 +1,21 @@
+```text
+                                          .--""--.
+                            *    .       /  .--.  \
+                     o/        *        ;  /    \  ;
+                    /|      .    *      :  \    /  :
+                    / \          .       \  '--'  /
+                   /   \      *           '--..--'
+                                              \\
+     __________________________________________\\________________
+    |    |    |    |    |    |    |    |    |   \\   |    |    |
+    |____|____|____|____|____|____|____|____|____\\__|____|____|
+    |    |    |    |    |    |    |    |    |     \\ |    |    |
+    |____|____|____|____|____|____|____|____|______vv|____|____|
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+        B u m p .   S e t .   S p i k e .   A d m i n i s t r a t e .
+```
+
 # Team Oversight Plugin
 
 A comprehensive volleyball club management system for WordPress with Ultimate Member integration. The admin is split into two areas:
