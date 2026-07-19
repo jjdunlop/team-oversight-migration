@@ -7,7 +7,6 @@ if (!defined('ABSPATH')) {
 class TeamOversight_Exports {
     
     public function __construct() {
-        add_action('wp_ajax_export_xero_invoices', array($this, 'handle_xero_export'));
     }
     
     public function get_available_seasons() {
@@ -48,65 +47,6 @@ class TeamOversight_Exports {
         ?>
         <div class="wrap">
             <h1>Export Data</h1>
-            
-            <div class="import-export-section">
-                <h3>Xero Invoice Export</h3>
-                <p>Export invoices in Xero import format for billing.</p>
-                
-                <form method="post">
-                    <table class="form-table-compact">
-                        <tr>
-                            <th><label for="export_season">Season</label></th>
-                            <td>
-                                <select name="export_season" required>
-                                    <option value="">Select Season</option>
-                                    <?php 
-                                    $available_seasons = $this->get_available_seasons();
-                                    $current_year = date('Y');
-                                    foreach ($available_seasons as $available_season): ?>
-                                        <option value="<?php echo esc_attr($available_season); ?>" <?php selected($available_season, $current_year); ?>><?php echo esc_html($available_season); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </td>
-                        </tr>
-                        
-                        <tr>
-                            <th><label for="invoice_date">Invoice Date</label></th>
-                            <td>
-                                <input type="date" name="invoice_date" value="<?php echo date('Y-m-d'); ?>" required>
-                            </td>
-                        </tr>
-                        
-                        <tr>
-                            <th><label for="due_date">Due Date</label></th>
-                            <td>
-                                <input type="date" name="due_date" value="<?php echo date('Y-04-01', strtotime('+1 year')); ?>" required>
-                                <p class="description">Default: April 1st of next year</p>
-                            </td>
-                        </tr>
-                        
-                        <tr>
-                            <th><label for="outstanding_only">Export Filter</label></th>
-                            <td>
-                                <label>
-                                    <input type="radio" name="outstanding_only" value="1" checked>
-                                    Outstanding invoices only
-                                </label><br>
-                                <label>
-                                    <input type="radio" name="outstanding_only" value="0">
-                                    All invoices
-                                </label>
-                            </td>
-                        </tr>
-                    </table>
-                    
-                    <p>
-                        <input type="submit" class="button button-primary" value="Export Xero Invoices">
-                        <input type="hidden" name="action" value="export_xero_invoices">
-                        <?php wp_nonce_field('export_xero_invoices', 'export_nonce'); ?>
-                    </p>
-                </form>
-            </div>
             
             <div class="import-export-section">
                 <h3>Team Lists Export</h3>
@@ -178,9 +118,6 @@ class TeamOversight_Exports {
         }
         
         switch ($_POST['action']) {
-            case 'export_xero_invoices':
-                $this->export_xero_invoices();
-                break;
             case 'export_mus_report':
                 $this->export_mus_report();
                 break;
@@ -188,103 +125,6 @@ class TeamOversight_Exports {
                 $this->export_team_lists();
                 break;
         }
-    }
-    
-    private function export_xero_invoices() {
-        global $wpdb;
-        
-        $season = sanitize_text_field($_POST['export_season']);
-        $invoice_date = sanitize_text_field($_POST['invoice_date']);
-        $due_date = sanitize_text_field($_POST['due_date']);
-        $outstanding_only = intval($_POST['outstanding_only']);
-        
-        $where_clause = "WHERE inv.season = %s";
-        $params = array($season);
-        
-        if ($outstanding_only) {
-            $where_clause .= " AND inv.outstanding_amount > 0";
-        }
-        
-        $invoices = $wpdb->get_results($wpdb->prepare("
-            SELECT 
-                inv.*,
-                ta.team,
-                ta.role
-            FROM {$wpdb->prefix}team_invoices inv
-            LEFT JOIN {$wpdb->prefix}team_assignments ta ON inv.email = ta.email AND inv.season = ta.season AND ta.is_active = 1
-            {$where_clause}
-            GROUP BY inv.id
-            ORDER BY inv.name
-        ", ...$params));
-        
-        if (empty($invoices)) {
-            echo '<div class="notice notice-warning"><p>No invoices found for the selected criteria.</p></div>';
-            return;
-        }
-        
-        $filename = "xero_invoices_{$season}_" . date('Y-m-d') . ".csv";
-        
-        // Clean output buffer to prevent HTML insertion
-        if (ob_get_length()) {
-            ob_end_clean();
-        }
-        
-        header('Content-Type: text/csv');
-        header('Content-Disposition: attachment; filename="' . $filename . '"');
-        header('Pragma: no-cache');
-        header('Expires: 0');
-        
-        $output = fopen('php://output', 'w');
-        
-        $header = array(
-            'ContactName', 'EmailAddress', 'POAddressLine1', 'POAddressLine2', 
-            'POAddressLine3', 'POAddressLine4', 'POCity', 'PORegion', 
-            'POPostalCode', 'POCountry', 'InvoiceNumber', 'Reference', 
-            'InvoiceDate', 'DueDate', 'InventoryItemCode', 'Description', 
-            'Quantity', 'UnitAmount', 'Discount', 'AccountCode', 'TaxType', 
-            'TrackingName1', 'TrackingOption1', 'TrackingName2', 'TrackingOption2', 
-            'Currency', 'BrandingTheme'
-        );
-        
-        fputcsv($output, $header);
-        
-        $fees = new TeamOversight_Fees();
-        
-        foreach ($invoices as $invoice) {
-            $fee_class = $fees->determine_fee_class($invoice->email, $season);
-            $is_junior_league = (strpos($invoice->team, 'YSL') === 0 || strpos($invoice->team, 'JPL') === 0);
-            $league_type = $is_junior_league ? 'YSL/JPL' : 'VVL';
-            $account_code = '4003';
-            
-            $description = "{$fee_class} - {$league_type}";
-            
-            $invoice_number = "VVL-{$season}-" . (5023 + ($invoice->id - 1));
-            
-            $row = array(
-                $invoice->name,                    // ContactName
-                $invoice->email,                   // EmailAddress
-                '', '', '', '', '', '',            // PO Address fields (empty)
-                '', '',                            // POPostalCode, POCountry (empty)
-                $invoice_number,                   // InvoiceNumber
-                '',                                // Reference
-                $invoice_date,                     // InvoiceDate
-                $due_date,                         // DueDate
-                '',                                // InventoryItemCode (empty)
-                $description,                      // Description
-                '1',                               // Quantity
-                number_format($invoice->invoice_amount, 2, '.', ''), // UnitAmount
-                '',                                // Discount (empty)
-                $account_code,                     // AccountCode
-                'GST on Income',                   // TaxType
-                '', '', '', '',                    // Tracking fields (empty)
-                '', ''                             // Currency, BrandingTheme (empty)
-            );
-            
-            fputcsv($output, $row);
-        }
-        
-        fclose($output);
-        exit;
     }
     
     private function export_team_lists() {
@@ -441,11 +281,6 @@ class TeamOversight_Exports {
         
         fclose($output);
         exit;
-    }
-    
-    public function handle_xero_export() {
-        $this->export_xero_invoices();
-        wp_die();
     }
     
     private function determine_mus_category($member) {

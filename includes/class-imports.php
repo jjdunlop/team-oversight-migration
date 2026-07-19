@@ -8,7 +8,6 @@ class TeamOversight_Imports {
     
     public function __construct() {
         add_action('wp_ajax_import_revsport_csv', array($this, 'handle_revsport_import'));
-        add_action('wp_ajax_import_xero_payments', array($this, 'handle_xero_payments_import'));
     }
     
     public function render_import_page() {
@@ -39,25 +38,6 @@ class TeamOversight_Imports {
                     </p>
                 </form>
             </div>
-            
-            <div class="import-export-section">
-                <h3>Xero Payment Data Import</h3>
-                <p>Import payment data from Xero to update outstanding balances.</p>
-                
-                <form method="post" enctype="multipart/form-data">
-                    <div class="file-upload-area">
-                        <p><strong>Upload Xero Payment CSV File</strong></p>
-                        <input type="file" name="xero_csv" accept=".csv" required>
-                        <p class="description">Expected columns: ContactName, EmailAddress, InvoiceNumber, Status, InvoiceAmountDue (Xero export format)</p>
-                    </div>
-                    
-                    <p>
-                        <input type="submit" class="button button-primary" value="Import Xero Payments">
-                        <input type="hidden" name="action" value="import_xero_payments">
-                        <?php wp_nonce_field('import_xero_payments', 'import_nonce'); ?>
-                    </p>
-                </form>
-            </div>
         </div>
         <?php
     }
@@ -71,9 +51,6 @@ class TeamOversight_Imports {
         switch ($_POST['action']) {
             case 'import_revsport':
                 $this->import_revsport_csv();
-                break;
-            case 'import_xero_payments':
-                $this->import_xero_payments();
                 break;
         }
     }
@@ -188,130 +165,9 @@ class TeamOversight_Imports {
         echo '</p></div>';
     }
     
-    private function import_xero_payments() {
-        if (!isset($_FILES['xero_csv']) || $_FILES['xero_csv']['error'] !== UPLOAD_ERR_OK) {
-            echo '<div class="notice notice-error"><p>Failed to upload file.</p></div>';
-            return;
-        }
-        
-        $file_path = $_FILES['xero_csv']['tmp_name'];
-        $handle = fopen($file_path, 'r');
-        
-        if ($handle === FALSE) {
-            echo '<div class="notice notice-error"><p>Failed to read CSV file.</p></div>';
-            return;
-        }
-        
-        global $wpdb;
-        
-        $header = fgetcsv($handle);
-        $processed_count = 0;
-        $updated_count = 0;
-        $skipped_count = 0;
-        $updated_invoices = array();
-        
-        // Find column indices
-        $contact_name_index = array_search('ContactName', $header);
-        $email_index = array_search('EmailAddress', $header);
-        $invoice_number_index = array_search('InvoiceNumber', $header);
-        $status_index = array_search('Status', $header);
-        $amount_due_index = array_search('InvoiceAmountDue', $header);
-        
-        if ($contact_name_index === false || $email_index === false || $invoice_number_index === false || 
-            $status_index === false || $amount_due_index === false) {
-            echo '<div class="notice notice-error"><p>Required columns not found. Expected: ContactName, EmailAddress, InvoiceNumber, Status, InvoiceAmountDue</p></div>';
-            fclose($handle);
-            return;
-        }
-        
-        while (($data = fgetcsv($handle)) !== FALSE) {
-            if (count($data) < max($contact_name_index, $email_index, $invoice_number_index, $status_index, $amount_due_index) + 1) {
-                continue;
-            }
-            
-            $contact_name = sanitize_text_field($data[$contact_name_index]);
-            $email = sanitize_email($data[$email_index]);
-            $invoice_number = sanitize_text_field($data[$invoice_number_index]);
-            $status = sanitize_text_field($data[$status_index]);
-            $amount_due = floatval($data[$amount_due_index]);
-            
-            $processed_count++;
-            
-            // Only process VVL invoice numbers - skip others silently
-            if (!preg_match('/^VVL-\d{4}-\d+$/', $invoice_number)) {
-                $skipped_count++;
-                continue;
-            }
-            
-            // Extract season and invoice ID from VVL format
-            if (preg_match('/^VVL-(\d{4})-(\d+)$/', $invoice_number, $matches)) {
-                $season = $matches[1];
-                $invoice_id = intval($matches[2]) - 5023 + 1; // Reverse the calculation
-                
-                // Find matching invoice by ID, season, and email
-                $invoice = $wpdb->get_row($wpdb->prepare("
-                    SELECT * FROM {$wpdb->prefix}team_invoices 
-                    WHERE id = %d AND season = %s AND email = %s
-                ", $invoice_id, $season, $email));
-                
-                if ($invoice) {
-                    // Calculate GST-free amount
-                    $gst_free_amount = round($amount_due / 1.1, 2);
-                    
-                    // Only update if the amount is different
-                    if (abs($invoice->outstanding_amount - $gst_free_amount) > 0.01) { // Allow for small rounding differences
-                        $wpdb->update(
-                            $wpdb->prefix . 'team_invoices',
-                            array('outstanding_amount' => $gst_free_amount),
-                            array('id' => $invoice->id),
-                            array('%f'),
-                            array('%d')
-                        );
-                        
-                        $updated_invoices[] = array(
-                            'contact_name' => $contact_name,
-                            'email' => $email,
-                            'invoice_number' => $invoice_number,
-                            'old_amount' => $invoice->outstanding_amount,
-                            'new_amount' => $gst_free_amount
-                        );
-                        
-                        $updated_count++;
-                    }
-                }
-            }
-        }
-        
-        fclose($handle);
-        
-        // Secure deletion of uploaded file
-        unlink($file_path);
-        
-        echo '<div class="notice notice-success"><p>';
-        echo "Xero payment import completed: {$processed_count} rows processed, {$updated_count} invoices updated, {$skipped_count} non-system invoices skipped.";
-        
-        if (!empty($updated_invoices)) {
-            echo '<br><strong>Updated invoices:</strong><br>';
-            foreach (array_slice($updated_invoices, 0, 10) as $update) {
-                echo "• {$update['invoice_number']} ({$update['contact_name']}) - Outstanding: \${$update['old_amount']} → \${$update['new_amount']}<br>";
-            }
-            if (count($updated_invoices) > 10) {
-                echo "... and " . (count($updated_invoices) - 10) . " more";
-            }
-        }
-        
-        echo '</p></div>';
-    }
-    
     public function handle_revsport_import() {
         // AJAX handler for RevSport import
         $this->import_revsport_csv();
-        wp_die();
-    }
-    
-    public function handle_xero_payments_import() {
-        // AJAX handler for Xero payments import
-        $this->import_xero_payments();
         wp_die();
     }
 }

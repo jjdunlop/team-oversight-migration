@@ -14,22 +14,33 @@ class TeamOversight_Admin {
         add_action('wp_ajax_delete_assignment', array($this, 'ajax_delete_assignment'));
         add_action('wp_ajax_update_invoice', array($this, 'ajax_update_invoice'));
         add_action('wp_ajax_delete_invoice', array($this, 'ajax_delete_invoice'));
-        add_action('wp_ajax_export_single_invoice', array($this, 'ajax_export_single_invoice'));
         add_action('wp_ajax_bulk_accept_trials', array($this, 'ajax_bulk_accept_trials'));
         add_action('wp_ajax_bulk_reject_trials', array($this, 'ajax_bulk_reject_trials'));
     }
     
     public function add_admin_menu() {
+        // Club-wide membership management (tiers, grants, member list).
         add_menu_page(
-            'Team Oversight',
-            'Team Oversight',
+            'Club Membership',
+            'Club Membership',
+            'manage_options',
+            'club-membership',
+            array($this, 'members_page'),
+            'dashicons-id-alt',
+            30
+        );
+
+        // VVL competition machinery: teams, trials, assignments, fees.
+        add_menu_page(
+            'VVL Oversight',
+            'VVL Oversight',
             'manage_options',
             'team-oversight',
             array($this, 'dashboard_page'),
             'dashicons-groups',
-            30
+            31
         );
-        
+
         add_submenu_page(
             'team-oversight',
             'Dashboard',
@@ -38,7 +49,7 @@ class TeamOversight_Admin {
             'team-oversight',
             array($this, 'dashboard_page')
         );
-        
+
         add_submenu_page(
             'team-oversight',
             'Trial Applications',
@@ -95,7 +106,7 @@ class TeamOversight_Admin {
     }
     
     public function enqueue_admin_scripts() {
-        if (isset($_GET['page']) && strpos($_GET['page'], 'team-oversight') !== false) {
+        if (isset($_GET['page']) && (strpos($_GET['page'], 'team-oversight') !== false || strpos($_GET['page'], 'club-membership') !== false)) {
             wp_enqueue_style('team-oversight-admin', TEAM_OVERSIGHT_PLUGIN_URL . 'assets/admin.css', array(), TEAM_OVERSIGHT_VERSION);
             wp_enqueue_script('team-oversight-admin', TEAM_OVERSIGHT_PLUGIN_URL . 'assets/admin.js', array('jquery'), TEAM_OVERSIGHT_VERSION, true);
         }
@@ -109,7 +120,7 @@ class TeamOversight_Admin {
         
         ?>
         <div class="wrap">
-            <h1>Team Oversight Dashboard</h1>
+            <h1>VVL Oversight Dashboard</h1>
             
             <div class="season-filter">
                 <label for="season-select">Season:</label>
@@ -129,6 +140,11 @@ class TeamOversight_Admin {
         <?php
     }
     
+    public function members_page() {
+        $members_page = new TeamOversight_Members_Page();
+        $members_page->render_page();
+    }
+
     public function trials_page() {
         if (isset($_POST['action']) && ($_POST['action'] === 'accept_trial' || $_POST['action'] === 'reject_trial' || $_POST['action'] === 'undo_trial')) {
             $this->process_trial_action();
@@ -1040,14 +1056,13 @@ class TeamOversight_Admin {
                                     <span class="display-value">$<?php echo number_format($invoice->outstanding_amount, 2); ?></span>
                                     <input type="number" class="edit-value" value="<?php echo $invoice->outstanding_amount; ?>" step="0.01" min="0" style="display: none; width: 80px;">
                                 </td>
-                                <td><?php echo esc_html("VVL-{$invoice->season}-" . (5023 + ($invoice->id - 1))); ?></td>
+                                <td><?php echo esc_html($invoice->invoice_reference); ?></td>
                                 <td><?php echo date('Y-m-d H:i', strtotime($invoice->created_date)); ?></td>
                                 <td>
                                     <button type="button" class="button edit-invoice" onclick="editInvoice(this)">Edit</button>
                                     <button type="button" class="button button-primary save-invoice" onclick="saveInvoice(this)" style="display: none;">Save</button>
                                     <button type="button" class="button cancel-edit-invoice" onclick="cancelEditInvoice(this)" style="display: none;">Cancel</button>
                                     <button type="button" class="button button-link-delete delete-invoice" onclick="deleteInvoice(this)" style="display: none; color: #a00;">Delete</button>
-                                    <button type="button" class="button export-single" onclick="exportSingleInvoice(<?php echo $invoice->id; ?>)">Export</button>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -1173,31 +1188,6 @@ class TeamOversight_Admin {
                         alert('Error: ' + response.data);
                     }
                 });
-            }
-            
-            function exportSingleInvoice(invoiceId) {
-                const data = {
-                    action: 'export_single_invoice',
-                    invoice_id: invoiceId,
-                    nonce: '<?php echo wp_create_nonce('export_single_invoice'); ?>'
-                };
-                
-                // Create form and submit for download
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.action = ajaxurl;
-                
-                Object.keys(data).forEach(key => {
-                    const input = document.createElement('input');
-                    input.type = 'hidden';
-                    input.name = key;
-                    input.value = data[key];
-                    form.appendChild(input);
-                });
-                
-                document.body.appendChild(form);
-                form.submit();
-                document.body.removeChild(form);
             }
             </script>
         </div>
@@ -2235,96 +2225,4 @@ class TeamOversight_Admin {
         }
     }
     
-    public function ajax_export_single_invoice() {
-        if (!wp_verify_nonce($_POST['nonce'], 'export_single_invoice')) {
-            wp_send_json_error('Security check failed');
-        }
-        
-        if (!current_user_can('manage_options')) {
-            wp_send_json_error('Insufficient permissions');
-        }
-        
-        global $wpdb;
-        
-        $invoice_id = intval($_POST['invoice_id']);
-        
-        $invoice = $wpdb->get_row($wpdb->prepare("
-            SELECT inv.*, ta.team, ta.role 
-            FROM {$wpdb->prefix}team_invoices inv
-            LEFT JOIN {$wpdb->prefix}team_assignments ta ON inv.email = ta.email AND inv.season = ta.season AND ta.is_active = 1
-            WHERE inv.id = %d
-        ", $invoice_id));
-        
-        if (!$invoice) {
-            wp_die('Invoice not found');
-        }
-        
-        $invoice_number = "VVL-{$invoice->season}-" . (5023 + ($invoice->id - 1));
-        $filename = "xero_invoice_{$invoice_number}_" . date('Y-m-d') . ".csv";
-        
-        // Clean output buffer
-        if (ob_get_length()) {
-            ob_end_clean();
-        }
-        
-        header('Content-Type: text/csv');
-        header('Content-Disposition: attachment; filename="' . $filename . '"');
-        header('Pragma: no-cache');
-        header('Expires: 0');
-        
-        $output = fopen('php://output', 'w');
-        
-        // Use same header as bulk Xero export
-        $header = array(
-            'ContactName', 'EmailAddress', 'POAddressLine1', 'POAddressLine2', 
-            'POAddressLine3', 'POAddressLine4', 'POCity', 'PORegion', 
-            'POPostalCode', 'POCountry', 'InvoiceNumber', 'Reference', 
-            'InvoiceDate', 'DueDate', 'InventoryItemCode', 'Description', 
-            'Quantity', 'UnitAmount', 'Discount', 'AccountCode', 'TaxType', 
-            'TrackingName1', 'TrackingOption1', 'TrackingName2', 'TrackingOption2', 
-            'Currency', 'BrandingTheme'
-        );
-        
-        fputcsv($output, $header);
-        
-        // Determine fee class and description like in bulk export
-        $fees = new TeamOversight_Fees();
-        $fee_class = $fees->determine_fee_class($invoice->email);
-        $is_junior_league = (strpos($invoice->team, 'YSL') === 0 || strpos($invoice->team, 'JPL') === 0);
-        $league_type = $is_junior_league ? 'YSL/JPL' : 'VVL';
-        $account_code = '4003';
-        $description = "{$fee_class} - {$league_type}";
-        
-        // Use current date for invoice date and April 1st next year for due date
-        $invoice_date = date('Y-m-d');
-        $due_date = date('Y-04-01', strtotime('+1 year'));
-        
-        // Generate Xero invoice number format
-        $xero_invoice_number = "VVL-{$invoice->season}-" . (5023 + ($invoice->id - 1));
-        
-        $row = array(
-            $invoice->name,                    // ContactName
-            $invoice->email,                   // EmailAddress
-            '', '', '', '', '', '',            // PO Address fields (empty)
-            '', '',                            // POPostalCode, POCountry (empty)
-            $xero_invoice_number,              // InvoiceNumber
-            '',                                // Reference
-            $invoice_date,                     // InvoiceDate
-            $due_date,                         // DueDate
-            '',                                // InventoryItemCode (empty)
-            $description,                      // Description
-            '1',                               // Quantity
-            number_format($invoice->invoice_amount, 2, '.', ''), // UnitAmount
-            '',                                // Discount (empty)
-            $account_code,                     // AccountCode
-            'GST on Income',                   // TaxType
-            '', '', '', '',                    // Tracking fields (empty)
-            '', ''                             // Currency, BrandingTheme (empty)
-        );
-        
-        fputcsv($output, $row);
-        
-        fclose($output);
-        exit;
-    }
 }

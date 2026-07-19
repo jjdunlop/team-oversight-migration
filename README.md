@@ -1,6 +1,9 @@
 # Team Oversight Plugin
 
-A comprehensive volleyball team management system for WordPress with Ultimate Member integration.
+A comprehensive volleyball club management system for WordPress with Ultimate Member integration. The admin is split into two areas:
+
+- **Club Membership** — club-wide member list and time-bound membership tiers (Full/Associate), granted by purchases or manually
+- **VVL Oversight** — competition machinery: VVL teams, trial applications, team assignments, fee invoices, imports/exports
 
 ## Features
 
@@ -8,9 +11,10 @@ A comprehensive volleyball team management system for WordPress with Ultimate Me
 - **Team Assignment Management**: Admin can assign players to teams with multiple roles
 - **Fee Calculation**: Automatic fee calculation based on MUS category and team role
 - **Multi-Role Support**: Players can have multiple roles across different teams
-- **Payment Tracking**: Import Xero payment data and track outstanding balances
+- **Payment Tracking**: Track invoice amounts and outstanding balances per member
+- **Membership Tiers**: Time-bound Full/Associate memberships granted automatically by WooCommerce purchases (per-product or per-category tier + term), with manual grants, revocation, and automatic role sync/expiry
+- **Members Page**: One row per person — membership status and expiry, profile data, teams, fees owing, accreditation — filterable, sortable, CSV-exportable
 - **Accreditation Management**: Import and track RevSport accreditation data
-- **Invoice Export**: Generate Xero-compatible invoice files
 - **Oversight Dashboard**: Comprehensive view of MUS data, payments, accreditations, and team lists
 
 ## Installation
@@ -74,9 +78,8 @@ A comprehensive volleyball team management system for WordPress with Ultimate Me
 
 #### Data Import/Export
 - **RevSport Import**: Upload CSV with accreditation data
-- **Xero Payment Import**: Upload payment CSV to update balances
-- **Xero Invoice Export**: Generate invoice files for billing
 - **Team Lists Export**: Export team rosters
+- **MUS Membership Report**: Export membership report with MUS categories
 
 ## Data Structure
 
@@ -112,17 +115,20 @@ A comprehensive volleyball team management system for WordPress with Ultimate Me
 ### RevSport CSV Import
 Required columns: VA ID, First name, Last name, Date of birth, Gender identity, Mobile phone, Email address, Payment status, Payment date, VA Coach, VA Referee
 
-### Xero Payment Import
-Required columns: Customer Email, Invoice Reference, Payment Amount, Payment Date
+## Membership Tiers
 
-### Xero Invoice Export
-Generates standard Xero import format with all required fields
+Memberships are time-bound grants stored in `wp_team_memberships`; a member's current status is their highest unexpired grant. The `full-member` / `associate-member` WordPress roles are kept in sync daily (and on every grant) so role-based gating and the profile shortcode keep working — including automatic demotion when the last grant expires.
+
+- **From purchases**: set "Membership tier granted" + "Membership term (months)" on a product (Product > Edit > General), or configure a product-category rule on the Members page. Terms run from the purchase date. Only explicitly configured products/categories grant anything.
+- **Manual grants**: Members page > "Grant a membership manually" (tier + valid-until date + note, recorded against the granting admin).
+- **Seeding**: Members page > "Seed memberships from this year's purchases" converts the current year's qualifying purchases into dated grants (Full = 12 months, Associate = 3 months from purchase). Dry-run available; idempotent.
 
 ## Database Tables
 
 - `wp_team_accreditations` - RevSport accreditation data
 - `wp_team_invoices` - Player invoices and payment tracking
 - `wp_team_assignments` - Team/role assignments with history
+- `wp_team_memberships` - Time-bound membership tier grants
 - `wp_fee_matrix` - Fee calculation matrix
 - `wp_trial_applications` - Trial applications and status
 

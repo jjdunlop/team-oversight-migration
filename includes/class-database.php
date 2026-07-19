@@ -66,6 +66,34 @@ class TeamOversight_Database {
             $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}fee_matrix SET season = %s WHERE season IS NULL", $current_year));
         }
         
+        // Create team_memberships table if it doesn't exist (added in 1.1.0)
+        $memberships_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_memberships'");
+        if (!$memberships_exists) {
+            $charset_collate = $wpdb->get_charset_collate();
+            $sql = "CREATE TABLE {$wpdb->prefix}team_memberships (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                user_id bigint(20) unsigned NOT NULL,
+                tier varchar(30) NOT NULL,
+                start_date date NOT NULL,
+                end_date date NOT NULL,
+                source varchar(20) NOT NULL DEFAULT 'manual',
+                order_id bigint(20) unsigned DEFAULT NULL,
+                order_item_id bigint(20) unsigned DEFAULT NULL,
+                product_id bigint(20) unsigned DEFAULT NULL,
+                granted_by bigint(20) unsigned DEFAULT NULL,
+                note varchar(255) DEFAULT '',
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY user_id (user_id),
+                KEY tier (tier),
+                KEY end_date (end_date),
+                KEY order_item_id (order_item_id)
+            ) $charset_collate;";
+
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+        }
+
         // Import price matrix if fee_matrix table is empty
         $existing_fees = $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}fee_matrix WHERE is_active = 1");
         if ($existing_fees == 0) {
