@@ -42,6 +42,9 @@ class TeamOversight_Coach_Portal {
         add_shortcode('team_coach_portal', array($this, 'render'));
         // CSV export must run before the theme outputs anything.
         add_action('template_redirect', array($this, 'maybe_export_roster'));
+        // Verdict changes save via AJAX (no page reload); the form POST
+        // remains as the no-JS / failure fallback.
+        add_action('wp_ajax_murvc_coach_set_selection', array($this, 'ajax_set_selection'));
     }
 
     // ------------------------------------------------------------------
@@ -226,17 +229,7 @@ class TeamOversight_Coach_Portal {
                                     <span class="cac-number">#<?php echo intval($a['trial_number']); ?></span>
                                     <span class="cac-name"><?php echo $a['picked_mine'] ? '★ ' : ''; ?><?php echo esc_html($a['name']); ?></span>
                                     <span class="cac-chips">
-                                        <?php $verdict_labels = self::get_verdict_labels(); ?>
-                                        <?php if (!empty($a['selections'])): ?>
-                                            <?php foreach ($a['selections'] as $sel): ?>
-                                                <?php $sel_label = isset($verdict_labels[$sel['status']]) ? $verdict_labels[$sel['status']] : ucfirst($sel['status']); ?>
-                                                <span class="verdict-chip verdict-chip-<?php echo esc_attr($sel['status']); ?>" title="<?php echo esc_attr($sel['team_name'] . ' — ' . $sel_label); ?>">
-                                                    <?php echo esc_html($sel['team']); ?>: <?php echo esc_html($sel_label); ?>
-                                                </span>
-                                            <?php endforeach; ?>
-                                        <?php else: ?>
-                                            <span class="cac-unclaimed">Unclaimed</span>
-                                        <?php endif; ?>
+                                        <?php echo $this->render_verdict_chips($a['selections']); ?>
                                     </span>
                                 </div>
 
@@ -286,7 +279,7 @@ class TeamOversight_Coach_Portal {
                                             <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
                                             <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
                                             <label class="cac-verdict-label">My verdict:
-                                                <select name="selection_status" onchange="this.form.submit()">
+                                                <select name="selection_status" class="verdict-select">
                                                     <option value="clear" <?php selected($a['my_status'], ''); ?>>&mdash; None &mdash;</option>
                                                     <?php foreach (self::get_verdict_labels() as $status_key => $status_label): ?>
                                                         <option value="<?php echo esc_attr($status_key); ?>" <?php selected($a['my_status'], $status_key); ?>><?php echo esc_html($status_label); ?></option>
@@ -303,6 +296,32 @@ class TeamOversight_Coach_Portal {
 
                     <script>
                     (function() {
+                        // Verdicts save via AJAX and update the card in place;
+                        // any failure falls back to the normal form submit.
+                        var murvcAjax = '<?php echo esc_url(admin_url('admin-ajax.php')); ?>';
+                        document.querySelectorAll('.verdict-select').forEach(function(sel) {
+                            sel.addEventListener('change', function() {
+                                var form = sel.closest('form');
+                                var card = sel.closest('.coach-applicant-card');
+                                var data = new FormData(form);
+                                data.set('action', 'murvc_coach_set_selection');
+                                sel.disabled = true;
+
+                                fetch(murvcAjax, {method: 'POST', credentials: 'same-origin', body: data})
+                                    .then(function(r) { return r.json(); })
+                                    .then(function(res) {
+                                        if (!res || !res.success) { form.submit(); return; }
+                                        card.querySelector('.cac-chips').innerHTML = res.data.chips;
+                                        card.className = 'coach-applicant-card' + (res.data.my_status ? ' verdict-' + res.data.my_status : '');
+                                        card.setAttribute('data-has-verdict', res.data.my_status ? '1' : '0');
+                                        sel.disabled = false;
+                                        card.classList.add('verdict-saved');
+                                        setTimeout(function() { card.classList.remove('verdict-saved'); }, 900);
+                                    })
+                                    .catch(function() { form.submit(); });
+                            });
+                        });
+
                         var search = document.getElementById('coach-search');
                         var mineOnly = document.getElementById('coach-filter-mine');
                         function filterCoachList() {
@@ -511,6 +530,11 @@ class TeamOversight_Coach_Portal {
         .coach-applicant-card.verdict-tentative { border-left-color: #f0b429; background: #fffdf5; }
         .coach-applicant-card.verdict-training_only { border-left-color: #339af0; background: #f5faff; }
         .coach-applicant-card.verdict-rejected { border-left-color: #dc3232; background: #fdf8f8; opacity: 0.8; }
+
+        .coach-applicant-card.verdict-saved {
+            outline: 2px solid #46b450;
+            transition: outline 0.2s ease-in;
+        }
 
         .cac-header {
             display: flex;
@@ -736,6 +760,111 @@ class TeamOversight_Coach_Portal {
         }
 
         return '<div class="coach-portal-success"><p>' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ') marked <strong>' . esc_html($verdict_labels[$status]) . '</strong> for ' . esc_html($team) . '.</p></div>';
+    }
+
+    /**
+     * Verdict chips markup for an applicant's selections across all teams.
+     */
+    private function render_verdict_chips($selections) {
+        if (empty($selections)) {
+            return '<span class="cac-unclaimed">Unclaimed</span>';
+        }
+
+        $labels = self::get_verdict_labels();
+        $html = '';
+        foreach ($selections as $sel) {
+            $label = isset($labels[$sel['status']]) ? $labels[$sel['status']] : ucfirst($sel['status']);
+            $html .= '<span class="verdict-chip verdict-chip-' . esc_attr($sel['status']) . '" title="' . esc_attr($sel['team_name'] . ' — ' . $label) . '">'
+                . esc_html($sel['team']) . ': ' . esc_html($label)
+                . '</span> ';
+        }
+        return $html;
+    }
+
+    /**
+     * AJAX verdict save: same rules as the form path, returning the fresh
+     * chips so the card updates without a reload.
+     */
+    public function ajax_set_selection() {
+        if (!is_user_logged_in() || !check_ajax_referer('coach_portal_action', 'coach_nonce', false)) {
+            wp_send_json_error('Security check failed');
+        }
+
+        $season = isset($_POST['coach_season']) ? sanitize_text_field($_POST['coach_season']) : '';
+        $team = isset($_POST['coach_team']) ? sanitize_text_field($_POST['coach_team']) : '';
+
+        $my_teams = $this->get_my_teams($season);
+        if (!isset($my_teams[$team])) {
+            wp_send_json_error('You can only act for teams you coach.');
+        }
+
+        global $wpdb;
+        $application_id = intval($_POST['application_id']);
+
+        $application = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}trial_applications
+            WHERE id = %d AND season = %s AND application_status IN ('pending', 'accepted')
+        ", $application_id, $season));
+
+        if (!$application) {
+            wp_send_json_error('Application not found.');
+        }
+
+        $status = isset($_POST['selection_status']) ? sanitize_text_field($_POST['selection_status']) : '';
+
+        if ($status === 'clear') {
+            $wpdb->delete($wpdb->prefix . 'team_trial_selections', array(
+                'application_id' => $application_id,
+                'team' => $team,
+            ), array('%d', '%s'));
+        } elseif (in_array($status, self::SELECTION_STATUSES, true)) {
+            $existing = $wpdb->get_var($wpdb->prepare("
+                SELECT id FROM {$wpdb->prefix}team_trial_selections
+                WHERE application_id = %d AND team = %s
+            ", $application_id, $team));
+
+            if ($existing) {
+                $wpdb->update(
+                    $wpdb->prefix . 'team_trial_selections',
+                    array('status' => $status, 'created_by' => get_current_user_id(), 'updated_date' => current_time('mysql')),
+                    array('id' => $existing),
+                    array('%s', '%d', '%s'),
+                    array('%d')
+                );
+            } else {
+                $wpdb->insert($wpdb->prefix . 'team_trial_selections', array(
+                    'application_id' => $application_id,
+                    'season' => $season,
+                    'team' => $team,
+                    'status' => $status,
+                    'created_by' => get_current_user_id(),
+                ), array('%d', '%s', '%s', '%s', '%d'));
+            }
+        } else {
+            wp_send_json_error('Invalid verdict.');
+        }
+
+        // Fresh chips across all teams for this applicant.
+        $database = new TeamOversight_Database();
+        $teams_config = $database->get_teams_config();
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT team, status FROM {$wpdb->prefix}team_trial_selections
+            WHERE application_id = %d ORDER BY team
+        ", $application_id));
+
+        $selections = array();
+        foreach ($rows as $row) {
+            $selections[] = array(
+                'team' => $row->team,
+                'team_name' => isset($teams_config[$row->team]) ? $teams_config[$row->team]['name'] : $row->team,
+                'status' => $row->status,
+            );
+        }
+
+        wp_send_json_success(array(
+            'my_status' => $status === 'clear' ? '' : $status,
+            'chips' => $this->render_verdict_chips($selections),
+        ));
     }
 
     // ------------------------------------------------------------------
