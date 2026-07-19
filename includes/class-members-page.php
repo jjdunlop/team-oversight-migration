@@ -38,7 +38,7 @@ class TeamOversight_Members_Page {
 
         ?>
         <div class="wrap">
-            <h1>Club Membership</h1>
+            <h1>Club Membership <a href="<?php echo admin_url('admin.php?page=club-membership-history'); ?>" class="page-title-action">Membership History</a></h1>
 
             <div class="season-filter">
                 <label for="season-select">Season (VVL teams &amp; fees columns):</label>
@@ -367,6 +367,243 @@ class TeamOversight_Members_Page {
             </script>
         </div>
         <?php
+    }
+
+    // ------------------------------------------------------------------
+    // Membership History
+    // ------------------------------------------------------------------
+
+    /**
+     * Everyone who held a membership grant overlapping the date range.
+     * Anyone whose grant touches the window counts — even a single day.
+     */
+    private function get_membership_history($from, $to) {
+        global $wpdb;
+
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT m.user_id, u.display_name, u.user_email,
+                GROUP_CONCAT(CONCAT(m.tier, '|', m.start_date, '|', m.end_date, '|', m.source) ORDER BY m.start_date SEPARATOR ',') AS grants
+            FROM {$wpdb->prefix}team_memberships m
+            LEFT JOIN {$wpdb->users} u ON u.ID = m.user_id
+            WHERE m.start_date <= %s AND m.end_date >= %s
+            GROUP BY m.user_id
+            ORDER BY u.display_name
+        ", $to, $from));
+
+        $tiers = TeamOversight_Memberships::get_tiers();
+        $rank = array(
+            TeamOversight_Memberships::TIER_LIFE => 3,
+            TeamOversight_Memberships::TIER_FULL => 2,
+            TeamOversight_Memberships::TIER_ASSOCIATE => 1,
+        );
+        $today = current_time('Y-m-d');
+
+        $history = array();
+        foreach ($rows as $row) {
+            $highest = null;
+            $current = null;
+            $periods = array();
+
+            foreach (explode(',', $row->grants) as $grant) {
+                $parts = explode('|', $grant);
+                if (count($parts) !== 4 || !isset($tiers[$parts[0]])) {
+                    continue;
+                }
+                list($tier, $start, $end, $source) = $parts;
+
+                if ($highest === null || $rank[$tier] > $rank[$highest]) {
+                    $highest = $tier;
+                }
+                if ($start <= $today && $end >= $today && ($current === null || $rank[$tier] > $rank[$current])) {
+                    $current = $tier;
+                }
+
+                $end_display = ($end >= TeamOversight_Memberships::PERMANENT_FROM) ? 'no expiry' : $end;
+                $periods[] = $tiers[$tier] . ': ' . $start . ' → ' . $end_display . ' (' . $source . ')';
+            }
+
+            if ($highest === null) {
+                continue;
+            }
+
+            $history[] = array(
+                'user_id' => intval($row->user_id),
+                'name' => $row->display_name ?: ($row->user_email ?: 'deleted user #' . $row->user_id),
+                'email' => $row->user_email ?: '',
+                'highest_tier' => $highest,
+                'highest_label' => $tiers[$highest],
+                'current_label' => $current ? $tiers[$current] : '—',
+                'periods' => $periods,
+            );
+        }
+
+        return $history;
+    }
+
+    private function get_history_range() {
+        $from = (isset($_REQUEST['history_from']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_REQUEST['history_from']))
+            ? $_REQUEST['history_from'] : date('Y') . '-01-01';
+        $to = (isset($_REQUEST['history_to']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_REQUEST['history_to']))
+            ? $_REQUEST['history_to'] : current_time('Y-m-d');
+        if ($from > $to) {
+            $tmp = $from;
+            $from = $to;
+            $to = $tmp;
+        }
+        return array($from, $to);
+    }
+
+    public function render_history_page() {
+        if (isset($_POST['action']) && $_POST['action'] === 'export_membership_history_csv') {
+            $this->action_export_history_csv();
+        }
+
+        list($from, $to) = $this->get_history_range();
+        $history = $this->get_membership_history($from, $to);
+
+        $tier_counts = array();
+        foreach ($history as $h) {
+            $tier_counts[$h['highest_label']] = isset($tier_counts[$h['highest_label']]) ? $tier_counts[$h['highest_label']] + 1 : 1;
+        }
+
+        ?>
+        <div class="wrap">
+            <h1>Membership History</h1>
+            <p class="description">Everyone who held a membership at any point in the selected period, based on dated membership grants. Members whose tier role predates the grant ledger (stop-gap assignments) only appear once purchase-history seeding has been run.</p>
+
+            <form method="get" style="margin: 15px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; display: inline-block;">
+                <input type="hidden" name="page" value="club-membership-history">
+                <label>Members between
+                    <input type="date" name="history_from" value="<?php echo esc_attr($from); ?>">
+                </label>
+                <label> and
+                    <input type="date" name="history_to" value="<?php echo esc_attr($to); ?>">
+                </label>
+                <input type="submit" class="button button-primary" value="Show">
+            </form>
+
+            <form method="post" style="display: inline-block; margin-left: 10px;">
+                <input type="hidden" name="action" value="export_membership_history_csv">
+                <input type="hidden" name="history_from" value="<?php echo esc_attr($from); ?>">
+                <input type="hidden" name="history_to" value="<?php echo esc_attr($to); ?>">
+                <?php wp_nonce_field('export_membership_history_csv', 'members_nonce'); ?>
+                <input type="submit" class="button" value="Export CSV">
+            </form>
+
+            <p>
+                <strong><?php echo count($history); ?></strong> people held a membership between <?php echo esc_html($from); ?> and <?php echo esc_html($to); ?>
+                <?php if (!empty($tier_counts)): ?>
+                    (<?php
+                    $parts = array();
+                    foreach ($tier_counts as $label => $count) {
+                        $parts[] = $count . ' ' . $label;
+                    }
+                    echo esc_html(implode(', ', $parts));
+                    ?> at highest)
+                <?php endif; ?>
+            </p>
+
+            <?php if (!empty($history)): ?>
+                <div style="margin: 10px 0;">
+                    <label for="history-search">Search:</label>
+                    <input type="text" id="history-search" placeholder="Search name or email..." style="width: 220px;">
+                    <label for="history-tier" style="margin-left: 10px;">Tier held:</label>
+                    <select id="history-tier">
+                        <option value="">All</option>
+                        <?php foreach (TeamOversight_Memberships::get_tiers() as $slug => $label): ?>
+                            <option value="<?php echo esc_attr($slug); ?>"><?php echo esc_html($label); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
+                <table class="wp-list-table widefat fixed striped" id="history-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 16%;">Name</th>
+                            <th style="width: 20%;">Email</th>
+                            <th style="width: 13%;">Highest Tier (period)</th>
+                            <th>Membership Periods</th>
+                            <th style="width: 13%;">Current Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($history as $h): ?>
+                            <tr data-tier="<?php echo esc_attr($h['highest_tier']); ?>">
+                                <td>
+                                    <?php if ($h['email']): ?>
+                                        <a href="<?php echo esc_url(get_edit_user_link($h['user_id'])); ?>"><?php echo esc_html($h['name']); ?></a>
+                                    <?php else: ?>
+                                        <?php echo esc_html($h['name']); ?>
+                                    <?php endif; ?>
+                                </td>
+                                <td><?php echo esc_html($h['email']); ?></td>
+                                <td><?php echo esc_html($h['highest_label']); ?></td>
+                                <td style="font-size: 12px;"><?php echo esc_html(implode('; ', $h['periods'])); ?></td>
+                                <td><?php echo esc_html($h['current_label']); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+
+                <script>
+                function filterHistory() {
+                    const search = document.getElementById('history-search').value.toLowerCase();
+                    const tier = document.getElementById('history-tier').value;
+                    document.querySelectorAll('#history-table tbody tr').forEach(row => {
+                        const matchesSearch = search === '' || row.textContent.toLowerCase().includes(search);
+                        const matchesTier = tier === '' || row.dataset.tier === tier;
+                        row.style.display = matchesSearch && matchesTier ? '' : 'none';
+                    });
+                }
+                document.getElementById('history-search').addEventListener('input', filterHistory);
+                document.getElementById('history-tier').addEventListener('change', filterHistory);
+                </script>
+            <?php else: ?>
+                <p>No membership grants overlap this period.</p>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
+    private function action_export_history_csv() {
+        if (!isset($_POST['members_nonce']) || !wp_verify_nonce($_POST['members_nonce'], 'export_membership_history_csv')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
+        list($from, $to) = $this->get_history_range();
+        $history = $this->get_membership_history($from, $to);
+
+        $filename = "membership_history_{$from}_to_{$to}.csv";
+
+        if (ob_get_length()) {
+            ob_end_clean();
+        }
+
+        header('Content-Type: text/csv');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+
+        $output = fopen('php://output', 'w');
+        fputcsv($output, array('Name', 'Email', 'Highest Tier In Period', 'Membership Periods', 'Current Status'));
+
+        foreach ($history as $h) {
+            fputcsv($output, array(
+                $h['name'],
+                $h['email'],
+                $h['highest_label'],
+                implode('; ', $h['periods']),
+                $h['current_label'],
+            ));
+        }
+
+        fclose($output);
+        exit;
     }
 
     // ------------------------------------------------------------------

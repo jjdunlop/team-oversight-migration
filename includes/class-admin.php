@@ -30,6 +30,24 @@ class TeamOversight_Admin {
             30
         );
 
+        add_submenu_page(
+            'club-membership',
+            'Members',
+            'Members',
+            'manage_options',
+            'club-membership',
+            array($this, 'members_page')
+        );
+
+        add_submenu_page(
+            'club-membership',
+            'Membership History',
+            'Membership History',
+            'manage_options',
+            'club-membership-history',
+            array($this, 'membership_history_page')
+        );
+
         // VVL competition machinery: teams, trials, assignments, fees.
         add_menu_page(
             'VVL Oversight',
@@ -143,6 +161,11 @@ class TeamOversight_Admin {
     public function members_page() {
         $members_page = new TeamOversight_Members_Page();
         $members_page->render_page();
+    }
+
+    public function membership_history_page() {
+        $members_page = new TeamOversight_Members_Page();
+        $members_page->render_history_page();
     }
 
     public function trials_page() {
