@@ -155,12 +155,13 @@ class TeamOversight_Coach_Portal {
                 <h4>Current Team (<?php echo count($roster); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?>)</h4>
                 <?php if (!empty($roster) || !empty($selection_roster)): ?>
                     <table class="coach-portal-table coach-roster-table">
-                        <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Email</th><th>Mobile</th></tr></thead>
+                        <thead><tr><th>Name</th><th>Role</th><th>Positions</th><th>Status</th><th>Email</th><th>Mobile</th></tr></thead>
                         <tbody>
                             <?php foreach ($roster as $member): ?>
                                 <tr>
                                     <td data-label="Name"><?php echo esc_html($member->name ?: $member->email); ?></td>
                                     <td data-label="Role"><?php echo esc_html(str_replace('_', ' ', ucwords($member->role, '_'))); ?></td>
+                                    <td data-label="Positions"><?php echo esc_html($this->format_positions($member->preferred_positions)); ?></td>
                                     <td data-label="Status"><span class="verdict-chip verdict-chip-confirmed">Confirmed</span></td>
                                     <td data-label="Email"><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
                                     <td data-label="Mobile"><?php echo esc_html($member->mobile ?: ''); ?></td>
@@ -170,6 +171,7 @@ class TeamOversight_Coach_Portal {
                                 <tr class="verdict-<?php echo esc_attr($member->status); ?>">
                                     <td data-label="Name"><?php echo esc_html($member->name); ?> <small>#<?php echo intval($member->trial_number); ?></small></td>
                                     <td data-label="Role">Playing Member</td>
+                                    <td data-label="Positions"><?php echo esc_html($this->format_positions($member->preferred_positions)); ?></td>
                                     <td data-label="Status">
                                         <?php if ($member->status === 'selected'): ?>
                                             <span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>
@@ -761,12 +763,13 @@ class TeamOversight_Coach_Portal {
         $output = fopen('php://output', 'w');
         // UTF-8 BOM so Excel reads accents/dashes correctly.
         fwrite($output, "\xEF\xBB\xBF");
-        fputcsv($output, array('Name', 'Role', 'Status', 'Email', 'Mobile'));
+        fputcsv($output, array('Name', 'Role', 'Positions', 'Status', 'Email', 'Mobile'));
 
         foreach ($roster as $member) {
             fputcsv($output, array(
                 $member->name ?: $member->email,
                 str_replace('_', ' ', ucwords($member->role, '_')),
+                $this->format_positions($member->preferred_positions),
                 'Confirmed',
                 $member->email,
                 $member->mobile ?: '',
@@ -777,6 +780,7 @@ class TeamOversight_Coach_Portal {
             fputcsv($output, array(
                 $member->name,
                 'Playing Member',
+                $this->format_positions($member->preferred_positions),
                 $member->status === 'selected' ? 'Selected (awaiting finalisation)' : 'Tentative',
                 $member->email,
                 $member->mobile ?: '',
@@ -796,14 +800,33 @@ class TeamOversight_Coach_Portal {
 
         return $wpdb->get_results($wpdb->prepare("
             SELECT ta.role, ta.email,
-                u.display_name AS name,
-                um_mobile.meta_value AS mobile
+                MAX(u.display_name) AS name,
+                MAX(um_mobile.meta_value) AS mobile,
+                MAX(app.preferred_positions) AS preferred_positions
             FROM {$wpdb->prefix}team_assignments ta
             LEFT JOIN {$wpdb->users} u ON (ta.user_id = u.ID OR ((ta.user_id IS NULL OR ta.user_id = 0) AND ta.email = u.user_email))
             LEFT JOIN {$wpdb->usermeta} um_mobile ON u.ID = um_mobile.user_id AND um_mobile.meta_key = 'mobile_number'
+            LEFT JOIN {$wpdb->prefix}trial_applications app ON app.season = ta.season
+                AND app.application_status IN ('pending', 'accepted')
+                AND (app.user_id = u.ID OR app.email = ta.email)
             WHERE ta.team = %s AND ta.season = %s AND ta.is_active = 1
-            ORDER BY FIELD(ta.role, 'coach', 'assistant_coach', 'team_manager', 'playing_member', 'training_only', 'supporter'), u.display_name
+            GROUP BY ta.id
+            ORDER BY FIELD(ta.role, 'coach', 'assistant_coach', 'team_manager', 'playing_member', 'training_only', 'supporter'), MAX(u.display_name)
         ", $team_code, $season));
+    }
+
+    /**
+     * JSON position keys -> readable labels.
+     */
+    private function format_positions($json) {
+        $keys = $json ? json_decode($json, true) : array();
+        if (!is_array($keys) || empty($keys)) {
+            return '';
+        }
+        $positions = TeamOversight_Trials::get_position_options();
+        return implode(', ', array_map(function ($key) use ($positions) {
+            return isset($positions[$key]) ? $positions[$key] : $key;
+        }, $keys));
     }
 
     /**
@@ -814,7 +837,7 @@ class TeamOversight_Coach_Portal {
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT s.status, a.name, a.email, a.trial_number, a.user_id,
+            SELECT s.status, a.name, a.email, a.trial_number, a.user_id, a.preferred_positions,
                 um_mobile.meta_value AS mobile
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
