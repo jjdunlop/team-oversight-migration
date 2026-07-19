@@ -1268,16 +1268,19 @@ class TeamOversight_Admin {
         
         $season = $this->get_current_season();
         
+        // One row per invoice: assignments are aggregated into a team list
+        // (multi-team players and coach+player dual roles would otherwise
+        // duplicate the row per assignment).
         $invoices = $wpdb->get_results($wpdb->prepare("
-            SELECT 
+            SELECT
                 inv.*,
-                u.display_name as name,
-                ta.team,
-                ta.role
+                MAX(u.display_name) AS name,
+                GROUP_CONCAT(DISTINCT ta.team ORDER BY ta.team SEPARATOR '|') AS team_codes
             FROM {$wpdb->prefix}team_invoices inv
             LEFT JOIN {$wpdb->users} u ON inv.email = u.user_email
             LEFT JOIN {$wpdb->prefix}team_assignments ta ON inv.email = ta.email AND inv.season = ta.season AND ta.is_active = 1
             WHERE inv.season = %s
+            GROUP BY inv.id
             ORDER BY inv.created_date DESC
         ", $season));
         
@@ -1448,11 +1451,11 @@ class TeamOversight_Admin {
                                 $fee_info = "Age: {$age} | {$institution_short} | {$degree_short} | {$status} → {$calculated_fee_class}";
                             }
                         ?>
-                            <tr data-invoice-id="<?php echo $invoice->id; ?>" data-team="<?php echo esc_attr($invoice->team ?: ''); ?>" data-status="<?php echo $payment_status; ?>">
+                            <tr data-invoice-id="<?php echo $invoice->id; ?>" data-team="<?php echo esc_attr($invoice->team_codes ?: ''); ?>" data-status="<?php echo $payment_status; ?>">
                                 <td><?php echo $invoice->id; ?></td>
                                 <td><?php echo esc_html($invoice->name); ?></td>
                                 <td><?php echo esc_html($invoice->email); ?></td>
-                                <td><?php echo esc_html($invoice->team ?: 'N/A'); ?></td>
+                                <td><?php echo esc_html($invoice->team_codes ? str_replace('|', ', ', $invoice->team_codes) : 'N/A'); ?></td>
                                 <td style="font-size: 11px; max-width: 200px;" title="<?php echo esc_attr($fee_info); ?>"><?php echo esc_html($fee_info); ?></td>
                                 <td class="editable-invoice-amount" data-field="invoice_amount" data-value="<?php echo esc_attr($invoice->invoice_amount); ?>">
                                     <span class="display-value">$<?php echo number_format($invoice->invoice_amount, 2); ?></span>
@@ -1502,17 +1505,17 @@ class TeamOversight_Admin {
                 const rows = document.querySelectorAll('#invoices-table tbody tr');
                 rows.forEach(row => {
                     const text = row.textContent.toLowerCase();
-                    const team = row.dataset.team;
+                    const teams = (row.dataset.team || '').split('|');
                     const status = row.dataset.status;
-                    
+
                     const matchesSearch = search === '' || text.includes(search);
-                    const matchesTeam = teamFilter === '' || team === teamFilter;
+                    const matchesTeam = teamFilter === '' || teams.includes(teamFilter);
                     const matchesStatus = statusFilter === '' || status === statusFilter;
-                    
+
                     row.style.display = matchesSearch && matchesTeam && matchesStatus ? '' : 'none';
                 });
             }
-            
+
             document.getElementById('search-invoices').addEventListener('input', filterInvoices);
             document.getElementById('filter-team').addEventListener('change', filterInvoices);
             document.getElementById('filter-status').addEventListener('change', filterInvoices);
