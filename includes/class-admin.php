@@ -205,10 +205,10 @@ class TeamOversight_Admin {
         $season = $this->get_current_season();
 
         $selected = $wpdb->get_results($wpdb->prepare("
-            SELECT s.application_id, s.team, a.user_id, a.email
+            SELECT s.application_id, s.team, s.status, a.user_id, a.email
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
-            WHERE s.status = 'selected'
+            WHERE s.status IN ('selected', 'training_only')
                 AND a.season = %s
                 AND a.application_status IN ('pending', 'accepted')
             ORDER BY s.application_id, s.team
@@ -223,21 +223,26 @@ class TeamOversight_Admin {
         foreach ($selected as $row) {
             $by_app[$row->application_id]['user_id'] = intval($row->user_id);
             $by_app[$row->application_id]['email'] = $row->email;
-            $by_app[$row->application_id]['teams'][] = $row->team;
+            $by_app[$row->application_id]['teams'][] = array(
+                'team' => $row->team,
+                // Training Only verdicts finalise as training-only members
+                // (and pick up the cheaper training-only fee automatically).
+                'role' => $row->status === 'training_only' ? 'training_only' : 'playing_member',
+            );
         }
 
         $fees = new TeamOversight_Fees();
         $assignments_created = 0;
 
         foreach ($by_app as $application_id => $info) {
-            foreach ($info['teams'] as $team) {
+            foreach ($info['teams'] as $team_entry) {
                 // Only a playing assignment blocks creation — someone already
                 // on the team as coach/manager can still be added as a player.
                 $exists = $wpdb->get_var($wpdb->prepare("
                     SELECT id FROM {$wpdb->prefix}team_assignments
                     WHERE email = %s AND season = %s AND team = %s AND is_active = 1
                         AND role IN ('playing_member', 'training_only')
-                ", $info['email'], $season, $team));
+                ", $info['email'], $season, $team_entry['team']));
 
                 if (!$exists) {
                     $wpdb->insert(
@@ -246,8 +251,8 @@ class TeamOversight_Admin {
                             'user_id' => $info['user_id'],
                             'email' => $info['email'],
                             'season' => $season,
-                            'team' => $team,
-                            'role' => 'playing_member',
+                            'team' => $team_entry['team'],
+                            'role' => $team_entry['role'],
                             'registration_status' => 'active',
                             'start_date' => date('Y-m-d'),
                             'is_active' => 1
@@ -264,7 +269,9 @@ class TeamOversight_Admin {
                 $wpdb->prefix . 'trial_applications',
                 array(
                     'application_status' => 'accepted',
-                    'assigned_team' => implode(', ', $info['teams'])
+                    'assigned_team' => implode(', ', array_map(function ($t) {
+                        return $t['team'] . ($t['role'] === 'training_only' ? ' (T/O)' : '');
+                    }, $info['teams']))
                 ),
                 array('id' => $application_id),
                 array('%s', '%s'),
@@ -694,7 +701,7 @@ class TeamOversight_Admin {
             SELECT COUNT(DISTINCT s.application_id)
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
-            WHERE s.status = 'selected' AND a.season = %s AND a.application_status = 'pending'
+            WHERE s.status IN ('selected', 'training_only') AND a.season = %s AND a.application_status = 'pending'
         ", $season)));
 
         ?>
@@ -859,9 +866,10 @@ class TeamOversight_Admin {
                                     <?php if (!empty($selections_by_app[$trial->id])): ?>
                                         <br>
                                         <?php foreach ($selections_by_app[$trial->id] as $selection):
-                                            $chip_class = $selection->status === 'selected' ? 'status-accepted' : ($selection->status === 'tentative' ? 'status-pending' : 'status-rejected');
+                                            $chip_classes = array('selected' => 'status-accepted', 'training_only' => 'status-awaiting_payment', 'tentative' => 'status-pending', 'rejected' => 'status-rejected');
+                                            $chip_class = isset($chip_classes[$selection->status]) ? $chip_classes[$selection->status] : 'status-pending';
                                         ?>
-                                            <span class="<?php echo $chip_class; ?>" style="margin-right: 3px;"><?php echo esc_html($selection->team . ': ' . ucfirst($selection->status)); ?></span>
+                                            <span class="<?php echo $chip_class; ?>" style="margin-right: 3px;"><?php echo esc_html($selection->team . ': ' . ucwords(str_replace('_', ' ', $selection->status))); ?></span>
                                         <?php endforeach; ?>
                                     <?php endif; ?>
                                 </td>

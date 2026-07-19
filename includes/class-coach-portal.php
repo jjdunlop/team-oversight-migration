@@ -27,7 +27,16 @@ if (!defined('ABSPATH')) {
 class TeamOversight_Coach_Portal {
 
     const COACH_ROLES = "'coach', 'assistant_coach'";
-    const SELECTION_STATUSES = array('tentative', 'selected', 'rejected');
+    const SELECTION_STATUSES = array('tentative', 'selected', 'training_only', 'rejected');
+
+    public static function get_verdict_labels() {
+        return array(
+            'tentative' => 'Tentative',
+            'selected' => 'Selected',
+            'training_only' => 'Training Only',
+            'rejected' => 'Rejected',
+        );
+    }
 
     public function __construct() {
         add_shortcode('team_coach_portal', array($this, 'render'));
@@ -170,11 +179,13 @@ class TeamOversight_Coach_Portal {
                             <?php foreach ($selection_roster as $member): ?>
                                 <tr class="verdict-<?php echo esc_attr($member->status); ?>">
                                     <td data-label="Name"><?php echo esc_html($member->name); ?> <small>#<?php echo intval($member->trial_number); ?></small></td>
-                                    <td data-label="Role">Playing Member</td>
+                                    <td data-label="Role"><?php echo $member->status === 'training_only' ? 'Training Only' : 'Playing Member'; ?></td>
                                     <td data-label="Positions"><?php echo esc_html($this->format_positions($member->preferred_positions)); ?></td>
                                     <td data-label="Status">
                                         <?php if ($member->status === 'selected'): ?>
                                             <span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>
+                                        <?php elseif ($member->status === 'training_only'): ?>
+                                            <span class="verdict-chip verdict-chip-training_only">Training Only — awaiting finalisation</span>
                                         <?php else: ?>
                                             <span class="verdict-chip verdict-chip-tentative">Tentative</span>
                                         <?php endif; ?>
@@ -215,10 +226,12 @@ class TeamOversight_Coach_Portal {
                                     <span class="cac-number">#<?php echo intval($a['trial_number']); ?></span>
                                     <span class="cac-name"><?php echo $a['picked_mine'] ? '★ ' : ''; ?><?php echo esc_html($a['name']); ?></span>
                                     <span class="cac-chips">
+                                        <?php $verdict_labels = self::get_verdict_labels(); ?>
                                         <?php if (!empty($a['selections'])): ?>
                                             <?php foreach ($a['selections'] as $sel): ?>
-                                                <span class="verdict-chip verdict-chip-<?php echo esc_attr($sel['status']); ?>" title="<?php echo esc_attr($sel['team_name'] . ' — ' . ucfirst($sel['status'])); ?>">
-                                                    <?php echo esc_html($sel['team']); ?>: <?php echo esc_html(ucfirst($sel['status'])); ?>
+                                                <?php $sel_label = isset($verdict_labels[$sel['status']]) ? $verdict_labels[$sel['status']] : ucfirst($sel['status']); ?>
+                                                <span class="verdict-chip verdict-chip-<?php echo esc_attr($sel['status']); ?>" title="<?php echo esc_attr($sel['team_name'] . ' — ' . $sel_label); ?>">
+                                                    <?php echo esc_html($sel['team']); ?>: <?php echo esc_html($sel_label); ?>
                                                 </span>
                                             <?php endforeach; ?>
                                         <?php else: ?>
@@ -266,32 +279,22 @@ class TeamOversight_Coach_Portal {
                                         </details>
                                     </span>
                                     <span class="cac-actions">
-                                        <?php
-                                        $buttons = array('tentative' => 'Tentative', 'selected' => 'Select', 'rejected' => 'Reject');
-                                        foreach ($buttons as $status => $label):
-                                            if ($a['my_status'] === $status) { continue; }
-                                        ?>
-                                            <form method="post">
-                                                <input type="hidden" name="coach_action" value="set_selection">
-                                                <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
-                                                <input type="hidden" name="selection_status" value="<?php echo esc_attr($status); ?>">
-                                                <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
-                                                <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
-                                                <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                                                <button type="submit" class="button button-small"><?php echo esc_html($label); ?></button>
-                                            </form>
-                                        <?php endforeach; ?>
-                                        <?php if ($a['my_status']): ?>
-                                            <form method="post">
-                                                <input type="hidden" name="coach_action" value="set_selection">
-                                                <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
-                                                <input type="hidden" name="selection_status" value="clear">
-                                                <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
-                                                <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
-                                                <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                                                <button type="submit" class="button button-small">Clear</button>
-                                            </form>
-                                        <?php endif; ?>
+                                        <form method="post">
+                                            <input type="hidden" name="coach_action" value="set_selection">
+                                            <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
+                                            <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                            <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                            <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                                            <label class="cac-verdict-label">My verdict:
+                                                <select name="selection_status" onchange="this.form.submit()">
+                                                    <option value="clear" <?php selected($a['my_status'], ''); ?>>&mdash; None &mdash;</option>
+                                                    <?php foreach (self::get_verdict_labels() as $status_key => $status_label): ?>
+                                                        <option value="<?php echo esc_attr($status_key); ?>" <?php selected($a['my_status'], $status_key); ?>><?php echo esc_html($status_label); ?></option>
+                                                    <?php endforeach; ?>
+                                                </select>
+                                            </label>
+                                            <noscript><button type="submit" class="button button-small">Save</button></noscript>
+                                        </form>
                                     </span>
                                 </div>
                             </div>
@@ -397,6 +400,10 @@ class TeamOversight_Coach_Portal {
             background: #fff8e1;
         }
 
+        .coach-portal-table tr.verdict-training_only {
+            background: #f5faff;
+        }
+
         .coach-portal-table tr.verdict-rejected {
             background: #fbf0f0;
             opacity: 0.75;
@@ -414,6 +421,7 @@ class TeamOversight_Coach_Portal {
 
         .verdict-chip-selected { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .verdict-chip-tentative { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
+        .verdict-chip-training_only { background: #e7f5ff; color: #1864ab; border: 1px solid #74c0fc; }
         .verdict-chip-rejected { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .verdict-chip-confirmed { background: #e2e6ea; color: #1b1e21; border: 1px solid #c6c8ca; }
 
@@ -501,6 +509,7 @@ class TeamOversight_Coach_Portal {
 
         .coach-applicant-card.verdict-selected { border-left-color: #46b450; background: #f7fcf7; }
         .coach-applicant-card.verdict-tentative { border-left-color: #f0b429; background: #fffdf5; }
+        .coach-applicant-card.verdict-training_only { border-left-color: #339af0; background: #f5faff; }
         .coach-applicant-card.verdict-rejected { border-left-color: #dc3232; background: #fdf8f8; opacity: 0.8; }
 
         .cac-header {
@@ -701,6 +710,8 @@ class TeamOversight_Coach_Portal {
             return '';
         }
 
+        $verdict_labels = self::get_verdict_labels();
+
         $existing = $wpdb->get_var($wpdb->prepare("
             SELECT id FROM {$wpdb->prefix}team_trial_selections
             WHERE application_id = %d AND team = %s
@@ -724,7 +735,7 @@ class TeamOversight_Coach_Portal {
             ), array('%d', '%s', '%s', '%s', '%d'));
         }
 
-        return '<div class="coach-portal-success"><p>' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ') marked <strong>' . esc_html(ucfirst($status)) . '</strong> for ' . esc_html($team) . '.</p></div>';
+        return '<div class="coach-portal-success"><p>' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ') marked <strong>' . esc_html($verdict_labels[$status]) . '</strong> for ' . esc_html($team) . '.</p></div>';
     }
 
     // ------------------------------------------------------------------
@@ -777,11 +788,16 @@ class TeamOversight_Coach_Portal {
         }
 
         foreach ($selection_roster as $member) {
+            $status_labels = array(
+                'selected' => 'Selected (awaiting finalisation)',
+                'training_only' => 'Training Only (awaiting finalisation)',
+                'tentative' => 'Tentative',
+            );
             fputcsv($output, array(
                 $member->name,
-                'Playing Member',
+                $member->status === 'training_only' ? 'Training Only' : 'Playing Member',
                 $this->format_positions($member->preferred_positions),
-                $member->status === 'selected' ? 'Selected (awaiting finalisation)' : 'Tentative',
+                isset($status_labels[$member->status]) ? $status_labels[$member->status] : ucfirst($member->status),
                 $member->email,
                 $member->mobile ?: '',
             ));
@@ -843,9 +859,9 @@ class TeamOversight_Coach_Portal {
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
             LEFT JOIN {$wpdb->usermeta} um_mobile ON a.user_id = um_mobile.user_id AND um_mobile.meta_key = 'mobile_number'
             WHERE s.team = %s AND s.season = %s
-                AND s.status IN ('selected', 'tentative')
+                AND s.status IN ('selected', 'training_only', 'tentative')
                 AND a.application_status IN ('pending', 'accepted')
-            ORDER BY FIELD(s.status, 'selected', 'tentative'), a.trial_number
+            ORDER BY FIELD(s.status, 'selected', 'training_only', 'tentative'), a.trial_number
         ", $team_code, $season));
 
         // Skip anyone already confirmed in a PLAYING role. People confirmed
