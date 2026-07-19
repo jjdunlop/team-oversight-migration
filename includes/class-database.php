@@ -178,6 +178,29 @@ class TeamOversight_Database {
             ) $charset_collate;");
         }
 
+        // Fee payment ledger (added in 1.7.0): every payment applied to an
+        // invoice, whether from an online order or recorded manually.
+        $payments_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_invoice_payments'");
+        if (!$payments_exists) {
+            $charset_collate = $wpdb->get_charset_collate();
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta("CREATE TABLE {$wpdb->prefix}team_invoice_payments (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                invoice_id int(11) NOT NULL,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                order_id bigint(20) unsigned DEFAULT NULL,
+                order_item_id bigint(20) unsigned DEFAULT NULL,
+                amount decimal(10,2) NOT NULL,
+                source varchar(20) NOT NULL DEFAULT 'online',
+                note varchar(255) DEFAULT '',
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY invoice_id (invoice_id),
+                KEY user_id (user_id),
+                KEY order_item_id (order_item_id)
+            ) $charset_collate;");
+        }
+
         // Widen assigned_team so multi-team finalisation fits (added in 1.6.0).
         $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications MODIFY COLUMN assigned_team varchar(255) DEFAULT NULL");
 
@@ -276,7 +299,24 @@ class TeamOversight_Database {
                     KEY is_active (is_active)
                 ) $charset_collate;
             ",
-            'team_trial_selections' => "
+            'team_invoice_payments' => "
+            CREATE TABLE {$wpdb->prefix}team_invoice_payments (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                invoice_id int(11) NOT NULL,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                order_id bigint(20) unsigned DEFAULT NULL,
+                order_item_id bigint(20) unsigned DEFAULT NULL,
+                amount decimal(10,2) NOT NULL,
+                source varchar(20) NOT NULL DEFAULT 'online',
+                note varchar(255) DEFAULT '',
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY invoice_id (invoice_id),
+                KEY user_id (user_id),
+                KEY order_item_id (order_item_id)
+            ) $charset_collate;
+        ",
+        'team_trial_selections' => "
             CREATE TABLE {$wpdb->prefix}team_trial_selections (
                 id int(11) NOT NULL AUTO_INCREMENT,
                 application_id int(11) NOT NULL,

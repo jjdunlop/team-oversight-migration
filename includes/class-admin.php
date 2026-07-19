@@ -88,8 +88,8 @@ class TeamOversight_Admin {
         
         add_submenu_page(
             'team-oversight',
-            'Invoice Management',
-            'Invoice Management',
+            'Payment Management',
+            'Payment Management',
             'manage_options',
             'team-oversight-invoices',
             array($this, 'invoices_page')
@@ -308,7 +308,32 @@ class TeamOversight_Admin {
     }
     
     public function invoices_page() {
+        if (isset($_POST['action']) && $_POST['action'] === 'save_payment_settings') {
+            $this->save_payment_settings();
+        }
+
         $this->render_invoices_table();
+    }
+
+    private function save_payment_settings() {
+        if (!isset($_POST['payment_settings_nonce']) || !wp_verify_nonce($_POST['payment_settings_nonce'], 'save_payment_settings')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
+        $product_id = intval($_POST['payment_product']);
+        update_option(TeamOversight_Payments::PAYMENT_PRODUCT_OPTION, $product_id);
+
+        if ($product_id) {
+            echo '<div class="notice notice-success"><p>Payment product saved. Members can now pay any amount against their fees via the [member_fees] page.</p></div>';
+        } else {
+            echo '<div class="notice notice-success"><p>Online fee payment disabled.</p></div>';
+        }
     }
     
     public function fees_page() {
@@ -1237,21 +1262,71 @@ class TeamOversight_Admin {
         $database = new TeamOversight_Database();
         $teams = $database->get_teams();
         
+        // Payments ledger for this season's invoices, keyed by invoice.
+        $payments_by_invoice = array();
+        $payment_rows = $wpdb->get_results($wpdb->prepare("
+            SELECT p.invoice_id, p.amount, p.source, DATE(p.created_date) AS paid_date
+            FROM {$wpdb->prefix}team_invoice_payments p
+            JOIN {$wpdb->prefix}team_invoices i ON i.id = p.invoice_id
+            WHERE i.season = %s
+            ORDER BY p.created_date
+        ", $season));
+        foreach ($payment_rows as $payment) {
+            if (!isset($payments_by_invoice[$payment->invoice_id])) {
+                $payments_by_invoice[$payment->invoice_id] = array('count' => 0, 'lines' => array());
+            }
+            $payments_by_invoice[$payment->invoice_id]['count']++;
+            $payments_by_invoice[$payment->invoice_id]['lines'][] = $payment->paid_date . ': $' . number_format($payment->amount, 2) . ' (' . $payment->source . ')';
+        }
+
+        $season_dates = TeamOversight_Fees::get_season_dates($season);
+
         ?>
         <div class="wrap">
-            <h1>Invoice Management</h1>
-            
+            <h1>Payment Management</h1>
+
             <div class="season-filter">
                 <label for="season-select">Season:</label>
                 <select id="season-select" onchange="location.href=this.value;">
-                    <?php 
+                    <?php
                     $available_seasons = $this->get_available_seasons('main');
                     foreach ($available_seasons as $available_season): ?>
                         <option value="<?php echo admin_url('admin.php?page=team-oversight-invoices&season=' . $available_season); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
                     <?php endforeach; ?>
                 </select>
+                <?php if ($season_dates): ?>
+                    <span class="description" style="margin-left: 15px;">Season runs <?php echo esc_html($season_dates['start']); ?> &ndash; <?php echo esc_html($season_dates['end']); ?>; fees fall due linearly between these dates.</span>
+                <?php else: ?>
+                    <span class="description" style="margin-left: 15px; color: #996800;">No season dates set — nothing shows as overdue and pro-rata is off. Set them in <a href="<?php echo admin_url('admin.php?page=team-oversight-fees&season=' . $season); ?>">Configuration</a>.</span>
+                <?php endif; ?>
             </div>
-            
+
+            <details class="import-export-section" style="margin: 15px 0; padding: 10px 15px; background: #fff; border: 1px solid #ccd0d4;">
+                <summary style="cursor: pointer; font-weight: 600;">
+                    Payment settings — member payment product
+                    <?php $payment_product_id = intval(get_option(TeamOversight_Payments::PAYMENT_PRODUCT_OPTION)); ?>
+                    <?php if ($payment_product_id): ?>
+                        <span style="color: #1a7a2e;">(active: #<?php echo $payment_product_id; ?> <?php echo esc_html(get_the_title($payment_product_id)); ?>)</span>
+                    <?php else: ?>
+                        <span style="color: #996800;">(not set — members cannot pay online)</span>
+                    <?php endif; ?>
+                </summary>
+                <p class="description">The product used when members pay fees via the [member_fees] page. Its price is overridden with whatever amount the member chooses, so create a dedicated product (e.g. "Membership Fee Payment") with price 0 and select it here. Paid orders reduce the member's outstanding balance automatically.</p>
+                <form method="post">
+                    <select name="payment_product" style="max-width: 400px;">
+                        <option value="0">Disabled — no online fee payment</option>
+                        <?php
+                        $products = get_posts(array('post_type' => 'product', 'post_status' => 'publish', 'numberposts' => 500, 'orderby' => 'title', 'order' => 'ASC'));
+                        foreach ($products as $product_post): ?>
+                            <option value="<?php echo $product_post->ID; ?>" <?php selected($payment_product_id, $product_post->ID); ?>><?php echo esc_html($product_post->post_title); ?> (#<?php echo $product_post->ID; ?>)</option>
+                        <?php endforeach; ?>
+                    </select>
+                    <input type="submit" class="button button-primary" value="Save">
+                    <input type="hidden" name="action" value="save_payment_settings">
+                    <?php wp_nonce_field('save_payment_settings', 'payment_settings_nonce'); ?>
+                </form>
+            </details>
+
             <?php if (!empty($invoices)): ?>
                 <div class="invoices-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
                     <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
@@ -1288,10 +1363,11 @@ class TeamOversight_Admin {
                             <th>Email</th>
                             <th>Team</th>
                             <th>Fee Info</th>
-                            <th>Invoice Amount</th>
-                            <th>Outstanding Amount</th>
-                            <th>Invoice Number</th>
-                            <th>Created Date</th>
+                            <th>Season Fee</th>
+                            <th>Paid</th>
+                            <th>Outstanding</th>
+                            <th>Overdue</th>
+                            <th>Payments</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -1360,12 +1436,26 @@ class TeamOversight_Admin {
                                     <span class="display-value">$<?php echo number_format($invoice->invoice_amount, 2); ?></span>
                                     <input type="number" class="edit-value" value="<?php echo $invoice->invoice_amount; ?>" step="0.01" min="0" style="display: none; width: 80px;">
                                 </td>
+                                <td>$<?php echo number_format(max(0, $invoice->invoice_amount - $invoice->outstanding_amount), 2); ?></td>
                                 <td class="editable-outstanding-amount" data-field="outstanding_amount" data-value="<?php echo esc_attr($invoice->outstanding_amount); ?>">
                                     <span class="display-value">$<?php echo number_format($invoice->outstanding_amount, 2); ?></span>
                                     <input type="number" class="edit-value" value="<?php echo $invoice->outstanding_amount; ?>" step="0.01" min="0" style="display: none; width: 80px;">
                                 </td>
-                                <td><?php echo esc_html($invoice->invoice_reference); ?></td>
-                                <td><?php echo date('Y-m-d H:i', strtotime($invoice->created_date)); ?></td>
+                                <td>
+                                    <?php $overdue = TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season); ?>
+                                    <?php if ($overdue > 0): ?>
+                                        <span style="color: #a00; font-weight: 600;">$<?php echo number_format($overdue, 2); ?></span>
+                                    <?php else: ?>
+                                        &mdash;
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php if (!empty($payments_by_invoice[$invoice->id])): ?>
+                                        <span title="<?php echo esc_attr(implode("\n", $payments_by_invoice[$invoice->id]['lines'])); ?>" style="cursor: help; text-decoration: underline dotted;"><?php echo intval($payments_by_invoice[$invoice->id]['count']); ?></span>
+                                    <?php else: ?>
+                                        0
+                                    <?php endif; ?>
+                                </td>
                                 <td>
                                     <button type="button" class="button edit-invoice" onclick="editInvoice(this)">Edit</button>
                                     <button type="button" class="button button-primary save-invoice" onclick="saveInvoice(this)" style="display: none;">Save</button>

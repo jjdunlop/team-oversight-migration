@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Team Oversight
  * Description: MURVC club management - club membership tiers (Club Membership menu) and VVL team oversight: trials, assignments, fees and dashboard (VVL Oversight menu).
- * Version: 1.6.0
+ * Version: 1.7.0
  * Author: Team Management System
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.6.0');
+define('TEAM_OVERSIGHT_VERSION', '1.7.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -137,6 +137,23 @@ function team_oversight_create_tables() {
                 KEY order_item_id (order_item_id)
             ) $charset_collate;
         ",
+        'team_invoice_payments' => "
+            CREATE TABLE {$wpdb->prefix}team_invoice_payments (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                invoice_id int(11) NOT NULL,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                order_id bigint(20) unsigned DEFAULT NULL,
+                order_item_id bigint(20) unsigned DEFAULT NULL,
+                amount decimal(10,2) NOT NULL,
+                source varchar(20) NOT NULL DEFAULT 'online',
+                note varchar(255) DEFAULT '',
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY invoice_id (invoice_id),
+                KEY user_id (user_id),
+                KEY order_item_id (order_item_id)
+            ) $charset_collate;
+        ",
         'team_trial_selections' => "
             CREATE TABLE {$wpdb->prefix}team_trial_selections (
                 id int(11) NOT NULL AUTO_INCREMENT,
@@ -217,6 +234,7 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-memberships.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-members-page.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coach-portal.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-payments.php';
 
     // Initialize components
     new TeamOversight_Database();
@@ -226,6 +244,7 @@ function team_oversight_init() {
     new TeamOversight_Exports();
     new TeamOversight_Memberships();
     new TeamOversight_Coach_Portal();
+    new TeamOversight_Payments();
     
     // Initialize admin interface
     if (is_admin()) {

@@ -31,6 +31,48 @@ class TeamOversight_Fees {
         return array('gender' => $gender, 'age_rule' => $age_rule);
     }
     
+    /**
+     * Manually-entered season start/end dates (Configuration page), used
+     * for pro-rata fees and the payment schedule. Null until both are set.
+     */
+    public static function get_season_dates($season) {
+        $all = get_option('team_oversight_season_dates', array());
+        if (!empty($all[$season]['start']) && !empty($all[$season]['end'])) {
+            return $all[$season];
+        }
+        return null;
+    }
+
+    /**
+     * Pro-rata factor for a player's season fee: joined on/before the season
+     * start owes the full amount; joined later owes the fraction of the
+     * season remaining from their join date. 1.0 when no dates are set.
+     */
+    public static function get_pro_rata_factor($email, $season) {
+        $dates = self::get_season_dates($season);
+        if (!$dates) {
+            return 1.0;
+        }
+
+        global $wpdb;
+        $join = $wpdb->get_var($wpdb->prepare("
+            SELECT MIN(start_date) FROM {$wpdb->prefix}team_assignments
+            WHERE email = %s AND season = %s AND is_active = 1
+        ", $email, $season));
+
+        $join_ts = $join ? strtotime($join) : current_time('timestamp');
+        $start = strtotime($dates['start']);
+        $end = strtotime($dates['end']);
+
+        if ($end <= $start || $join_ts <= $start) {
+            return 1.0;
+        }
+        if ($join_ts >= $end) {
+            return 0.0;
+        }
+        return ($end - $join_ts) / ($end - $start);
+    }
+
     public function import_price_matrix($season = null) {
         global $wpdb;
         
@@ -285,6 +327,25 @@ class TeamOversight_Fees {
                 echo '<div class="notice notice-error"><p>Failed to import price matrix. Please check the file exists.</p></div>';
             }
         }
+
+        // Save season start/end dates
+        if (isset($_POST['action']) && $_POST['action'] === 'save_season_dates') {
+            if (isset($_POST['season_dates_nonce']) && wp_verify_nonce($_POST['season_dates_nonce'], 'save_season_dates') && current_user_can('manage_options')) {
+                $start = (isset($_POST['season_start']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_POST['season_start'])) ? $_POST['season_start'] : '';
+                $end = (isset($_POST['season_end']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_POST['season_end'])) ? $_POST['season_end'] : '';
+
+                if ($start && $end && $start < $end) {
+                    $all_dates = get_option('team_oversight_season_dates', array());
+                    $all_dates[$selected_season] = array('start' => $start, 'end' => $end);
+                    update_option('team_oversight_season_dates', $all_dates);
+                    echo '<div class="notice notice-success"><p>Season dates saved for ' . esc_html($selected_season) . ': ' . esc_html($start) . ' &ndash; ' . esc_html($end) . '. Pro-rata fees and the payment schedule now use these dates.</p></div>';
+                } else {
+                    echo '<div class="notice notice-error"><p>Please provide valid dates with the start before the end.</p></div>';
+                }
+            } else {
+                echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            }
+        }
         
         $fee_matrix = $this->get_fee_matrix_for_season($selected_season);
         
@@ -310,6 +371,27 @@ class TeamOversight_Fees {
                 <p><strong>Configuration for <?php echo esc_html($selected_season); ?> Season</strong> - Each season has its own independent fee structure and team settings.</p>
             </div>
             
+            <!-- Season Dates -->
+            <?php $season_dates = self::get_season_dates($selected_season); ?>
+            <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; margin-bottom: 20px;">
+                <h2 style="margin-top: 0;">Season Dates</h2>
+                <p class="description">Used for pro-rata fees (players confirmed after the start owe the remaining fraction of the season) and the payment schedule (fees fall due linearly between these dates, driving the "overdue" amount members see).</p>
+                <form method="post">
+                    <label>Season start
+                        <input type="date" name="season_start" value="<?php echo esc_attr($season_dates ? $season_dates['start'] : ''); ?>" required>
+                    </label>
+                    <label style="margin-left: 15px;">Season end
+                        <input type="date" name="season_end" value="<?php echo esc_attr($season_dates ? $season_dates['end'] : ''); ?>" required>
+                    </label>
+                    <input type="hidden" name="action" value="save_season_dates">
+                    <?php wp_nonce_field('save_season_dates', 'season_dates_nonce'); ?>
+                    <input type="submit" class="button button-primary" value="Save Season Dates" style="margin-left: 15px;">
+                    <?php if (!$season_dates): ?>
+                        <span class="description" style="margin-left: 10px; color: #996800;">No dates set — fees are charged in full and nothing shows as overdue.</span>
+                    <?php endif; ?>
+                </form>
+            </div>
+
             <!-- Configuration Content with Side-by-Side Layout -->
             <div style="display: flex; gap: 30px; align-items: flex-start;">
                 
@@ -922,7 +1004,10 @@ class TeamOversight_Fees {
         
         // Apply minimum fee rule - user pays the LOWEST fee across all their roles
         $minimum_fee = min($applicable_fees);
-        
+
+        // Pro-rata: mid-season joiners owe the remaining fraction of the season.
+        $minimum_fee = round($minimum_fee * self::get_pro_rata_factor($email, $season), 2);
+
         // Create single invoice for all assignments
         $user = get_user_by('email', $email);
         $name = $user ? $user->display_name : $email;
@@ -1003,7 +1088,8 @@ class TeamOversight_Fees {
         
         if (!empty($applicable_fees)) {
             $minimum_fee = min($applicable_fees);
-            
+            $minimum_fee = round($minimum_fee * self::get_pro_rata_factor($email, $season), 2);
+
             // Update existing invoice with new minimum fee if it's different
             $current_invoice = $wpdb->get_row($wpdb->prepare("
                 SELECT invoice_amount, outstanding_amount FROM {$wpdb->prefix}team_invoices 
