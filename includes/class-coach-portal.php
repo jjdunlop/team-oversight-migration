@@ -112,6 +112,7 @@ class TeamOversight_Coach_Portal {
         $teams_config = $database->get_teams_config();
         $active_config = isset($teams_config[$active_team]) ? $teams_config[$active_team] : array('name' => $active_team, 'gender' => 'mixed', 'age_rule' => '');
         $roster = $this->get_roster($active_team, $season);
+        $selection_roster = $this->get_selection_roster($active_team, $season, $roster);
         $applicants = $this->get_applicants_by_gender($active_config['gender'], $season, $active_team, $my_team_codes);
 
         $base_url = remove_query_arg(array('coach_team', 'coach_season'));
@@ -151,15 +152,31 @@ class TeamOversight_Coach_Portal {
             <div class="coach-team-section">
                 <h3><?php echo esc_html($active_config['name']); ?> <small>(<?php echo esc_html($season); ?> — you are <?php echo esc_html(str_replace('_', ' ', $my_teams[$active_team])); ?>)</small></h3>
 
-                <h4>Current Team (<?php echo count($roster); ?>)</h4>
-                <?php if (!empty($roster)): ?>
+                <h4>Current Team (<?php echo count($roster); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?>)</h4>
+                <?php if (!empty($roster) || !empty($selection_roster)): ?>
                     <table class="coach-portal-table">
-                        <thead><tr><th>Name</th><th>Role</th><th>Email</th><th>Mobile</th></tr></thead>
+                        <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Email</th><th>Mobile</th></tr></thead>
                         <tbody>
                             <?php foreach ($roster as $member): ?>
                                 <tr>
                                     <td><?php echo esc_html($member->name ?: $member->email); ?></td>
                                     <td><?php echo esc_html(str_replace('_', ' ', ucwords($member->role, '_'))); ?></td>
+                                    <td><span class="verdict-chip verdict-chip-confirmed">Confirmed</span></td>
+                                    <td><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
+                                    <td><?php echo esc_html($member->mobile ?: ''); ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                            <?php foreach ($selection_roster as $member): ?>
+                                <tr class="verdict-<?php echo esc_attr($member->status); ?>">
+                                    <td><?php echo esc_html($member->name); ?> <small>#<?php echo intval($member->trial_number); ?></small></td>
+                                    <td>Playing Member</td>
+                                    <td>
+                                        <?php if ($member->status === 'selected'): ?>
+                                            <span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>
+                                        <?php else: ?>
+                                            <span class="verdict-chip verdict-chip-tentative">Tentative</span>
+                                        <?php endif; ?>
+                                    </td>
                                     <td><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
                                     <td><?php echo esc_html($member->mobile ?: ''); ?></td>
                                 </tr>
@@ -407,6 +424,7 @@ class TeamOversight_Coach_Portal {
         .verdict-chip-selected { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .verdict-chip-tentative { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
         .verdict-chip-rejected { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .verdict-chip-confirmed { background: #e2e6ea; color: #1b1e21; border: 1px solid #c6c8ca; }
 
         .coach-app-details summary {
             cursor: pointer;
@@ -565,6 +583,7 @@ class TeamOversight_Coach_Portal {
         }
 
         $roster = $this->get_roster($team, $season);
+        $selection_roster = $this->get_selection_roster($team, $season, $roster);
 
         $filename = 'team_list_' . sanitize_file_name($team) . "_{$season}.csv";
 
@@ -576,12 +595,23 @@ class TeamOversight_Coach_Portal {
         $output = fopen('php://output', 'w');
         // UTF-8 BOM so Excel reads accents/dashes correctly.
         fwrite($output, "\xEF\xBB\xBF");
-        fputcsv($output, array('Name', 'Role', 'Email', 'Mobile'));
+        fputcsv($output, array('Name', 'Role', 'Status', 'Email', 'Mobile'));
 
         foreach ($roster as $member) {
             fputcsv($output, array(
                 $member->name ?: $member->email,
                 str_replace('_', ' ', ucwords($member->role, '_')),
+                'Confirmed',
+                $member->email,
+                $member->mobile ?: '',
+            ));
+        }
+
+        foreach ($selection_roster as $member) {
+            fputcsv($output, array(
+                $member->name,
+                'Playing Member',
+                $member->status === 'selected' ? 'Selected (awaiting finalisation)' : 'Tentative',
                 $member->email,
                 $member->mobile ?: '',
             ));
@@ -608,6 +638,32 @@ class TeamOversight_Coach_Portal {
             WHERE ta.team = %s AND ta.season = %s AND ta.is_active = 1
             ORDER BY FIELD(ta.role, 'coach', 'assistant_coach', 'team_manager', 'playing_member', 'training_only', 'supporter'), u.display_name
         ", $team_code, $season));
+    }
+
+    /**
+     * Selection-board players for a team (tentative + selected verdicts)
+     * who aren't already on the confirmed roster.
+     */
+    private function get_selection_roster($team_code, $season, $roster) {
+        global $wpdb;
+
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT s.status, a.name, a.email, a.trial_number, a.user_id,
+                um_mobile.meta_value AS mobile
+            FROM {$wpdb->prefix}team_trial_selections s
+            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+            LEFT JOIN {$wpdb->usermeta} um_mobile ON a.user_id = um_mobile.user_id AND um_mobile.meta_key = 'mobile_number'
+            WHERE s.team = %s AND s.season = %s
+                AND s.status IN ('selected', 'tentative')
+                AND a.application_status IN ('pending', 'accepted')
+            ORDER BY FIELD(s.status, 'selected', 'tentative'), a.trial_number
+        ", $team_code, $season));
+
+        // Skip anyone already confirmed on the roster.
+        $roster_emails = array_map('strtolower', wp_list_pluck($roster, 'email'));
+        return array_values(array_filter($rows, function ($row) use ($roster_emails) {
+            return !in_array(strtolower($row->email), $roster_emails, true);
+        }));
     }
 
     /**
