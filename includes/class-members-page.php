@@ -67,7 +67,7 @@ class TeamOversight_Members_Page {
                         <tr>
                             <th><label for="grant_tier">Tier</label></th>
                             <td>
-                                <select name="grant_tier" required>
+                                <select name="grant_tier" id="grant_tier" required>
                                     <?php foreach ($tiers as $slug => $label): ?>
                                         <option value="<?php echo esc_attr($slug); ?>"><?php echo esc_html($label); ?></option>
                                     <?php endforeach; ?>
@@ -76,7 +76,10 @@ class TeamOversight_Members_Page {
                         </tr>
                         <tr>
                             <th><label for="grant_end_date">Valid Until</label></th>
-                            <td><input type="date" name="grant_end_date" value="<?php echo date('Y-m-d', strtotime('+12 months')); ?>" required></td>
+                            <td>
+                                <input type="date" name="grant_end_date" id="grant_end_date" value="<?php echo date('Y-m-d', strtotime('+12 months')); ?>" required>
+                                <p class="description" id="grant-life-note" style="display: none;">Life memberships don't expire — the date is set to <?php echo esc_html(TeamOversight_Memberships::PERMANENT_END); ?> and shown as "no expiry".</p>
+                            </td>
                         </tr>
                         <tr>
                             <th><label for="grant_note">Note</label></th>
@@ -154,6 +157,7 @@ class TeamOversight_Members_Page {
                         <label for="filter-membership">Membership:</label>
                         <select id="filter-membership">
                             <option value="">All</option>
+                            <option value="life">Life Member</option>
                             <option value="full">Full Member</option>
                             <option value="associate">Associate Member</option>
                             <option value="none">No Membership</option>
@@ -347,6 +351,18 @@ class TeamOversight_Members_Page {
                 if (!e.target.closest('#grant_user_email') && !e.target.closest('#grant-email-suggestions')) {
                     document.getElementById('grant-email-suggestions').style.display = 'none';
                 }
+            });
+
+            // Life memberships never expire — auto-fill the sentinel date.
+            document.getElementById('grant_tier').addEventListener('change', function() {
+                const isLife = this.value === '<?php echo TeamOversight_Memberships::TIER_LIFE; ?>';
+                const dateInput = document.getElementById('grant_end_date');
+                if (isLife) {
+                    dateInput.value = '<?php echo TeamOversight_Memberships::PERMANENT_END; ?>';
+                } else if (dateInput.value === '<?php echo TeamOversight_Memberships::PERMANENT_END; ?>') {
+                    dateInput.value = '<?php echo date('Y-m-d', strtotime('+12 months')); ?>';
+                }
+                document.getElementById('grant-life-note').style.display = isLife ? '' : 'none';
             });
             </script>
         </div>
@@ -548,9 +564,11 @@ class TeamOversight_Members_Page {
             $where = "
                 WHERE caps.meta_value LIKE %s
                     OR caps.meta_value LIKE %s
+                    OR caps.meta_value LIKE %s
                     OR mem.user_id IS NOT NULL
                     OR teams.email IS NOT NULL
             ";
+            $params[] = '%"life-member"%';
             $params[] = '%"full-member"%';
             $params[] = '%"associate-member"%';
         }
@@ -629,19 +647,27 @@ class TeamOversight_Members_Page {
                         }
                     }
                 }
-                if (isset($active[TeamOversight_Memberships::TIER_FULL])) {
+                if (isset($active[TeamOversight_Memberships::TIER_LIFE])) {
+                    $ledger_tier = TeamOversight_Memberships::TIER_LIFE;
+                } elseif (isset($active[TeamOversight_Memberships::TIER_FULL])) {
                     $ledger_tier = TeamOversight_Memberships::TIER_FULL;
                 } elseif (isset($active[TeamOversight_Memberships::TIER_ASSOCIATE])) {
                     $ledger_tier = TeamOversight_Memberships::TIER_ASSOCIATE;
                 }
                 if ($ledger_tier) {
                     $ledger_until = $active[$ledger_tier];
+                    // Life-member sentinel dates display as "no expiry".
+                    if ($ledger_until >= TeamOversight_Memberships::PERMANENT_FROM) {
+                        $ledger_until = '';
+                    }
                 }
             }
 
             // Fall back to role-only status (stop-gap assignments with no ledger row).
             $role_tier = null;
-            if (in_array(TeamOversight_Memberships::TIER_FULL, $roles, true)) {
+            if (in_array(TeamOversight_Memberships::TIER_LIFE, $roles, true)) {
+                $role_tier = TeamOversight_Memberships::TIER_LIFE;
+            } elseif (in_array(TeamOversight_Memberships::TIER_FULL, $roles, true)) {
                 $role_tier = TeamOversight_Memberships::TIER_FULL;
             } elseif (in_array(TeamOversight_Memberships::TIER_ASSOCIATE, $roles, true)) {
                 $role_tier = TeamOversight_Memberships::TIER_ASSOCIATE;
@@ -652,7 +678,10 @@ class TeamOversight_Members_Page {
 
             $status_key = 'none';
             $status_sort = 0;
-            if ($effective_tier === TeamOversight_Memberships::TIER_FULL) {
+            if ($effective_tier === TeamOversight_Memberships::TIER_LIFE) {
+                $status_key = 'life';
+                $status_sort = 3;
+            } elseif ($effective_tier === TeamOversight_Memberships::TIER_FULL) {
                 $status_key = 'full';
                 $status_sort = 2;
             } elseif ($effective_tier === TeamOversight_Memberships::TIER_ASSOCIATE) {

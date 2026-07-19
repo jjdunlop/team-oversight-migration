@@ -30,7 +30,7 @@ A comprehensive volleyball club management system for WordPress with Ultimate Me
 - **Fee Calculation**: Automatic fee calculation based on MUS category and team role
 - **Multi-Role Support**: Players can have multiple roles across different teams
 - **Payment Tracking**: Track invoice amounts and outstanding balances per member
-- **Membership Tiers**: Time-bound Full/Associate memberships granted automatically by WooCommerce purchases (per-product or per-category tier + term), with manual grants, revocation, and automatic role sync/expiry
+- **Membership Tiers**: Time-bound Full/Associate memberships granted automatically by WooCommerce purchases (per-product or per-category tier + term), plus manually-granted non-expiring Life memberships; manual grants, revocation, and automatic role sync/expiry throughout
 - **Members Page**: One row per person — membership status and expiry, profile data, teams, fees owing, accreditation — filterable, sortable, CSV-exportable
 - **Accreditation Management**: Import and track RevSport accreditation data
 - **Oversight Dashboard**: Comprehensive view of MUS data, payments, accreditations, and team lists

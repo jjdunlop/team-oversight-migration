@@ -21,8 +21,13 @@ if (!defined('ABSPATH')) {
  */
 class TeamOversight_Memberships {
 
+    const TIER_LIFE = 'life-member';
     const TIER_FULL = 'full-member';
     const TIER_ASSOCIATE = 'associate-member';
+
+    // End dates on/after this are treated as "never expires" (life members).
+    const PERMANENT_FROM = '2099-01-01';
+    const PERMANENT_END = '2099-12-31';
 
     const PRODUCT_TIER_META = '_murvc_membership_tier';
     const PRODUCT_TERM_META = '_murvc_membership_term_months';
@@ -51,9 +56,65 @@ class TeamOversight_Memberships {
         // Tier/term fields on the product edit screen.
         add_action('woocommerce_product_options_general_product_data', array($this, 'render_product_fields'));
         add_action('woocommerce_process_product_meta', array($this, 'save_product_fields'));
+
+        // Membership badge on UM profiles. Supersedes the WPCode snippet of
+        // the same name — delete that snippet once this version is live.
+        add_shortcode('murvc_member_role', array($this, 'render_member_role_shortcode'));
+    }
+
+    /**
+     * Shows the profile user's membership tier (highest role they hold),
+     * falling back to other known roles.
+     */
+    public function render_member_role_shortcode() {
+        $uid = 0;
+        if (function_exists('um_profile_id')) {
+            $uid = um_profile_id();
+        }
+        if (!$uid && function_exists('um_get_requested_user')) {
+            $uid = um_get_requested_user();
+        }
+        if (!$uid) {
+            $uid = get_current_user_id();
+        }
+        if (!$uid) {
+            return '';
+        }
+
+        $user = get_userdata($uid);
+        if (!$user) {
+            return '';
+        }
+        $roles = (array) $user->roles;
+
+        $labels = self::get_tiers() + array(
+            'non-member' => 'Non-Member',
+            'administrator' => 'Administrator',
+            'shop_manager' => 'Committee',
+            'customer' => 'Member',
+        );
+
+        foreach ($labels as $slug => $label) {
+            if (in_array($slug, $roles, true)) {
+                return '<span class="murvc-member-role">' . esc_html($label) . '</span>';
+            }
+        }
+        return '';
     }
 
     public static function get_tiers() {
+        return array(
+            self::TIER_LIFE => 'Life Member',
+            self::TIER_FULL => 'Full Member',
+            self::TIER_ASSOCIATE => 'Associate Member',
+        );
+    }
+
+    /**
+     * Tiers a product purchase can grant. Life membership is bestowed by the
+     * club, not bought, so it is manual-grant only.
+     */
+    public static function get_purchasable_tiers() {
         return array(
             self::TIER_FULL => 'Full Member',
             self::TIER_ASSOCIATE => 'Associate Member',
@@ -61,6 +122,9 @@ class TeamOversight_Memberships {
     }
 
     public function register_roles() {
+        if (!get_role(self::TIER_LIFE)) {
+            add_role(self::TIER_LIFE, 'Life Member', array('read' => true));
+        }
         if (!get_role(self::TIER_FULL)) {
             add_role(self::TIER_FULL, 'Full Member', array('read' => true));
         }
@@ -96,7 +160,7 @@ class TeamOversight_Memberships {
             'desc_tip' => true,
             'options' => array_merge(
                 array('' => 'None — no membership granted'),
-                self::get_tiers()
+                self::get_purchasable_tiers()
             ),
         ));
 
@@ -116,7 +180,7 @@ class TeamOversight_Memberships {
         $tier = isset($_POST[self::PRODUCT_TIER_META]) ? sanitize_text_field($_POST[self::PRODUCT_TIER_META]) : '';
         $months = isset($_POST[self::PRODUCT_TERM_META]) ? intval($_POST[self::PRODUCT_TERM_META]) : 0;
 
-        if ($tier && array_key_exists($tier, self::get_tiers())) {
+        if ($tier && array_key_exists($tier, self::get_purchasable_tiers())) {
             update_post_meta($post_id, self::PRODUCT_TIER_META, $tier);
         } else {
             delete_post_meta($post_id, self::PRODUCT_TIER_META);
@@ -138,7 +202,7 @@ class TeamOversight_Memberships {
         $tier = get_post_meta($product_id, self::PRODUCT_TIER_META, true);
         $months = intval(get_post_meta($product_id, self::PRODUCT_TERM_META, true));
 
-        if ($tier && $months > 0 && array_key_exists($tier, self::get_tiers())) {
+        if ($tier && $months > 0 && array_key_exists($tier, self::get_purchasable_tiers())) {
             return array('tier' => $tier, 'months' => $months);
         }
 
@@ -162,7 +226,7 @@ class TeamOversight_Memberships {
                 'tier' => $rules[$term->term_id]['tier'],
                 'months' => intval($rules[$term->term_id]['months']),
             );
-            if (!array_key_exists($candidate['tier'], self::get_tiers()) || $candidate['months'] < 1) {
+            if (!array_key_exists($candidate['tier'], self::get_purchasable_tiers()) || $candidate['months'] < 1) {
                 continue;
             }
             if ($best === null
@@ -176,6 +240,9 @@ class TeamOversight_Memberships {
     }
 
     private function tier_rank($tier) {
+        if ($tier === self::TIER_LIFE) {
+            return 3;
+        }
         return $tier === self::TIER_FULL ? 2 : ($tier === self::TIER_ASSOCIATE ? 1 : 0);
     }
 
@@ -303,6 +370,7 @@ class TeamOversight_Memberships {
         // snippet, so strip tier roles even if the user had no ledger rows.
         $user = get_userdata($user_id);
         if ($user) {
+            $user->remove_role(self::TIER_LIFE);
             $user->remove_role(self::TIER_FULL);
             $user->remove_role(self::TIER_ASSOCIATE);
         }
@@ -319,6 +387,9 @@ class TeamOversight_Memberships {
             WHERE user_id = %d AND start_date <= CURDATE() AND end_date >= CURDATE()
         ", $user_id));
 
+        if (in_array(self::TIER_LIFE, $tiers, true)) {
+            return self::TIER_LIFE;
+        }
         if (in_array(self::TIER_FULL, $tiers, true)) {
             return self::TIER_FULL;
         }
