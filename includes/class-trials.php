@@ -132,15 +132,48 @@ class TeamOversight_Trials {
         $user = wp_get_current_user();
         $database = new TeamOversight_Database();
         $fees = new TeamOversight_Fees();
-        
+
         // Calculate MUS status and validate profile
         $mus_status = $fees->determine_fee_class($user->user_email);
         $profile_validation = $this->validate_user_profile($user->ID);
-        
+
+        // Their most recent live application, so the trial number is always
+        // findable by revisiting this page.
+        global $wpdb;
+        $my_application = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}trial_applications
+            WHERE user_id = %d AND season >= %s
+                AND application_status IN ('awaiting_payment', 'pending', 'accepted')
+            ORDER BY created_date DESC
+            LIMIT 1
+        ", $user->ID, date('Y')));
+
         ob_start();
         ?>
         <div id="trial-application-form">
             <h3>Trial Application Form</h3>
+
+            <?php if ($my_application): ?>
+                <div class="trial-status-panel">
+                    <div class="trial-number-badge">
+                        <span class="trial-number-label">Your Trial Number</span>
+                        <span class="trial-number-value">#<?php echo intval($my_application->trial_number); ?></span>
+                    </div>
+                    <div class="trial-status-text">
+                        <?php if ($my_application->application_status === 'awaiting_payment'): ?>
+                            <p><strong>Your <?php echo esc_html($my_application->season); ?> application has been received but is awaiting payment.</strong> Submit the form below again to return to the checkout, or contact the club if you believe you have already paid.</p>
+                        <?php elseif ($my_application->application_status === 'accepted'): ?>
+                            <?php
+                            $assigned_config = $database->get_teams_config();
+                            $assigned_name = isset($assigned_config[$my_application->assigned_team]) ? $assigned_config[$my_application->assigned_team]['name'] : $my_application->assigned_team;
+                            ?>
+                            <p><strong>Congratulations — you've been assigned to <?php echo esc_html($assigned_name); ?> for <?php echo esc_html($my_application->season); ?>.</strong></p>
+                        <?php else: ?>
+                            <p><strong>Your <?php echo esc_html($my_application->season); ?> trial application is confirmed.</strong> When trials are busy, a coach may ask you for your trial number to speed things up — many players write it on their hand or arm on the day.</p>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            <?php endif; ?>
             
             <!-- MUS Status Display Section -->
             <div id="mus-status-section" class="mus-status-container">
@@ -682,6 +715,44 @@ class TeamOversight_Trials {
             margin: 0;
         }
 
+        .trial-status-panel {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            background: #f0f7f0;
+            border: 2px solid #46b450;
+            border-radius: 8px;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+        }
+
+        .trial-number-badge {
+            text-align: center;
+            background: #46b450;
+            color: #fff;
+            border-radius: 8px;
+            padding: 10px 18px;
+            flex-shrink: 0;
+        }
+
+        .trial-number-label {
+            display: block;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .trial-number-value {
+            display: block;
+            font-size: 28px;
+            font-weight: bold;
+            line-height: 1.2;
+        }
+
+        .trial-status-text p {
+            margin: 0;
+        }
+
         .team-option.team-ineligible {
             opacity: 0.5;
         }
@@ -944,7 +1015,17 @@ class TeamOversight_Trials {
                 array('%d')
             );
             $application_id = ($updated !== false) ? intval($awaiting_id) : 0;
+            $trial_number = intval($wpdb->get_var($wpdb->prepare("
+                SELECT trial_number FROM {$wpdb->prefix}trial_applications WHERE id = %d
+            ", $awaiting_id)));
         } else {
+            // Assign the next per-season trial number at submission time.
+            $trial_number = intval($wpdb->get_var($wpdb->prepare("
+                SELECT MAX(trial_number) FROM {$wpdb->prefix}trial_applications WHERE season = %s
+            ", $season))) + 1;
+            $application_data['trial_number'] = $trial_number;
+            $application_formats[] = '%d';
+
             $inserted = $wpdb->insert($wpdb->prefix . 'trial_applications', $application_data, $application_formats);
             $application_id = $inserted ? intval($wpdb->insert_id) : 0;
         }
@@ -954,7 +1035,7 @@ class TeamOversight_Trials {
         }
 
         if (!$fee_product) {
-            wp_send_json_success(array('message' => 'Your trial application has been submitted successfully! You will be contacted regarding team assignments.'));
+            wp_send_json_success(array('message' => 'Your trial application has been submitted successfully! Your trial number is <strong>#' . $trial_number . '</strong> — a coach may ask you for it at trials, so make a note of it (it is also shown whenever you revisit this page). You will be contacted regarding team assignments.'));
         }
 
         $checkout_url = $this->add_fee_to_cart($fee_product, $application_id);
@@ -964,7 +1045,7 @@ class TeamOversight_Trials {
         }
 
         wp_send_json_success(array(
-            'message' => 'Application saved! Taking you to the checkout to pay the trial fee&hellip;',
+            'message' => 'Application saved — your trial number is <strong>#' . $trial_number . '</strong>. Taking you to the checkout to pay the trial fee&hellip;',
             'redirect' => $checkout_url
         ));
     }

@@ -144,6 +144,7 @@ function team_oversight_create_tables() {
                 email varchar(255) NOT NULL,
                 name varchar(255) NOT NULL,
                 season varchar(10) NOT NULL,
+                trial_number int(11) DEFAULT NULL,
                 interested_teams text NOT NULL,
                 preferred_positions text NOT NULL,
                 is_transfer_player tinyint(1) DEFAULT 0,

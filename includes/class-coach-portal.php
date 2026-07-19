@@ -93,7 +93,6 @@ class TeamOversight_Coach_Portal {
                 <?php
                 $team_name = isset($teams_config[$team_code]) ? $teams_config[$team_code]['name'] : $team_code;
                 $roster = $this->get_roster($team_code, $season);
-                $applicants = $this->get_applicants($team_code, $season);
                 ?>
                 <div class="coach-team-section">
                     <h3><?php echo esc_html($team_name); ?> <small>(<?php echo esc_html($season); ?> — you are <?php echo esc_html(str_replace('_', ' ', $coach_role)); ?>)</small></h3>
@@ -116,20 +115,51 @@ class TeamOversight_Coach_Portal {
                     <?php else: ?>
                         <p>No active members assigned yet.</p>
                     <?php endif; ?>
+                </div>
+            <?php endforeach; ?>
 
-                    <h4>Trial Applicants (<?php echo count($applicants); ?>)</h4>
+            <?php
+            // Applicant pools are gender-wide, not per-team: players are
+            // sometimes redirected between trials, and borderline-age players
+            // can attend with a VV exemption — coaches need to see everyone
+            // in their competition. Applicants who picked one of the coach's
+            // teams sort first.
+            $my_team_codes = array_keys($my_teams);
+            $genders_coached = array();
+            foreach ($my_team_codes as $code) {
+                $g = isset($teams_config[$code]) ? $teams_config[$code]['gender'] : 'mixed';
+                if ($g === 'mixed') {
+                    $genders_coached['mens'] = true;
+                    $genders_coached['womens'] = true;
+                } else {
+                    $genders_coached[$g] = true;
+                }
+            }
+            ?>
+
+            <?php foreach (array_keys($genders_coached) as $gender): ?>
+                <?php
+                $applicants = $this->get_applicants_by_gender($gender, $season, $my_team_codes);
+                $gender_label = $gender === 'mens' ? "Men's" : "Women's";
+                ?>
+                <div class="coach-team-section">
+                    <h3>Trial Applicants — <?php echo esc_html($gender_label); ?> (<?php echo count($applicants); ?>)</h3>
+                    <p class="coach-portal-hint">All <?php echo esc_html(strtolower($gender_label)); ?> applicants for <?php echo esc_html($season); ?> are shown — including players outside your team's age group or who selected other teams, since players are sometimes redirected between trials and VV can grant age exemptions. Those who selected your team<?php echo count($my_team_codes) > 1 ? 's' : ''; ?> (★) are listed first.</p>
+
                     <?php if (!empty($applicants)): ?>
                         <table class="coach-portal-table">
-                            <thead><tr><th>Name</th><th>Age</th><th>Positions</th><th>Status</th><th>Details</th></tr></thead>
+                            <thead><tr><th style="width: 60px;">Trial #</th><th>Name</th><th style="width: 45px;">Age</th><th>Positions</th><th>Teams Selected</th><th>Status</th><th>Details</th></tr></thead>
                             <tbody>
                                 <?php foreach ($applicants as $applicant): ?>
-                                    <tr>
+                                    <tr<?php echo $applicant['picked_mine'] ? ' class="picked-my-team"' : ''; ?>>
+                                        <td><strong>#<?php echo intval($applicant['trial_number']); ?></strong></td>
                                         <td>
-                                            <?php echo esc_html($applicant['name']); ?><br>
+                                            <?php echo $applicant['picked_mine'] ? '★ ' : ''; ?><?php echo esc_html($applicant['name']); ?><br>
                                             <small><a href="mailto:<?php echo esc_attr($applicant['email']); ?>"><?php echo esc_html($applicant['email']); ?></a></small>
                                         </td>
                                         <td><?php echo esc_html($applicant['age']); ?></td>
                                         <td><?php echo esc_html($applicant['positions']); ?></td>
+                                        <td title="<?php echo esc_attr($applicant['teams_selected_names']); ?>"><?php echo esc_html($applicant['teams_selected']); ?></td>
                                         <td>
                                             <?php echo esc_html($applicant['status']); ?>
                                             <?php if ($applicant['assigned_team']): ?><br><small>→ <?php echo esc_html($applicant['assigned_team']); ?></small><?php endif; ?>
@@ -154,7 +184,7 @@ class TeamOversight_Coach_Portal {
                             </tbody>
                         </table>
                     <?php else: ?>
-                        <p>No trial applications for this team yet.</p>
+                        <p>No trial applications yet.</p>
                     <?php endif; ?>
                 </div>
             <?php endforeach; ?>
@@ -213,6 +243,15 @@ class TeamOversight_Coach_Portal {
             margin: 0;
             color: #444;
         }
+
+        .coach-portal-hint {
+            color: #666;
+            font-size: 13px;
+        }
+
+        .coach-portal-table tr.picked-my-team {
+            background: #f0f7f0;
+        }
         </style>
         <?php
         return ob_get_clean();
@@ -234,24 +273,46 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
-     * Paid/reviewable trial applications that selected this team.
-     * interested_teams is a JSON array of team codes.
+     * All paid/reviewable applicants in a competition (mens/womens) for a
+     * season. Applicant competition comes from their stored answer, falling
+     * back to profile gender; applicants whose competition can't be
+     * determined are included in both pools rather than hidden.
+     * Sorted with those who selected one of the coach's teams first.
      */
-    private function get_applicants($team_code, $season) {
+    private function get_applicants_by_gender($gender, $season, $my_team_codes) {
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}trial_applications
             WHERE season = %s
                 AND application_status IN ('pending', 'accepted')
-                AND interested_teams LIKE %s
-            ORDER BY created_date DESC
-        ", $season, '%' . $wpdb->esc_like('"' . $team_code . '"') . '%'));
+            ORDER BY trial_number
+        ", $season));
 
         $positions = TeamOversight_Trials::get_position_options();
+        $database = new TeamOversight_Database();
+        $teams_config = $database->get_teams_config();
 
         $applicants = array();
         foreach ($rows as $row) {
+            // Which competition is this applicant in?
+            $comp = null;
+            $form_data = $row->form_data ? json_decode($row->form_data, true) : array();
+            if (!empty($form_data['Trialling For'])) {
+                if (stripos($form_data['Trialling For'], 'wom') === 0) {
+                    $comp = 'womens';
+                } elseif (stripos($form_data['Trialling For'], 'men') === 0) {
+                    $comp = 'mens';
+                }
+            }
+            if ($comp === null) {
+                $profile = TeamOversight_Trials::get_competition_from_profile($row->user_id);
+                $comp = $profile['competition'];
+            }
+            if ($comp !== null && $comp !== $gender) {
+                continue;
+            }
+
             $age = '';
             $birth_date = get_user_meta($row->user_id, 'birth_date', true);
             if ($birth_date) {
@@ -266,16 +327,37 @@ class TeamOversight_Coach_Portal {
                 return isset($positions[$key]) ? $positions[$key] : $key;
             }, $position_keys);
 
+            $selected_codes = json_decode($row->interested_teams, true) ?: array();
+            $picked_mine = (bool) array_intersect($selected_codes, $my_team_codes);
+
+            $selected_display = array();
+            $selected_names = array();
+            foreach ($selected_codes as $code) {
+                $selected_display[] = (in_array($code, $my_team_codes, true) ? '★' : '') . $code;
+                $selected_names[] = isset($teams_config[$code]) ? $teams_config[$code]['name'] : $code;
+            }
+
             $applicants[] = array(
+                'trial_number' => intval($row->trial_number),
                 'name' => $row->name,
                 'email' => $row->email,
                 'age' => $age,
                 'positions' => implode(', ', $position_labels),
+                'teams_selected' => implode(', ', $selected_display),
+                'teams_selected_names' => implode(', ', $selected_names),
+                'picked_mine' => $picked_mine,
                 'status' => ucwords(str_replace('_', ' ', $row->application_status)),
                 'assigned_team' => $row->assigned_team ?: '',
-                'form_data' => $row->form_data ? json_decode($row->form_data, true) : array(),
+                'form_data' => $form_data,
             );
         }
+
+        usort($applicants, function ($a, $b) {
+            if ($a['picked_mine'] !== $b['picked_mine']) {
+                return $a['picked_mine'] ? -1 : 1;
+            }
+            return $a['trial_number'] - $b['trial_number'];
+        });
 
         return $applicants;
     }

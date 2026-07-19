@@ -678,6 +678,7 @@ class TeamOversight_Admin {
                             <th style="width: 40px;">
                                 <input type="checkbox" id="select-all-trials" title="Select all visible trials">
                             </th>
+                            <th style="width: 55px;">Trial #</th>
                             <th>Name</th>
                             <th>Email</th>
                             <th>Interested Teams</th>
@@ -701,6 +702,7 @@ class TeamOversight_Admin {
                                         <input type="checkbox" class="trial-checkbox" value="<?php echo $trial->id; ?>" data-email="<?php echo esc_attr($trial->email); ?>" data-season="<?php echo esc_attr($trial->season); ?>">
                                     <?php endif; ?>
                                 </td>
+                                <td><strong>#<?php echo intval($trial->trial_number); ?></strong></td>
                                 <td><?php echo esc_html($trial->name); ?></td>
                                 <td><?php echo esc_html($trial->email); ?></td>
                                 <td>
@@ -789,7 +791,7 @@ class TeamOversight_Admin {
                             </tr>
                             <?php if (!empty($form_data)): ?>
                                 <tr class="trial-details-row" id="trial-details-<?php echo $trial->id; ?>" style="display: none;">
-                                    <td colspan="9" style="background: #f8f9fa; padding: 15px 25px;">
+                                    <td colspan="10" style="background: #f8f9fa; padding: 15px 25px;">
                                         <table class="trial-details-table">
                                             <?php foreach ($form_data as $question => $answer): ?>
                                                 <?php if ($answer !== '' && $answer !== null): ?>

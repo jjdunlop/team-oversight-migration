@@ -78,6 +78,30 @@ class TeamOversight_Database {
             $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications ADD COLUMN form_data longtext DEFAULT NULL AFTER is_transfer_player");
         }
 
+        // Add trial_number to trial_applications (added in 1.5.0): a per-season
+        // sequential number players can write on themselves at trials.
+        $trial_number_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}trial_applications LIKE 'trial_number'");
+        if (empty($trial_number_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications ADD COLUMN trial_number int(11) DEFAULT NULL AFTER season");
+
+            // Backfill existing applications sequentially per season.
+            $existing = $wpdb->get_results("
+                SELECT id, season FROM {$wpdb->prefix}trial_applications
+                ORDER BY season, created_date, id
+            ");
+            $counters = array();
+            foreach ($existing as $row) {
+                $counters[$row->season] = isset($counters[$row->season]) ? $counters[$row->season] + 1 : 1;
+                $wpdb->update(
+                    $wpdb->prefix . 'trial_applications',
+                    array('trial_number' => $counters[$row->season]),
+                    array('id' => $row->id),
+                    array('%d'),
+                    array('%d')
+                );
+            }
+        }
+
         // Key assignments and invoices by user ID so email changes don't break
         // linkage (added in 1.3.0). Email is kept as a display/import snapshot.
         foreach (array('team_assignments', 'team_invoices') as $table) {
@@ -225,7 +249,8 @@ class TeamOversight_Database {
                     email varchar(255) NOT NULL,
                     name varchar(255) NOT NULL,
                     season varchar(10) NOT NULL,
-                    interested_teams text NOT NULL,
+                    trial_number int(11) DEFAULT NULL,
+                interested_teams text NOT NULL,
                     preferred_positions text NOT NULL,
                     is_transfer_player tinyint(1) DEFAULT 0,
                 form_data longtext DEFAULT NULL,
