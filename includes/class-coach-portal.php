@@ -237,7 +237,7 @@ class TeamOversight_Coach_Portal {
                     $sections = array(
                         array('Applied to your team — awaiting your verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and you haven\'t recorded a verdict yet.'),
                         array('Applied to your team — verdict recorded', $actioned, ''),
-                        array('Everyone else in this competition', $others, 'Applicants who didn\'t select your team — shown because players get redirected between trials and VV can grant age exemptions.'),
+                        array('Other applicants', $others, 'Applicants who didn\'t select your team — shown because players get redirected between trials and VV can grant age exemptions.'),
                     );
                     ?>
                     <div id="coach-applicant-list">
@@ -257,7 +257,14 @@ class TeamOversight_Coach_Portal {
 
                                 <div class="cac-meta">
                                     <a href="mailto:<?php echo esc_attr($a['email']); ?>"><?php echo esc_html($a['email']); ?></a>
-                                    <?php if ($a['age'] !== ''): ?> &middot; Age <?php echo esc_html($a['age']); ?><?php endif; ?>
+                                    <?php if ($a['age'] !== ''): ?>
+                                        &middot;
+                                        <?php if (!empty($a['age_flag'])): ?>
+                                            <span class="cac-age-flag">Age <?php echo esc_html($a['age']); ?> (born <?php echo esc_html($a['dob_display']); ?>) — over the <?php echo esc_html($a['age_rule_label']); ?> limit for this team; VV exemption required</span>
+                                        <?php else: ?>
+                                            Age <?php echo esc_html($a['age']); ?>
+                                        <?php endif; ?>
+                                    <?php endif; ?>
                                     <?php if ($a['positions']): ?> &middot; <?php echo esc_html($a['positions']); ?><?php endif; ?>
                                     &middot; <span title="<?php echo esc_attr($a['teams_selected_names']); ?>">Applied for: <?php echo esc_html($a['teams_selected']); ?></span>
                                 </div>
@@ -566,6 +573,11 @@ class TeamOversight_Coach_Portal {
             font-size: 13px;
             color: #555;
             margin: 4px 0;
+        }
+
+        .cac-age-flag {
+            color: #a00;
+            font-weight: 600;
         }
 
         .cac-footer {
@@ -960,6 +972,11 @@ class TeamOversight_Coach_Portal {
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config();
 
+        // The active team's DOB cutoff, so over-age applicants are flagged
+        // (they can still be selected — VV can grant exemptions).
+        $active_age_rule = isset($teams_config[$active_team]) ? $teams_config[$active_team]['age_rule'] : '';
+        $age_cutoff = $active_age_rule ? TeamOversight_Database::get_dob_cutoff($active_age_rule, $season) : null;
+
         $selections_by_app = array();
         foreach ($selection_rows as $sel) {
             $selections_by_app[$sel->application_id][] = array(
@@ -999,11 +1016,17 @@ class TeamOversight_Coach_Portal {
             }
 
             $age = '';
+            $dob_display = '';
+            $age_flag = false;
             $birth_date = get_user_meta($row->user_id, 'birth_date', true);
             if ($birth_date) {
                 $birth_ts = strtotime(str_replace('/', '-', $birth_date));
                 if ($birth_ts) {
                     $age = (new DateTime('@' . $birth_ts))->diff(new DateTime())->y;
+                    $dob_display = date('d/m/Y', $birth_ts);
+                    if ($age_cutoff && date('Y-m-d', $birth_ts) < $age_cutoff) {
+                        $age_flag = true;
+                    }
                 }
             }
 
@@ -1036,6 +1059,9 @@ class TeamOversight_Coach_Portal {
                 'name' => $row->name,
                 'email' => $row->email,
                 'age' => $age,
+                'dob_display' => $dob_display,
+                'age_flag' => $age_flag,
+                'age_rule_label' => strtoupper($active_age_rule),
                 'positions' => implode(', ', $position_labels),
                 'teams_selected' => implode(', ', $selected_display),
                 'teams_selected_names' => implode(', ', $selected_names),
