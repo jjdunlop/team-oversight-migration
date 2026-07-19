@@ -298,29 +298,41 @@ class TeamOversight_Readiness {
         }
 
         $user = wp_get_current_user();
-        $season = date('Y');
+
+        // Selections for NEXT season happen during the current year (trials
+        // run pre-season), so check the current season and the next one and
+        // render a panel for each the player is selected in.
+        $current_year = intval(date('Y'));
+        $seasons = array((string) $current_year, (string) ($current_year + 1));
 
         // Manual tick/untick.
         if (isset($_POST['murvc_rtp_toggle'], $_POST['murvc_rtp_nonce'])
             && wp_verify_nonce($_POST['murvc_rtp_nonce'], 'murvc_rtp')) {
             $step = sanitize_text_field($_POST['murvc_rtp_toggle']);
-            if (in_array($step, array('vv', 'kit'), true)) {
-                $manual = get_user_meta($user->ID, 'murvc_rtp_' . $season, true);
+            $toggle_season = isset($_POST['murvc_rtp_season']) ? sanitize_text_field($_POST['murvc_rtp_season']) : $seasons[0];
+            if (in_array($step, array('vv', 'kit'), true) && in_array($toggle_season, $seasons, true)) {
+                $manual = get_user_meta($user->ID, 'murvc_rtp_' . $toggle_season, true);
                 $manual = is_array($manual) ? $manual : array();
                 if (in_array($step, $manual, true)) {
                     $manual = array_values(array_diff($manual, array($step)));
                 } else {
                     $manual[] = $step;
                 }
-                update_user_meta($user->ID, 'murvc_rtp_' . $season, $manual);
+                update_user_meta($user->ID, 'murvc_rtp_' . $toggle_season, $manual);
             }
         }
 
-        $checklist = self::compute($user, $season);
-        if ($checklist === null) {
-            return '';
+        $output = '';
+        foreach ($seasons as $season) {
+            $checklist = self::compute($user, $season);
+            if ($checklist !== null) {
+                $output .= $this->render_panel($season, $checklist);
+            }
         }
+        return $output;
+    }
 
+    private function render_panel($season, $checklist) {
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config();
         $team_names = array_map(function ($code) use ($teams_config) {
@@ -368,6 +380,7 @@ class TeamOversight_Readiness {
                             <?php if (!empty($step['manual']) && empty($step['auto_done'])): ?>
                                 <form method="post" style="display: inline;">
                                     <input type="hidden" name="murvc_rtp_toggle" value="<?php echo esc_attr($step_key); ?>">
+                                    <input type="hidden" name="murvc_rtp_season" value="<?php echo esc_attr($season); ?>">
                                     <?php wp_nonce_field('murvc_rtp', 'murvc_rtp_nonce'); ?>
                                     <?php if ($step['done']): ?>
                                         <button type="submit" class="button rtp-untick">Undo — not done yet</button>
