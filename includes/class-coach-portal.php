@@ -161,41 +161,104 @@ class TeamOversight_Coach_Portal {
             <div class="coach-team-section">
                 <h3><?php echo esc_html($active_config['name']); ?> <small>(<?php echo esc_html($season); ?> — you are <?php echo esc_html(str_replace('_', ' ', $my_teams[$active_team])); ?>)</small></h3>
 
-                <h4>Current Team (<?php echo count($roster); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?>)</h4>
-                <?php if (!empty($roster) || !empty($selection_roster)): ?>
+                <?php
+                // Staff stay a compact table; players render as cards like
+                // the applicant list, so a selection visually "moves" the
+                // same card into the team.
+                $staff = array();
+                $confirmed_players = array();
+                foreach ($roster as $member) {
+                    if (in_array($member->role, array('playing_member', 'training_only'), true)) {
+                        $confirmed_players[] = $member;
+                    } else {
+                        $staff[] = $member;
+                    }
+                }
+                ?>
+
+                <h4>Coaching Staff (<?php echo count($staff); ?>)</h4>
+                <?php if (!empty($staff)): ?>
                     <table class="coach-portal-table coach-roster-table">
-                        <thead><tr><th>Name</th><th>Role</th><th>Positions</th><th>Status</th><th>Email</th><th>Mobile</th></tr></thead>
+                        <thead><tr><th>Name</th><th>Role</th><th>Email</th><th>Mobile</th></tr></thead>
                         <tbody>
-                            <?php foreach ($roster as $member): ?>
+                            <?php foreach ($staff as $member): ?>
                                 <tr>
                                     <td data-label="Name"><?php echo esc_html($member->name ?: $member->email); ?></td>
                                     <td data-label="Role"><?php echo esc_html(str_replace('_', ' ', ucwords($member->role, '_'))); ?></td>
-                                    <td data-label="Positions"><?php echo esc_html($this->format_positions($member->preferred_positions)); ?></td>
-                                    <td data-label="Status"><span class="verdict-chip verdict-chip-confirmed">Confirmed</span></td>
-                                    <td data-label="Email"><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
-                                    <td data-label="Mobile"><?php echo esc_html($member->mobile ?: ''); ?></td>
-                                </tr>
-                            <?php endforeach; ?>
-                            <?php foreach ($selection_roster as $member): ?>
-                                <tr class="verdict-<?php echo esc_attr($member->status); ?>">
-                                    <td data-label="Name"><?php echo esc_html($member->name); ?> <small>#<?php echo intval($member->trial_number); ?></small></td>
-                                    <td data-label="Role"><?php echo $member->status === 'training_only' ? 'Training Only' : 'Playing Member'; ?></td>
-                                    <td data-label="Positions"><?php echo esc_html($this->format_positions($member->preferred_positions)); ?></td>
-                                    <td data-label="Status">
-                                        <?php if ($member->status === 'selected'): ?>
-                                            <span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>
-                                        <?php elseif ($member->status === 'training_only'): ?>
-                                            <span class="verdict-chip verdict-chip-training_only">Training Only — awaiting finalisation</span>
-                                        <?php else: ?>
-                                            <span class="verdict-chip verdict-chip-tentative">Tentative</span>
-                                        <?php endif; ?>
-                                    </td>
                                     <td data-label="Email"><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
                                     <td data-label="Mobile"><?php echo esc_html($member->mobile ?: ''); ?></td>
                                 </tr>
                             <?php endforeach; ?>
                         </tbody>
                     </table>
+                <?php else: ?>
+                    <p>No coaching staff assigned yet.</p>
+                <?php endif; ?>
+
+                <h4>Players (<?php echo count($confirmed_players); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?>)</h4>
+                <?php if (!empty($confirmed_players) || !empty($selection_roster)): ?>
+                    <?php foreach ($confirmed_players as $member): ?>
+                        <div class="coach-applicant-card">
+                            <div class="cac-header">
+                                <span class="cac-name"><?php echo esc_html($member->name ?: $member->email); ?></span>
+                                <span class="cac-chips">
+                                    <span class="verdict-chip verdict-chip-confirmed">Confirmed<?php echo $member->role === 'training_only' ? ' — Training Only' : ''; ?></span>
+                                </span>
+                            </div>
+                            <div class="cac-meta">
+                                <a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a>
+                                <?php if ($member->mobile): ?> &middot; <?php echo esc_html($member->mobile); ?><?php endif; ?>
+                                <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+
+                    <?php foreach ($selection_roster as $member): ?>
+                        <div class="coach-applicant-card verdict-<?php echo esc_attr($member->status); ?>">
+                            <div class="cac-header">
+                                <span class="cac-number">#<?php echo intval($member->trial_number); ?></span>
+                                <span class="cac-name"><?php echo esc_html($member->name); ?></span>
+                                <span class="cac-chips">
+                                    <?php if ($member->status === 'selected'): ?>
+                                        <span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>
+                                    <?php elseif ($member->status === 'training_only'): ?>
+                                        <span class="verdict-chip verdict-chip-training_only">Training Only — awaiting finalisation</span>
+                                    <?php else: ?>
+                                        <span class="verdict-chip verdict-chip-tentative">Tentative</span>
+                                    <?php endif; ?>
+                                </span>
+                            </div>
+                            <div class="cac-meta">
+                                <a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a>
+                                <?php if ($member->mobile): ?> &middot; <?php echo esc_html($member->mobile); ?><?php endif; ?>
+                                <?php if (!empty($member->age_flag)): ?>
+                                    &middot; <span class="cac-age-flag">Age <?php echo esc_html($member->age); ?> (born <?php echo esc_html($member->dob_display); ?>) — over the <?php echo esc_html($member->rule_label); ?> limit for this team; VV exemption required</span>
+                                <?php endif; ?>
+                                <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
+                            </div>
+                            <div class="cac-footer">
+                                <span class="cac-actions">
+                                    <form method="post">
+                                        <input type="hidden" name="coach_action" value="set_selection">
+                                        <input type="hidden" name="application_id" value="<?php echo intval($member->application_id); ?>">
+                                        <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                        <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                        <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                                        <label class="cac-verdict-label">My verdict:
+                                            <select name="selection_status" onchange="this.form.submit()">
+                                                <option value="clear">&mdash; None &mdash;</option>
+                                                <?php foreach (self::get_verdict_labels() as $status_key => $status_label): ?>
+                                                    <option value="<?php echo esc_attr($status_key); ?>" <?php selected($member->status, $status_key); ?>><?php echo esc_html($status_label); ?></option>
+                                                <?php endforeach; ?>
+                                            </select>
+                                        </label>
+                                        <noscript><button type="submit" class="button button-small">Save</button></noscript>
+                                    </form>
+                                </span>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+
                     <form method="post">
                         <input type="hidden" name="coach_action" value="export_roster">
                         <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
@@ -204,7 +267,7 @@ class TeamOversight_Coach_Portal {
                         <button type="submit" class="button">Export team list (CSV)</button>
                     </form>
                 <?php else: ?>
-                    <p>No active members assigned yet.</p>
+                    <p>No players yet — record verdicts below to build your team.</p>
                 <?php endif; ?>
             </div>
 
@@ -907,7 +970,7 @@ class TeamOversight_Coach_Portal {
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT s.status, a.name, a.email, a.trial_number, a.user_id, a.preferred_positions,
+            SELECT s.status, s.application_id, a.name, a.email, a.trial_number, a.user_id, a.preferred_positions,
                 um_mobile.meta_value AS mobile
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
@@ -927,9 +990,34 @@ class TeamOversight_Coach_Portal {
                 $playing_emails[] = strtolower($member->email);
             }
         }
-        return array_values(array_filter($rows, function ($row) use ($playing_emails) {
+        $rows = array_values(array_filter($rows, function ($row) use ($playing_emails) {
             return !in_array(strtolower($row->email), $playing_emails, true);
         }));
+
+        // Carry the over-age flag into the team list so a tentatively
+        // selected over-age player stays visibly exemption-dependent.
+        $database = new TeamOversight_Database();
+        $teams_config = $database->get_teams_config();
+        $age_rule = isset($teams_config[$team_code]) ? $teams_config[$team_code]['age_rule'] : '';
+        $cutoff = $age_rule ? TeamOversight_Database::get_dob_cutoff($age_rule, $season) : null;
+
+        foreach ($rows as $row) {
+            $row->age_flag = false;
+            $row->age = '';
+            $row->dob_display = '';
+            $row->rule_label = strtoupper($age_rule);
+            if ($cutoff) {
+                $birth_date = get_user_meta($row->user_id, 'birth_date', true);
+                $birth_ts = $birth_date ? strtotime(str_replace('/', '-', $birth_date)) : false;
+                if ($birth_ts && date('Y-m-d', $birth_ts) < $cutoff) {
+                    $row->age_flag = true;
+                    $row->age = (new DateTime('@' . $birth_ts))->diff(new DateTime())->y;
+                    $row->dob_display = date('d/m/Y', $birth_ts);
+                }
+            }
+        }
+
+        return $rows;
     }
 
     /**
