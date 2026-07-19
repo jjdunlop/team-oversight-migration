@@ -171,6 +171,9 @@ class TeamOversight_Admin {
         $product_id = intval($_POST['trial_fee_product']);
         update_option('team_oversight_trial_fee_product', $product_id);
 
+        $training_url = isset($_POST['training_info_url']) ? esc_url_raw(trim($_POST['training_info_url'])) : '';
+        update_option('team_oversight_training_info_url', $training_url);
+
         if ($product_id) {
             echo '<div class="notice notice-success"><p>Trial fee product saved. New applications will be sent to checkout to pay before review.</p></div>';
         } else {
@@ -552,7 +555,7 @@ class TeamOversight_Admin {
             <?php $trial_fee_product_id = intval(get_option('team_oversight_trial_fee_product')); ?>
             <details class="import-export-section" style="margin: 15px 0; padding: 10px 15px; background: #fff; border: 1px solid #ccd0d4;">
                 <summary style="cursor: pointer; font-weight: 600;">
-                    Trial fee product
+                    Trial settings — fee product
                     <?php if ($trial_fee_product_id): ?>
                         <span style="color: #1a7a2e;">(active: #<?php echo $trial_fee_product_id; ?> <?php echo esc_html(get_the_title($trial_fee_product_id)); ?>)</span>
                     <?php else: ?>
@@ -575,9 +578,16 @@ class TeamOversight_Admin {
                             <option value="<?php echo $product_post->ID; ?>" <?php selected($trial_fee_product_id, $product_post->ID); ?>><?php echo esc_html($product_post->post_title); ?> (#<?php echo $product_post->ID; ?>)</option>
                         <?php endforeach; ?>
                     </select>
-                    <input type="submit" class="button button-primary" value="Save">
-                    <input type="hidden" name="action" value="save_trial_settings">
-                    <?php wp_nonce_field('save_trial_settings', 'trial_settings_nonce'); ?>
+                    <p style="margin: 12px 0 0 0;">
+                        <label for="training_info_url"><strong>Training info page URL</strong></label><br>
+                        <input type="url" name="training_info_url" id="training_info_url" value="<?php echo esc_attr(get_option('team_oversight_training_info_url')); ?>" style="width: 420px;" placeholder="https://members.renegades.com.au/training-times/">
+                        <span class="description">Linked at the top of the trial form so players can pick teams by training venue and day. Leave empty to hide the link.</span>
+                    </p>
+                    <p>
+                        <input type="submit" class="button button-primary" value="Save Trial Settings">
+                        <input type="hidden" name="action" value="save_trial_settings">
+                        <?php wp_nonce_field('save_trial_settings', 'trial_settings_nonce'); ?>
+                    </p>
                 </form>
             </details>
 

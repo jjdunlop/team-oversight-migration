@@ -13,6 +13,19 @@ class TeamOversight_Fees {
         add_action('wp_ajax_save_team', array($this, 'save_team'));
         add_action('wp_ajax_update_team', array($this, 'update_team'));
         add_action('wp_ajax_delete_team', array($this, 'delete_team'));
+        add_action('wp_ajax_reset_default_teams', array($this, 'reset_default_teams'));
+    }
+
+    /**
+     * Sanitized gender + age-limit meta from a team save/update request.
+     */
+    private function get_posted_team_meta() {
+        $gender = isset($_POST['team_gender']) ? sanitize_text_field($_POST['team_gender']) : 'mixed';
+        if (!in_array($gender, array('mens', 'womens', 'mixed'), true)) {
+            $gender = 'mixed';
+        }
+        $max_age = isset($_POST['team_max_age']) ? max(0, min(99, intval($_POST['team_max_age']))) : 0;
+        return array('gender' => $gender, 'max_age' => $max_age);
     }
     
     public function import_price_matrix($season = null) {
@@ -377,7 +390,24 @@ class TeamOversight_Fees {
                                     </tr>
                                     <tr>
                                         <th><label for="team-name">Team Name</label></th>
-                                        <td><input type="text" id="team-name" name="team_name" placeholder="e.g. Premier League Division 1 Men" style="width: 300px;" required></td>
+                                        <td><input type="text" id="team-name" name="team_name" placeholder="e.g. Melbourne University Renegades Blue" style="width: 300px;" required></td>
+                                    </tr>
+                                    <tr>
+                                        <th><label for="team-gender">Gender</label></th>
+                                        <td>
+                                            <select id="team-gender" name="team_gender">
+                                                <option value="mens">Men's</option>
+                                                <option value="womens">Women's</option>
+                                                <option value="mixed">Mixed / Open</option>
+                                            </select>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <th><label for="team-max-age">Age Limit</label></th>
+                                        <td>
+                                            <input type="number" id="team-max-age" name="team_max_age" min="0" max="99" placeholder="0" style="width: 70px;">
+                                            <span class="description">Under-X on 31 Dec of the season year; 0 or blank = open age</span>
+                                        </td>
                                     </tr>
                                 </table>
                                 <p style="margin: 15px 0 0 0;">
@@ -393,22 +423,37 @@ class TeamOversight_Fees {
                             <table class="wp-list-table widefat fixed striped" style="margin-top: 10px;">
                                 <thead>
                                     <tr>
-                                        <th style="width: 120px;">Team Code</th>
+                                        <th style="width: 100px;">Team Code</th>
                                         <th>Team Name</th>
+                                        <th style="width: 90px;">Gender</th>
+                                        <th style="width: 80px;">Age Limit</th>
                                         <th style="width: 140px;">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="teams-tbody">
-                                    <?php 
+                                    <?php
                                     $database = new TeamOversight_Database();
-                                    $teams = $database->get_teams();
-                                    foreach ($teams as $code => $name): 
+                                    $teams_config = $database->get_teams_config();
+                                    $gender_labels = array('mens' => "Men's", 'womens' => "Women's", 'mixed' => 'Mixed');
+                                    foreach ($teams_config as $code => $team):
                                     ?>
                                         <tr data-team-code="<?php echo esc_attr($code); ?>">
                                             <td><strong><?php echo esc_html($code); ?></strong></td>
                                             <td class="team-name-cell">
-                                                <span class="display-value"><?php echo esc_html($name); ?></span>
-                                                <input type="text" class="edit-value" value="<?php echo esc_attr($name); ?>" style="display: none; width: 100%;">
+                                                <span class="display-value"><?php echo esc_html($team['name']); ?></span>
+                                                <input type="text" class="edit-value" value="<?php echo esc_attr($team['name']); ?>" style="display: none; width: 100%;">
+                                            </td>
+                                            <td class="team-gender-cell">
+                                                <span class="display-value"><?php echo esc_html($gender_labels[$team['gender']]); ?></span>
+                                                <select class="edit-value" style="display: none;">
+                                                    <option value="mens" <?php selected($team['gender'], 'mens'); ?>>Men's</option>
+                                                    <option value="womens" <?php selected($team['gender'], 'womens'); ?>>Women's</option>
+                                                    <option value="mixed" <?php selected($team['gender'], 'mixed'); ?>>Mixed</option>
+                                                </select>
+                                            </td>
+                                            <td class="team-age-cell">
+                                                <span class="display-value"><?php echo $team['max_age'] ? 'U' . intval($team['max_age']) : 'Open'; ?></span>
+                                                <input type="number" class="edit-value" value="<?php echo intval($team['max_age']); ?>" min="0" max="99" style="display: none; width: 60px;">
                                             </td>
                                             <td>
                                                 <button type="button" class="button button-small edit-team-btn" onclick="editTeam('<?php echo esc_js($code); ?>')">Edit</button>
@@ -420,6 +465,10 @@ class TeamOversight_Fees {
                                     <?php endforeach; ?>
                                 </tbody>
                             </table>
+                            <p style="margin-top: 15px;">
+                                <button type="button" class="button" onclick="resetDefaultTeams()">Load default club team list</button>
+                                <span class="description">Replaces all teams above with the plugin's current default list (with gender + age limits). Existing team assignments keep their old codes.</span>
+                            </p>
                         </div>
                     </div>
                 </div>
@@ -470,16 +519,20 @@ class TeamOversight_Fees {
         function saveTeam() {
             const teamCode = document.getElementById('team-code').value.trim();
             const teamName = document.getElementById('team-name').value.trim();
-            
+            const teamGender = document.getElementById('team-gender').value;
+            const teamMaxAge = document.getElementById('team-max-age').value || '0';
+
             if (!teamCode || !teamName) {
                 alert('Please fill in both team code and team name.');
                 return;
             }
-            
+
             const formData = new FormData();
             formData.append('action', 'save_team');
             formData.append('team_code', teamCode);
             formData.append('team_name', teamName);
+            formData.append('team_gender', teamGender);
+            formData.append('team_max_age', teamMaxAge);
             formData.append('team_nonce', '<?php echo wp_create_nonce('save_team'); ?>');
             
             const statusDiv = document.getElementById('team-save-status');
@@ -499,9 +552,10 @@ class TeamOversight_Fees {
                     // Reset form
                     document.getElementById('team-code').value = '';
                     document.getElementById('team-name').value = '';
-                    
+                    document.getElementById('team-max-age').value = '';
+
                     // Add new row to teams table
-                    addTeamRow(teamCode, teamName);
+                    addTeamRow(teamCode, teamName, teamGender, parseInt(teamMaxAge, 10) || 0);
                 } else {
                     statusDiv.textContent = '✗ Error: ' + (data.data || 'Unknown error');
                     statusDiv.style.color = '#dc3232';
@@ -514,7 +568,8 @@ class TeamOversight_Fees {
             });
         }
         
-        function addTeamRow(code, name) {
+        function addTeamRow(code, name, gender, maxAge) {
+            const genderLabels = {mens: "Men's", womens: "Women's", mixed: 'Mixed'};
             const tbody = document.getElementById('teams-tbody');
             const newRow = document.createElement('tr');
             newRow.setAttribute('data-team-code', code);
@@ -523,6 +578,18 @@ class TeamOversight_Fees {
                 <td class="team-name-cell">
                     <span class="display-value">${escapeHtml(name)}</span>
                     <input type="text" class="edit-value" value="${escapeHtml(name)}" style="display: none; width: 100%;">
+                </td>
+                <td class="team-gender-cell">
+                    <span class="display-value">${genderLabels[gender] || gender}</span>
+                    <select class="edit-value" style="display: none;">
+                        <option value="mens"${gender === 'mens' ? ' selected' : ''}>Men's</option>
+                        <option value="womens"${gender === 'womens' ? ' selected' : ''}>Women's</option>
+                        <option value="mixed"${gender === 'mixed' ? ' selected' : ''}>Mixed</option>
+                    </select>
+                </td>
+                <td class="team-age-cell">
+                    <span class="display-value">${maxAge ? 'U' + maxAge : 'Open'}</span>
+                    <input type="number" class="edit-value" value="${maxAge}" min="0" max="99" style="display: none; width: 60px;">
                 </td>
                 <td>
                     <button type="button" class="button button-small edit-team-btn" onclick="editTeam('${escapeHtml(code)}')">Edit</button>
@@ -533,61 +600,45 @@ class TeamOversight_Fees {
             `;
             tbody.appendChild(newRow);
         }
-        
+
         function editTeam(teamCode) {
             const row = document.querySelector(`tr[data-team-code="${teamCode}"]`);
-            const nameCell = row.querySelector('.team-name-cell');
-            const displayValue = nameCell.querySelector('.display-value');
-            const editValue = nameCell.querySelector('.edit-value');
-            const editBtn = row.querySelector('.edit-team-btn');
-            const saveBtn = row.querySelector('.save-team-btn');
-            const cancelBtn = row.querySelector('.cancel-team-btn');
-            
-            displayValue.style.display = 'none';
-            editValue.style.display = 'block';
-            editBtn.style.display = 'none';
-            saveBtn.style.display = 'inline-block';
-            cancelBtn.style.display = 'inline-block';
-            
-            editValue.focus();
+            row.querySelectorAll('.display-value').forEach(el => el.style.display = 'none');
+            row.querySelectorAll('.edit-value').forEach(el => el.style.display = 'inline-block');
+            row.querySelector('.edit-team-btn').style.display = 'none';
+            row.querySelector('.save-team-btn').style.display = 'inline-block';
+            row.querySelector('.cancel-team-btn').style.display = 'inline-block';
+            row.querySelector('.team-name-cell .edit-value').focus();
         }
-        
+
         function cancelTeamEdit(teamCode) {
             const row = document.querySelector(`tr[data-team-code="${teamCode}"]`);
-            const nameCell = row.querySelector('.team-name-cell');
-            const displayValue = nameCell.querySelector('.display-value');
-            const editValue = nameCell.querySelector('.edit-value');
-            const editBtn = row.querySelector('.edit-team-btn');
-            const saveBtn = row.querySelector('.save-team-btn');
-            const cancelBtn = row.querySelector('.cancel-team-btn');
-            
-            // Reset edit value to original
-            editValue.value = displayValue.textContent;
-            
-            displayValue.style.display = 'block';
-            editValue.style.display = 'none';
-            editBtn.style.display = 'inline-block';
-            saveBtn.style.display = 'none';
-            cancelBtn.style.display = 'none';
+            row.querySelectorAll('.display-value').forEach(el => el.style.display = '');
+            row.querySelectorAll('.edit-value').forEach(el => el.style.display = 'none');
+            row.querySelector('.edit-team-btn').style.display = 'inline-block';
+            row.querySelector('.save-team-btn').style.display = 'none';
+            row.querySelector('.cancel-team-btn').style.display = 'none';
         }
-        
+
         function saveTeamEdit(teamCode) {
             const row = document.querySelector(`tr[data-team-code="${teamCode}"]`);
-            const nameCell = row.querySelector('.team-name-cell');
-            const editValue = nameCell.querySelector('.edit-value');
-            const newName = editValue.value.trim();
-            
+            const newName = row.querySelector('.team-name-cell .edit-value').value.trim();
+            const newGender = row.querySelector('.team-gender-cell .edit-value').value;
+            const newMaxAge = row.querySelector('.team-age-cell .edit-value').value || '0';
+
             if (!newName) {
                 alert('Team name cannot be empty.');
                 return;
             }
-            
+
             const formData = new FormData();
             formData.append('action', 'update_team');
             formData.append('team_code', teamCode);
             formData.append('team_name', newName);
+            formData.append('team_gender', newGender);
+            formData.append('team_max_age', newMaxAge);
             formData.append('team_nonce', '<?php echo wp_create_nonce('update_team'); ?>');
-            
+
             fetch(ajaxurl, {
                 method: 'POST',
                 body: formData
@@ -595,11 +646,10 @@ class TeamOversight_Fees {
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    // Update display value
-                    const displayValue = nameCell.querySelector('.display-value');
-                    displayValue.textContent = newName;
-                    
-                    // Exit edit mode
+                    const genderLabels = {mens: "Men's", womens: "Women's", mixed: 'Mixed'};
+                    row.querySelector('.team-name-cell .display-value').textContent = newName;
+                    row.querySelector('.team-gender-cell .display-value').textContent = genderLabels[newGender] || newGender;
+                    row.querySelector('.team-age-cell .display-value').textContent = parseInt(newMaxAge, 10) ? 'U' + parseInt(newMaxAge, 10) : 'Open';
                     cancelTeamEdit(teamCode);
                 } else {
                     alert('Error updating team: ' + (data.data || 'Unknown error'));
@@ -607,6 +657,32 @@ class TeamOversight_Fees {
             })
             .catch(error => {
                 alert('Error updating team: ' + error.message);
+            });
+        }
+
+        function resetDefaultTeams() {
+            if (!confirm('Replace ALL configured teams with the default club team list (including gender and age limits)?\n\nExisting team assignments are not changed, but any assignment using an old team code will show that code without a matching team entry.')) {
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('action', 'reset_default_teams');
+            formData.append('team_nonce', '<?php echo wp_create_nonce('reset_default_teams'); ?>');
+
+            fetch(ajaxurl, {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.data || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                alert('Error: ' + error.message);
             });
         }
         
@@ -991,7 +1067,11 @@ class TeamOversight_Fees {
         
         $teams[$team_code] = $team_name;
         update_option('team_oversight_teams', $teams);
-        
+
+        $meta = get_option('team_oversight_team_meta', array());
+        $meta[$team_code] = $this->get_posted_team_meta();
+        update_option('team_oversight_team_meta', $meta);
+
         wp_send_json_success('Team added successfully');
     }
     
@@ -1020,7 +1100,11 @@ class TeamOversight_Fees {
         
         $teams[$team_code] = $team_name;
         update_option('team_oversight_teams', $teams);
-        
+
+        $meta = get_option('team_oversight_team_meta', array());
+        $meta[$team_code] = $this->get_posted_team_meta();
+        update_option('team_oversight_team_meta', $meta);
+
         wp_send_json_success('Team updated successfully');
     }
     
@@ -1059,7 +1143,35 @@ class TeamOversight_Fees {
         
         unset($teams[$team_code]);
         update_option('team_oversight_teams', $teams);
-        
+
+        $meta = get_option('team_oversight_team_meta', array());
+        if (isset($meta[$team_code])) {
+            unset($meta[$team_code]);
+            update_option('team_oversight_team_meta', $meta);
+        }
+
         wp_send_json_success('Team deleted successfully');
+    }
+
+    public function reset_default_teams() {
+        if (!wp_verify_nonce($_POST['team_nonce'], 'reset_default_teams')) {
+            wp_die('Security check failed');
+        }
+
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
+        }
+
+        $defaults = TeamOversight_Database::get_default_teams();
+        $names = array();
+        $meta = array();
+        foreach ($defaults as $code => $team) {
+            $names[$code] = $team['name'];
+            $meta[$code] = array('gender' => $team['gender'], 'max_age' => $team['max_age']);
+        }
+        update_option('team_oversight_teams', $names);
+        update_option('team_oversight_team_meta', $meta);
+
+        wp_send_json_success('Default team list loaded');
     }
 }

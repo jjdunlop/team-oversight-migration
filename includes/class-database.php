@@ -249,40 +249,115 @@ class TeamOversight_Database {
         }
     }
     
+    /**
+     * The current club team list, seeded when no teams are configured.
+     * gender: mens|womens|mixed. max_age: player must be UNDER this age on
+     * 31 Dec of the season year (0 = open age).
+     */
+    public static function get_default_teams() {
+        return array(
+            'PL1M' => array('name' => 'Melbourne University Renegades', 'gender' => 'mens', 'max_age' => 0),
+            'PL1W' => array('name' => 'Melbourne University Renegades', 'gender' => 'womens', 'max_age' => 0),
+            'PL2M' => array('name' => 'Melbourne University Renegades', 'gender' => 'mens', 'max_age' => 0),
+            'PL2W' => array('name' => 'Melbourne University Renegades', 'gender' => 'womens', 'max_age' => 0),
+            'SL1M-B' => array('name' => 'Melbourne University Renegades Blue', 'gender' => 'mens', 'max_age' => 0),
+            'SL1M-W' => array('name' => 'Melbourne University Renegades White', 'gender' => 'mens', 'max_age' => 0),
+            'SL1W-B' => array('name' => 'Melbourne University Renegades Blue', 'gender' => 'womens', 'max_age' => 0),
+            'SL1W-W' => array('name' => 'Melbourne University Renegades White', 'gender' => 'womens', 'max_age' => 0),
+            'SL2M' => array('name' => 'Melbourne University Renegades', 'gender' => 'mens', 'max_age' => 0),
+            'SL2W' => array('name' => 'Melbourne University Renegades', 'gender' => 'womens', 'max_age' => 0),
+            'SL3M-R' => array('name' => 'Melbourne University Renegades Red', 'gender' => 'mens', 'max_age' => 0),
+            'SL3M-B' => array('name' => 'Melbourne University Renegades Blue', 'gender' => 'mens', 'max_age' => 0),
+            'SL3W' => array('name' => 'Melbourne University Renegades', 'gender' => 'womens', 'max_age' => 0),
+            'JPLM' => array('name' => 'Melbourne University Renegades', 'gender' => 'mens', 'max_age' => 19),
+            'JPLW' => array('name' => 'Melbourne University Renegades', 'gender' => 'womens', 'max_age' => 19),
+            'YSL17B1-B' => array('name' => 'Melbourne University Renegades Blue', 'gender' => 'mens', 'max_age' => 17),
+            'YSL17B1-R' => array('name' => 'Melbourne University Renegades Red', 'gender' => 'mens', 'max_age' => 17),
+            'YSL17G1' => array('name' => 'Melbourne University Renegades', 'gender' => 'womens', 'max_age' => 17),
+            'YSL15B' => array('name' => 'Melbourne University Renegades', 'gender' => 'mens', 'max_age' => 15),
+            'YSL15G' => array('name' => 'Melbourne University Renegades', 'gender' => 'womens', 'max_age' => 15),
+        );
+    }
+
     public function get_teams() {
         // Get teams from WordPress options (dynamic teams)
         $custom_teams = get_option('team_oversight_teams', array());
-        
-        // Default teams as fallback
-        $default_teams = array(
-            'PLD1-M' => 'Premier League Division 1 Men',
-            'PLD1-W' => 'Premier League Division 1 Women',
-            'PLD2-M' => 'Premier League Division 2 Men',
-            'PLD2-W' => 'Premier League Division 2 Women',
-            'SLD1B-M' => 'State League Division 1 Blue Men',
-            'SLD1W-M' => 'State League Division 1 White Men',
-            'SLD2-M' => 'State League Division 2 Men',
-            'SLD3-M' => 'State League Division 3 Men',
-            'SLD1B-W' => 'State League Division 1 Blue Women',
-            'SLD1W-W' => 'State League Division 1 White Women',
-            'SLD2-W' => 'State League Division 2 Women',
-            'SLD3-W' => 'State League Division 3 Women',
-            'YSL17D1B-B' => 'Youth State League 17 Division 1 Blue Boys',
-            'YSL17D1R-B' => 'Youth State League 17 Division 1 Red Boys',
-            'YSL17D1W-B' => 'Youth State League 17 Division 1 White Boys',
-            'YSL17D1A-G' => 'Youth State League 17 Division 1 Atlas Girls',
-            'YSL17D1B-G' => 'Youth State League 17 Division 1 Blue Girls',
-            'JPLD1-B' => 'Junior Premier League Division 1 Boys',
-            'JPLD1-G' => 'Junior Premier League Division 1 Girls'
-        );
-        
-        // Initialize with default teams if no custom teams exist
+
+        // Seed defaults (names + meta) if no teams are configured yet.
         if (empty($custom_teams)) {
-            update_option('team_oversight_teams', $default_teams);
-            return $default_teams;
+            $defaults = self::get_default_teams();
+            $names = array();
+            $meta = array();
+            foreach ($defaults as $code => $team) {
+                $names[$code] = $team['name'];
+                $meta[$code] = array('gender' => $team['gender'], 'max_age' => $team['max_age']);
+            }
+            update_option('team_oversight_teams', $names);
+            update_option('team_oversight_team_meta', $meta);
+            return $names;
         }
-        
+
         return $custom_teams;
+    }
+
+    /**
+     * Teams with their gender and age-limit metadata:
+     * code => array(name, gender: mens|womens|mixed, max_age: int, 0 = open).
+     * Gender falls back to a guess from the team code for teams saved before
+     * metadata existed.
+     */
+    public function get_teams_config() {
+        $names = $this->get_teams();
+        $meta = get_option('team_oversight_team_meta', array());
+
+        $config = array();
+        foreach ($names as $code => $name) {
+            $team_meta = isset($meta[$code]) && is_array($meta[$code]) ? $meta[$code] : array();
+            $gender = isset($team_meta['gender']) && in_array($team_meta['gender'], array('mens', 'womens', 'mixed'), true)
+                ? $team_meta['gender']
+                : self::derive_team_gender($code);
+            $config[$code] = array(
+                'name' => $name,
+                'gender' => $gender,
+                'max_age' => isset($team_meta['max_age']) ? intval($team_meta['max_age']) : 0,
+            );
+        }
+        return $config;
+    }
+
+    /**
+     * Best-effort gender from a team code, used only for teams saved before
+     * the gender setting existed. Handles both conventions:
+     *  - legacy: colour in the body, gender as the suffix (SLD1B-W = Blue, Women)
+     *  - current: gender in the body, colour as the suffix (SL1W-B = Women, Blue)
+     */
+    public static function derive_team_gender($code) {
+        $parts = explode('-', strtoupper(trim($code)));
+        $first = $parts[0];
+        $last = count($parts) > 1 ? end($parts) : '';
+
+        // Legacy style: explicit gender letter as its own suffix segment.
+        if ($last === 'M') {
+            return 'mens';
+        }
+        if ($last === 'W' || $last === 'G') {
+            return 'womens';
+        }
+
+        // Current style: gender letter inside the first segment (SL1M-B, YSL17G1, JPLM).
+        if (preg_match('/(M|B)\d*$/', $first)) {
+            return 'mens';
+        }
+        if (preg_match('/(W|G)\d*$/', $first)) {
+            return 'womens';
+        }
+
+        // Remaining suffix B: legacy "Boys" (JPLD1-B).
+        if ($last === 'B') {
+            return 'mens';
+        }
+
+        return 'mixed';
     }
     
     public function get_positions() {

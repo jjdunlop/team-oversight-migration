@@ -201,7 +201,13 @@ class TeamOversight_Trials {
             $prefill = self::get_prefill_data($user->ID);
             $competition = self::get_competition_from_profile($user->ID);
             $profile_edit_url = home_url('/um-member-profile-custom/?profiletab=main&um_action=edit');
+            $training_info_url = get_option('team_oversight_training_info_url');
             ?>
+            <?php if ($training_info_url): ?>
+                <div class="trial-training-notice">
+                    <p><strong>Before you start:</strong> team selection depends on when and where each team trains — <a href="<?php echo esc_url($training_info_url); ?>" target="_blank">check the training venues and days</a> so you pick teams whose sessions you can actually attend.</p>
+                </div>
+            <?php endif; ?>
             <div class="trial-prefill-section">
                 <h4>Your Details</h4>
                 <p class="prefill-note">These details come from your account. <a href="<?php echo esc_url($profile_edit_url); ?>" target="_blank">Edit your profile</a> to change them, then use the Refresh Status button above.</p>
@@ -310,9 +316,32 @@ class TeamOversight_Trials {
                     <tr>
                         <th>Select the team/s you are trialling for <span class="required">*</span></th>
                         <td>
-                            <?php foreach (self::get_level_options() as $key => $label): ?>
-                                <label><input type="checkbox" name="interested_teams[]" value="<?php echo esc_attr($key); ?>"> <?php echo esc_html($label); ?></label><br>
-                            <?php endforeach; ?>
+                            <?php if ($training_info_url): ?>
+                                <p class="description" style="margin-top: 0;"><a href="<?php echo esc_url($training_info_url); ?>" target="_blank">Training venues and days for each team</a></p>
+                            <?php endif; ?>
+                            <div class="teams-checkboxes">
+                                <?php
+                                $teams_config = $database->get_teams_config();
+                                $team_groups = array('mens' => "Men's Teams", 'womens' => "Women's Teams", 'mixed' => 'Mixed / Open Teams');
+                                foreach ($team_groups as $group_key => $group_label):
+                                    $group_teams = array_filter($teams_config, function ($t) use ($group_key) {
+                                        return $t['gender'] === $group_key;
+                                    });
+                                    if (empty($group_teams)) {
+                                        continue;
+                                    }
+                                ?>
+                                    <div class="team-group">
+                                        <h4><?php echo esc_html($group_label); ?></h4>
+                                        <?php foreach ($group_teams as $code => $team): ?>
+                                            <label class="team-option" data-gender="<?php echo esc_attr($team['gender']); ?>" data-max-age="<?php echo intval($team['max_age']); ?>">
+                                                <input type="checkbox" name="interested_teams[]" value="<?php echo esc_attr($code); ?>">
+                                                <?php echo esc_html($code . ' — ' . $team['name']); ?><?php echo $team['max_age'] ? ' (Under ' . intval($team['max_age']) . ')' : ''; ?><span class="ineligible-reason"></span>
+                                            </label><br>
+                                        <?php endforeach; ?>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
                         </td>
                     </tr>
 
@@ -377,6 +406,49 @@ class TeamOversight_Trials {
         
         <script>
         jQuery(document).ready(function($) {
+            // Team eligibility: grey out teams the player can't trial for,
+            // based on competition (profile gender or the form question) and
+            // each team's age limit at 31 Dec of the selected season.
+            var murvcDob = '<?php echo esc_js($prefill['birth_date']); ?>';
+            var murvcComp = '<?php echo esc_js($competition['competition'] ? $competition['competition'] : ''); ?>';
+
+            function murvcAgeAtSeasonEnd(seasonYear) {
+                if (!murvcDob) return null;
+                var d = new Date(murvcDob.replace(/\//g, '-') + 'T00:00:00');
+                if (isNaN(d.getTime())) return null;
+                // Age on 31 Dec of the season year — every birthday has passed.
+                return seasonYear - d.getFullYear();
+            }
+
+            function updateTeamEligibility() {
+                var seasonYear = parseInt($('#season').val(), 10);
+                var comp = murvcComp || $('input[name="gender_trialling"]:checked').val() || '';
+                var age = murvcAgeAtSeasonEnd(seasonYear);
+
+                $('.team-option').each(function() {
+                    var $opt = $(this);
+                    var gender = $opt.attr('data-gender');
+                    var maxAge = parseInt($opt.attr('data-max-age'), 10) || 0;
+                    var reason = '';
+
+                    if (comp && gender !== 'mixed' && gender !== comp) {
+                        reason = gender === 'mens' ? "men's team" : "women's team";
+                    } else if (maxAge && age !== null && age >= maxAge) {
+                        reason = 'age limit: must be under ' + maxAge + ' in ' + seasonYear;
+                    }
+
+                    var $cb = $opt.find('input');
+                    $cb.prop('disabled', !!reason);
+                    if (reason) { $cb.prop('checked', false); }
+                    $opt.toggleClass('team-ineligible', !!reason);
+                    $opt.find('.ineligible-reason').text(reason ? ' — not eligible (' + reason + ')' : '');
+                });
+            }
+
+            $('#season').on('change', updateTeamEligibility);
+            $(document).on('change', 'input[name="gender_trialling"]', updateTeamEligibility);
+            updateTeamEligibility();
+
             // Conditional sections
             $('input[name="vvl_history"]').on('change', function() {
                 var v = $(this).val();
@@ -587,6 +659,28 @@ class TeamOversight_Trials {
             margin: 0;
         }
 
+        .trial-training-notice {
+            background: #fff8e1;
+            border: 1px solid #ffd54f;
+            color: #7a5b00;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+
+        .trial-training-notice p {
+            margin: 0;
+        }
+
+        .team-option.team-ineligible {
+            opacity: 0.5;
+        }
+
+        .team-option .ineligible-reason {
+            color: #a00;
+            font-size: 12px;
+        }
+
         .trial-prefill-section {
             margin-bottom: 20px;
             border: 2px solid #e0e0e0;
@@ -678,7 +772,9 @@ class TeamOversight_Trials {
             wp_send_json_error(array('message' => 'Please complete your profile information before submitting your trial application. Missing fields: ' . implode(', ', $profile_validation['missing_fields'])));
         }
         $season = sanitize_text_field($_POST['season']);
-        $interested_teams = isset($_POST['interested_teams']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['interested_teams']), array_keys(self::get_level_options()))) : array();
+        $database = new TeamOversight_Database();
+        $teams_config = $database->get_teams_config();
+        $interested_teams = isset($_POST['interested_teams']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['interested_teams']), array_keys($teams_config))) : array();
         $preferred_positions = isset($_POST['preferred_positions']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['preferred_positions']), array_keys(self::get_position_options()))) : array();
 
         $history = isset($_POST['vvl_history']) ? sanitize_text_field($_POST['vvl_history']) : '';
@@ -704,6 +800,27 @@ class TeamOversight_Trials {
         }
 
         $is_transfer_player = ($history === 'transfer') ? 1 : 0;
+
+        // Eligibility is enforced server-side: the greyed-out checkboxes are
+        // a courtesy, this is the authority.
+        $prefill = self::get_prefill_data($user->ID);
+        $age_at_season_end = null;
+        if (!empty($prefill['birth_date'])) {
+            $birth_ts = strtotime(str_replace('/', '-', $prefill['birth_date']));
+            if ($birth_ts) {
+                $age_at_season_end = intval($season) - intval(date('Y', $birth_ts));
+            }
+        }
+
+        foreach ($interested_teams as $team_code) {
+            $team = $teams_config[$team_code];
+            if ($team['gender'] !== 'mixed' && $gender_trialling && $team['gender'] !== $gender_trialling) {
+                wp_send_json_error(array('message' => $team_code . ' is a ' . ($team['gender'] === 'mens' ? "men's" : "women's") . ' team and does not match the competition you are trialling for.'));
+            }
+            if ($team['max_age'] && $age_at_season_end !== null && $age_at_season_end >= $team['max_age']) {
+                wp_send_json_error(array('message' => $team_code . ' is an Under-' . $team['max_age'] . ' team; you must be under ' . $team['max_age'] . ' on 31 December ' . intval($season) . ' to trial for it.'));
+            }
+        }
 
         $level_options = self::get_level_options();
         $history_options = self::get_history_options();
@@ -771,7 +888,6 @@ class TeamOversight_Trials {
         }
 
         // Snapshot the account details as they were at submission time.
-        $prefill = self::get_prefill_data($user->ID);
         $form_data['Contact Number (at submission)'] = $prefill['mobile'];
         $form_data['Date of Birth (at submission)'] = $prefill['birth_date'];
 
