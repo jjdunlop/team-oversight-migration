@@ -336,7 +336,7 @@ class TeamOversight_Trials {
                                         <?php foreach ($group_teams as $code => $team): ?>
                                             <label class="team-option" data-gender="<?php echo esc_attr($team['gender']); ?>" data-max-age="<?php echo intval($team['max_age']); ?>">
                                                 <input type="checkbox" name="interested_teams[]" value="<?php echo esc_attr($code); ?>">
-                                                <?php echo esc_html($code . ' — ' . $team['name']); ?><?php echo $team['max_age'] ? ' (Under ' . intval($team['max_age']) . ')' : ''; ?><span class="ineligible-reason"></span>
+                                                <?php echo esc_html($team['name']); ?><?php echo $team['max_age'] ? ' (Under ' . intval($team['max_age']) . ')' : ''; ?><span class="ineligible-reason"></span>
                                             </label><br>
                                         <?php endforeach; ?>
                                     </div>
