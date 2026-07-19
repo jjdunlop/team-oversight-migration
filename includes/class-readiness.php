@@ -390,9 +390,10 @@ class TeamOversight_Readiness {
                                 <tr class="rtp-fees-owing"><th>Remaining</th><td>$<?php echo number_format($step['outstanding'], 2); ?></td></tr>
                                 <tr class="<?php echo $step['overdue'] > 0 ? 'rtp-fees-overdue' : ''; ?>"><th>Overdue now</th><td>$<?php echo number_format($step['overdue'], 2); ?></td></tr>
                                 <?php if ($step['overdue'] <= 0 && $step['outstanding'] > 0 && !empty($step['paid_through'])): ?>
-                                    <tr class="rtp-fees-uptodate"><th>Up to date until</th><td><?php echo esc_html(date('j M Y', strtotime($step['paid_through']))); ?></td></tr>
+                                    <tr class="rtp-fees-uptodate"><th>Next payment due</th><td><?php echo esc_html(date('j M Y', strtotime($step['paid_through']))); ?></td></tr>
                                 <?php endif; ?>
                             </table>
+                            <?php echo TeamOversight_Payments::render_fee_progress($step['invoiced'], $step['outstanding'], $season); ?>
 
                             <?php if ($step['outstanding'] > 0): ?>
                                 <?php $payment_product = TeamOversight_Payments::get_payment_product(); ?>
@@ -561,6 +562,37 @@ class TeamOversight_Readiness {
         .rtp-fees-uptodate th, .rtp-fees-uptodate td {
             color: #155724;
             font-weight: 600;
+        }
+
+        .fee-progress {
+            position: relative;
+            height: 10px;
+            background: #e8e8e8;
+            border-radius: 5px;
+            margin: 10px 0 2px 0;
+            max-width: 340px;
+        }
+
+        .fee-progress-fill {
+            height: 100%;
+            border-radius: 5px;
+        }
+
+        .fee-progress-ontrack { background: #46b450; }
+        .fee-progress-behind { background: #dc3232; }
+
+        .fee-progress-marker {
+            position: absolute;
+            top: -3px;
+            width: 2px;
+            height: 16px;
+            background: #333;
+        }
+
+        .fee-progress-caption {
+            font-size: 12px;
+            color: #666;
+            margin: 2px 0 0 0;
         }
 
         .rtp-pay-form {

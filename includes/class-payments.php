@@ -99,6 +99,28 @@ class TeamOversight_Payments {
         return date('Y-m-d', $start + (int) round($paid_fraction * ($end - $start)));
     }
 
+    /**
+     * Thin progress bar: green/red fill = fraction paid, dark marker = where
+     * the schedule says you should be today. Empty string without dates.
+     */
+    public static function render_fee_progress($invoice_amount, $outstanding_amount, $season) {
+        $expected = self::get_expected_factor($season);
+        $invoice_amount = floatval($invoice_amount);
+        if ($expected === null || $invoice_amount <= 0) {
+            return '';
+        }
+
+        $paid_pct = (int) round(max(0, min(1, ($invoice_amount - floatval($outstanding_amount)) / $invoice_amount)) * 100);
+        $sched_pct = (int) round($expected * 100);
+        $state = $paid_pct >= $sched_pct ? 'ontrack' : 'behind';
+
+        return '<div class="fee-progress" title="Paid ' . $paid_pct . '% — schedule expects ' . $sched_pct . '%">'
+            . '<div class="fee-progress-fill fee-progress-' . $state . '" style="width: ' . min(100, $paid_pct) . '%;"></div>'
+            . '<div class="fee-progress-marker" style="left: ' . min(100, $sched_pct) . '%;"></div>'
+            . '</div>'
+            . '<p class="fee-progress-caption">Paid ' . $paid_pct . '% &middot; season ' . $sched_pct . '% elapsed</p>';
+    }
+
     public static function get_payment_product() {
         if (!function_exists('wc_get_product')) {
             return null;
@@ -172,9 +194,10 @@ class TeamOversight_Payments {
                         <tr class="<?php echo $overdue > 0 ? 'member-fees-overdue' : ''; ?>"><th>Overdue now</th><td>$<?php echo number_format($overdue, 2); ?></td></tr>
                         <?php $paid_through = self::get_paid_through_date($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season); ?>
                         <?php if ($overdue <= 0 && floatval($invoice->outstanding_amount) > 0 && $paid_through): ?>
-                            <tr class="member-fees-uptodate"><th>Up to date until</th><td><?php echo esc_html(date('j M Y', strtotime($paid_through))); ?></td></tr>
+                            <tr class="member-fees-uptodate"><th>Next payment due</th><td><?php echo esc_html(date('j M Y', strtotime($paid_through))); ?></td></tr>
                         <?php endif; ?>
                     </table>
+                    <?php echo self::render_fee_progress($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season); ?>
                 </div>
             <?php endforeach; ?>
 
@@ -253,6 +276,37 @@ class TeamOversight_Payments {
         .member-fees-uptodate th, .member-fees-uptodate td {
             color: #155724;
             font-weight: 600;
+        }
+
+        .fee-progress {
+            position: relative;
+            height: 10px;
+            background: #e8e8e8;
+            border-radius: 5px;
+            margin: 10px 0 2px 0;
+            overflow: visible;
+        }
+
+        .fee-progress-fill {
+            height: 100%;
+            border-radius: 5px;
+        }
+
+        .fee-progress-ontrack { background: #46b450; }
+        .fee-progress-behind { background: #dc3232; }
+
+        .fee-progress-marker {
+            position: absolute;
+            top: -3px;
+            width: 2px;
+            height: 16px;
+            background: #333;
+        }
+
+        .fee-progress-caption {
+            font-size: 12px;
+            color: #666;
+            margin: 2px 0 0 0;
         }
 
         .member-fees-pay-form input[type="number"] {
