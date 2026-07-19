@@ -231,9 +231,12 @@ class TeamOversight_Admin {
 
         foreach ($by_app as $application_id => $info) {
             foreach ($info['teams'] as $team) {
+                // Only a playing assignment blocks creation — someone already
+                // on the team as coach/manager can still be added as a player.
                 $exists = $wpdb->get_var($wpdb->prepare("
                     SELECT id FROM {$wpdb->prefix}team_assignments
                     WHERE email = %s AND season = %s AND team = %s AND is_active = 1
+                        AND role IN ('playing_member', 'training_only')
                 ", $info['email'], $season, $team));
 
                 if (!$exists) {

@@ -154,6 +154,7 @@ class TeamOversight_Coach_Portal {
 
                 <h4>Current Team (<?php echo count($roster); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?>)</h4>
                 <?php if (!empty($roster) || !empty($selection_roster)): ?>
+                    <div class="coach-table-wrap">
                     <table class="coach-portal-table">
                         <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Email</th><th>Mobile</th></tr></thead>
                         <tbody>
@@ -183,6 +184,7 @@ class TeamOversight_Coach_Portal {
                             <?php endforeach; ?>
                         </tbody>
                     </table>
+                    </div>
                     <form method="post">
                         <input type="hidden" name="coach_action" value="export_roster">
                         <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
@@ -206,6 +208,7 @@ class TeamOversight_Coach_Portal {
                 </p>
 
                 <?php if (!empty($applicants)): ?>
+                    <div class="coach-table-wrap">
                     <table class="coach-portal-table" id="coach-applicants-table">
                         <thead><tr>
                             <th style="width: 55px;">Trial #</th>
@@ -306,6 +309,7 @@ class TeamOversight_Coach_Portal {
                             <?php endforeach; ?>
                         </tbody>
                     </table>
+                    </div>
 
                     <script>
                     (function() {
@@ -467,6 +471,58 @@ class TeamOversight_Coach_Portal {
 
         .coach-actions-cell .button-small {
             margin: 1px 2px 1px 0;
+        }
+
+        /* Mobile: tables scroll sideways inside their wrapper instead of
+           breaking the page; controls grow to comfortable touch targets. */
+        .coach-table-wrap {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin-bottom: 20px;
+        }
+
+        .coach-table-wrap .coach-portal-table {
+            margin-bottom: 0;
+        }
+
+        #coach-applicants-table {
+            min-width: 900px;
+        }
+
+        @media (max-width: 782px) {
+            .coach-team-section {
+                padding: 12px;
+            }
+
+            .coach-portal-table th,
+            .coach-portal-table td {
+                padding: 6px;
+                font-size: 13px;
+            }
+
+            .coach-team-tab {
+                padding: 10px 14px;
+                margin-bottom: 8px;
+            }
+
+            #coach-search {
+                width: 100% !important;
+                max-width: 100%;
+                box-sizing: border-box;
+                padding: 8px;
+                font-size: 16px; /* prevents iOS zoom-on-focus */
+            }
+
+            .coach-actions-cell .button-small,
+            .coach-note-form .button-small {
+                padding: 8px 12px;
+                font-size: 13px;
+                line-height: 1.2;
+            }
+
+            .coach-note-form textarea {
+                font-size: 16px;
+            }
         }
         </style>
         <?php
@@ -659,10 +715,17 @@ class TeamOversight_Coach_Portal {
             ORDER BY FIELD(s.status, 'selected', 'tentative'), a.trial_number
         ", $team_code, $season));
 
-        // Skip anyone already confirmed on the roster.
-        $roster_emails = array_map('strtolower', wp_list_pluck($roster, 'email'));
-        return array_values(array_filter($rows, function ($row) use ($roster_emails) {
-            return !in_array(strtolower($row->email), $roster_emails, true);
+        // Skip anyone already confirmed in a PLAYING role. People confirmed
+        // as coach/manager still show their player selection separately —
+        // a coach can legitimately also be selected as a player.
+        $playing_emails = array();
+        foreach ($roster as $member) {
+            if (in_array($member->role, array('playing_member', 'training_only'), true)) {
+                $playing_emails[] = strtolower($member->email);
+            }
+        }
+        return array_values(array_filter($rows, function ($row) use ($playing_emails) {
+            return !in_array(strtolower($row->email), $playing_emails, true);
         }));
     }
 
