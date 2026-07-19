@@ -166,7 +166,9 @@ class TeamOversight_Exports {
         header('Expires: 0');
         
         $output = fopen('php://output', 'w');
-        
+        // UTF-8 BOM so Excel reads accents/dashes correctly.
+        fwrite($output, "\xEF\xBB\xBF");
+
         $header = array('Team', 'Name', 'Email', 'Role', 'Birth Date', 'Mobile Number');
         fputcsv($output, $header);
         
@@ -246,7 +248,9 @@ class TeamOversight_Exports {
         header('Expires: 0');
         
         $output = fopen('php://output', 'w');
-        
+        // UTF-8 BOM so Excel reads accents/dashes correctly.
+        fwrite($output, "\xEF\xBB\xBF");
+
         $header = array(
             'Team', 'Name', 'Email', 'Role', 'Birth Date', 'Mobile Number', 'Gender',
             'MUS Sport Category', 'Member Type', 'Registration Status'

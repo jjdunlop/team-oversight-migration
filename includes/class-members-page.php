@@ -382,9 +382,15 @@ class TeamOversight_Members_Page {
 
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT m.user_id, u.display_name, u.user_email,
+                MAX(bd.meta_value) AS birth_date,
+                MAX(g.meta_value) AS gender,
+                MAX(mus.meta_value) AS mus_category,
                 GROUP_CONCAT(CONCAT(m.tier, '|', m.start_date, '|', m.end_date, '|', m.source) ORDER BY m.start_date SEPARATOR ',') AS grants
             FROM {$wpdb->prefix}team_memberships m
             LEFT JOIN {$wpdb->users} u ON u.ID = m.user_id
+            LEFT JOIN {$wpdb->usermeta} bd ON bd.user_id = m.user_id AND bd.meta_key = 'birth_date'
+            LEFT JOIN {$wpdb->usermeta} g ON g.user_id = m.user_id AND g.meta_key = 'gender'
+            LEFT JOIN {$wpdb->usermeta} mus ON mus.user_id = m.user_id AND mus.meta_key = 'MUSEligibilityCategory'
             WHERE m.start_date <= %s AND m.end_date >= %s
             GROUP BY m.user_id
             ORDER BY u.display_name
@@ -426,13 +432,30 @@ class TeamOversight_Members_Page {
                 continue;
             }
 
+            // Age at the end of the reporting range.
+            $age = '';
+            if ($row->birth_date) {
+                $birth_ts = strtotime(str_replace('/', '-', $row->birth_date));
+                if ($birth_ts) {
+                    $age = (new DateTime('@' . $birth_ts))->diff(new DateTime($to))->y;
+                }
+            }
+
+            $gender = $row->gender ? maybe_unserialize($row->gender) : '';
+            if (is_array($gender)) {
+                $gender = reset($gender);
+            }
+
             $history[] = array(
                 'user_id' => intval($row->user_id),
                 'name' => $row->display_name ?: ($row->user_email ?: 'deleted user #' . $row->user_id),
                 'email' => $row->user_email ?: '',
+                'age' => $age,
+                'gender' => is_string($gender) ? $gender : '',
+                'mus_category' => $row->mus_category ?: '',
                 'highest_tier' => $highest,
                 'highest_label' => $tiers[$highest],
-                'current_label' => $current ? $tiers[$current] : '—',
+                'current_label' => $current ? $tiers[$current] : 'None',
                 'periods' => $periods,
             );
         }
@@ -519,11 +542,14 @@ class TeamOversight_Members_Page {
                 <table class="wp-list-table widefat fixed striped" id="history-table">
                     <thead>
                         <tr>
-                            <th style="width: 16%;">Name</th>
-                            <th style="width: 20%;">Email</th>
-                            <th style="width: 13%;">Highest Tier (period)</th>
+                            <th style="width: 14%;">Name</th>
+                            <th style="width: 16%;">Email</th>
+                            <th style="width: 4%;">Age</th>
+                            <th style="width: 7%;">Gender</th>
+                            <th style="width: 11%;">MUS Category</th>
+                            <th style="width: 11%;">Highest Tier (period)</th>
                             <th>Membership Periods</th>
-                            <th style="width: 13%;">Current Status</th>
+                            <th style="width: 10%;">Current Status</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -537,6 +563,9 @@ class TeamOversight_Members_Page {
                                     <?php endif; ?>
                                 </td>
                                 <td><?php echo esc_html($h['email']); ?></td>
+                                <td><?php echo esc_html($h['age']); ?></td>
+                                <td><?php echo esc_html($h['gender']); ?></td>
+                                <td style="font-size: 11px;" title="<?php echo esc_attr($h['mus_category']); ?>"><?php echo esc_html($h['mus_category']); ?></td>
                                 <td><?php echo esc_html($h['highest_label']); ?></td>
                                 <td style="font-size: 12px;"><?php echo esc_html(implode('; ', $h['periods'])); ?></td>
                                 <td><?php echo esc_html($h['current_label']); ?></td>
@@ -590,12 +619,17 @@ class TeamOversight_Members_Page {
         header('Expires: 0');
 
         $output = fopen('php://output', 'w');
-        fputcsv($output, array('Name', 'Email', 'Highest Tier In Period', 'Membership Periods', 'Current Status'));
+        // UTF-8 BOM so Excel reads accents/dashes correctly.
+        fwrite($output, "\xEF\xBB\xBF");
+        fputcsv($output, array('Name', 'Email', 'Age (at range end)', 'Gender', 'MUS Category', 'Highest Tier In Period', 'Membership Periods', 'Current Status'));
 
         foreach ($history as $h) {
             fputcsv($output, array(
                 $h['name'],
                 $h['email'],
+                $h['age'],
+                $h['gender'],
+                $h['mus_category'],
                 $h['highest_label'],
                 implode('; ', $h['periods']),
                 $h['current_label'],
@@ -746,6 +780,8 @@ class TeamOversight_Members_Page {
         header('Expires: 0');
 
         $output = fopen('php://output', 'w');
+        // UTF-8 BOM so Excel reads accents/dashes correctly.
+        fwrite($output, "\xEF\xBB\xBF");
         fputcsv($output, array(
             'Name', 'Email', 'Mobile', 'Age', 'Gender', 'MUS Category',
             'Membership', 'Membership Until', 'VVL Teams', 'Invoiced', 'Outstanding',
