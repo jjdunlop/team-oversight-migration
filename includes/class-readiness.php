@@ -250,6 +250,11 @@ class TeamOversight_Readiness {
             $overdue += TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $season);
         }
 
+        $invoiced_total = 0;
+        foreach ($invoices as $invoice) {
+            $invoiced_total += floatval($invoice->invoice_amount);
+        }
+
         if (empty($invoices)) {
             $fees_done = true;
             $fees_detail = 'Your season fee will appear once the club confirms your team — nothing to pay yet.';
@@ -258,19 +263,24 @@ class TeamOversight_Readiness {
             $fees_detail = 'Paid in full — thank you!';
         } elseif ($overdue <= 0) {
             $fees_done = true;
-            $fees_detail = 'On track: $' . number_format($outstanding, 2) . ' remaining, falling due progressively across the season.';
+            $fees_detail = 'You\'re on track. Fees fall due progressively across the season — pay any amount, as often as you like, as long as you stay ahead of the schedule.';
         } else {
             $fees_done = false;
-            $fees_detail = '$' . number_format($overdue, 2) . ' is overdue (of $' . number_format($outstanding, 2) . ' remaining). Please make a payment to get back on schedule.';
+            $fees_detail = 'You\'ve fallen behind the payment schedule — please make a payment to get back on track.';
         }
 
         $steps['fees'] = array(
-            'title' => 'Check and pay your club fees',
+            'title' => 'Stay up to date on your fees',
             'done' => $fees_done,
             'manual' => false,
             'url' => get_option(self::FEES_URL_OPTION),
-            'url_label' => 'View and pay fees',
+            'url_label' => 'Fee details',
             'detail' => $fees_detail,
+            'has_invoice' => !empty($invoices),
+            'invoiced' => round($invoiced_total, 2),
+            'paid' => round(max(0, $invoiced_total - $outstanding), 2),
+            'outstanding' => round($outstanding, 2),
+            'overdue' => round($overdue, 2),
         );
 
         $ready = true;
@@ -370,6 +380,40 @@ class TeamOversight_Readiness {
                                     </li>
                                 <?php endforeach; ?>
                             </ul>
+                        <?php endif; ?>
+
+                        <?php if ($step_key === 'fees' && !empty($step['has_invoice'])): ?>
+                            <table class="rtp-fees-table">
+                                <tr><th>Season fee</th><td>$<?php echo number_format($step['invoiced'], 2); ?></td></tr>
+                                <tr><th>Paid so far</th><td>$<?php echo number_format($step['paid'], 2); ?></td></tr>
+                                <tr class="rtp-fees-owing"><th>Remaining</th><td>$<?php echo number_format($step['outstanding'], 2); ?></td></tr>
+                                <?php if ($step['overdue'] > 0): ?>
+                                    <tr class="rtp-fees-overdue"><th>Overdue now</th><td>$<?php echo number_format($step['overdue'], 2); ?></td></tr>
+                                <?php endif; ?>
+                            </table>
+
+                            <?php if ($step['outstanding'] > 0): ?>
+                                <?php $payment_product = TeamOversight_Payments::get_payment_product(); ?>
+                                <?php if ($payment_product): ?>
+                                    <form method="post" class="rtp-pay-form">
+                                        <label>Pay amount ($)
+                                            <input type="number" name="murvc_pay_amount" min="1" max="<?php echo esc_attr(number_format($step['outstanding'], 2, '.', '')); ?>" step="0.01" value="<?php echo esc_attr(number_format($step['overdue'] > 0 ? $step['overdue'] : $step['outstanding'], 2, '.', '')); ?>" required>
+                                        </label>
+                                        <input type="hidden" name="murvc_pay_action" value="pay_fees">
+                                        <?php wp_nonce_field('murvc_pay_fees', 'murvc_pay_nonce'); ?>
+                                        <button type="submit" class="button button-primary">Pay Now</button>
+                                        <small class="rtp-pay-note">Pay any amount — it comes straight off your balance.</small>
+                                    </form>
+                                <?php else: ?>
+                                    <p class="rtp-pay-form rtp-pay-disabled">
+                                        <label>Pay amount ($)
+                                            <input type="number" value="<?php echo esc_attr(number_format($step['outstanding'], 2, '.', '')); ?>" disabled>
+                                        </label>
+                                        <button type="button" class="button" disabled>Pay Now</button>
+                                        <small class="rtp-pay-note">Online payment is coming soon — you'll be able to pay any amount here.</small>
+                                    </p>
+                                <?php endif; ?>
+                            <?php endif; ?>
                         <?php endif; ?>
 
                         <p class="rtp-step-actions">
@@ -482,6 +526,54 @@ class TeamOversight_Readiness {
 
         .rtp-untick {
             font-size: 12px;
+        }
+
+        .rtp-fees-table {
+            border-collapse: collapse;
+            margin: 8px 0;
+            min-width: 240px;
+        }
+
+        .rtp-fees-table th {
+            text-align: left;
+            font-weight: 600;
+            color: #444;
+            padding: 3px 25px 3px 0;
+        }
+
+        .rtp-fees-table td {
+            text-align: right;
+            padding: 3px 0;
+        }
+
+        .rtp-fees-owing th, .rtp-fees-owing td {
+            border-top: 1px solid #ddd;
+            font-weight: 700;
+        }
+
+        .rtp-fees-overdue th, .rtp-fees-overdue td {
+            color: #a00;
+            font-weight: 700;
+        }
+
+        .rtp-pay-form {
+            margin: 10px 0 4px 0;
+        }
+
+        .rtp-pay-form input[type="number"] {
+            width: 110px;
+            padding: 6px;
+            font-size: 16px;
+        }
+
+        .rtp-pay-note {
+            display: block;
+            color: #666;
+            margin-top: 4px;
+        }
+
+        .rtp-pay-disabled {
+            opacity: 0.65;
         }
         </style>
         <?php
