@@ -656,9 +656,11 @@ class TeamOversight_Admin {
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($trials as $trial): 
+                        <?php foreach ($trials as $trial):
                             $interested_teams = json_decode($trial->interested_teams, true);
                             $positions = json_decode($trial->preferred_positions, true);
+                            $form_data = !empty($trial->form_data) ? json_decode($trial->form_data, true) : array();
+                            $gender_trialling = isset($form_data['Trialling For']) ? $form_data['Trialling For'] : '';
                         ?>
                             <tr data-trial-id="<?php echo $trial->id; ?>" data-status="<?php echo esc_attr($trial->application_status); ?>" data-transfer="<?php echo $trial->is_transfer_player ? '1' : '0'; ?>">
                                 <td>
@@ -668,7 +670,10 @@ class TeamOversight_Admin {
                                 </td>
                                 <td><?php echo esc_html($trial->name); ?></td>
                                 <td><?php echo esc_html($trial->email); ?></td>
-                                <td><?php echo esc_html(implode(', ', $interested_teams)); ?></td>
+                                <td>
+                                    <?php echo esc_html(implode(', ', $interested_teams)); ?>
+                                    <?php if ($gender_trialling): ?><br><small>(<?php echo esc_html($gender_trialling); ?>)</small><?php endif; ?>
+                                </td>
                                 <td><?php echo esc_html(implode(', ', $positions)); ?></td>
                                 <td><?php echo $trial->is_transfer_player ? 'Yes' : 'No'; ?></td>
                                 <td>
@@ -744,8 +749,27 @@ class TeamOversight_Admin {
                                     <?php else: ?>
                                         <?php echo esc_html($trial->assigned_team ?: 'N/A'); ?>
                                     <?php endif; ?>
+                                    <?php if (!empty($form_data)): ?>
+                                        <button type="button" class="button button-small" onclick="toggleTrialDetails(<?php echo $trial->id; ?>)">Details</button>
+                                    <?php endif; ?>
                                 </td>
                             </tr>
+                            <?php if (!empty($form_data)): ?>
+                                <tr class="trial-details-row" id="trial-details-<?php echo $trial->id; ?>" style="display: none;">
+                                    <td colspan="9" style="background: #f8f9fa; padding: 15px 25px;">
+                                        <table class="trial-details-table">
+                                            <?php foreach ($form_data as $question => $answer): ?>
+                                                <?php if ($answer !== '' && $answer !== null): ?>
+                                                    <tr>
+                                                        <th style="text-align: left; padding: 3px 25px 3px 0; white-space: nowrap; vertical-align: top; color: #555;"><?php echo esc_html($question); ?></th>
+                                                        <td style="padding: 3px 0;"><?php echo nl2br(esc_html(is_array($answer) ? implode(', ', $answer) : $answer)); ?></td>
+                                                    </tr>
+                                                <?php endif; ?>
+                                            <?php endforeach; ?>
+                                        </table>
+                                    </td>
+                                </tr>
+                            <?php endif; ?>
                         <?php endforeach; ?>
                     </tbody>
                 </table>
@@ -825,6 +849,13 @@ class TeamOversight_Admin {
             
             <script>
             // Trial applications filtering
+            function toggleTrialDetails(trialId) {
+                const row = document.getElementById('trial-details-' + trialId);
+                if (row) {
+                    row.style.display = row.style.display === 'none' ? '' : 'none';
+                }
+            }
+
             function filterTrials() {
                 const search = document.getElementById('search-trials').value.toLowerCase();
                 const statusFilter = document.getElementById('filter-status').value;
@@ -834,14 +865,20 @@ class TeamOversight_Admin {
                 let visiblePendingCount = 0;
                 
                 rows.forEach(row => {
+                    // Detail rows collapse whenever filters change.
+                    if (row.classList.contains('trial-details-row')) {
+                        row.style.display = 'none';
+                        return;
+                    }
+
                     const text = row.textContent.toLowerCase();
                     const status = row.dataset.status;
                     const transfer = row.dataset.transfer;
-                    
+
                     const matchesSearch = search === '' || text.includes(search);
                     const matchesStatus = statusFilter === '' || status === statusFilter;
                     const matchesTransfer = transferFilter === '' || transfer === transferFilter;
-                    
+
                     const visible = matchesSearch && matchesStatus && matchesTransfer;
                     row.style.display = visible ? '' : 'none';
                     
@@ -1749,6 +1786,7 @@ class TeamOversight_Admin {
                 $wpdb->insert(
                     $wpdb->prefix . 'team_assignments',
                     array(
+                        'user_id' => intval($trial->user_id),
                         'email' => $trial->email,
                         'season' => $trial->season,
                         'team' => $assigned_team,
@@ -1757,7 +1795,7 @@ class TeamOversight_Admin {
                         'start_date' => date('Y-m-d'),
                         'is_active' => 1
                     ),
-                    array('%s', '%s', '%s', '%s', '%s', '%s', '%d')
+                    array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d')
                 );
                 
                 $fees = new TeamOversight_Fees();
@@ -1920,6 +1958,7 @@ class TeamOversight_Admin {
                 $assignment_result = $wpdb->insert(
                     $wpdb->prefix . 'team_assignments',
                     array(
+                        'user_id' => intval($trial->user_id),
                         'email' => $trial->email,
                         'season' => $trial->season,
                         'team' => $assigned_team,
@@ -1928,7 +1967,7 @@ class TeamOversight_Admin {
                         'start_date' => date('Y-m-d'),
                         'is_active' => 1
                     ),
-                    array('%s', '%s', '%s', '%s', '%s', '%s', '%d')
+                    array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d')
                 );
                 
                 if ($assignment_result === false) {
@@ -2088,6 +2127,7 @@ class TeamOversight_Admin {
             $result = $wpdb->insert(
                 $wpdb->prefix . 'team_assignments',
                 array(
+                    'user_id' => $user->ID,
                     'email' => $user_email,
                     'season' => $season,
                     'team' => $team,
@@ -2096,7 +2136,7 @@ class TeamOversight_Admin {
                     'start_date' => $start_date,
                     'is_active' => 1
                 ),
-                array('%s', '%s', '%s', '%s', '%s', '%s', '%d')
+                array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d')
             );
             
             if ($result) {

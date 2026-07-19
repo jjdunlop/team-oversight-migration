@@ -72,6 +72,29 @@ class TeamOversight_Database {
             $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications ADD COLUMN order_id bigint(20) unsigned DEFAULT NULL AFTER assigned_team");
         }
 
+        // Add form_data column to trial_applications for the full questionnaire (added in 1.3.0)
+        $form_data_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}trial_applications LIKE 'form_data'");
+        if (empty($form_data_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications ADD COLUMN form_data longtext DEFAULT NULL AFTER is_transfer_player");
+        }
+
+        // Key assignments and invoices by user ID so email changes don't break
+        // linkage (added in 1.3.0). Email is kept as a display/import snapshot.
+        foreach (array('team_assignments', 'team_invoices') as $table) {
+            $user_id_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}{$table} LIKE 'user_id'");
+            if (empty($user_id_exists)) {
+                $wpdb->query("ALTER TABLE {$wpdb->prefix}{$table} ADD COLUMN user_id bigint(20) unsigned DEFAULT NULL AFTER id");
+                $wpdb->query("ALTER TABLE {$wpdb->prefix}{$table} ADD INDEX user_id (user_id)");
+                // Backfill from current accounts by email match.
+                $wpdb->query("
+                    UPDATE {$wpdb->prefix}{$table} t
+                    JOIN {$wpdb->users} u ON u.user_email = t.email
+                    SET t.user_id = u.ID
+                    WHERE t.user_id IS NULL
+                ");
+            }
+        }
+
         // Create team_memberships table if it doesn't exist (added in 1.1.0)
         $memberships_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_memberships'");
         if (!$memberships_exists) {
@@ -130,6 +153,7 @@ class TeamOversight_Database {
             'team_invoices' => "
                 CREATE TABLE {$wpdb->prefix}team_invoices (
                     id int(11) NOT NULL AUTO_INCREMENT,
+                user_id bigint(20) unsigned DEFAULT NULL,
                     email varchar(255) NOT NULL,
                     name varchar(255) NOT NULL,
                     season varchar(10) NOT NULL,
@@ -146,6 +170,7 @@ class TeamOversight_Database {
             'team_assignments' => "
                 CREATE TABLE {$wpdb->prefix}team_assignments (
                     id int(11) NOT NULL AUTO_INCREMENT,
+                user_id bigint(20) unsigned DEFAULT NULL,
                     email varchar(255) NOT NULL,
                     season varchar(10) NOT NULL,
                     team varchar(50) NOT NULL,
@@ -203,6 +228,7 @@ class TeamOversight_Database {
                     interested_teams text NOT NULL,
                     preferred_positions text NOT NULL,
                     is_transfer_player tinyint(1) DEFAULT 0,
+                form_data longtext DEFAULT NULL,
                     application_status varchar(20) DEFAULT 'pending',
                     assigned_team varchar(50) DEFAULT NULL,
                     order_id bigint(20) unsigned DEFAULT NULL,

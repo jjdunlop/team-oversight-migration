@@ -24,7 +24,64 @@ class TeamOversight_Trials {
     }
     
     public function init() {
-        
+
+    }
+
+    public static function get_history_options() {
+        return array(
+            'renegades_last_season' => 'I played with Renegades last season (no transfer needed)',
+            'renegades_previously' => 'I have played with Renegades previously, and have not played VVL for any other club since leaving Renegades (no transfer needed)',
+            'transfer' => 'I am transferring from a different club (transfer needed)',
+            'never_played' => 'I have never played in Volleyball Victoria League',
+        );
+    }
+
+    public static function get_level_options() {
+        return array(
+            'PL1' => 'Premier League 1',
+            'PL2' => 'Premier League 2',
+            'JPL' => 'Junior Premier League U/19',
+            'SL1' => 'State League 1',
+            'SL2' => 'State League 2',
+            'SL3' => 'State League 3',
+            'YSL17' => 'Youth State League U/17',
+        );
+    }
+
+    public static function get_position_options() {
+        return array(
+            'middle' => 'Middle',
+            'setter' => 'Setter',
+            'libero' => 'Libero',
+            'pass_hitter' => 'Pass Hitter / Opposite / Other Hitter',
+            'not_sure' => 'Not sure yet',
+        );
+    }
+
+    public static function get_venue_options() {
+        return array(
+            'all' => 'I can train at all venues',
+            'ivanhoe' => 'Ivanhoe Grammar School',
+            'maribyrnong' => 'Maribyrnong College',
+            'mus' => 'Melbourne University Sport',
+            'bundha' => 'Bundha Sports Centre',
+        );
+    }
+
+    /**
+     * Account data shown read-only on the trial form. Never taken from the
+     * submitted POST — always re-read from the account at submission time.
+     */
+    public static function get_prefill_data($user_id) {
+        $user = get_userdata($user_id);
+        return array(
+            'first_name' => get_user_meta($user_id, 'first_name', true),
+            'last_name' => get_user_meta($user_id, 'last_name', true),
+            'email' => $user ? $user->user_email : '',
+            'mobile' => get_user_meta($user_id, 'mobile_number', true),
+            'birth_date' => get_user_meta($user_id, 'birth_date', true),
+            'institution' => get_user_meta($user_id, 'institution1', true),
+        );
     }
     
     public function render_trial_form($atts = array()) {
@@ -104,113 +161,171 @@ class TeamOversight_Trials {
                 </div>
             <?php endif; ?>
 
+            <?php
+            // Prefilled account details: shown read-only. Changing them
+            // happens on the profile, not here.
+            $prefill = self::get_prefill_data($user->ID);
+            $profile_edit_url = home_url('/um-member-profile-custom/?profiletab=main&um_action=edit');
+            ?>
+            <div class="trial-prefill-section">
+                <h4>Your Details</h4>
+                <p class="prefill-note">These details come from your account. <a href="<?php echo esc_url($profile_edit_url); ?>" target="_blank">Edit your profile</a> to change them, then use the Refresh Status button above.</p>
+                <table class="trial-prefill-table">
+                    <tr><th>First Name</th><td><?php echo esc_html($prefill['first_name'] ?: '—'); ?></td></tr>
+                    <tr><th>Last Name</th><td><?php echo esc_html($prefill['last_name'] ?: '—'); ?></td></tr>
+                    <tr><th>Email Address</th><td><?php echo esc_html($prefill['email']); ?></td></tr>
+                    <tr><th>Contact Number</th><td><?php echo esc_html($prefill['mobile'] ?: '— missing, please add it to your profile'); ?></td></tr>
+                    <tr><th>Date of Birth</th><td><?php echo esc_html($prefill['birth_date'] ?: '— missing, please add it to your profile'); ?></td></tr>
+                    <tr><th>Institution</th><td><?php echo esc_html($prefill['institution'] ?: '—'); ?></td></tr>
+                </table>
+            </div>
+
             <form id="trial-form" method="post">
                 <table class="form-table">
                     <tr>
                         <th><label for="season">Season</label></th>
                         <td>
                             <select name="season" id="season" required>
-                                <option value="">Select Season</option>
-                                <?php 
-                                $current_year = date('Y');
-                                $next_year = $current_year + 1;
-                                $previous_year = $current_year - 1;
-                                ?>
-                                <option value="<?php echo $previous_year; ?>"><?php echo $previous_year; ?></option>
+                                <?php $current_year = date('Y'); ?>
                                 <option value="<?php echo $current_year; ?>" selected><?php echo $current_year; ?></option>
-                                <option value="<?php echo $next_year; ?>"><?php echo $next_year; ?></option>
+                                <option value="<?php echo $current_year + 1; ?>"><?php echo $current_year + 1; ?></option>
                             </select>
                         </td>
                     </tr>
-                    
+
                     <tr>
-                        <th><label for="interested_teams">Teams of Interest</label></th>
+                        <th>What is your history within Volleyball Victoria League? <span class="required">*</span></th>
                         <td>
-                            <div class="teams-checkboxes">
-                                <?php 
-                                $teams = $database->get_teams();
-                                $team_groups = array(
-                                    'Premier League' => array(),
-                                    'State League' => array(),
-                                    'Youth State League' => array(),
-                                    'Junior Premier League' => array()
-                                );
-                                
-                                foreach ($teams as $code => $name) {
-                                    if (strpos($code, 'PLD') === 0) {
-                                        $team_groups['Premier League'][$code] = $name;
-                                    } elseif (strpos($code, 'SLD') === 0) {
-                                        $team_groups['State League'][$code] = $name;
-                                    } elseif (strpos($code, 'YSL') === 0) {
-                                        $team_groups['Youth State League'][$code] = $name;
-                                    } elseif (strpos($code, 'JPL') === 0) {
-                                        $team_groups['Junior Premier League'][$code] = $name;
-                                    }
-                                }
-                                
-                                foreach ($team_groups as $group_name => $group_teams): 
-                                    if (!empty($group_teams)):
-                                ?>
-                                    <div class="team-group">
-                                        <h4><?php echo esc_html($group_name); ?></h4>
-                                        <?php foreach ($group_teams as $code => $name): ?>
-                                            <label>
-                                                <input type="checkbox" name="interested_teams[]" value="<?php echo esc_attr($code); ?>">
-                                                <?php echo esc_html($name); ?>
-                                            </label><br>
-                                        <?php endforeach; ?>
-                                    </div>
-                                <?php 
-                                    endif;
-                                endforeach; 
-                                ?>
-                            </div>
-                        </td>
-                    </tr>
-                    
-                    <tr>
-                        <th><label for="preferred_positions">Preferred Positions</label></th>
-                        <td>
-                            <?php 
-                            $positions = $database->get_positions();
-                            foreach ($positions as $key => $position): 
-                            ?>
-                                <label>
-                                    <input type="checkbox" name="preferred_positions[]" value="<?php echo esc_attr($key); ?>">
-                                    <?php echo esc_html($position); ?>
-                                </label><br>
+                            <?php foreach (self::get_history_options() as $key => $label): ?>
+                                <label><input type="radio" name="vvl_history" value="<?php echo esc_attr($key); ?>" required> <?php echo esc_html($label); ?></label><br>
                             <?php endforeach; ?>
                         </td>
                     </tr>
-                    
-                    <tr>
-                        <th><label for="is_transfer_player">Transfer Player Status</label></th>
+
+                    <tr class="returning-section" style="display: none;">
+                        <th>Select the level at which you played last <span class="required">*</span></th>
                         <td>
-                            <label>
-                                <input type="radio" name="is_transfer_player" value="0" checked>
-                                No - I did not play for a different club last year
-                            </label><br>
-                            <label>
-                                <input type="radio" name="is_transfer_player" value="1">
-                                Yes - I played for a different club last year
-                            </label>
+                            <select name="last_level">
+                                <option value="">Select Level</option>
+                                <?php foreach (self::get_level_options() as $key => $label): ?>
+                                    <option value="<?php echo esc_attr($key); ?>"><?php echo esc_html($label); ?></option>
+                                <?php endforeach; ?>
+                                <option value="other">Other</option>
+                            </select>
+                            <input type="text" name="last_level_other" placeholder="Other level" style="display: none;">
                         </td>
                     </tr>
-                    
-                    <tr>
-                        <th><label for="additional_comments">Additional Comments</label></th>
+
+                    <tr class="transfer-section" style="display: none;">
+                        <th>Enter the season you last played VVL (e.g. <?php echo $current_year - 1; ?>) <span class="required">*</span></th>
+                        <td><input type="text" name="transfer_season" maxlength="10"></td>
+                    </tr>
+                    <tr class="transfer-section" style="display: none;">
+                        <th>For which club did you play your last season <span class="required">*</span></th>
+                        <td><input type="text" name="transfer_club" maxlength="100"></td>
+                    </tr>
+                    <tr class="transfer-section" style="display: none;">
+                        <th>Select the level at which you played <span class="required">*</span></th>
                         <td>
-                            <textarea name="additional_comments" rows="4" cols="50" placeholder="Any additional information you'd like to share..."></textarea>
+                            <select name="transfer_level">
+                                <option value="">Select Level</option>
+                                <?php foreach (self::get_level_options() as $key => $label): ?>
+                                    <option value="<?php echo esc_attr($key); ?>"><?php echo esc_html($label); ?></option>
+                                <?php endforeach; ?>
+                                <option value="other">Other</option>
+                            </select>
+                            <input type="text" name="transfer_level_other" placeholder="Other level" style="display: none;">
                         </td>
+                    </tr>
+
+                    <tr>
+                        <th>Are you an international player/student? <span class="required">*</span></th>
+                        <td>
+                            <label><input type="radio" name="international" value="no" required checked> No</label><br>
+                            <label><input type="radio" name="international" value="yes"> Yes</label>
+                        </td>
+                    </tr>
+                    <tr class="international-section" style="display: none;">
+                        <th>What is your country of origin? <span class="required">*</span></th>
+                        <td><input type="text" name="country_origin" maxlength="100"></td>
+                    </tr>
+                    <tr class="international-section" style="display: none;">
+                        <th>Are you a registered volleyball player in another country? <span class="required">*</span></th>
+                        <td>
+                            <label><input type="radio" name="registered_abroad" value="no" checked> No</label><br>
+                            <label><input type="radio" name="registered_abroad" value="yes"> Yes</label>
+                            <input type="text" name="registered_country" placeholder="Which country?" style="display: none;">
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th>Are you trialling for men's or women's? <span class="required">*</span></th>
+                        <td>
+                            <label><input type="radio" name="gender_trialling" value="mens" required> Men's</label><br>
+                            <label><input type="radio" name="gender_trialling" value="womens"> Women's</label>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th>Select the team/s you are trialling for <span class="required">*</span></th>
+                        <td>
+                            <?php foreach (self::get_level_options() as $key => $label): ?>
+                                <label><input type="checkbox" name="interested_teams[]" value="<?php echo esc_attr($key); ?>"> <?php echo esc_html($label); ?></label><br>
+                            <?php endforeach; ?>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th>Select the position/s you are trialling for <span class="required">*</span></th>
+                        <td>
+                            <?php foreach (self::get_position_options() as $key => $label): ?>
+                                <label><input type="checkbox" name="preferred_positions[]" value="<?php echo esc_attr($key); ?>"> <?php echo esc_html($label); ?></label><br>
+                            <?php endforeach; ?>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th>List any trial dates you are unavailable to attend</th>
+                        <td>
+                            <textarea name="unavailable_dates" rows="2" cols="50" placeholder="e.g. Sat 8 Nov, Sun 16 Nov"></textarea>
+                            <p class="description">If you are unable to make any of the trial dates, please email coaches_women@renegades.com.au or coaches_men@renegades.com.au</p>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th>Training venues will vary — select any venues you can't attend <span class="required">*</span></th>
+                        <td>
+                            <?php foreach (self::get_venue_options() as $key => $label): ?>
+                                <label><input type="checkbox" name="venues[]" value="<?php echo esc_attr($key); ?>"> <?php echo esc_html($label); ?></label><br>
+                            <?php endforeach; ?>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th>Can you attend 2 regular training sessions per week? <span class="required">*</span></th>
+                        <td>
+                            <label><input type="radio" name="two_sessions" value="yes" required> Yes</label><br>
+                            <label><input type="radio" name="two_sessions" value="no"> No</label>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th>Please list any period/s of absence during the competition season (April&ndash;September)</th>
+                        <td><textarea name="absence_periods" rows="2" cols="50"></textarea></td>
+                    </tr>
+
+                    <tr>
+                        <th>Tell us about your volleyball experience and at what level you have previously played</th>
+                        <td><textarea name="experience" rows="4" cols="50"></textarea></td>
                     </tr>
                 </table>
-                
+
                 <p>
                     <input type="submit" id="submit-trial-btn" class="button button-primary" value="Submit Trial Application" <?php echo !$profile_validation['is_complete'] ? 'disabled' : ''; ?>>
                     <input type="hidden" name="action" value="submit_trial_application">
                     <?php wp_nonce_field('trial_application', 'trial_nonce'); ?>
                 </p>
-                
+
                 <?php if (!$profile_validation['is_complete']): ?>
                     <div class="profile-incomplete-notice">
                         <p><strong>⚠ Profile Incomplete:</strong> Please complete your profile information above before submitting your trial application.</p>
@@ -221,6 +336,29 @@ class TeamOversight_Trials {
         
         <script>
         jQuery(document).ready(function($) {
+            // Conditional sections
+            $('input[name="vvl_history"]').on('change', function() {
+                var v = $(this).val();
+                $('.returning-section').toggle(v === 'renegades_last_season' || v === 'renegades_previously');
+                $('.transfer-section').toggle(v === 'transfer');
+            });
+
+            $('input[name="international"]').on('change', function() {
+                $('.international-section').toggle($('input[name="international"]:checked').val() === 'yes');
+            });
+
+            $('input[name="registered_abroad"]').on('change', function() {
+                $('input[name="registered_country"]').toggle($('input[name="registered_abroad"]:checked').val() === 'yes');
+            });
+
+            $('select[name="last_level"]').on('change', function() {
+                $('input[name="last_level_other"]').toggle($(this).val() === 'other');
+            });
+
+            $('select[name="transfer_level"]').on('change', function() {
+                $('input[name="transfer_level_other"]').toggle($(this).val() === 'other');
+            });
+
             // Handle form submission
             $('#trial-form').on('submit', function(e) {
                 e.preventDefault();
@@ -407,6 +545,45 @@ class TeamOversight_Trials {
         .trial-fee-notice p {
             margin: 0;
         }
+
+        .trial-prefill-section {
+            margin-bottom: 20px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            background: #f9f9f9;
+            padding: 15px 20px;
+        }
+
+        .trial-prefill-section h4 {
+            margin: 0 0 5px 0;
+        }
+
+        .prefill-note {
+            color: #666;
+            font-size: 13px;
+            margin: 0 0 10px 0;
+        }
+
+        .trial-prefill-table {
+            border-collapse: collapse;
+        }
+
+        .trial-prefill-table th {
+            text-align: left;
+            padding: 4px 20px 4px 0;
+            color: #444;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .trial-prefill-table td {
+            padding: 4px 0;
+            color: #222;
+        }
+
+        .required {
+            color: #dc3232;
+        }
         
         #submit-trial-btn:disabled {
             opacity: 0.6;
@@ -460,15 +637,95 @@ class TeamOversight_Trials {
             wp_send_json_error(array('message' => 'Please complete your profile information before submitting your trial application. Missing fields: ' . implode(', ', $profile_validation['missing_fields'])));
         }
         $season = sanitize_text_field($_POST['season']);
-        $interested_teams = isset($_POST['interested_teams']) ? array_map('sanitize_text_field', $_POST['interested_teams']) : array();
-        $preferred_positions = isset($_POST['preferred_positions']) ? array_map('sanitize_text_field', $_POST['preferred_positions']) : array();
-        $is_transfer_player = intval($_POST['is_transfer_player']);
-        $additional_comments = sanitize_textarea_field($_POST['additional_comments']);
-        
-        if (empty($season) || empty($interested_teams) || empty($preferred_positions)) {
+        $interested_teams = isset($_POST['interested_teams']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['interested_teams']), array_keys(self::get_level_options()))) : array();
+        $preferred_positions = isset($_POST['preferred_positions']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['preferred_positions']), array_keys(self::get_position_options()))) : array();
+
+        $history = isset($_POST['vvl_history']) ? sanitize_text_field($_POST['vvl_history']) : '';
+        $international = isset($_POST['international']) ? sanitize_text_field($_POST['international']) : '';
+        $gender_trialling = isset($_POST['gender_trialling']) ? sanitize_text_field($_POST['gender_trialling']) : '';
+        $two_sessions = isset($_POST['two_sessions']) ? sanitize_text_field($_POST['two_sessions']) : '';
+        $venues = isset($_POST['venues']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['venues']), array_keys(self::get_venue_options()))) : array();
+
+        if (empty($season) || empty($interested_teams) || empty($preferred_positions)
+            || !array_key_exists($history, self::get_history_options())
+            || !in_array($international, array('yes', 'no'), true)
+            || !in_array($gender_trialling, array('mens', 'womens'), true)
+            || !in_array($two_sessions, array('yes', 'no'), true)
+            || empty($venues)) {
             wp_send_json_error(array('message' => 'Please fill in all required fields.'));
         }
-        
+
+        $is_transfer_player = ($history === 'transfer') ? 1 : 0;
+
+        $level_options = self::get_level_options();
+        $history_options = self::get_history_options();
+        $venue_options = self::get_venue_options();
+
+        $resolve_level = function ($field) use ($level_options) {
+            $value = isset($_POST[$field]) ? sanitize_text_field($_POST[$field]) : '';
+            if ($value === 'other') {
+                $other = isset($_POST[$field . '_other']) ? sanitize_text_field($_POST[$field . '_other']) : '';
+                return $other !== '' ? 'Other: ' . $other : '';
+            }
+            return isset($level_options[$value]) ? $level_options[$value] : '';
+        };
+
+        // Human-readable answers, stored as a snapshot with the application.
+        $form_data = array(
+            'VVL History' => $history_options[$history],
+            'Trialling For' => $gender_trialling === 'mens' ? "Men's" : "Women's",
+            'Can Attend 2 Sessions/Week' => ucfirst($two_sessions),
+            'Venues Unable To Attend' => implode(', ', array_map(function ($v) use ($venue_options) {
+                return $venue_options[$v];
+            }, $venues)),
+            'Unavailable Trial Dates' => isset($_POST['unavailable_dates']) ? sanitize_textarea_field($_POST['unavailable_dates']) : '',
+            'Absence Periods (Apr-Sep)' => isset($_POST['absence_periods']) ? sanitize_textarea_field($_POST['absence_periods']) : '',
+            'Volleyball Experience' => isset($_POST['experience']) ? sanitize_textarea_field($_POST['experience']) : '',
+        );
+
+        if ($history === 'renegades_last_season' || $history === 'renegades_previously') {
+            $last_level = $resolve_level('last_level');
+            if ($last_level === '') {
+                wp_send_json_error(array('message' => 'Please select the level at which you last played.'));
+            }
+            $form_data['Last Level Played'] = $last_level;
+        }
+
+        if ($history === 'transfer') {
+            $transfer_season = isset($_POST['transfer_season']) ? sanitize_text_field($_POST['transfer_season']) : '';
+            $transfer_club = isset($_POST['transfer_club']) ? sanitize_text_field($_POST['transfer_club']) : '';
+            $transfer_level = $resolve_level('transfer_level');
+            if ($transfer_season === '' || $transfer_club === '' || $transfer_level === '') {
+                wp_send_json_error(array('message' => 'Please complete the club transfer details.'));
+            }
+            $form_data['Transfer: Last VVL Season'] = $transfer_season;
+            $form_data['Transfer: Previous Club'] = $transfer_club;
+            $form_data['Transfer: Level Played'] = $transfer_level;
+        }
+
+        if ($international === 'yes') {
+            $country_origin = isset($_POST['country_origin']) ? sanitize_text_field($_POST['country_origin']) : '';
+            $registered_abroad = isset($_POST['registered_abroad']) ? sanitize_text_field($_POST['registered_abroad']) : '';
+            if ($country_origin === '' || !in_array($registered_abroad, array('yes', 'no'), true)) {
+                wp_send_json_error(array('message' => 'Please complete the international player details.'));
+            }
+            $form_data['International Player'] = 'Yes';
+            $form_data['Country of Origin'] = $country_origin;
+            if ($registered_abroad === 'yes') {
+                $registered_country = isset($_POST['registered_country']) ? sanitize_text_field($_POST['registered_country']) : '';
+                $form_data['Registered Player In Another Country'] = 'Yes' . ($registered_country !== '' ? ' — ' . $registered_country : '');
+            } else {
+                $form_data['Registered Player In Another Country'] = 'No';
+            }
+        } else {
+            $form_data['International Player'] = 'No';
+        }
+
+        // Snapshot the account details as they were at submission time.
+        $prefill = self::get_prefill_data($user->ID);
+        $form_data['Contact Number (at submission)'] = $prefill['mobile'];
+        $form_data['Date of Birth (at submission)'] = $prefill['birth_date'];
+
         global $wpdb;
 
         $existing_application = $wpdb->get_var($wpdb->prepare("
@@ -490,9 +747,10 @@ class TeamOversight_Trials {
             'interested_teams' => json_encode($interested_teams),
             'preferred_positions' => json_encode($preferred_positions),
             'is_transfer_player' => $is_transfer_player,
+            'form_data' => wp_json_encode($form_data),
             'application_status' => $fee_product ? 'awaiting_payment' : 'pending'
         );
-        $application_formats = array('%d', '%s', '%s', '%s', '%s', '%s', '%d', '%s');
+        $application_formats = array('%d', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s');
 
         // Reuse an abandoned unpaid application for this season instead of
         // stacking duplicates when someone retries after leaving checkout.
@@ -699,6 +957,7 @@ class TeamOversight_Trials {
             $wpdb->insert(
                 $wpdb->prefix . 'team_assignments',
                 array(
+                    'user_id' => intval($application->user_id),
                     'email' => $application->email,
                     'season' => $application->season,
                     'team' => $assigned_team,
@@ -707,7 +966,7 @@ class TeamOversight_Trials {
                     'start_date' => date('Y-m-d'),
                     'is_active' => 1
                 ),
-                array('%s', '%s', '%s', '%s', '%s', '%s', '%d')
+                array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d')
             );
             
             $fees = new TeamOversight_Fees();
@@ -732,6 +991,9 @@ class TeamOversight_Trials {
     
     public function validate_user_profile($user_id) {
         $required_fields = array(
+            'first_name' => 'First Name',
+            'last_name' => 'Last Name',
+            'mobile_number' => 'Contact Number',
             'birth_date' => 'Date of Birth',
             'degree1type' => 'Degree Type',
             'institution1' => 'Institution',

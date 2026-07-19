@@ -25,7 +25,7 @@ A comprehensive volleyball club management system for WordPress with Ultimate Me
 
 ## Features
 
-- **Trial Application System**: Logged-in users apply for team trials through a front-end form; an optional trial fee (a WooCommerce product configured on the Trial Applications page) sends applicants to checkout, and only paid applications enter the review queue
+- **Trial Application System**: Logged-in users apply for team trials through a front-end form modelled on the club's VVL trials questionnaire (VVL history, transfers, international players, venues, availability); account details (name, email, phone, DOB) are shown read-only and edited via the profile. An optional trial fee (a WooCommerce product configured on the Trial Applications page) sends applicants to checkout, and only paid applications enter the review queue. Full answers are stored per application and viewable via the Details button in admin
 - **Team Assignment Management**: Admin can assign players to teams with multiple roles
 - **Fee Calculation**: Automatic fee calculation based on MUS category and team role
 - **Multi-Role Support**: Players can have multiple roles across different teams

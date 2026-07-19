@@ -841,6 +841,7 @@ class TeamOversight_Fees {
         $result = $wpdb->insert(
             $wpdb->prefix . 'team_invoices',
             array(
+                'user_id' => $user ? $user->ID : null,
                 'email' => $email,
                 'name' => $name,
                 'season' => $season,
@@ -848,7 +849,7 @@ class TeamOversight_Fees {
                 'outstanding_amount' => $minimum_fee,
                 'invoice_reference' => $invoice_reference
             ),
-            array('%s', '%s', '%s', '%f', '%f', '%s')
+            array('%d', '%s', '%s', '%s', '%f', '%f', '%s')
         );
         
         if ($result === false) {
