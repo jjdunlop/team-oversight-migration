@@ -2590,19 +2590,92 @@ class TeamOversight_Admin {
         }
         
         global $wpdb;
-        
+
         $assignment_id = intval($_POST['assignment_id']);
-        
+
+        // Capture the row first so trial applications can be synced after.
+        $assignment = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}team_assignments WHERE id = %d
+        ", $assignment_id));
+
         $result = $wpdb->delete(
             $wpdb->prefix . 'team_assignments',
             array('id' => $assignment_id),
             array('%d')
         );
-        
+
         if ($result !== false) {
+            if ($assignment && in_array($assignment->role, array('playing_member', 'training_only'), true)) {
+                $this->sync_trial_after_assignment_removal($assignment->email, $assignment->season, $assignment->team);
+            }
             wp_send_json_success('Assignment deleted successfully');
         } else {
             wp_send_json_error('Failed to delete assignment');
+        }
+    }
+
+    /**
+     * Keep trial applications in step when a playing assignment is removed:
+     * drop the team from the accepted list (back to pending if none remain)
+     * and downgrade the coach verdict for that team to Tentative — the
+     * player stays visible on the coach's board as flagged, but the next
+     * finalisation run won't silently recreate the assignment (it only
+     * processes Selected / Training Only verdicts).
+     */
+    private function sync_trial_after_assignment_removal($email, $season, $team) {
+        global $wpdb;
+
+        $application = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}trial_applications
+            WHERE season = %s AND email = %s AND application_status = 'accepted'
+        ", $season, $email));
+
+        if (!$application) {
+            return;
+        }
+
+        // assigned_team tokens look like "SL2M" or "JPLM (T/O)".
+        $tokens = array_filter(array_map('trim', explode(',', (string) $application->assigned_team)));
+        $remaining = array();
+        $removed = false;
+        foreach ($tokens as $token) {
+            if (trim(str_replace('(T/O)', '', $token)) === $team) {
+                $removed = true;
+            } else {
+                $remaining[] = $token;
+            }
+        }
+
+        if (!$removed) {
+            return;
+        }
+
+        // Downgrade the verdict to Tentative so the coach still sees the
+        // player flagged, without finalisation recreating the assignment.
+        $wpdb->update(
+            $wpdb->prefix . 'team_trial_selections',
+            array('status' => 'tentative', 'updated_date' => current_time('mysql')),
+            array('application_id' => $application->id, 'team' => $team),
+            array('%s', '%s'),
+            array('%d', '%s')
+        );
+
+        if (empty($remaining)) {
+            $wpdb->update(
+                $wpdb->prefix . 'trial_applications',
+                array('application_status' => 'pending', 'assigned_team' => null),
+                array('id' => $application->id),
+                array('%s', '%s'),
+                array('%d')
+            );
+        } else {
+            $wpdb->update(
+                $wpdb->prefix . 'trial_applications',
+                array('assigned_team' => implode(', ', $remaining)),
+                array('id' => $application->id),
+                array('%s'),
+                array('%d')
+            );
         }
     }
     
