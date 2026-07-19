@@ -13,6 +13,14 @@ class TeamOversight_Trials {
         add_action('wp_ajax_nopriv_submit_trial_application', array($this, 'handle_trial_submission'));
         add_action('wp_ajax_check_profile_status', array($this, 'check_profile_status'));
         add_action('wp_ajax_nopriv_check_profile_status', array($this, 'check_profile_status'));
+
+        // Trial fee payment via WooCommerce: the form saves the application as
+        // awaiting_payment, sends the user to checkout with the configured fee
+        // product, and the paid order flips the application to pending.
+        add_action('woocommerce_checkout_create_order_line_item', array($this, 'attach_application_to_order_item'), 10, 3);
+        add_action('woocommerce_order_status_processing', array($this, 'handle_trial_payment'));
+        add_action('woocommerce_order_status_completed', array($this, 'handle_trial_payment'));
+        add_filter('woocommerce_get_item_data', array($this, 'display_application_in_cart'), 10, 2);
     }
     
     public function init() {
@@ -21,7 +29,13 @@ class TeamOversight_Trials {
     
     public function render_trial_form($atts = array()) {
         if (!is_user_logged_in()) {
-            return '<p>You must be logged in to submit a trial application. <a href="' . wp_login_url() . '">Login here</a></p>';
+            $login_url = function_exists('um_get_core_page')
+                ? add_query_arg('redirect_to', urlencode(get_permalink()), um_get_core_page('login'))
+                : wp_login_url(get_permalink());
+            return '<div class="trial-login-required" style="border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px; background: #f9f9f9;">'
+                . '<p><strong>You must be logged in with your club account to submit a trial application.</strong></p>'
+                . '<p><a class="button button-primary" href="' . esc_url($login_url) . '">Log in to continue</a></p>'
+                . '</div>';
         }
         
         $user = wp_get_current_user();
@@ -82,6 +96,14 @@ class TeamOversight_Trials {
                 </div>
             </div>
             
+            <?php $fee_product = $this->get_trial_fee_product(); ?>
+            <?php if ($fee_product): ?>
+                <div class="trial-fee-notice">
+                    <p><strong>Trial registration fee: <?php echo wp_kses_post($fee_product->get_price_html()); ?></strong><br>
+                    After submitting this form you will be taken to the checkout to pay. Your application is only reviewed once payment is complete.</p>
+                </div>
+            <?php endif; ?>
+
             <form id="trial-form" method="post">
                 <table class="form-table">
                     <tr>
@@ -218,6 +240,9 @@ class TeamOversight_Trials {
                     success: function(response) {
                         if (response.success) {
                             $('#trial-application-form').html('<div class="notice notice-success"><p>' + response.data.message + '</p></div>');
+                            if (response.data.redirect) {
+                                window.location.href = response.data.redirect;
+                            }
                         } else {
                             alert('Error: ' + response.data.message);
                         }
@@ -369,6 +394,19 @@ class TeamOversight_Trials {
         .profile-incomplete-notice p {
             margin: 0;
         }
+
+        .trial-fee-notice {
+            background: #e7f5ff;
+            border: 1px solid #74c0fc;
+            color: #1864ab;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+
+        .trial-fee-notice p {
+            margin: 0;
+        }
         
         #submit-trial-btn:disabled {
             opacity: 0.6;
@@ -432,36 +470,178 @@ class TeamOversight_Trials {
         }
         
         global $wpdb;
-        
+
         $existing_application = $wpdb->get_var($wpdb->prepare("
-            SELECT id FROM {$wpdb->prefix}trial_applications 
+            SELECT id FROM {$wpdb->prefix}trial_applications
             WHERE user_id = %d AND season = %s AND application_status = 'pending'
         ", $user->ID, $season));
-        
+
         if ($existing_application) {
             wp_send_json_error(array('message' => 'You already have a pending application for this season.'));
         }
-        
-        $result = $wpdb->insert(
-            $wpdb->prefix . 'trial_applications',
-            array(
-                'user_id' => $user->ID,
-                'email' => $user->user_email,
-                'name' => $user->display_name,
-                'season' => $season,
-                'interested_teams' => json_encode($interested_teams),
-                'preferred_positions' => json_encode($preferred_positions),
-                'is_transfer_player' => $is_transfer_player,
-                'application_status' => 'pending'
-            ),
-            array('%d', '%s', '%s', '%s', '%s', '%s', '%d', '%s')
+
+        $fee_product = $this->get_trial_fee_product();
+
+        $application_data = array(
+            'user_id' => $user->ID,
+            'email' => $user->user_email,
+            'name' => $user->display_name,
+            'season' => $season,
+            'interested_teams' => json_encode($interested_teams),
+            'preferred_positions' => json_encode($preferred_positions),
+            'is_transfer_player' => $is_transfer_player,
+            'application_status' => $fee_product ? 'awaiting_payment' : 'pending'
         );
-        
-        if ($result) {
-            wp_send_json_success(array('message' => 'Your trial application has been submitted successfully! You will be contacted regarding team assignments.'));
+        $application_formats = array('%d', '%s', '%s', '%s', '%s', '%s', '%d', '%s');
+
+        // Reuse an abandoned unpaid application for this season instead of
+        // stacking duplicates when someone retries after leaving checkout.
+        $awaiting_id = $wpdb->get_var($wpdb->prepare("
+            SELECT id FROM {$wpdb->prefix}trial_applications
+            WHERE user_id = %d AND season = %s AND application_status IN ('awaiting_payment', 'expired')
+        ", $user->ID, $season));
+
+        if ($awaiting_id) {
+            $updated = $wpdb->update(
+                $wpdb->prefix . 'trial_applications',
+                $application_data,
+                array('id' => $awaiting_id),
+                $application_formats,
+                array('%d')
+            );
+            $application_id = ($updated !== false) ? intval($awaiting_id) : 0;
         } else {
+            $inserted = $wpdb->insert($wpdb->prefix . 'trial_applications', $application_data, $application_formats);
+            $application_id = $inserted ? intval($wpdb->insert_id) : 0;
+        }
+
+        if (!$application_id) {
             wp_send_json_error(array('message' => 'There was an error submitting your application. Please try again.'));
         }
+
+        if (!$fee_product) {
+            wp_send_json_success(array('message' => 'Your trial application has been submitted successfully! You will be contacted regarding team assignments.'));
+        }
+
+        $checkout_url = $this->add_fee_to_cart($fee_product, $application_id);
+
+        if (!$checkout_url) {
+            wp_send_json_error(array('message' => 'Your application was saved, but the trial fee could not be added to your cart. Please contact the club to arrange payment.'));
+        }
+
+        wp_send_json_success(array(
+            'message' => 'Application saved! Taking you to the checkout to pay the trial fee&hellip;',
+            'redirect' => $checkout_url
+        ));
+    }
+
+    /**
+     * The WooCommerce product used as the trial registration fee, or null
+     * if none is configured (in which case applications submit directly).
+     */
+    public function get_trial_fee_product() {
+        if (!function_exists('wc_get_product')) {
+            return null;
+        }
+
+        $product_id = intval(get_option('team_oversight_trial_fee_product'));
+        if (!$product_id) {
+            return null;
+        }
+
+        $product = wc_get_product($product_id);
+        return ($product && $product->is_purchasable()) ? $product : null;
+    }
+
+    private function add_fee_to_cart($product, $application_id) {
+        if (!function_exists('WC')) {
+            return false;
+        }
+
+        if (WC()->cart === null && function_exists('wc_load_cart')) {
+            wc_load_cart();
+        }
+        if (WC()->cart === null) {
+            return false;
+        }
+
+        // Drop any earlier trial-fee line so retries don't stack.
+        foreach (WC()->cart->get_cart() as $cart_item_key => $cart_item) {
+            if (!empty($cart_item['murvc_trial_application_id'])) {
+                WC()->cart->remove_cart_item($cart_item_key);
+            }
+        }
+
+        $added = WC()->cart->add_to_cart(
+            $product->get_id(),
+            1,
+            0,
+            array(),
+            array('murvc_trial_application_id' => $application_id)
+        );
+
+        return $added ? wc_get_checkout_url() : false;
+    }
+
+    public function display_application_in_cart($item_data, $cart_item) {
+        if (!empty($cart_item['murvc_trial_application_id'])) {
+            $item_data[] = array(
+                'key' => 'Trial application',
+                'value' => '#' . intval($cart_item['murvc_trial_application_id'])
+            );
+        }
+        return $item_data;
+    }
+
+    public function attach_application_to_order_item($item, $cart_item_key, $values) {
+        if (!empty($values['murvc_trial_application_id'])) {
+            $item->add_meta_data('_murvc_trial_application_id', intval($values['murvc_trial_application_id']), true);
+        }
+    }
+
+    /**
+     * Paid order containing a trial fee -> application becomes reviewable.
+     */
+    public function handle_trial_payment($order_id) {
+        if (!function_exists('wc_get_order')) {
+            return;
+        }
+
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return;
+        }
+
+        global $wpdb;
+
+        foreach ($order->get_items() as $item) {
+            $application_id = intval($item->get_meta('_murvc_trial_application_id'));
+            if (!$application_id) {
+                continue;
+            }
+
+            $wpdb->query($wpdb->prepare("
+                UPDATE {$wpdb->prefix}trial_applications
+                SET application_status = 'pending', order_id = %d
+                WHERE id = %d AND application_status IN ('awaiting_payment', 'expired')
+            ", $order_id, $application_id));
+        }
+    }
+
+    /**
+     * Applications left unpaid for 7+ days are marked expired so the review
+     * list stays clean. Resubmitting the form (or a late payment coming
+     * through) revives them.
+     */
+    public static function expire_stale_awaiting() {
+        global $wpdb;
+
+        $wpdb->query("
+            UPDATE {$wpdb->prefix}trial_applications
+            SET application_status = 'expired'
+            WHERE application_status = 'awaiting_payment'
+                AND created_date < DATE_SUB(NOW(), INTERVAL 7 DAY)
+        ");
     }
     
     public function get_trial_applications($season = null) {

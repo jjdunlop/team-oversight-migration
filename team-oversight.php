@@ -1,8 +1,8 @@
-<?php
+﻿<?php
 /**
  * Plugin Name: Team Oversight
- * Description: MURVC club management — club membership tiers (Club Membership menu) and VVL team oversight: trials, assignments, fees and dashboard (VVL Oversight menu).
- * Version: 1.1.0
+ * Description: MURVC club management - club membership tiers (Club Membership menu) and VVL team oversight: trials, assignments, fees and dashboard (VVL Oversight menu).
+ * Version: 1.2.0
  * Author: Team Management System
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.1.0');
+define('TEAM_OVERSIGHT_VERSION', '1.2.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -147,6 +147,7 @@ function team_oversight_create_tables() {
                 is_transfer_player tinyint(1) DEFAULT 0,
                 application_status varchar(20) DEFAULT 'pending',
                 assigned_team varchar(50) DEFAULT NULL,
+                order_id bigint(20) unsigned DEFAULT NULL,
                 created_date datetime DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
                 KEY user_id (user_id),

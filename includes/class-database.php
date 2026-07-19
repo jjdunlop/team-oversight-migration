@@ -66,6 +66,12 @@ class TeamOversight_Database {
             $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}fee_matrix SET season = %s WHERE season IS NULL", $current_year));
         }
         
+        // Add order_id column to trial_applications for trial fee orders (added in 1.2.0)
+        $order_id_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}trial_applications LIKE 'order_id'");
+        if (empty($order_id_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications ADD COLUMN order_id bigint(20) unsigned DEFAULT NULL AFTER assigned_team");
+        }
+
         // Create team_memberships table if it doesn't exist (added in 1.1.0)
         $memberships_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_memberships'");
         if (!$memberships_exists) {
@@ -199,6 +205,7 @@ class TeamOversight_Database {
                     is_transfer_player tinyint(1) DEFAULT 0,
                     application_status varchar(20) DEFAULT 'pending',
                     assigned_team varchar(50) DEFAULT NULL,
+                    order_id bigint(20) unsigned DEFAULT NULL,
                     created_date datetime DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (id),
                     KEY user_id (user_id),

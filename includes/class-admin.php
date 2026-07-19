@@ -146,11 +146,36 @@ class TeamOversight_Admin {
     }
 
     public function trials_page() {
-        if (isset($_POST['action']) && ($_POST['action'] === 'accept_trial' || $_POST['action'] === 'reject_trial' || $_POST['action'] === 'undo_trial')) {
+        if (isset($_POST['action']) && $_POST['action'] === 'save_trial_settings') {
+            $this->save_trial_settings();
+        }
+
+        if (isset($_POST['action']) && in_array($_POST['action'], array('accept_trial', 'reject_trial', 'undo_trial', 'mark_trial_paid'), true)) {
             $this->process_trial_action();
         }
-        
+
         $this->render_trials_table();
+    }
+
+    private function save_trial_settings() {
+        if (!isset($_POST['trial_settings_nonce']) || !wp_verify_nonce($_POST['trial_settings_nonce'], 'save_trial_settings')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
+        $product_id = intval($_POST['trial_fee_product']);
+        update_option('team_oversight_trial_fee_product', $product_id);
+
+        if ($product_id) {
+            echo '<div class="notice notice-success"><p>Trial fee product saved. New applications will be sent to checkout to pay before review.</p></div>';
+        } else {
+            echo '<div class="notice notice-success"><p>Trial fee disabled. Applications now submit directly without payment.</p></div>';
+        }
     }
     
     public function assignments_page() {
@@ -497,30 +522,65 @@ class TeamOversight_Admin {
     
     private function render_trials_table() {
         global $wpdb;
-        
+
         $season = $this->get_current_season();
-        
+
+        // Tidy up unpaid applications older than 7 days before listing.
+        TeamOversight_Trials::expire_stale_awaiting();
+
         $trials = $wpdb->get_results($wpdb->prepare("
-            SELECT * FROM {$wpdb->prefix}trial_applications 
-            WHERE season = %s 
+            SELECT * FROM {$wpdb->prefix}trial_applications
+            WHERE season = %s
             ORDER BY created_date DESC
         ", $season));
-        
+
         ?>
         <div class="wrap">
             <h1>Trial Applications</h1>
-            
+
             <div class="season-filter">
                 <label for="season-select">Season:</label>
                 <select id="season-select" onchange="location.href=this.value;">
-                    <?php 
+                    <?php
                     $available_seasons = $this->get_available_seasons('main');
                     foreach ($available_seasons as $available_season): ?>
                         <option value="<?php echo admin_url('admin.php?page=team-oversight-trials&season=' . $available_season); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
-            
+
+            <?php $trial_fee_product_id = intval(get_option('team_oversight_trial_fee_product')); ?>
+            <details class="import-export-section" style="margin: 15px 0; padding: 10px 15px; background: #fff; border: 1px solid #ccd0d4;">
+                <summary style="cursor: pointer; font-weight: 600;">
+                    Trial fee product
+                    <?php if ($trial_fee_product_id): ?>
+                        <span style="color: #1a7a2e;">(active: #<?php echo $trial_fee_product_id; ?> <?php echo esc_html(get_the_title($trial_fee_product_id)); ?>)</span>
+                    <?php else: ?>
+                        <span style="color: #996800;">(no fee — applications submit directly)</span>
+                    <?php endif; ?>
+                </summary>
+                <p class="description">When a product is selected, submitting the trial form saves the application as "Awaiting Payment", adds this product to the cart and sends the applicant to checkout. The application only becomes reviewable once the order is paid. Unpaid applications expire after 7 days.</p>
+                <form method="post">
+                    <select name="trial_fee_product" style="max-width: 400px;">
+                        <option value="0">No fee — applications submit directly</option>
+                        <?php
+                        $products = get_posts(array(
+                            'post_type' => 'product',
+                            'post_status' => 'publish',
+                            'numberposts' => 500,
+                            'orderby' => 'title',
+                            'order' => 'ASC',
+                        ));
+                        foreach ($products as $product_post): ?>
+                            <option value="<?php echo $product_post->ID; ?>" <?php selected($trial_fee_product_id, $product_post->ID); ?>><?php echo esc_html($product_post->post_title); ?> (#<?php echo $product_post->ID; ?>)</option>
+                        <?php endforeach; ?>
+                    </select>
+                    <input type="submit" class="button button-primary" value="Save">
+                    <input type="hidden" name="action" value="save_trial_settings">
+                    <?php wp_nonce_field('save_trial_settings', 'trial_settings_nonce'); ?>
+                </form>
+            </details>
+
             <?php if (!empty($trials)): ?>
                 <div class="trials-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
                     <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
@@ -532,9 +592,11 @@ class TeamOversight_Admin {
                             <label for="filter-status">Status:</label>
                             <select id="filter-status">
                                 <option value="">All Statuses</option>
+                                <option value="awaiting_payment">Awaiting Payment</option>
                                 <option value="pending">Pending</option>
                                 <option value="accepted">Accepted</option>
                                 <option value="rejected">Rejected</option>
+                                <option value="expired">Expired (unpaid)</option>
                             </select>
                         </div>
                         <div>
@@ -589,6 +651,7 @@ class TeamOversight_Admin {
                             <th>Positions</th>
                             <th>Transfer Player</th>
                             <th>Status</th>
+                            <th>Payment</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -610,11 +673,35 @@ class TeamOversight_Admin {
                                 <td><?php echo $trial->is_transfer_player ? 'Yes' : 'No'; ?></td>
                                 <td>
                                     <span class="status-<?php echo esc_attr($trial->application_status); ?>">
-                                        <?php echo esc_html(ucfirst($trial->application_status)); ?>
+                                        <?php echo esc_html(ucwords(str_replace('_', ' ', $trial->application_status))); ?>
                                     </span>
                                 </td>
                                 <td>
-                                    <?php if ($trial->application_status === 'pending'): ?>
+                                    <?php if (!empty($trial->order_id)): ?>
+                                        <a href="<?php echo esc_url(admin_url('post.php?post=' . intval($trial->order_id) . '&action=edit')); ?>">Order #<?php echo intval($trial->order_id); ?></a>
+                                    <?php elseif ($trial->application_status === 'awaiting_payment'): ?>
+                                        <span style="color: #996800;">Unpaid</span>
+                                    <?php elseif ($trial->application_status === 'expired'): ?>
+                                        <span style="color: #a00;">Never paid</span>
+                                    <?php else: ?>
+                                        &mdash;
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php if ($trial->application_status === 'awaiting_payment' || $trial->application_status === 'expired'): ?>
+                                        <form method="post" style="display: inline;">
+                                            <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
+                                            <input type="hidden" name="action" value="mark_trial_paid">
+                                            <input type="submit" class="button" value="Mark as Paid" onclick="return confirm('Mark this application as paid (payment received outside the site)? It will move to the review queue.')">
+                                            <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
+                                        </form>
+                                        <form method="post" style="display: inline;">
+                                            <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
+                                            <input type="hidden" name="action" value="reject_trial">
+                                            <input type="submit" class="button" value="Reject" onclick="return confirm('Are you sure?')">
+                                            <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
+                                        </form>
+                                    <?php elseif ($trial->application_status === 'pending'): ?>
                                         <form method="post" style="display: inline;">
                                             <select name="assigned_team" required style="max-width: 150px; font-size: 12px;">
                                                 <option value="">Select Team</option>
@@ -696,6 +783,24 @@ class TeamOversight_Admin {
                 color: #155724;
                 background-color: #d4edda;
                 border: 1px solid #c3e6cb;
+                padding: 2px 8px;
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            .status-awaiting_payment {
+                color: #1864ab;
+                background-color: #e7f5ff;
+                border: 1px solid #74c0fc;
+                padding: 2px 8px;
+                border-radius: 3px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            .status-expired {
+                color: #666;
+                background-color: #eee;
+                border: 1px solid #ccc;
                 padding: 2px 8px;
                 border-radius: 3px;
                 font-size: 11px;
@@ -1671,7 +1776,17 @@ class TeamOversight_Admin {
             );
             
             echo '<div class="notice notice-success"><p>Trial application rejected.</p></div>';
-            
+
+        } elseif ($action === 'mark_trial_paid') {
+            // Manual override for payments made outside the site (cash, EFT).
+            $wpdb->query($wpdb->prepare("
+                UPDATE {$wpdb->prefix}trial_applications
+                SET application_status = 'pending'
+                WHERE id = %d AND application_status IN ('awaiting_payment', 'expired')
+            ", $trial_id));
+
+            echo '<div class="notice notice-success"><p>Application marked as paid and moved to the review queue.</p></div>';
+
         } elseif ($action === 'undo_trial') {
             // Get trial info
             $trial = $wpdb->get_row($wpdb->prepare("
