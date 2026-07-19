@@ -82,9 +82,12 @@ class TeamOversight_Readiness {
     }
 
     /**
-     * Kit quantities purchased in paid orders since 1 Jan of the season year,
-     * per category. Older purchases don't count — that's what the manual
-     * "I already have these" tick is for.
+     * Kit quantities purchased in paid orders, per category.
+     *
+     * Shirts count ALL-TIME: the club issues the shirt and the payment is
+     * once-ever — a shirt paid for years ago is still paid for. Shorts and
+     * socks count this season only; the manual "I already have these" tick
+     * covers older pairs.
      */
     public static function get_kit_purchases($user_id, $season) {
         global $wpdb;
@@ -97,27 +100,43 @@ class TeamOversight_Readiness {
             return $purchased;
         }
 
+        $season_start = intval($season) . '-01-01';
         $id_list = implode(',', array_map('intval', $all_ids));
         $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT opl.product_id, SUM(opl.product_qty) AS qty
+            SELECT opl.product_id, opl.date_created, opl.product_qty
             FROM {$wpdb->prefix}wc_order_product_lookup opl
             JOIN {$wpdb->prefix}wc_customer_lookup cl ON cl.customer_id = opl.customer_id
             JOIN {$wpdb->posts} p ON p.ID = opl.order_id AND p.post_status IN ('wc-processing', 'wc-completed')
             WHERE cl.user_id = %d
-                AND opl.date_created >= %s
                 AND opl.product_id IN ({$id_list})
-            GROUP BY opl.product_id
-        ", $user_id, intval($season) . '-01-01'));
+        ", $user_id));
 
         foreach ($rows as $row) {
-            foreach ($products as $category => $ids) {
-                if (in_array(intval($row->product_id), $ids, true)) {
-                    $purchased[$category] += intval($row->qty);
+            $product_id = intval($row->product_id);
+            if (in_array($product_id, $products['shirt'], true)) {
+                $purchased['shirt'] += intval($row->product_qty);
+            } elseif ($row->date_created >= $season_start) {
+                if (in_array($product_id, $products['shorts'], true)) {
+                    $purchased['shorts'] += intval($row->product_qty);
+                } elseif (in_array($product_id, $products['socks'], true)) {
+                    $purchased['socks'] += intval($row->product_qty);
                 }
             }
         }
 
         return $purchased;
+    }
+
+    /**
+     * Admin-recorded shirt credit for payments made outside this account
+     * (e.g. under an old email). array(qty, note).
+     */
+    public static function get_shirt_credit($user_id) {
+        $credit = get_user_meta($user_id, 'murvc_shirt_credit', true);
+        return array(
+            'qty' => is_array($credit) && isset($credit['qty']) ? max(0, intval($credit['qty'])) : 0,
+            'note' => is_array($credit) && isset($credit['note']) ? $credit['note'] : '',
+        );
     }
 
     /**
@@ -153,15 +172,44 @@ class TeamOversight_Readiness {
             'detail' => 'Every player needs a current VV membership before taking the court. Register on the VV website, then tick this off.',
         );
 
-        // 2. Playing kit.
-        $required = array('shorts' => 1, 'socks' => 1);
-        if ($shirts_required > 0) {
-            $required = array('shirt' => $shirts_required) + $required;
-        }
         $purchased = self::get_kit_purchases($user->ID, $season);
         $kit_products = self::get_kit_products();
 
-        $labels = array('shirt' => 'Playing shirt', 'shorts' => 'Playing shorts', 'socks' => 'Club socks');
+        // 2. Playing shirt — a payment obligation, not a purchase decision.
+        // The club issues the shirt regardless; it must be PAID for, once
+        // ever (all-time purchases count, plus any admin-recorded credit for
+        // payments made under a different account). No self-tick.
+        if ($shirts_required > 0) {
+            $credit = self::get_shirt_credit($user->ID);
+            $shirts_paid = $purchased['shirt'] + $credit['qty'];
+            $shirt_done = !empty($kit_products['shirt']) && $shirts_paid >= $shirts_required;
+
+            $detail = 'The club issues your playing shirt, but it must be paid for — a one-off payment that carries over between seasons. ';
+            $detail .= 'Paid: ' . min($shirts_paid, $shirts_required) . ' of ' . $shirts_required . ' shirt' . ($shirts_required > 1 ? 's' : '') . '.';
+            if ($credit['qty'] > 0) {
+                $detail .= ' (Includes ' . $credit['qty'] . ' recorded by the club' . ($credit['note'] ? ': ' . $credit['note'] : '') . '.)';
+            }
+            if (!$shirt_done) {
+                $detail .= ' If you paid under a different account or email, contact the club and we\'ll record it against this one.';
+            }
+
+            $steps['shirt'] = array(
+                'title' => 'Pay for your playing shirt' . ($shirts_required > 1 ? 's' : ''),
+                'done' => $shirt_done,
+                'manual' => false,
+                'url' => get_option(self::KIT_URL_OPTION),
+                'url_label' => 'Pay for shirt' . ($shirts_required > 1 ? 's' : ''),
+                'shirt_paid' => $shirts_paid,
+                'shirt_purchased' => $purchased['shirt'],
+                'shirt_credit' => $credit,
+                'shirt_required' => $shirts_required,
+                'detail' => $detail,
+            );
+        }
+
+        // 3. Shorts & socks — regular products, only issued once purchased.
+        $required = array('shorts' => 1, 'socks' => 1);
+        $labels = array('shorts' => 'Playing shorts', 'socks' => 'Club socks');
         $items = array();
         $auto_done = true;
         foreach ($required as $category => $qty) {
@@ -171,23 +219,21 @@ class TeamOversight_Readiness {
                 $auto_done = false;
             }
             $items[] = array(
-                'label' => $labels[$category] . ($qty > 1 ? ' × ' . $qty : ''),
+                'label' => $labels[$category],
                 'purchased' => $have,
                 'satisfied' => $satisfied,
             );
         }
 
         $steps['kit'] = array(
-            'title' => 'Get your playing kit',
+            'title' => 'Get your shorts and socks',
             'done' => $auto_done || in_array('kit', $manual, true),
             'auto_done' => $auto_done,
             'manual' => true,
             'url' => get_option(self::KIT_URL_OPTION),
-            'url_label' => 'Shop playing kit',
+            'url_label' => 'Shop shorts & socks',
             'items' => $items,
-            'detail' => $shirts_required === 0
-                ? 'Your team supplies playing shirts — you just need shorts and socks.'
-                : 'Purchases from the club shop this season tick off automatically. Already have your kit from a previous season? Tick the box.',
+            'detail' => 'Purchases from the club shop this season tick off automatically. Still using shorts and socks from a previous season? Tick the box.',
         );
 
         // 3. Club fees.
@@ -326,7 +372,7 @@ class TeamOversight_Readiness {
                                     <?php if ($step['done']): ?>
                                         <button type="submit" class="button rtp-untick">Undo — not done yet</button>
                                     <?php else: ?>
-                                        <button type="submit" class="button button-primary"><?php echo $step_key === 'kit' ? "I already have my kit" : "I've done this"; ?></button>
+                                        <button type="submit" class="button button-primary"><?php echo $step_key === 'kit' ? "I already have shorts & socks" : "I've done this"; ?></button>
                                     <?php endif; ?>
                                 </form>
                             <?php endif; ?>
@@ -438,6 +484,10 @@ class TeamOversight_Readiness {
             $this->save_settings();
         }
 
+        if (isset($_POST['action']) && $_POST['action'] === 'save_shirt_credit') {
+            $this->save_shirt_credit();
+        }
+
         global $wpdb;
 
         // Everyone selected/confirmed as a player this season.
@@ -501,11 +551,12 @@ class TeamOversight_Readiness {
                 <table class="wp-list-table widefat fixed striped">
                     <thead><tr>
                         <th>Player</th>
-                        <th>Teams</th>
-                        <th>VV Registration</th>
-                        <th>Kit</th>
-                        <th>Fees</th>
-                        <th style="width: 70px;">Ready</th>
+                        <th style="width: 10%;">Teams</th>
+                        <th style="width: 12%;">VV Registration</th>
+                        <th>Shirt Payment</th>
+                        <th style="width: 14%;">Shorts &amp; Socks</th>
+                        <th style="width: 16%;">Fees</th>
+                        <th style="width: 55px;">Ready</th>
                     </tr></thead>
                     <tbody>
                         <?php foreach ($player_ids as $player_id): ?>
@@ -523,11 +574,37 @@ class TeamOversight_Readiness {
                             foreach ($kit_step['items'] as $item) {
                                 $kit_summary[] = $item['label'] . ': ' . ($item['satisfied'] ? '✔' : ($item['purchased'] > 0 ? $item['purchased'] : '—'));
                             }
+                            $shirt_step = isset($checklist['steps']['shirt']) ? $checklist['steps']['shirt'] : null;
                             ?>
                             <tr>
                                 <td><a href="<?php echo esc_url(get_edit_user_link($player_id)); ?>"><?php echo esc_html($player->display_name); ?></a><br><small><?php echo esc_html($player->user_email); ?></small></td>
                                 <td><?php echo esc_html(implode(', ', $checklist['teams'])); ?></td>
                                 <td><?php echo $checklist['steps']['vv']['done'] ? '<span style="color:#1a7a2e;">✔ Confirmed by player</span>' : '<span style="color:#996800;">Not confirmed</span>'; ?></td>
+                                <td style="font-size: 12px;">
+                                    <?php if ($shirt_step === null): ?>
+                                        <span style="color: #666;">Not required (supplied)</span>
+                                    <?php else: ?>
+                                        <?php if ($shirt_step['done']): ?>
+                                            <span style="color:#1a7a2e;">✔ Paid <?php echo intval($shirt_step['shirt_paid']); ?>/<?php echo intval($shirt_step['shirt_required']); ?></span>
+                                        <?php else: ?>
+                                            <span style="color:#a00;">Paid <?php echo intval($shirt_step['shirt_paid']); ?>/<?php echo intval($shirt_step['shirt_required']); ?></span>
+                                        <?php endif; ?>
+                                        <?php if ($shirt_step['shirt_credit']['qty'] > 0): ?>
+                                            <br><small title="<?php echo esc_attr($shirt_step['shirt_credit']['note']); ?>">incl. <?php echo intval($shirt_step['shirt_credit']['qty']); ?> credited<?php echo $shirt_step['shirt_credit']['note'] ? ' — ' . esc_html($shirt_step['shirt_credit']['note']) : ''; ?></small>
+                                        <?php endif; ?>
+                                        <details style="margin-top: 4px;">
+                                            <summary style="cursor: pointer; font-size: 11px;">Record credit</summary>
+                                            <form method="post" style="margin-top: 4px;">
+                                                <input type="hidden" name="action" value="save_shirt_credit">
+                                                <input type="hidden" name="credit_user_id" value="<?php echo intval($player_id); ?>">
+                                                <?php wp_nonce_field('save_shirt_credit', 'shirt_credit_nonce'); ?>
+                                                <input type="number" name="credit_qty" value="<?php echo intval($shirt_step['shirt_credit']['qty']); ?>" min="0" max="5" style="width: 50px;"> shirts
+                                                <input type="text" name="credit_note" value="<?php echo esc_attr($shirt_step['shirt_credit']['note']); ?>" placeholder="e.g. paid 2019 under old@email.com" style="width: 95%; margin-top: 3px;">
+                                                <button type="submit" class="button button-small">Save</button>
+                                            </form>
+                                        </details>
+                                    <?php endif; ?>
+                                </td>
                                 <td style="font-size: 12px;">
                                     <?php echo $kit_step['done'] ? '<span style="color:#1a7a2e;">✔' . (empty($kit_step['auto_done']) ? ' (player ticked)' : ' (purchased)') . '</span><br>' : ''; ?>
                                     <?php echo esc_html(implode(' · ', $kit_summary)); ?>
@@ -543,6 +620,40 @@ class TeamOversight_Readiness {
             <?php endif; ?>
         </div>
         <?php
+    }
+
+    /**
+     * Record shirt payments made outside this account (old email, cash,
+     * different account) as a credit toward the shirt requirement.
+     */
+    private function save_shirt_credit() {
+        if (!isset($_POST['shirt_credit_nonce']) || !wp_verify_nonce($_POST['shirt_credit_nonce'], 'save_shirt_credit')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
+        $user_id = intval($_POST['credit_user_id']);
+        $user = get_userdata($user_id);
+        if (!$user) {
+            echo '<div class="notice notice-error"><p>User not found.</p></div>';
+            return;
+        }
+
+        $qty = max(0, min(5, intval($_POST['credit_qty'])));
+        $note = sanitize_text_field($_POST['credit_note']);
+
+        if ($qty > 0 || $note !== '') {
+            update_user_meta($user_id, 'murvc_shirt_credit', array('qty' => $qty, 'note' => $note));
+        } else {
+            delete_user_meta($user_id, 'murvc_shirt_credit');
+        }
+
+        echo '<div class="notice notice-success"><p>Shirt credit for ' . esc_html($user->display_name) . ' set to ' . $qty . '.</p></div>';
     }
 
     private function save_settings() {
