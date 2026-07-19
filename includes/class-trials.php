@@ -69,6 +69,30 @@ class TeamOversight_Trials {
     }
 
     /**
+     * VV competition (mens/womens) derived from the profile gender field.
+     * Male -> mens, Female -> womens. Anything else — unset, Non-Binary,
+     * Other, Prefer not to say — returns null and the form asks the
+     * competition question directly, since VV only runs men's and women's
+     * competitions and the choice is then the player's to make.
+     */
+    public static function get_competition_from_profile($user_id) {
+        $gender = get_user_meta($user_id, 'gender', true);
+        $gender = maybe_unserialize($gender);
+        if (is_array($gender)) {
+            $gender = reset($gender);
+        }
+        $gender = is_string($gender) ? trim($gender) : '';
+
+        $map = array('male' => 'mens', 'female' => 'womens');
+        $key = strtolower($gender);
+
+        return array(
+            'gender' => $gender,
+            'competition' => isset($map[$key]) ? $map[$key] : null,
+        );
+    }
+
+    /**
      * Account data shown read-only on the trial form. Never taken from the
      * submitted POST — always re-read from the account at submission time.
      */
@@ -165,6 +189,7 @@ class TeamOversight_Trials {
             // Prefilled account details: shown read-only. Changing them
             // happens on the profile, not here.
             $prefill = self::get_prefill_data($user->ID);
+            $competition = self::get_competition_from_profile($user->ID);
             $profile_edit_url = home_url('/um-member-profile-custom/?profiletab=main&um_action=edit');
             ?>
             <div class="trial-prefill-section">
@@ -176,6 +201,10 @@ class TeamOversight_Trials {
                     <tr><th>Email Address</th><td><?php echo esc_html($prefill['email']); ?></td></tr>
                     <tr><th>Contact Number</th><td><?php echo esc_html($prefill['mobile'] ?: '— missing, please add it to your profile'); ?></td></tr>
                     <tr><th>Date of Birth</th><td><?php echo esc_html($prefill['birth_date'] ?: '— missing, please add it to your profile'); ?></td></tr>
+                    <tr><th>Gender</th><td><?php echo esc_html($competition['gender'] ?: '— missing, please add it to your profile'); ?></td></tr>
+                    <?php if ($competition['competition']): ?>
+                        <tr><th>Trialling For</th><td><?php echo $competition['competition'] === 'mens' ? "Men's competition" : "Women's competition"; ?> <small style="color: #666;">(based on your profile gender — edit your profile if this is wrong)</small></td></tr>
+                    <?php endif; ?>
                     <tr><th>Institution</th><td><?php echo esc_html($prefill['institution'] ?: '—'); ?></td></tr>
                 </table>
             </div>
@@ -258,13 +287,15 @@ class TeamOversight_Trials {
                         </td>
                     </tr>
 
-                    <tr>
-                        <th>Are you trialling for men's or women's? <span class="required">*</span></th>
-                        <td>
-                            <label><input type="radio" name="gender_trialling" value="mens" required> Men's</label><br>
-                            <label><input type="radio" name="gender_trialling" value="womens"> Women's</label>
-                        </td>
-                    </tr>
+                    <?php if (!$competition['competition']): ?>
+                        <tr>
+                            <th>Volleyball Victoria runs men's and women's competitions. Which competition are you trialling for? <span class="required">*</span></th>
+                            <td>
+                                <label><input type="radio" name="gender_trialling" value="mens" required> Men's</label><br>
+                                <label><input type="radio" name="gender_trialling" value="womens"> Women's</label>
+                            </td>
+                        </tr>
+                    <?php endif; ?>
 
                     <tr>
                         <th>Select the team/s you are trialling for <span class="required">*</span></th>
@@ -642,7 +673,14 @@ class TeamOversight_Trials {
 
         $history = isset($_POST['vvl_history']) ? sanitize_text_field($_POST['vvl_history']) : '';
         $international = isset($_POST['international']) ? sanitize_text_field($_POST['international']) : '';
-        $gender_trialling = isset($_POST['gender_trialling']) ? sanitize_text_field($_POST['gender_trialling']) : '';
+
+        // Competition comes from the profile gender when it maps to Men's or
+        // Women's; the form question is only honoured when it doesn't.
+        $competition = self::get_competition_from_profile($user->ID);
+        $gender_trialling = $competition['competition'];
+        if (!$gender_trialling) {
+            $gender_trialling = isset($_POST['gender_trialling']) ? sanitize_text_field($_POST['gender_trialling']) : '';
+        }
         $two_sessions = isset($_POST['two_sessions']) ? sanitize_text_field($_POST['two_sessions']) : '';
         $venues = isset($_POST['venues']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['venues']), array_keys(self::get_venue_options()))) : array();
 
@@ -673,7 +711,8 @@ class TeamOversight_Trials {
         // Human-readable answers, stored as a snapshot with the application.
         $form_data = array(
             'VVL History' => $history_options[$history],
-            'Trialling For' => $gender_trialling === 'mens' ? "Men's" : "Women's",
+            'Trialling For' => ($gender_trialling === 'mens' ? "Men's" : "Women's") . ($competition['competition'] ? '' : ' (asked on form)'),
+            'Gender (profile)' => $competition['gender'],
             'Can Attend 2 Sessions/Week' => ucfirst($two_sessions),
             'Venues Unable To Attend' => implode(', ', array_map(function ($v) use ($venue_options) {
                 return $venue_options[$v];
@@ -995,6 +1034,7 @@ class TeamOversight_Trials {
             'last_name' => 'Last Name',
             'mobile_number' => 'Contact Number',
             'birth_date' => 'Date of Birth',
+            'gender' => 'Gender',
             'degree1type' => 'Degree Type',
             'institution1' => 'Institution',
             'degree1enddate' => 'Degree End Date'
