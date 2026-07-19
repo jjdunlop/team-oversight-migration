@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Team Oversight
  * Description: MURVC club management - club membership tiers (Club Membership menu) and VVL team oversight: trials, assignments, fees and dashboard (VVL Oversight menu).
- * Version: 1.8.0
+ * Version: 1.9.0
  * Author: Team Management System
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.8.0');
+define('TEAM_OVERSIGHT_VERSION', '1.9.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -135,6 +135,21 @@ function team_oversight_create_tables() {
                 KEY tier (tier),
                 KEY end_date (end_date),
                 KEY order_item_id (order_item_id)
+            ) $charset_collate;
+        ",
+        'team_fee_segments' => "
+            CREATE TABLE {$wpdb->prefix}team_fee_segments (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                email varchar(255) NOT NULL,
+                season varchar(10) NOT NULL,
+                fee_role varchar(50) NOT NULL,
+                start_date date NOT NULL,
+                end_date date DEFAULT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY email (email),
+                KEY season (season)
             ) $charset_collate;
         ",
         'team_invoice_payments' => "

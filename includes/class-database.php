@@ -178,6 +178,28 @@ class TeamOversight_Database {
             ) $charset_collate;");
         }
 
+        // Fee segments (added in 1.9.0): a dated history of each player's
+        // fee role per season, so mid-season role changes (training-only ->
+        // playing) charge each period at its own rate.
+        $segments_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_fee_segments'");
+        if (!$segments_exists) {
+            $charset_collate = $wpdb->get_charset_collate();
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta("CREATE TABLE {$wpdb->prefix}team_fee_segments (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                email varchar(255) NOT NULL,
+                season varchar(10) NOT NULL,
+                fee_role varchar(50) NOT NULL,
+                start_date date NOT NULL,
+                end_date date DEFAULT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY email (email),
+                KEY season (season)
+            ) $charset_collate;");
+        }
+
         // Fee payment ledger (added in 1.7.0): every payment applied to an
         // invoice, whether from an online order or recorded manually.
         $payments_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_invoice_payments'");
@@ -299,7 +321,22 @@ class TeamOversight_Database {
                     KEY is_active (is_active)
                 ) $charset_collate;
             ",
-            'team_invoice_payments' => "
+            'team_fee_segments' => "
+            CREATE TABLE {$wpdb->prefix}team_fee_segments (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                email varchar(255) NOT NULL,
+                season varchar(10) NOT NULL,
+                fee_role varchar(50) NOT NULL,
+                start_date date NOT NULL,
+                end_date date DEFAULT NULL,
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY email (email),
+                KEY season (season)
+            ) $charset_collate;
+        ",
+        'team_invoice_payments' => "
             CREATE TABLE {$wpdb->prefix}team_invoice_payments (
                 id int(11) NOT NULL AUTO_INCREMENT,
                 invoice_id int(11) NOT NULL,

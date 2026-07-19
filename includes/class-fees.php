@@ -74,6 +74,165 @@ class TeamOversight_Fees {
         return ($end - $join_ts) / ($end - $start);
     }
 
+    /**
+     * Record the player's current fee role (the cheapest role across their
+     * active assignments) as a dated segment. Called whenever assignments
+     * change: an unchanged role is a no-op; a change closes the open
+     * segment today and opens a new one, so mid-season role changes
+     * (training-only -> playing) charge each period at its own rate.
+     */
+    public function checkpoint_fee_role($email, $season) {
+        global $wpdb;
+
+        $assignments = $wpdb->get_results($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}team_assignments
+            WHERE email = %s AND season = %s AND is_active = 1
+        ", $email, $season));
+
+        $today = current_time('Y-m-d');
+        $open = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}team_fee_segments
+            WHERE email = %s AND season = %s AND end_date IS NULL
+            ORDER BY start_date DESC, id DESC LIMIT 1
+        ", $email, $season));
+
+        if (empty($assignments)) {
+            // No active assignments: close the open segment — the fee
+            // freezes at what accrued while they were on a team.
+            if ($open) {
+                $wpdb->update(
+                    $wpdb->prefix . 'team_fee_segments',
+                    array('end_date' => $today),
+                    array('id' => $open->id),
+                    array('%s'),
+                    array('%d')
+                );
+            }
+            return;
+        }
+
+        // Cheapest fee role across their current roles (minimum-fee rule).
+        $fee_class = $this->determine_fee_class($email, $season);
+        $best_role = null;
+        $best_fee = null;
+        foreach (array_unique(wp_list_pluck($assignments, 'role')) as $role) {
+            $fee = $this->get_fee($fee_class, $role, $season);
+            if ($fee !== null && ($best_fee === null || floatval($fee) < floatval($best_fee))) {
+                $best_fee = $fee;
+                $best_role = $role;
+            }
+        }
+        if ($best_role === null) {
+            $best_role = $assignments[0]->role;
+        }
+
+        if ($open && $open->fee_role === $best_role) {
+            return;
+        }
+
+        if ($open) {
+            $wpdb->update(
+                $wpdb->prefix . 'team_fee_segments',
+                array('end_date' => $today),
+                array('id' => $open->id),
+                array('%s'),
+                array('%d')
+            );
+        }
+
+        // First-ever segment starts at their join date; later ones today.
+        $start = $today;
+        if (!$open) {
+            $join = $wpdb->get_var($wpdb->prepare("
+                SELECT MIN(start_date) FROM {$wpdb->prefix}team_assignments
+                WHERE email = %s AND season = %s AND is_active = 1
+            ", $email, $season));
+            if ($join) {
+                $start = $join;
+            }
+        }
+
+        $wpdb->insert(
+            $wpdb->prefix . 'team_fee_segments',
+            array(
+                'user_id' => intval($assignments[0]->user_id),
+                'email' => $email,
+                'season' => $season,
+                'fee_role' => $best_role,
+                'start_date' => $start,
+            ),
+            array('%d', '%s', '%s', '%s', '%s')
+        );
+    }
+
+    /**
+     * Season fee from the segment history: each segment charges its role's
+     * rate for its share of the season window. Null when no segments exist
+     * (caller falls back to flat minimum-fee × pro-rata). Without season
+     * dates, the latest segment's full rate applies.
+     */
+    private function compute_segment_fee($email, $season, $fee_class) {
+        global $wpdb;
+
+        $segments = $wpdb->get_results($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}team_fee_segments
+            WHERE email = %s AND season = %s
+            ORDER BY start_date, id
+        ", $email, $season));
+
+        if (empty($segments)) {
+            return null;
+        }
+
+        $dates = self::get_season_dates($season);
+        if (!$dates) {
+            $last = end($segments);
+            $fee = $this->get_fee($fee_class, $last->fee_role, $season);
+            return $fee !== null ? round(floatval($fee), 2) : null;
+        }
+
+        $season_start = strtotime($dates['start']);
+        $season_end = strtotime($dates['end']);
+        if ($season_end <= $season_start) {
+            return null;
+        }
+
+        $total = 0;
+        foreach ($segments as $segment) {
+            $rate = $this->get_fee($fee_class, $segment->fee_role, $season);
+            if ($rate === null) {
+                continue;
+            }
+            $from = max($season_start, strtotime($segment->start_date));
+            $to = $segment->end_date ? min($season_end, strtotime($segment->end_date)) : $season_end;
+            if ($to <= $from) {
+                continue;
+            }
+            $total += floatval($rate) * ($to - $from) / ($season_end - $season_start);
+        }
+
+        return round($total, 2);
+    }
+
+    /**
+     * Recalculate a player's fee after an assignment change. Creates no
+     * invoice for players who never had one — it just checkpoints the
+     * segment history so a later invoice charges the right blend.
+     */
+    public function recalculate_after_assignment_change($email, $season) {
+        global $wpdb;
+
+        $has_invoice = $wpdb->get_var($wpdb->prepare("
+            SELECT id FROM {$wpdb->prefix}team_invoices WHERE email = %s AND season = %s
+        ", $email, $season));
+
+        if ($has_invoice) {
+            $this->generate_invoice($email, $season);
+        } else {
+            $this->checkpoint_fee_role($email, $season);
+        }
+    }
+
     public function import_price_matrix($season = null) {
         global $wpdb;
         
@@ -1030,6 +1189,14 @@ class TeamOversight_Fees {
         // Pro-rata: mid-season joiners owe the remaining fraction of the season.
         $minimum_fee = round($minimum_fee * self::get_pro_rata_factor($email, $season), 2);
 
+        // Segment history takes precedence: each fee-role period charges its
+        // own rate for its share of the season (role changes mid-season).
+        $this->checkpoint_fee_role($email, $season);
+        $segment_fee = $this->compute_segment_fee($email, $season, $fee_class);
+        if ($segment_fee !== null) {
+            $minimum_fee = $segment_fee;
+        }
+
         // Create single invoice for all assignments
         $user = get_user_by('email', $email);
         $name = $user ? $user->display_name : $email;
@@ -1086,57 +1253,75 @@ class TeamOversight_Fees {
     
     private function update_existing_invoice($email, $season, $invoice_id) {
         global $wpdb;
-        
-        // Get all current active assignments for this user and season
+
+        $fee_class = $this->determine_fee_class($email, $season);
+
+        // Segment history first: it handles role changes AND freezing the
+        // fee at the accrued amount when someone leaves all teams.
+        $this->checkpoint_fee_role($email, $season);
+        $segment_fee = $this->compute_segment_fee($email, $season, $fee_class);
+        if ($segment_fee !== null) {
+            $this->apply_invoice_amount($invoice_id, $segment_fee);
+            return true;
+        }
+
+        // Fallback (no segment history): flat minimum fee × pro-rata.
         $assignments = $wpdb->get_results($wpdb->prepare("
-            SELECT * FROM {$wpdb->prefix}team_assignments 
+            SELECT * FROM {$wpdb->prefix}team_assignments
             WHERE email = %s AND season = %s AND is_active = 1
         ", $email, $season));
-        
+
         if (empty($assignments)) {
             return true; // No active assignments, keep existing invoice
         }
-        
-        // Recalculate minimum fee based on all current assignments
-        $fee_class = $this->determine_fee_class($email, $season);
+
         $applicable_fees = array();
-        
+
         foreach ($assignments as $assignment) {
             $fee = $this->get_fee($fee_class, $assignment->role, $season);
             if ($fee !== null) {
                 $applicable_fees[] = $fee;
             }
         }
-        
+
         if (!empty($applicable_fees)) {
             $minimum_fee = min($applicable_fees);
             $minimum_fee = round($minimum_fee * self::get_pro_rata_factor($email, $season), 2);
-
-            // Update existing invoice with new minimum fee if it's different
-            $current_invoice = $wpdb->get_row($wpdb->prepare("
-                SELECT invoice_amount, outstanding_amount FROM {$wpdb->prefix}team_invoices 
-                WHERE id = %d
-            ", $invoice_id));
-            
-            if ($current_invoice && $current_invoice->invoice_amount != $minimum_fee) {
-                // Calculate new outstanding amount proportionally
-                $payment_made = $current_invoice->invoice_amount - $current_invoice->outstanding_amount;
-                $new_outstanding = max(0, $minimum_fee - $payment_made);
-                
-                $wpdb->update(
-                    $wpdb->prefix . 'team_invoices',
-                    array(
-                        'invoice_amount' => $minimum_fee,
-                        'outstanding_amount' => $new_outstanding
-                    ),
-                    array('id' => $invoice_id),
-                    array('%f', '%f'),
-                    array('%d')
-                );
-            }
+            $this->apply_invoice_amount($invoice_id, $minimum_fee);
         }
-        
+
         return true;
+    }
+
+    /**
+     * Set an invoice to a new fee amount, preserving payments already made
+     * (outstanding = new fee minus paid, never below zero).
+     */
+    private function apply_invoice_amount($invoice_id, $new_fee) {
+        global $wpdb;
+
+        $current_invoice = $wpdb->get_row($wpdb->prepare("
+            SELECT invoice_amount, outstanding_amount FROM {$wpdb->prefix}team_invoices
+            WHERE id = %d
+        ", $invoice_id));
+
+        if (!$current_invoice || floatval($current_invoice->invoice_amount) == floatval($new_fee)) {
+            return;
+        }
+
+        $payment_made = floatval($current_invoice->invoice_amount) - floatval($current_invoice->outstanding_amount);
+        $new_outstanding = max(0, round($new_fee - $payment_made, 2));
+
+        $wpdb->update(
+            $wpdb->prefix . 'team_invoices',
+            array(
+                'invoice_amount' => $new_fee,
+                'outstanding_amount' => $new_outstanding
+            ),
+            array('id' => $invoice_id),
+            array('%f', '%f'),
+            array('%d')
+        );
     }
     
     private function generate_invoice_reference($season) {

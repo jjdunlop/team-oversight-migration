@@ -2439,7 +2439,11 @@ class TeamOversight_Admin {
             
         } elseif ($_POST['action'] === 'deactivate_assignment') {
             $assignment_id = intval($_POST['assignment_id']);
-            
+
+            $deactivating = $wpdb->get_row($wpdb->prepare("
+                SELECT email, season FROM {$wpdb->prefix}team_assignments WHERE id = %d
+            ", $assignment_id));
+
             $result = $wpdb->update(
                 $wpdb->prefix . 'team_assignments',
                 array(
@@ -2450,8 +2454,12 @@ class TeamOversight_Admin {
                 array('%d', '%s'),
                 array('%d')
             );
-            
+
             if ($result) {
+                if ($deactivating) {
+                    $fees = new TeamOversight_Fees();
+                    $fees->recalculate_after_assignment_change($deactivating->email, $deactivating->season);
+                }
                 echo '<div class="notice notice-success"><p>Assignment deactivated successfully.</p></div>';
             } else {
                 echo '<div class="notice notice-error"><p>Failed to deactivate assignment.</p></div>';
@@ -2565,6 +2573,10 @@ class TeamOversight_Admin {
             $update_format[] = '%d';
         }
         
+        $before = $wpdb->get_row($wpdb->prepare("
+            SELECT email, season FROM {$wpdb->prefix}team_assignments WHERE id = %d
+        ", $assignment_id));
+
         $result = $wpdb->update(
             $wpdb->prefix . 'team_assignments',
             $update_data,
@@ -2572,8 +2584,14 @@ class TeamOversight_Admin {
             $update_format,
             array('%d')
         );
-        
+
         if ($result !== false) {
+            // Role/status changes affect the fee: checkpoint the fee-role
+            // history and recalculate the invoice (payments preserved).
+            if ($before) {
+                $fees = new TeamOversight_Fees();
+                $fees->recalculate_after_assignment_change($before->email, $before->season);
+            }
             wp_send_json_success('Assignment updated successfully');
         } else {
             wp_send_json_error('Failed to update assignment');
@@ -2607,6 +2625,10 @@ class TeamOversight_Admin {
         if ($result !== false) {
             if ($assignment && in_array($assignment->role, array('playing_member', 'training_only'), true)) {
                 $this->sync_trial_after_assignment_removal($assignment->email, $assignment->season, $assignment->team);
+            }
+            if ($assignment) {
+                $fees = new TeamOversight_Fees();
+                $fees->recalculate_after_assignment_change($assignment->email, $assignment->season);
             }
             wp_send_json_success('Assignment deleted successfully');
         } else {
