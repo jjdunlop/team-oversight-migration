@@ -837,8 +837,8 @@ class TeamOversight_Trials {
     }
     
     public function handle_trial_submission() {
-        if (!wp_verify_nonce($_POST['trial_nonce'], 'trial_application')) {
-            wp_die('Security check failed');
+        if (!isset($_POST['trial_nonce']) || !wp_verify_nonce($_POST['trial_nonce'], 'trial_application')) {
+            wp_send_json_error(array('message' => 'Security check failed — please reload the page and try again.'));
         }
         
         if (!is_user_logged_in()) {

@@ -7,7 +7,6 @@ if (!defined('ABSPATH')) {
 class TeamOversight_Imports {
     
     public function __construct() {
-        add_action('wp_ajax_import_revsport_csv', array($this, 'handle_revsport_import'));
     }
     
     public function render_import_page() {
@@ -165,9 +164,4 @@ class TeamOversight_Imports {
         echo '</p></div>';
     }
     
-    public function handle_revsport_import() {
-        // AJAX handler for RevSport import
-        $this->import_revsport_csv();
-        wp_die();
-    }
 }

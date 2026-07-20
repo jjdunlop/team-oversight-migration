@@ -2468,10 +2468,14 @@ class TeamOversight_Admin {
     }
     
     public function ajax_search_users() {
-        if (!wp_verify_nonce($_POST['nonce'], 'search_users')) {
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'search_users')) {
             wp_send_json_error('Security check failed');
         }
-        
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
         $query = sanitize_text_field($_POST['query']);
         $search_type = sanitize_text_field($_POST['search_type'] ?? 'both');
         
