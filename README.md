@@ -53,9 +53,12 @@ Memberships are **time-bound grants** stored in `team_memberships`: tier + start
 
 One row per person: membership status + expiry, age, gender, MUS category, VVL teams for the season, fees owing, VA accreditation, profile-confirmation status. Filter/search/sort, CSV export, manual grant (with email autocomplete) and revoke.
 
-### Data Quality
+### Stats
 
-Club Membership → Data Quality: how complete member data is — gender, DOB, mobile, MUS category, this-year profile confirmation, ledger membership — as counts/percentages for two scopes: *active this year* (current membership or a team this season) and *all accounts*. A snapshot is recorded once a day (on the membership cron, with a page-view fallback), so sparkline trends accrue from the day the page ships; "Record snapshot now" forces today's entry. History is capped at ~3 years and stored in a non-autoloaded option.
+Club Membership → Stats — statistics about **current members** (unexpired ledger grants), in tabs designed to grow over time:
+
+- **Data Quality**: profile completeness — gender, DOB, mobile, MUS category, this-year confirmation — as percentages with colour bars and 30-day deltas. A snapshot is recorded once a day (membership cron, page-view fallback, manual button) into a non-autoloaded option capped at ~3 years, so sparkline trends accrue from first deploy.
+- **Locations**: postcode distribution (UM `postal_code`, falling back to the WooCommerce billing postcode; messy values like "VIC 3000" are normalised), plus a saved **postcode watchlist** — enter any list of postcodes and see how many current members live in them.
 
 ### Membership History
 

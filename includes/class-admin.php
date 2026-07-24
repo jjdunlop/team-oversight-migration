@@ -50,8 +50,8 @@ class TeamOversight_Admin {
 
         add_submenu_page(
             'club-membership',
-            'Data Quality',
-            'Data Quality',
+            'Stats',
+            'Stats',
             'manage_options',
             'club-membership-stats',
             array($this, 'stats_page')
