@@ -149,14 +149,17 @@ class TeamOversight_Stats_Page {
     }
 
     /**
-     * Postcode per current member: UM postal_code first, WooCommerce
-     * billing_postcode as fallback. Returns array(postcode => count),
-     * '' key = members with no usable postcode.
+     * Postcode per member holding a grant overlapping [$from, $to]
+     * ($from = $to = today means current members): UM postal_code first,
+     * WooCommerce billing_postcode as fallback. Returns
+     * array(postcode => count), '' key = members with no usable postcode.
      */
-    public function get_postcode_counts() {
+    public function get_postcode_counts($from = null, $to = null) {
         global $wpdb;
 
         $today = current_time('Y-m-d');
+        $from = $from ? $from : $today;
+        $to = $to ? $to : $today;
         $values = $wpdb->get_col($wpdb->prepare("
             SELECT COALESCE(NULLIF(MAX(pc.meta_value), ''), MAX(bpc.meta_value), '')
             FROM (SELECT DISTINCT user_id FROM {$wpdb->prefix}team_memberships
@@ -164,7 +167,7 @@ class TeamOversight_Stats_Page {
             LEFT JOIN {$wpdb->usermeta} pc ON pc.user_id = m.user_id AND pc.meta_key = 'postal_code'
             LEFT JOIN {$wpdb->usermeta} bpc ON bpc.user_id = m.user_id AND bpc.meta_key = 'billing_postcode'
             GROUP BY m.user_id
-        ", $today, $today));
+        ", $to, $from));
 
         $counts = array();
         foreach ($values as $raw) {
@@ -362,7 +365,19 @@ class TeamOversight_Stats_Page {
             }
         }
 
-        $counts = $this->get_postcode_counts();
+        // Period: defaults to today/today = current members; widen the range
+        // to count anyone who held a membership during that period.
+        $today = current_time('Y-m-d');
+        $from = (isset($_GET['loc_from']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['loc_from'])) ? $_GET['loc_from'] : $today;
+        $to = (isset($_GET['loc_to']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['loc_to'])) ? $_GET['loc_to'] : $today;
+        if ($from > $to) {
+            $tmp = $from;
+            $from = $to;
+            $to = $tmp;
+        }
+        $is_current = ($from === $today && $to === $today);
+
+        $counts = $this->get_postcode_counts($from, $to);
         $watchlist = $this->get_watchlist();
 
         $total = array_sum($counts);
@@ -381,7 +396,20 @@ class TeamOversight_Stats_Page {
             <h1>Stats</h1>
             <?php $this->render_tabs('locations'); ?>
 
-            <p class="description">Where the <strong><?php echo intval($total); ?> current members</strong> on the ledger live, by profile postcode (falling back to their billing postcode). <?php echo intval($known); ?> have a usable postcode; <?php echo intval($unknown); ?> don't.</p>
+            <p class="description">Where the <strong><?php echo intval($total); ?> <?php echo $is_current ? 'current members' : 'members between ' . esc_html($from) . ' and ' . esc_html($to); ?></strong> on the ledger live, by profile postcode (falling back to their billing postcode). <?php echo intval($known); ?> have a usable postcode; <?php echo intval($unknown); ?> don't.</p>
+
+            <form method="get" style="margin: 15px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; display: inline-block;">
+                <input type="hidden" name="page" value="club-membership-stats">
+                <input type="hidden" name="tab" value="locations">
+                <label>Members between
+                    <input type="date" name="loc_from" value="<?php echo esc_attr($from); ?>">
+                </label>
+                <label> and
+                    <input type="date" name="loc_to" value="<?php echo esc_attr($to); ?>">
+                </label>
+                <input type="submit" class="button button-primary" value="Show">
+                <a href="<?php echo esc_url(admin_url('admin.php?page=club-membership-stats&tab=locations')); ?>" class="button" style="margin-left: 6px;">Current members</a>
+            </form>
 
             <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start;">
 

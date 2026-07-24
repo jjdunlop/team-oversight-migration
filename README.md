@@ -58,7 +58,7 @@ One row per person: membership status + expiry, age, gender, MUS category, VVL t
 Club Membership → Stats — statistics about **current members** (unexpired ledger grants), in tabs designed to grow over time:
 
 - **Data Quality**: profile completeness — gender, DOB, mobile, MUS category, this-year confirmation — as percentages with colour bars and 30-day deltas. A snapshot is recorded once a day (membership cron, page-view fallback, manual button) into a non-autoloaded option capped at ~3 years, so sparkline trends accrue from first deploy.
-- **Locations**: postcode distribution (UM `postal_code`, falling back to the WooCommerce billing postcode; messy values like "VIC 3000" are normalised), plus a saved **postcode watchlist** — enter any list of postcodes and see how many current members live in them.
+- **Locations**: postcode distribution (UM `postal_code`, falling back to the WooCommerce billing postcode; messy values like "VIC 3000" are normalised), plus a saved **postcode watchlist** — enter any list of postcodes and see how many members live in them. Defaults to current members; a date-range picker widens the population to anyone who held a membership during the period.
 
 ### Membership History
 
