@@ -487,6 +487,12 @@ class TeamOversight_Members_Page {
     }
 
     public function render_history_page() {
+        $tab = isset($_GET['tab']) ? sanitize_key($_GET['tab']) : '';
+        if ($tab === 'mus-matrix') {
+            $this->render_mus_matrix_page();
+            return;
+        }
+
         if (isset($_POST['action']) && $_POST['action'] === 'export_membership_history_csv') {
             $this->action_export_history_csv();
         }
@@ -502,6 +508,7 @@ class TeamOversight_Members_Page {
         ?>
         <div class="wrap">
             <h1>Membership History</h1>
+            <?php $this->render_history_tabs('history'); ?>
             <p class="description">Everyone who held a membership at any point in the selected period, based on dated membership grants. Members whose tier role predates the grant ledger (stop-gap assignments) only appear once purchase-history seeding has been run.</p>
 
             <form method="get" style="margin: 15px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; display: inline-block;">
@@ -644,6 +651,214 @@ class TeamOversight_Members_Page {
                 implode('; ', $h['periods']),
                 $h['current_label'],
             ));
+        }
+
+        fclose($output);
+        exit;
+    }
+
+    // ------------------------------------------------------------------
+    // MUS matrix (Membership History → MUS Matrix tab)
+    // ------------------------------------------------------------------
+
+    private function render_history_tabs($active) {
+        $base = admin_url('admin.php?page=club-membership-history');
+        ?>
+        <nav class="nav-tab-wrapper" style="margin-bottom: 15px;">
+            <a href="<?php echo esc_url($base); ?>" class="nav-tab <?php echo $active === 'history' ? 'nav-tab-active' : ''; ?>">History</a>
+            <a href="<?php echo esc_url($base . '&tab=mus-matrix'); ?>" class="nav-tab <?php echo $active === 'mus-matrix' ? 'nav-tab-active' : ''; ?>">MUS Matrix</a>
+        </nav>
+        <?php
+    }
+
+    /**
+     * Fold the raw MUSEligibilityCategory profile values into the row labels
+     * MUS reporting uses. Unrecognised values keep their raw label so new
+     * profile options are never silently lumped together.
+     */
+    private function mus_matrix_row_label($raw) {
+        $raw = trim((string) $raw);
+        if ($raw === '') {
+            return 'Unknown';
+        }
+
+        $map = array(
+            'Melbourne University - Undergrad. Student' => 'Melbourne University - Undergrad. Student',
+            'Melbourne University - Postgrad. Student' => 'Melbourne University - Postgrad. Student',
+            'Melbourne University - Alumni' => 'Melbourne University - Alumni',
+            'Melbourne University - Staff' => 'Melbourne University - Staff',
+            'Melbourne University - Unknown' => 'Melbourne University - Unknown',
+            'Student of another university' => 'Student / Alumni of another university',
+            'Alumni of another university' => 'Student / Alumni of another university',
+            'Student/Alumni of another university' => 'Student / Alumni of another university',
+            'Student / Alumni of another university' => 'Student / Alumni of another university',
+            'Junior (U/19) - High school or below' => 'Other',
+            'Adult - High School Only' => 'Other',
+            'Other' => 'Other',
+        );
+        return isset($map[$raw]) ? $map[$raw] : $raw;
+    }
+
+    private function mus_matrix_gender_col($gender) {
+        $g = strtolower(trim((string) $gender));
+        if ($g === '') {
+            return 'Unknown';
+        }
+        if (strpos($g, 'non') !== false || strpos($g, 'binary') !== false) {
+            return 'Non-Binary';
+        }
+        // Check female before male: 'female' contains 'male'.
+        if (strpos($g, 'female') !== false || strpos($g, 'woman') !== false || $g === 'f') {
+            return 'Female';
+        }
+        if (strpos($g, 'male') !== false || strpos($g, 'man') !== false || $g === 'm') {
+            return 'Male';
+        }
+        return 'Unknown';
+    }
+
+    /**
+     * Counts everyone holding a membership grant overlapping [$from, $to],
+     * grouped MUS category × gender. Returns array(rows, gender_cols) where
+     * each row = label => array('Male' => n, ..., 'Total' => n), template rows
+     * always present (zeros included), unexpected categories appended, and a
+     * final TOTAL row.
+     */
+    private function get_mus_matrix($from, $to) {
+        $genders = array('Male', 'Female', 'Non-Binary', 'Unknown');
+        $template_rows = array(
+            'Melbourne University - Undergrad. Student',
+            'Melbourne University - Postgrad. Student',
+            'Melbourne University - Alumni',
+            'Melbourne University - Staff',
+            'Student / Alumni of another university',
+            'Other',
+            'Melbourne University - Unknown',
+            'Unknown',
+        );
+
+        $empty = array_fill_keys($genders, 0);
+        $empty['Total'] = 0;
+
+        $rows = array_fill_keys($template_rows, $empty);
+        foreach ($this->get_membership_history($from, $to) as $person) {
+            $row = $this->mus_matrix_row_label($person['mus_category']);
+            $col = $this->mus_matrix_gender_col($person['gender']);
+            if (!isset($rows[$row])) {
+                $rows[$row] = $empty;
+            }
+            $rows[$row][$col]++;
+            $rows[$row]['Total']++;
+        }
+
+        $total = $empty;
+        foreach ($rows as $counts) {
+            foreach (array_merge($genders, array('Total')) as $key) {
+                $total[$key] += $counts[$key];
+            }
+        }
+        $rows['TOTAL'] = $total;
+
+        return array($rows, $genders);
+    }
+
+    private function render_mus_matrix_page() {
+        if (isset($_POST['action']) && $_POST['action'] === 'export_mus_matrix_csv') {
+            $this->action_export_mus_matrix_csv();
+        }
+
+        list($from, $to) = $this->get_history_range();
+        list($rows, $genders) = $this->get_mus_matrix($from, $to);
+
+        ?>
+        <div class="wrap">
+            <h1>Membership History</h1>
+            <?php $this->render_history_tabs('mus-matrix'); ?>
+
+            <p class="description">Active members for MUS reporting: everyone who held a membership (any tier, from the grants ledger) during the selected period, grouped by MUS eligibility category and gender. "Student / Alumni of another university" folds together the student/alumni profile variants; junior and high-school categories count as "Other"; people with no category or gender on their profile count as "Unknown".</p>
+
+            <form method="get" style="margin: 15px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; display: inline-block;">
+                <input type="hidden" name="page" value="club-membership-history">
+                <input type="hidden" name="tab" value="mus-matrix">
+                <label>Members between
+                    <input type="date" name="history_from" value="<?php echo esc_attr($from); ?>">
+                </label>
+                <label> and
+                    <input type="date" name="history_to" value="<?php echo esc_attr($to); ?>">
+                </label>
+                <input type="submit" class="button button-primary" value="Show">
+            </form>
+
+            <form method="post" style="display: inline-block; margin-left: 10px;">
+                <input type="hidden" name="action" value="export_mus_matrix_csv">
+                <input type="hidden" name="history_from" value="<?php echo esc_attr($from); ?>">
+                <input type="hidden" name="history_to" value="<?php echo esc_attr($to); ?>">
+                <?php wp_nonce_field('export_mus_matrix_csv', 'members_nonce'); ?>
+                <input type="submit" class="button" value="Export CSV">
+            </form>
+
+            <table class="wp-list-table widefat fixed striped" style="max-width: 900px; margin-top: 10px;">
+                <thead>
+                    <tr>
+                        <th>MUS Category</th>
+                        <?php foreach ($genders as $g): ?>
+                            <th style="width: 11%; text-align: right;"><?php echo esc_html($g); ?></th>
+                        <?php endforeach; ?>
+                        <th style="width: 11%; text-align: right;">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($rows as $label => $counts): ?>
+                        <tr<?php echo $label === 'TOTAL' ? ' style="font-weight: 600; border-top: 2px solid #333;"' : ''; ?>>
+                            <td><?php echo esc_html($label); ?></td>
+                            <?php foreach ($genders as $g): ?>
+                                <td style="text-align: right;"><?php echo intval($counts[$g]); ?></td>
+                            <?php endforeach; ?>
+                            <td style="text-align: right;"><strong><?php echo intval($counts['Total']); ?></strong></td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    private function action_export_mus_matrix_csv() {
+        if (!isset($_POST['members_nonce']) || !wp_verify_nonce($_POST['members_nonce'], 'export_mus_matrix_csv')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
+        list($from, $to) = $this->get_history_range();
+        list($rows, $genders) = $this->get_mus_matrix($from, $to);
+
+        $filename = "mus_matrix_{$from}_to_{$to}.csv";
+
+        if (ob_get_length()) {
+            ob_end_clean();
+        }
+
+        header('Content-Type: text/csv');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+
+        $output = fopen('php://output', 'w');
+        // UTF-8 BOM so Excel reads accents/dashes correctly.
+        fwrite($output, "\xEF\xBB\xBF");
+        fputcsv($output, array_merge(array('MUS Category'), $genders, array('Total')));
+
+        foreach ($rows as $label => $counts) {
+            $line = array($label);
+            foreach ($genders as $g) {
+                $line[] = $counts[$g];
+            }
+            $line[] = $counts['Total'];
+            fputcsv($output, $line);
         }
 
         fclose($output);
