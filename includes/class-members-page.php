@@ -492,6 +492,10 @@ class TeamOversight_Members_Page {
             $this->render_mus_matrix_page();
             return;
         }
+        if ($tab === 'vv-report') {
+            $this->render_vv_report_page();
+            return;
+        }
 
         if (isset($_POST['action']) && $_POST['action'] === 'export_membership_history_csv') {
             $this->action_export_history_csv();
@@ -667,6 +671,7 @@ class TeamOversight_Members_Page {
         <nav class="nav-tab-wrapper" style="margin-bottom: 15px;">
             <a href="<?php echo esc_url($base); ?>" class="nav-tab <?php echo $active === 'history' ? 'nav-tab-active' : ''; ?>">History</a>
             <a href="<?php echo esc_url($base . '&tab=mus-matrix'); ?>" class="nav-tab <?php echo $active === 'mus-matrix' ? 'nav-tab-active' : ''; ?>">MUS Matrix</a>
+            <a href="<?php echo esc_url($base . '&tab=vv-report'); ?>" class="nav-tab <?php echo $active === 'vv-report' ? 'nav-tab-active' : ''; ?>">VV Report</a>
         </nav>
         <?php
     }
@@ -851,6 +856,218 @@ class TeamOversight_Members_Page {
         // UTF-8 BOM so Excel reads accents/dashes correctly.
         fwrite($output, "\xEF\xBB\xBF");
         fputcsv($output, array_merge(array('MUS Category'), $genders, array('Total')));
+
+        foreach ($rows as $label => $counts) {
+            $line = array($label);
+            foreach ($genders as $g) {
+                $line[] = $counts[$g];
+            }
+            $line[] = $counts['Total'];
+            fputcsv($output, $line);
+        }
+
+        fclose($output);
+        exit;
+    }
+
+    // ------------------------------------------------------------------
+    // VV report (Membership History → VV Report tab)
+    // ------------------------------------------------------------------
+
+    /**
+     * Which membership tiers the VV report includes. Defaults to associate
+     * only (the usual VV return) unless the form was submitted with other
+     * boxes ticked.
+     */
+    private function get_vv_selected_tiers() {
+        if (empty($_REQUEST['vv_tiers_set'])) {
+            return array(TeamOversight_Memberships::TIER_ASSOCIATE);
+        }
+        $valid = array_keys(TeamOversight_Memberships::get_tiers());
+        $picked = isset($_REQUEST['vv_tiers']) ? (array) $_REQUEST['vv_tiers'] : array();
+        return array_values(array_intersect($valid, array_map('sanitize_text_field', $picked)));
+    }
+
+    private function vv_gender_col($gender) {
+        $g = strtolower(trim((string) $gender));
+        if ($g === '') {
+            return 'Unknown gender';
+        }
+        if (strpos($g, 'non') !== false || strpos($g, 'binary') !== false || strpos($g, 'other') !== false) {
+            return 'Other';
+        }
+        // Check female before male: 'female' contains 'male'.
+        if (strpos($g, 'female') !== false || strpos($g, 'woman') !== false || $g === 'f') {
+            return 'Female';
+        }
+        if (strpos($g, 'male') !== false || strpos($g, 'man') !== false || $g === 'm') {
+            return 'Male';
+        }
+        return 'Unknown gender';
+    }
+
+    /**
+     * Age-band × gender counts for everyone whose HIGHEST tier held in
+     * [$from, $to] is one of $tiers (so tier selections never double-count
+     * a person). Age is taken at the end of the range; missing/invalid DOB
+     * lands in the "Unknown DOB" row. The 10–79 template bands always show;
+     * other bands (0 to 9, 80 to 89, ...) appear only when occupied.
+     */
+    private function get_vv_matrix($from, $to, $tiers) {
+        $genders = array('Male', 'Female', 'Other', 'Unknown gender');
+        $empty = array_fill_keys($genders, 0);
+        $empty['Total'] = 0;
+
+        $bands = array();
+        foreach (range(10, 70, 10) as $decade) {
+            $bands[$decade] = $empty;
+        }
+        $unknown_dob = $empty;
+
+        foreach ($this->get_membership_history($from, $to) as $person) {
+            if (!in_array($person['highest_tier'], $tiers, true)) {
+                continue;
+            }
+            $col = $this->vv_gender_col($person['gender']);
+            if ($person['age'] === '' || intval($person['age']) < 0) {
+                $unknown_dob[$col]++;
+                $unknown_dob['Total']++;
+                continue;
+            }
+            $decade = intval(floor(intval($person['age']) / 10) * 10);
+            if (!isset($bands[$decade])) {
+                $bands[$decade] = $empty;
+            }
+            $bands[$decade][$col]++;
+            $bands[$decade]['Total']++;
+        }
+        ksort($bands);
+
+        $rows = array();
+        foreach ($bands as $decade => $counts) {
+            $rows[$decade . ' to ' . ($decade + 9)] = $counts;
+        }
+        $rows['Unknown DOB'] = $unknown_dob;
+
+        $total = $empty;
+        foreach ($rows as $counts) {
+            foreach (array_merge($genders, array('Total')) as $key) {
+                $total[$key] += $counts[$key];
+            }
+        }
+        $rows['Total'] = $total;
+
+        return array($rows, $genders);
+    }
+
+    private function render_vv_report_page() {
+        if (isset($_POST['action']) && $_POST['action'] === 'export_vv_report_csv') {
+            $this->action_export_vv_report_csv();
+        }
+
+        list($from, $to) = $this->get_history_range();
+        $selected = $this->get_vv_selected_tiers();
+        list($rows, $genders) = $this->get_vv_matrix($from, $to, $selected);
+        $tiers = TeamOversight_Memberships::get_tiers();
+
+        ?>
+        <div class="wrap">
+            <h1>Membership History</h1>
+            <?php $this->render_history_tabs('vv-report'); ?>
+
+            <p class="description">VV return: members counted by age band and gender. A person counts once, under the <em>highest</em> tier they held during the selected period — so ticking Associate only excludes anyone who was also a Full or Life member in the period. Age is at the end of the period; missing date of birth lands in "Unknown DOB".</p>
+
+            <form method="get" style="margin: 15px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; display: inline-block;">
+                <input type="hidden" name="page" value="club-membership-history">
+                <input type="hidden" name="tab" value="vv-report">
+                <input type="hidden" name="vv_tiers_set" value="1">
+                <label>Members between
+                    <input type="date" name="history_from" value="<?php echo esc_attr($from); ?>">
+                </label>
+                <label> and
+                    <input type="date" name="history_to" value="<?php echo esc_attr($to); ?>">
+                </label>
+                <span style="margin-left: 15px;">Include:</span>
+                <?php foreach ($tiers as $slug => $label): ?>
+                    <label style="margin-left: 8px;">
+                        <input type="checkbox" name="vv_tiers[]" value="<?php echo esc_attr($slug); ?>" <?php checked(in_array($slug, $selected, true)); ?>>
+                        <?php echo esc_html($label); ?>
+                    </label>
+                <?php endforeach; ?>
+                <input type="submit" class="button button-primary" value="Show" style="margin-left: 15px;">
+            </form>
+
+            <form method="post" style="display: inline-block; margin-left: 10px;">
+                <input type="hidden" name="action" value="export_vv_report_csv">
+                <input type="hidden" name="history_from" value="<?php echo esc_attr($from); ?>">
+                <input type="hidden" name="history_to" value="<?php echo esc_attr($to); ?>">
+                <input type="hidden" name="vv_tiers_set" value="1">
+                <?php foreach ($selected as $slug): ?>
+                    <input type="hidden" name="vv_tiers[]" value="<?php echo esc_attr($slug); ?>">
+                <?php endforeach; ?>
+                <?php wp_nonce_field('export_vv_report_csv', 'members_nonce'); ?>
+                <input type="submit" class="button" value="Export CSV">
+            </form>
+
+            <p><strong><?php echo intval($rows['Total']['Total']); ?></strong> people counted
+                (<?php echo $selected ? esc_html(implode(', ', array_intersect_key($tiers, array_flip($selected)))) : 'no tiers selected'; ?>,
+                <?php echo esc_html($from); ?> to <?php echo esc_html($to); ?>).</p>
+
+            <table class="wp-list-table widefat fixed striped" style="max-width: 750px; margin-top: 10px;">
+                <thead>
+                    <tr>
+                        <th>Age band</th>
+                        <?php foreach ($genders as $g): ?>
+                            <th style="width: 14%; text-align: right;"><?php echo esc_html($g); ?></th>
+                        <?php endforeach; ?>
+                        <th style="width: 14%; text-align: right;">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($rows as $label => $counts): ?>
+                        <tr<?php echo $label === 'Total' ? ' style="font-weight: 600; border-top: 2px solid #333;"' : ''; ?>>
+                            <td><?php echo esc_html($label); ?></td>
+                            <?php foreach ($genders as $g): ?>
+                                <td style="text-align: right;"><?php echo intval($counts[$g]); ?></td>
+                            <?php endforeach; ?>
+                            <td style="text-align: right;"><strong><?php echo intval($counts['Total']); ?></strong></td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    private function action_export_vv_report_csv() {
+        if (!isset($_POST['members_nonce']) || !wp_verify_nonce($_POST['members_nonce'], 'export_vv_report_csv')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
+        list($from, $to) = $this->get_history_range();
+        $selected = $this->get_vv_selected_tiers();
+        list($rows, $genders) = $this->get_vv_matrix($from, $to, $selected);
+
+        $filename = "vv_report_{$from}_to_{$to}.csv";
+
+        if (ob_get_length()) {
+            ob_end_clean();
+        }
+
+        header('Content-Type: text/csv');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+
+        $output = fopen('php://output', 'w');
+        // UTF-8 BOM so Excel reads accents/dashes correctly.
+        fwrite($output, "\xEF\xBB\xBF");
+        fputcsv($output, array_merge(array('Age band'), $genders, array('Total')));
 
         foreach ($rows as $label => $counts) {
             $line = array($label);

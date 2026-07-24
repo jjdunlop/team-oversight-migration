@@ -59,6 +59,8 @@ Club Membership → Membership History: pick a date range and see everyone whose
 
 The **MUS Matrix** tab on the same page produces the periodic MUS return: active members (anyone holding a membership grant in the date range) as a matrix of MUS eligibility category × gender (Male / Female / Non-Binary / Unknown) with totals, CSV export. Profile category variants fold into the MUS row labels (other-university student/alumni variants merge; junior/high-school count as Other; missing data counts as Unknown; unrecognised categories keep their own row rather than being lumped).
 
+The **VV Report** tab produces the VV return: age band (10-year bands, age at the end of the period; missing DOB → "Unknown DOB") × gender (Male / Female / Other / Unknown gender) with totals, CSV export. Defaults to Associate members only, with tier checkboxes to change what's included; each person counts once under the *highest* tier they held in the period, so tier selections never double-count.
+
 ---
 
 ## VVL Oversight
