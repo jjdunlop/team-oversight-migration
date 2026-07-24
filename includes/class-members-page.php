@@ -393,13 +393,14 @@ class TeamOversight_Members_Page {
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT m.user_id, u.display_name, u.user_email,
                 MAX(bd.meta_value) AS birth_date,
-                MAX(g.meta_value) AS gender,
+                MAX(COALESCE(NULLIF(g.meta_value, ''), gd.meta_value)) AS gender,
                 MAX(mus.meta_value) AS mus_category,
                 GROUP_CONCAT(CONCAT(m.tier, '|', m.start_date, '|', m.end_date, '|', m.source) ORDER BY m.start_date SEPARATOR ',') AS grants
             FROM {$wpdb->prefix}team_memberships m
             LEFT JOIN {$wpdb->users} u ON u.ID = m.user_id
             LEFT JOIN {$wpdb->usermeta} bd ON bd.user_id = m.user_id AND bd.meta_key = 'birth_date'
             LEFT JOIN {$wpdb->usermeta} g ON g.user_id = m.user_id AND g.meta_key = 'gender'
+            LEFT JOIN {$wpdb->usermeta} gd ON gd.user_id = m.user_id AND gd.meta_key = 'gender_dropdown'
             LEFT JOIN {$wpdb->usermeta} mus ON mus.user_id = m.user_id AND mus.meta_key = 'MUSEligibilityCategory'
             WHERE m.start_date <= %s AND m.end_date >= %s
             GROUP BY m.user_id
@@ -1309,7 +1310,7 @@ class TeamOversight_Members_Page {
                 caps.meta_value AS caps,
                 bd.meta_value AS birth_date,
                 mob.meta_value AS mobile,
-                g.meta_value AS gender,
+                COALESCE(NULLIF(g.meta_value, ''), gd.meta_value) AS gender,
                 mus.meta_value AS mus_category,
                 pcy.meta_value AS confirmed_year,
                 mem.grants AS grants,
@@ -1323,6 +1324,7 @@ class TeamOversight_Members_Page {
             LEFT JOIN {$wpdb->usermeta} bd ON bd.user_id = u.ID AND bd.meta_key = 'birth_date'
             LEFT JOIN {$wpdb->usermeta} mob ON mob.user_id = u.ID AND mob.meta_key = 'mobile_number'
             LEFT JOIN {$wpdb->usermeta} g ON g.user_id = u.ID AND g.meta_key = 'gender'
+            LEFT JOIN {$wpdb->usermeta} gd ON gd.user_id = u.ID AND gd.meta_key = 'gender_dropdown'
             LEFT JOIN {$wpdb->usermeta} mus ON mus.user_id = u.ID AND mus.meta_key = 'MUSEligibilityCategory'
             LEFT JOIN {$wpdb->usermeta} pcy ON pcy.user_id = u.ID AND pcy.meta_key = 'profile_confirmed_year'
             LEFT JOIN (
