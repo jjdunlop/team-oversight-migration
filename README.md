@@ -53,6 +53,10 @@ Memberships are **time-bound grants** stored in `team_memberships`: tier + start
 
 One row per person: membership status + expiry, age, gender, MUS category, VVL teams for the season, fees owing, VA accreditation, profile-confirmation status. Filter/search/sort, CSV export, manual grant (with email autocomplete) and revoke.
 
+### Data Quality
+
+Club Membership → Data Quality: how complete member data is — gender, DOB, mobile, MUS category, this-year profile confirmation, ledger membership — as counts/percentages for two scopes: *active this year* (current membership or a team this season) and *all accounts*. A snapshot is recorded once a day (on the membership cron, with a page-view fallback), so sparkline trends accrue from the day the page ships; "Record snapshot now" forces today's entry. History is capped at ~3 years and stored in a non-autoloaded option.
+
 ### Membership History
 
 Club Membership → Membership History: pick a date range and see everyone whose membership overlapped it — highest tier held, every membership period with dates and source, age/gender/MUS, current status. CSV export. History exists from the moment grants exist (run seeding to backfill).
