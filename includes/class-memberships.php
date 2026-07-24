@@ -252,20 +252,25 @@ class TeamOversight_Memberships {
 
     public function handle_order($order_id) {
         if (!function_exists('wc_get_order')) {
-            return;
+            return 0;
         }
 
         $order = wc_get_order($order_id);
         if (!$order) {
-            return;
+            return 0;
         }
 
         $user_id = $order->get_user_id();
         if (!$user_id) {
-            return;
+            return 0;
         }
 
-        $granted = false;
+        // Terms run from when the order was paid (falls back to the order
+        // date, then today) so re-scanned old orders get true start dates.
+        $paid = $order->get_date_paid() ? $order->get_date_paid() : $order->get_date_created();
+        $start = $paid ? $paid->date('Y-m-d') : current_time('Y-m-d');
+
+        $granted = 0;
         foreach ($order->get_items() as $item_id => $item) {
             $product_id = $item->get_product_id();
             $mapping = $this->get_product_mapping($product_id);
@@ -277,7 +282,6 @@ class TeamOversight_Memberships {
                 continue;
             }
 
-            $start = current_time('Y-m-d');
             $end = date('Y-m-d', strtotime($start . ' +' . $mapping['months'] . ' months'));
 
             $this->insert_grant(array(
@@ -290,12 +294,39 @@ class TeamOversight_Memberships {
                 'order_item_id' => $item_id,
                 'product_id' => $product_id,
             ));
-            $granted = true;
+            $granted++;
         }
 
         if ($granted) {
             $this->sync_user_roles($user_id);
         }
+        return $granted;
+    }
+
+    /**
+     * Replay this year's paid (processing/completed) orders through the
+     * normal grant logic, using the CURRENT product/category configuration.
+     * Catches orders paid before a product's membership attributes were set.
+     * Idempotent: items that already granted are skipped by the per-item dedupe.
+     */
+    public function rescan_paid_orders() {
+        global $wpdb;
+
+        $year = wp_date('Y');
+        $order_ids = $wpdb->get_col($wpdb->prepare("
+            SELECT ID FROM {$wpdb->posts}
+            WHERE post_type = 'shop_order'
+                AND post_status IN ('wc-processing', 'wc-completed')
+                AND post_date >= %s AND post_date < %s
+            ORDER BY ID
+        ", $year . '-01-01', ((int) $year + 1) . '-01-01'));
+
+        $report = array('year' => $year, 'orders_checked' => 0, 'grants_created' => 0);
+        foreach ($order_ids as $order_id) {
+            $report['orders_checked']++;
+            $report['grants_created'] += (int) $this->handle_order(intval($order_id));
+        }
+        return $report;
     }
 
     private function grant_exists_for_order_item($order_item_id) {

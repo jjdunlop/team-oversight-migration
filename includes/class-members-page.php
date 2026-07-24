@@ -147,6 +147,16 @@ class TeamOversight_Members_Page {
                 </form>
             </details>
 
+            <details class="import-export-section" style="margin: 15px 0; padding: 10px 15px; background: #fff; border: 1px solid #ccd0d4;">
+                <summary style="cursor: pointer; font-weight: 600;">Re-scan this year's paid orders</summary>
+                <p class="description">Replays every paid (processing/completed) order from this calendar year through the normal membership-grant logic using the <strong>current</strong> product settings and category rules. Use this after adding membership attributes to a product — orders paid before the attributes were set never granted anything. Idempotent: purchases that already granted are skipped, and grants are dated from when the order was paid.</p>
+                <form method="post" onsubmit="return confirm('Re-scan all of this year\'s paid orders? New grants are created for any qualifying purchase that has none, dated from payment.');">
+                    <input type="submit" class="button button-primary" value="Re-scan Paid Orders">
+                    <input type="hidden" name="action" value="rescan_orders">
+                    <?php wp_nonce_field('rescan_orders', 'members_nonce'); ?>
+                </form>
+            </details>
+
             <div class="invoices-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
                 <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
                     <div>
@@ -650,6 +660,7 @@ class TeamOversight_Members_Page {
             'revoke_membership' => 'revoke_membership',
             'seed_memberships_dry' => 'seed_memberships',
             'seed_memberships_apply' => 'seed_memberships',
+            'rescan_orders' => 'rescan_orders',
             'save_membership_rules' => 'save_membership_rules',
             'export_members_csv' => 'export_members_csv',
         );
@@ -681,6 +692,9 @@ class TeamOversight_Members_Page {
                 break;
             case 'seed_memberships_apply':
                 $this->action_seed(true);
+                break;
+            case 'rescan_orders':
+                $this->action_rescan();
                 break;
             case 'save_membership_rules':
                 $this->action_save_rules();
@@ -743,6 +757,18 @@ class TeamOversight_Members_Page {
         echo '.';
         if (!empty($report['sample'])) {
             echo '<br><small>Sample:<br>' . implode('<br>', array_map('esc_html', $report['sample'])) . '</small>';
+        }
+        echo '</p></div>';
+    }
+
+    private function action_rescan() {
+        $report = $this->memberships->rescan_paid_orders();
+
+        echo '<div class="notice notice-success"><p>';
+        echo '<strong>Order re-scan (' . esc_html($report['year']) . '):</strong> ';
+        echo intval($report['orders_checked']) . ' paid orders checked, ' . intval($report['grants_created']) . ' new membership grants created.';
+        if (intval($report['grants_created']) === 0) {
+            echo ' Every qualifying purchase already has its grant.';
         }
         echo '</p></div>';
     }
