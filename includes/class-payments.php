@@ -28,6 +28,9 @@ class TeamOversight_Payments {
     const REMINDER_CRON = 'team_oversight_overdue_reminders';
     const EMAIL_SUBJECT_OPTION = 'team_oversight_overdue_email_subject';
     const EMAIL_BODY_OPTION = 'team_oversight_overdue_email_body';
+    const EMAIL_FROM_NAME_OPTION = 'team_oversight_email_from_name';
+    const EMAIL_FROM_OPTION = 'team_oversight_email_from_address';
+    const EMAIL_REPLYTO_OPTION = 'team_oversight_email_replyto';
 
     private static $hooks_registered = false;
 
@@ -191,6 +194,25 @@ class TeamOversight_Payments {
             . "Melbourne University Renegades Volleyball Club";
     }
 
+    /**
+     * Mail headers for plugin emails: configured From (name + address on a
+     * domain the server may send as) and Reply-To. Empty From = WordPress
+     * default sender.
+     */
+    public static function get_email_headers() {
+        $headers = array();
+        $from = sanitize_email(get_option(self::EMAIL_FROM_OPTION));
+        if ($from) {
+            $name = trim((string) get_option(self::EMAIL_FROM_NAME_OPTION));
+            $headers[] = 'From: ' . ($name !== '' ? $name . ' <' . $from . '>' : $from);
+        }
+        $replyto = sanitize_email(get_option(self::EMAIL_REPLYTO_OPTION));
+        if ($replyto) {
+            $headers[] = 'Reply-To: ' . $replyto;
+        }
+        return $headers;
+    }
+
     /** The link reminders point at: configured fees page or the checklist. */
     public static function get_reminder_link() {
         $url = get_option('team_oversight_fees_page_url');
@@ -261,7 +283,7 @@ class TeamOversight_Payments {
 
             list($subject, $message) = self::render_reminder_email($person['name'], $person['overdue'], $person['outstanding'], $checklist_url);
 
-            if (wp_mail($person['email'], $subject, $message)) {
+            if (wp_mail($person['email'], $subject, $message, self::get_email_headers())) {
                 update_user_meta($person['user_id'], self::REMINDER_META, time());
                 $report['sent']++;
             }

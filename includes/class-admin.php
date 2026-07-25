@@ -394,6 +394,18 @@ class TeamOversight_Admin {
                                 <input type="number" name="reminder_days" value="<?php echo intval(get_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, 7)); ?>" min="1" max="90" style="width: 55px;"> days)
                             </label>
                         </p>
+                        <p style="display: flex; gap: 10px;">
+                            <label style="flex: 1;"><strong>From name</strong><br>
+                                <input type="text" name="email_from_name" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_FROM_NAME_OPTION)); ?>" placeholder="MURVC" style="width: 100%;">
+                            </label>
+                            <label style="flex: 1.4;"><strong>From address</strong><br>
+                                <input type="email" name="email_from" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_FROM_OPTION)); ?>" placeholder="<?php echo esc_attr(get_option('woocommerce_email_from_address', get_option('admin_email'))); ?>" style="width: 100%;">
+                            </label>
+                            <label style="flex: 1.4;"><strong>Reply-To</strong><br>
+                                <input type="email" name="email_replyto" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION)); ?>" placeholder="treasurer@renegades.com.au" style="width: 100%;">
+                            </label>
+                        </p>
+                        <p class="description">From must be an address this server may send as — the safest choice is the same address WooCommerce order emails use (<?php echo esc_html(get_option('woocommerce_email_from_address', get_option('admin_email'))); ?>). Reply-To can be any real mailbox (that's where member replies land). Leave From blank for the WordPress default.</p>
                         <p>
                             <label><strong>Subject</strong><br>
                                 <input type="text" name="email_subject" value="<?php echo esc_attr($subject); ?>" style="width: 100%;">
@@ -453,6 +465,9 @@ class TeamOversight_Admin {
         update_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, max(1, min(90, intval($_POST['reminder_days']))));
         update_option(TeamOversight_Payments::EMAIL_SUBJECT_OPTION, sanitize_text_field(wp_unslash($_POST['email_subject'])));
         update_option(TeamOversight_Payments::EMAIL_BODY_OPTION, sanitize_textarea_field(wp_unslash($_POST['email_body'])));
+        update_option(TeamOversight_Payments::EMAIL_FROM_NAME_OPTION, sanitize_text_field(wp_unslash($_POST['email_from_name'])));
+        update_option(TeamOversight_Payments::EMAIL_FROM_OPTION, sanitize_email(wp_unslash($_POST['email_from'])));
+        update_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION, sanitize_email(wp_unslash($_POST['email_replyto'])));
 
         echo '<div class="notice notice-success"><p>Email settings saved.</p></div>';
     }
@@ -469,7 +484,7 @@ class TeamOversight_Admin {
 
         $admin = wp_get_current_user();
         list($subject, $body) = TeamOversight_Payments::render_reminder_email($admin->display_name, 150, 425.50);
-        if (wp_mail($admin->user_email, '[TEST] ' . $subject, $body)) {
+        if (wp_mail($admin->user_email, '[TEST] ' . $subject, $body, TeamOversight_Payments::get_email_headers())) {
             echo '<div class="notice notice-success"><p>Test email sent to ' . esc_html($admin->user_email) . '.</p></div>';
         } else {
             echo '<div class="notice notice-error"><p>Sending failed — check the site\'s email configuration.</p></div>';
