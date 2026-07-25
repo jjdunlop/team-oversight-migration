@@ -250,6 +250,11 @@ class TeamOversight_Payments {
             padding: 20px;
             background: #f9f9f9;
             max-width: 560px;
+            /* Breathing room + float containment so the panel never
+               collides with UM profile headers rendered below it. */
+            margin: 0 0 40px 0;
+            clear: both;
+            overflow: hidden;
         }
 
         .member-fees-season {
