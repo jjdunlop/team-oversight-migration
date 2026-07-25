@@ -2827,11 +2827,30 @@ class TeamOversight_Admin {
         }
         
         global $wpdb;
-        
+
         $invoice_id = intval($_POST['invoice_id']);
         $invoice_amount = floatval($_POST['invoice_amount']);
         $outstanding_amount = floatval($_POST['outstanding_amount']);
-        
+
+        $current = $wpdb->get_row($wpdb->prepare("
+            SELECT invoice_amount, outstanding_amount FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice_id));
+        if (!$current) {
+            wp_send_json_error('Invoice not found');
+        }
+
+        // "Paid" is derived (fee - outstanding). When the admin changes the
+        // FEE but leaves outstanding untouched, they mean "reprice this
+        // invoice, keep the payments" — so hold paid constant and recompute
+        // outstanding, instead of silently inventing paid money. An
+        // explicit outstanding edit (recording an offline payment) is
+        // honoured as entered.
+        $outstanding_untouched = abs($outstanding_amount - floatval($current->outstanding_amount)) < 0.005;
+        if ($outstanding_untouched) {
+            $paid = max(0, floatval($current->invoice_amount) - floatval($current->outstanding_amount));
+            $outstanding_amount = max(0, round($invoice_amount - $paid, 2));
+        }
+
         $result = $wpdb->update(
             $wpdb->prefix . 'team_invoices',
             array(
@@ -2842,7 +2861,7 @@ class TeamOversight_Admin {
             array('%f', '%f'),
             array('%d')
         );
-        
+
         if ($result !== false) {
             wp_send_json_success('Invoice updated successfully');
         } else {
