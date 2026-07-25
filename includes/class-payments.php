@@ -20,6 +20,13 @@ class TeamOversight_Payments {
 
     const PAYMENT_PRODUCT_OPTION = 'team_oversight_payment_product';
 
+    // Overdue reminder emails: master switch (default off), days between
+    // reminders per person, per-user last-sent meta, daily cron hook.
+    const REMINDERS_ENABLED_OPTION = 'team_oversight_overdue_reminders_enabled';
+    const REMINDER_DAYS_OPTION = 'team_oversight_overdue_reminder_days';
+    const REMINDER_META = 'murvc_overdue_last_reminded';
+    const REMINDER_CRON = 'team_oversight_overdue_reminders';
+
     private static $hooks_registered = false;
 
     public function __construct() {
@@ -41,6 +48,121 @@ class TeamOversight_Payments {
         add_action('woocommerce_checkout_create_order_line_item', array($this, 'attach_payment_to_order_item'), 10, 3);
         add_action('woocommerce_order_status_processing', array($this, 'handle_payment_order'));
         add_action('woocommerce_order_status_completed', array($this, 'handle_payment_order'));
+
+        // Overdue reminder emails (daily cron; only sends when enabled).
+        add_action('init', array($this, 'maybe_schedule_reminder_cron'));
+        add_action(self::REMINDER_CRON, array($this, 'run_reminder_cron'));
+    }
+
+    public function maybe_schedule_reminder_cron() {
+        if (!wp_next_scheduled(self::REMINDER_CRON)) {
+            wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', self::REMINDER_CRON);
+        }
+    }
+
+    public function run_reminder_cron() {
+        $this->send_overdue_reminders(false, false);
+    }
+
+    // ------------------------------------------------------------------
+    // Overdue reminder emails
+    // ------------------------------------------------------------------
+
+    /**
+     * Everyone with money overdue (all seasons; past-season debt counts in
+     * full), one entry per person, resolved to their WP account. Rows that
+     * can't be matched to an account are returned with user_id 0.
+     */
+    public static function get_overdue_people() {
+        global $wpdb;
+
+        $invoices = $wpdb->get_results("
+            SELECT * FROM {$wpdb->prefix}team_invoices WHERE outstanding_amount > 0
+        ");
+
+        $people = array();
+        foreach ($invoices as $invoice) {
+            $user_id = intval($invoice->user_id);
+            if (!$user_id && $invoice->email) {
+                $user = get_user_by('email', $invoice->email);
+                $user_id = $user ? $user->ID : 0;
+            }
+            $key = $user_id ? 'u' . $user_id : 'e' . strtolower((string) $invoice->email);
+
+            if (!isset($people[$key])) {
+                $account = $user_id ? get_userdata($user_id) : null;
+                $people[$key] = array(
+                    'user_id' => $user_id,
+                    'email' => $account ? $account->user_email : $invoice->email,
+                    'name' => $account ? $account->display_name : $invoice->name,
+                    'overdue' => 0.0,
+                    'outstanding' => 0.0,
+                );
+            }
+            $people[$key]['outstanding'] += floatval($invoice->outstanding_amount);
+            $people[$key]['overdue'] += self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+        }
+
+        return array_values(array_filter($people, function ($p) {
+            return $p['overdue'] >= 1;
+        }));
+    }
+
+    /**
+     * Email everyone whose fees are overdue, at most once per configured
+     * interval per person. $force ignores the master switch (admin "send
+     * now"); $dry_run reports who WOULD be emailed without sending.
+     * Returns a report array.
+     */
+    public function send_overdue_reminders($force = false, $dry_run = false) {
+        $report = array('enabled' => (bool) get_option(self::REMINDERS_ENABLED_OPTION), 'sent' => 0, 'skipped_recent' => 0, 'skipped_no_account' => 0, 'recipients' => array());
+
+        if (!$force && !$report['enabled']) {
+            return $report;
+        }
+
+        $days = max(1, intval(get_option(self::REMINDER_DAYS_OPTION, 7)));
+        $checklist_url = get_option('team_oversight_fees_page_url');
+        if (!$checklist_url) {
+            $checklist_url = home_url('/player-checklist/');
+        }
+
+        foreach (self::get_overdue_people() as $person) {
+            if (!$person['user_id']) {
+                $report['skipped_no_account']++;
+                continue;
+            }
+
+            $last = intval(get_user_meta($person['user_id'], self::REMINDER_META, true));
+            if ($last && (time() - $last) < $days * DAY_IN_SECONDS) {
+                $report['skipped_recent']++;
+                continue;
+            }
+
+            $report['recipients'][] = $person['name'] . ' <' . $person['email'] . '> $' . number_format($person['overdue'], 2);
+
+            if ($dry_run) {
+                $report['sent']++;
+                continue;
+            }
+
+            $subject = 'MURVC club fees overdue — $' . number_format($person['overdue'], 2);
+            $message = 'Hi ' . $person['name'] . ",\n\n"
+                . "Our records show your MURVC club fees have fallen behind the payment schedule.\n\n"
+                . '  Overdue now:     $' . number_format($person['overdue'], 2) . "\n"
+                . '  Total remaining: $' . number_format($person['outstanding'], 2) . "\n\n"
+                . "You can pay any amount online — every payment comes straight off your balance:\n"
+                . $checklist_url . "\n\n"
+                . "If you think this is a mistake, or you'd like to arrange a payment plan, just reply to this email.\n\n"
+                . "Melbourne University Renegades Volleyball Club";
+
+            if (wp_mail($person['email'], $subject, $message)) {
+                update_user_meta($person['user_id'], self::REMINDER_META, time());
+                $report['sent']++;
+            }
+        }
+
+        return $report;
     }
 
     // ------------------------------------------------------------------

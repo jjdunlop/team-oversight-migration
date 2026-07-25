@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Team Oversight
  * Description: MURVC club management - club membership tiers (Club Membership menu) and VVL team oversight: trials, assignments, fees and dashboard (VVL Oversight menu).
- * Version: 1.16.2
+ * Version: 1.17.0
  * Author: Team Management System
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.16.2');
+define('TEAM_OVERSIGHT_VERSION', '1.17.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -30,6 +30,7 @@ register_deactivation_hook(__FILE__, 'team_oversight_deactivate');
 
 function team_oversight_deactivate() {
     wp_clear_scheduled_hook('team_oversight_membership_sync');
+    wp_clear_scheduled_hook('team_oversight_overdue_reminders');
 }
 
 function team_oversight_create_tables() {

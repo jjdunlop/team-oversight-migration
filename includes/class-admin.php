@@ -342,7 +342,44 @@ class TeamOversight_Admin {
             $this->save_payment_settings();
         }
 
+        if (isset($_POST['action']) && in_array($_POST['action'], array('preview_overdue_reminders', 'send_overdue_reminders'), true)) {
+            $this->run_overdue_reminders($_POST['action'] === 'preview_overdue_reminders');
+        }
+
         $this->render_invoices_table();
+    }
+
+    private function run_overdue_reminders($dry_run) {
+        if (!isset($_POST['payment_settings_nonce']) || !wp_verify_nonce($_POST['payment_settings_nonce'], 'save_payment_settings')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
+        $payments = new TeamOversight_Payments();
+        $report = $payments->send_overdue_reminders(true, $dry_run);
+
+        echo '<div class="notice notice-' . ($dry_run ? 'info' : 'success') . '"><p>';
+        echo '<strong>Overdue reminders ' . ($dry_run ? 'preview' : 'sent') . ':</strong> ';
+        echo intval($report['sent']) . ($dry_run ? ' would receive an email' : ' emails sent');
+        if ($report['skipped_recent'] > 0) {
+            echo ', ' . intval($report['skipped_recent']) . ' skipped (reminded recently)';
+        }
+        if ($report['skipped_no_account'] > 0) {
+            echo ', ' . intval($report['skipped_no_account']) . ' skipped (no matching account)';
+        }
+        echo '.';
+        if (!empty($report['recipients'])) {
+            echo '<br><small>' . implode('<br>', array_map('esc_html', array_slice($report['recipients'], 0, 30)));
+            if (count($report['recipients']) > 30) {
+                echo '<br>… and ' . (count($report['recipients']) - 30) . ' more';
+            }
+            echo '</small>';
+        }
+        echo '</p></div>';
     }
 
     private function save_payment_settings() {
@@ -359,10 +396,13 @@ class TeamOversight_Admin {
         $product_id = intval($_POST['payment_product']);
         update_option(TeamOversight_Payments::PAYMENT_PRODUCT_OPTION, $product_id);
 
+        update_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION, !empty($_POST['reminders_enabled']) ? 1 : 0);
+        update_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, max(1, min(90, intval($_POST['reminder_days']))));
+
         if ($product_id) {
-            echo '<div class="notice notice-success"><p>Payment product saved. Members can now pay any amount against their fees via the [member_fees] page.</p></div>';
+            echo '<div class="notice notice-success"><p>Payment settings saved. Members can pay any amount against their fees via the [member_fees] page.</p></div>';
         } else {
-            echo '<div class="notice notice-success"><p>Online fee payment disabled.</p></div>';
+            echo '<div class="notice notice-success"><p>Payment settings saved (online fee payment disabled).</p></div>';
         }
     }
     
@@ -1368,9 +1408,31 @@ class TeamOversight_Admin {
                             <option value="<?php echo $product_post->ID; ?>" <?php selected($payment_product_id, $product_post->ID); ?>><?php echo esc_html($product_post->post_title); ?> (#<?php echo $product_post->ID; ?>)</option>
                         <?php endforeach; ?>
                     </select>
+                    <div style="margin: 12px 0; padding-top: 10px; border-top: 1px solid #eee;">
+                        <strong>Overdue reminder emails</strong>
+                        <p class="description">When enabled, a daily check emails everyone whose fees are overdue (including debts carried over from past seasons), at most once per interval per person, with their amount and a link to the checklist page. Use Preview first — it lists exactly who would be emailed without sending anything.</p>
+                        <label>
+                            <input type="checkbox" name="reminders_enabled" value="1" <?php checked(get_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION)); ?>>
+                            Send automatic overdue reminders
+                        </label>
+                        <label style="margin-left: 20px;">
+                            Remind each person at most every
+                            <input type="number" name="reminder_days" value="<?php echo intval(get_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, 7)); ?>" min="1" max="90" style="width: 60px;"> days
+                        </label>
+                    </div>
                     <input type="submit" class="button button-primary" value="Save">
                     <input type="hidden" name="action" value="save_payment_settings">
                     <?php wp_nonce_field('save_payment_settings', 'payment_settings_nonce'); ?>
+                </form>
+                <form method="post" style="display: inline-block; margin-top: 8px; margin-right: 8px;">
+                    <input type="hidden" name="action" value="preview_overdue_reminders">
+                    <?php wp_nonce_field('save_payment_settings', 'payment_settings_nonce'); ?>
+                    <input type="submit" class="button" value="Preview recipients (no emails)">
+                </form>
+                <form method="post" style="display: inline-block; margin-top: 8px;" onsubmit="return confirm('Send overdue reminder emails NOW to everyone listed in the preview (respecting the per-person interval)?');">
+                    <input type="hidden" name="action" value="send_overdue_reminders">
+                    <?php wp_nonce_field('save_payment_settings', 'payment_settings_nonce'); ?>
+                    <input type="submit" class="button" value="Send reminders now">
                 </form>
             </details>
 
