@@ -200,7 +200,7 @@ class TeamOversight_Admin {
             $this->finalise_selections();
         }
 
-        if (isset($_POST['action']) && in_array($_POST['action'], array('accept_trial', 'reject_trial', 'undo_trial', 'mark_trial_paid'), true)) {
+        if (isset($_POST['action']) && in_array($_POST['action'], array('accept_trial', 'reject_trial', 'undo_trial', 'mark_trial_paid', 'delete_trial'), true)) {
             $this->process_trial_action();
         }
 
@@ -978,6 +978,14 @@ class TeamOversight_Admin {
                                     <?php endif; ?>
                                     <?php if (!empty($form_data)): ?>
                                         <button type="button" class="button button-small" onclick="toggleTrialDetails(<?php echo $trial->id; ?>)">Details</button>
+                                    <?php endif; ?>
+                                    <?php if ($trial->application_status !== 'accepted'): ?>
+                                        <form method="post" style="display: inline;">
+                                            <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
+                                            <input type="hidden" name="action" value="delete_trial">
+                                            <input type="submit" class="button button-small" style="color: #a00;" value="Delete" onclick="return confirm('Permanently delete this application, including its coach verdicts and notes? The player will be able to submit a new one. This cannot be undone.')">
+                                            <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
+                                        </form>
                                     <?php endif; ?>
                                 </td>
                             </tr>
@@ -2177,6 +2185,28 @@ class TeamOversight_Admin {
                 
                 echo '<div class="notice notice-success"><p>Trial rejection undone successfully. Player returned to pending status.</p></div>';
             }
+        } elseif ($action === 'delete_trial') {
+            $trial = $wpdb->get_row($wpdb->prepare("
+                SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d
+            ", $trial_id));
+
+            if (!$trial) {
+                echo '<div class="notice notice-error"><p>Application not found.</p></div>';
+                return;
+            }
+
+            // Accepted applications hold real assignments/invoices — undo
+            // the assignment first so those are cleaned up properly.
+            if ($trial->application_status === 'accepted') {
+                echo '<div class="notice notice-error"><p>This application has been accepted — use <strong>Undo Assignment</strong> first, then delete.</p></div>';
+                return;
+            }
+
+            $wpdb->delete($wpdb->prefix . 'team_trial_selections', array('application_id' => $trial_id), array('%d'));
+            $wpdb->delete($wpdb->prefix . 'team_trial_notes', array('application_id' => $trial_id), array('%d'));
+            $wpdb->delete($wpdb->prefix . 'trial_applications', array('id' => $trial_id), array('%d'));
+
+            echo '<div class="notice notice-success"><p>Application deleted (' . esc_html($trial->name) . ', ' . esc_html($trial->season) . ') along with its verdicts and notes. The player can submit a fresh application.</p></div>';
         }
     }
     
