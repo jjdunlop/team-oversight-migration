@@ -20,14 +20,33 @@ class TeamOversight_Log {
         return $wpdb->prefix . 'team_activity_log';
     }
 
-    public static function get_types() {
-        return array(
-            'payment_online' => 'Online payment',
-            'payment_manual' => 'Manual payment',
-            'email_reminder' => 'Reminder email',
-            'fee_edit' => 'Fee edited',
-            'membership_grant' => 'Membership granted',
+    /**
+     * Event types, grouped into channels: 'vvl' shows on VVL Oversight →
+     * Logs (money and emails), 'membership' on Club Membership → Logs
+     * (membership lifecycle). One underlying table, two windows onto it.
+     */
+    public static function get_types($channel = null) {
+        $channels = array(
+            'vvl' => array(
+                'payment_online' => 'Online payment',
+                'payment_manual' => 'Manual payment',
+                'email_reminder' => 'Reminder email',
+                'fee_edit' => 'Fee edited',
+            ),
+            'membership' => array(
+                'membership_granted' => 'Granted',
+                'membership_extended' => 'Extended',
+                'membership_upgraded' => 'Upgraded',
+                'membership_expired' => 'Expired',
+                'membership_revoked' => 'Revoked',
+                'membership_grant' => 'Granted (pre-1.22)',
+            ),
         );
+
+        if ($channel === null) {
+            return array_merge($channels['vvl'], $channels['membership']);
+        }
+        return isset($channels[$channel]) ? $channels[$channel] : array();
     }
 
     /**
@@ -67,15 +86,20 @@ class TeamOversight_Log {
     // Admin page (VVL Oversight → Logs)
     // ------------------------------------------------------------------
 
-    public static function render_admin_page() {
+    public static function render_admin_page($channel = 'vvl') {
         global $wpdb;
 
-        $types = self::get_types();
+        $types = self::get_types($channel);
+        $page_slug = $channel === 'membership' ? 'club-membership-logs' : 'team-oversight-logs';
+        $intro = $channel === 'membership'
+            ? 'Membership lifecycle: grants, extensions, upgrades, expiries and revocations.'
+            : 'Payments, reminder emails and fee edits.';
         $type = isset($_GET['log_type']) && isset($types[$_GET['log_type']]) ? $_GET['log_type'] : '';
         $search = isset($_GET['log_search']) ? sanitize_text_field(wp_unslash($_GET['log_search'])) : '';
 
-        $where = array('1=1');
-        $params = array();
+        // Each page only ever shows its own channel's events.
+        $where = array('l.event_type IN (' . implode(',', array_fill(0, count($types), '%s')) . ')');
+        $params = array_keys($types);
         if ($type !== '') {
             $where[] = 'l.event_type = %s';
             $params[] = $type;
@@ -98,15 +122,15 @@ class TeamOversight_Log {
             ORDER BY l.id DESC
             LIMIT 500
         ";
-        $rows = $params ? $wpdb->get_results($wpdb->prepare($sql, $params)) : $wpdb->get_results($sql);
+        $rows = $wpdb->get_results($wpdb->prepare($sql, $params));
 
         ?>
         <div class="wrap">
             <h1>Logs</h1>
-            <p class="description">The last 500 matching events — payments, reminder emails, fee edits, membership grants. Entries are kept for two years.</p>
+            <p class="description"><?php echo esc_html($intro); ?> The last 500 matching events; entries are kept for two years.</p>
 
             <form method="get" style="margin: 15px 0; padding: 12px 15px; background: #f9f9f9; border: 1px solid #ddd; display: inline-block;">
-                <input type="hidden" name="page" value="team-oversight-logs">
+                <input type="hidden" name="page" value="<?php echo esc_attr($page_slug); ?>">
                 <label>Event:
                     <select name="log_type">
                         <option value="">All events</option>
@@ -120,7 +144,7 @@ class TeamOversight_Log {
                 </label>
                 <input type="submit" class="button" value="Filter">
                 <?php if ($type !== '' || $search !== ''): ?>
-                    <a href="<?php echo admin_url('admin.php?page=team-oversight-logs'); ?>" class="button">Clear</a>
+                    <a href="<?php echo admin_url('admin.php?page=' . $page_slug); ?>" class="button">Clear</a>
                 <?php endif; ?>
             </form>
 

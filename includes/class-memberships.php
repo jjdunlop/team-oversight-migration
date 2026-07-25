@@ -366,6 +366,9 @@ class TeamOversight_Memberships {
             return false;
         }
 
+        // Status BEFORE the grant, so the log can say what actually changed.
+        $prev_tier = $this->get_active_tier(intval($data['user_id']));
+
         $ok = $wpdb->insert(
             $wpdb->prefix . 'team_memberships',
             $data,
@@ -374,14 +377,33 @@ class TeamOversight_Memberships {
 
         if ($ok && class_exists('TeamOversight_Log')) {
             $tiers = self::get_tiers();
+            $tier_label = isset($tiers[$data['tier']]) ? $tiers[$data['tier']] : $data['tier'];
             $end_display = ($data['end_date'] >= self::PERMANENT_FROM) ? 'no expiry' : $data['end_date'];
-            TeamOversight_Log::add(
-                'membership_grant',
-                (isset($tiers[$data['tier']]) ? $tiers[$data['tier']] : $data['tier'])
-                    . ' granted until ' . $end_display . ' (' . $data['source'] . ')'
-                    . ($data['note'] ? ' — ' . $data['note'] : ''),
-                array('user_id' => intval($data['user_id']))
-            );
+            $today = current_time('Y-m-d');
+            $active_now = ($data['start_date'] <= $today && $data['end_date'] >= $today);
+            $rank = array(self::TIER_LIFE => 3, self::TIER_FULL => 2, self::TIER_ASSOCIATE => 1);
+            $new_rank = isset($rank[$data['tier']]) ? $rank[$data['tier']] : 0;
+            $prev_rank = ($prev_tier && isset($rank[$prev_tier])) ? $rank[$prev_tier] : 0;
+
+            $suffix = ' (' . $data['source'] . ')' . ($data['note'] ? ' — ' . $data['note'] : '');
+            if (!$active_now) {
+                $type = 'membership_granted';
+                $message = $tier_label . ' recorded for ' . $data['start_date'] . ' → ' . $end_display . $suffix;
+            } elseif ($prev_rank === 0) {
+                $type = 'membership_granted';
+                $message = $tier_label . ' granted until ' . $end_display . $suffix;
+            } elseif ($new_rank > $prev_rank) {
+                $type = 'membership_upgraded';
+                $message = 'Upgraded ' . $tiers[$prev_tier] . ' → ' . $tier_label . ' until ' . $end_display . $suffix;
+            } elseif ($new_rank === $prev_rank) {
+                $type = 'membership_extended';
+                $message = $tier_label . ' extended until ' . $end_display . $suffix;
+            } else {
+                $type = 'membership_granted';
+                $message = $tier_label . ' granted until ' . $end_display . ' (current ' . $tiers[$prev_tier] . ' status unchanged)' . $suffix;
+            }
+
+            TeamOversight_Log::add($type, $message, array('user_id' => intval($data['user_id'])));
         }
         return $ok;
     }
@@ -475,11 +497,22 @@ class TeamOversight_Memberships {
     public function revoke_all($user_id) {
         global $wpdb;
 
+        $prev_tier = $this->get_active_tier($user_id);
+
         $wpdb->query($wpdb->prepare("
             UPDATE {$wpdb->prefix}team_memberships
             SET end_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)
             WHERE user_id = %d AND end_date >= CURDATE()
         ", $user_id));
+
+        if (class_exists('TeamOversight_Log')) {
+            $tiers = self::get_tiers();
+            TeamOversight_Log::add(
+                'membership_revoked',
+                ($prev_tier && isset($tiers[$prev_tier]) ? $tiers[$prev_tier] . ' revoked' : 'Memberships revoked') . ' — all active grants ended',
+                array('user_id' => intval($user_id))
+            );
+        }
 
         // Revoking also overrides any role left over from the stop-gap
         // snippet, so strip tier roles even if the user had no ledger rows.
@@ -543,6 +576,7 @@ class TeamOversight_Memberships {
 
         $active_tier = $this->get_active_tier($user_id);
 
+        $removed = array();
         foreach (array_keys(self::get_tiers()) as $tier) {
             if ($tier === $active_tier) {
                 if (!in_array($tier, (array) $user->roles, true)) {
@@ -551,8 +585,28 @@ class TeamOversight_Memberships {
             } else {
                 if (in_array($tier, (array) $user->roles, true)) {
                     $user->remove_role($tier);
+                    $removed[] = $tier;
                 }
             }
+        }
+
+        // Lost their last tier without gaining another = membership lapsed.
+        // Only fires on the transition (role already gone next run), so the
+        // daily cron logs each expiry exactly once.
+        if ($active_tier === null && !empty($removed) && class_exists('TeamOversight_Log')) {
+            $tiers = self::get_tiers();
+            $labels = array();
+            foreach ($removed as $tier) {
+                $labels[] = isset($tiers[$tier]) ? $tiers[$tier] : $tier;
+            }
+            $last_end = $wpdb->get_var($wpdb->prepare("
+                SELECT MAX(end_date) FROM {$wpdb->prefix}team_memberships WHERE user_id = %d
+            ", $user_id));
+            TeamOversight_Log::add(
+                'membership_expired',
+                implode(', ', $labels) . ' lapsed' . ($last_end ? ' (last grant ended ' . $last_end . ')' : ''),
+                array('user_id' => intval($user_id))
+            );
         }
     }
 

@@ -129,7 +129,10 @@ Admin: VVL Oversight → **Player Readiness** — every selected player's VV/shi
 
 ### Logs
 
-VVL Oversight → **Logs**: an append-only activity log — online and manual payments (with amounts and notes), reminder emails sent, fee edits (old → new amount), membership grants — each stamped with when, who it was about, and which admin (or "System" for cron) did it. Filter by event type, search by name/email/message; entries kept for two years. Bulk reconciliation backfills deliberately stay out of the log.
+One append-only activity log, two windows onto it (filter by event type, search by name/email/message; entries kept two years; each row stamped with when, who it was about, and which admin — or "System" for cron — did it):
+
+- **VVL Oversight → Logs**: online and manual payments (amounts, notes, order refs), reminder emails sent, fee edits (old → new amount). Bulk reconciliation backfills deliberately stay out.
+- **Club Membership → Logs**: the membership lifecycle — **Granted** (first membership, or one that doesn't change current status), **Extended** (same tier, new end date), **Upgraded** (e.g. Associate → Full, message shows the transition), **Expired** (logged once by the daily role sync when the last grant lapses), **Revoked** (admin action, shows the tier held). Past-dated grants from seeding log as "recorded".
 
 ### Data imports/exports
 
