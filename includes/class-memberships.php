@@ -48,6 +48,11 @@ class TeamOversight_Memberships {
         add_action('init', array($this, 'register_roles'));
         add_action('init', array($this, 'maybe_schedule_cron'));
         add_action(self::CRON_HOOK, array($this, 'sync_all_users'));
+        add_action(self::CRON_HOOK, array($this, 'sync_assignment_grants'), 5);
+
+        // Team members become Full Members: sync right after any plugin
+        // admin POST (assignment add, trial accept, finalise, ...).
+        add_action('shutdown', array($this, 'maybe_sync_after_admin_change'));
 
         // Grant memberships when orders are paid.
         add_action('woocommerce_order_status_processing', array($this, 'handle_order'));
@@ -366,6 +371,72 @@ class TeamOversight_Memberships {
             $data,
             array('%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d', '%s')
         ) !== false;
+    }
+
+    /**
+     * Being on a team makes you a Full Member for that season's calendar
+     * year: everyone with an active assignment (any role — player, training
+     * only, coach, assistant coach, team manager) for the current season or
+     * later gets a full grant running to 31 Dec of the season year.
+     * Deduped by source + end date, so role changes and re-adds never
+     * double-grant; removing someone from a team never claws the
+     * membership back (they were a member while it stood).
+     */
+    public function sync_assignment_grants() {
+        global $wpdb;
+
+        $year = wp_date('Y');
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT DISTINCT COALESCE(NULLIF(a.user_id, 0), u.ID) AS user_id, a.season
+            FROM {$wpdb->prefix}team_assignments a
+            LEFT JOIN {$wpdb->users} u ON u.user_email = a.email
+            LEFT JOIN {$wpdb->prefix}team_memberships m
+                ON m.user_id = COALESCE(NULLIF(a.user_id, 0), u.ID)
+                AND m.source = 'assignment'
+                AND m.end_date = CONCAT(a.season, '-12-31')
+            WHERE a.is_active = 1 AND a.season >= %s AND m.id IS NULL
+        ", $year));
+
+        $granted = array();
+        foreach ($rows as $row) {
+            $user_id = intval($row->user_id);
+            if (!$user_id || !preg_match('/^\d{4}$/', (string) $row->season)) {
+                continue;
+            }
+            $ok = $this->insert_grant(array(
+                'user_id' => $user_id,
+                'tier' => self::TIER_FULL,
+                'start_date' => current_time('Y-m-d'),
+                'end_date' => $row->season . '-12-31',
+                'source' => 'assignment',
+                'note' => 'Team assignment ' . $row->season,
+            ));
+            if ($ok) {
+                $granted[$user_id] = true;
+            }
+        }
+
+        foreach (array_keys($granted) as $uid) {
+            $this->sync_user_roles(intval($uid));
+        }
+        return count($granted);
+    }
+
+    /**
+     * Fire the assignment-grant sync right after any Team Oversight /
+     * Club Membership admin POST, so new team members become Full Members
+     * immediately without coupling to every assignment call site. The
+     * daily cron is the catch-all for anything else.
+     */
+    public function maybe_sync_after_admin_change() {
+        if (!is_admin() || empty($_POST) || !current_user_can('manage_options')) {
+            return;
+        }
+        $page = isset($_GET['page']) ? sanitize_key(wp_unslash($_GET['page'])) : '';
+        if (strpos($page, 'team-oversight') !== 0 && strpos($page, 'club-membership') !== 0) {
+            return;
+        }
+        $this->sync_assignment_grants();
     }
 
     public function grant_manual($user_id, $tier, $end_date, $note = '') {

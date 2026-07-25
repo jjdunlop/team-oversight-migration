@@ -40,10 +40,11 @@ Memberships are **time-bound grants** stored in `team_memberships`: tier + start
 | Tier | WP role | How granted | Expiry |
 |------|---------|-------------|--------|
 | Life Member | `life-member` | Manual only | Never (2099 sentinel, shown as "no expiry") |
-| Full Member | `full-member` | Purchase or manual | Term from purchase date |
+| Full Member | `full-member` | Purchase, manual, or automatic on team assignment | Term from purchase date; assignment grants run to 31 Dec of the season year |
 | Associate Member | `associate-member` | Purchase or manual | Term from purchase date |
 
 - **From purchases**: set "Membership tier granted" + "Membership term (months)" on a WooCommerce product (Product → Edit → General), or configure product-category rules on the Members page. Only explicitly configured products grant anything. Terms run from the purchase date; overlapping grants simply overlap (highest active tier wins).
+- **From team assignments**: anyone with an active team assignment (any role — player, training only, coach, assistant coach, team manager) for the current season or later is automatically granted Full Membership running to 31 Dec of the season year (`source = assignment`). Synced immediately after plugin admin changes and by the daily cron; deduped per person per season, and removing someone from a team never revokes the grant.
 - **Role sync**: the `full-member`/`associate-member`/`life-member` WP roles are kept in sync on every grant and by a daily cron (`team_oversight_membership_sync`), including automatic demotion when the last grant expires. Users with roles but **no** ledger rows are never touched (protects pre-ledger role assignments until seeding runs).
 - **Seeding**: Members page → "Seed memberships from this year's purchases" converts the year's qualifying purchases into dated grants (dry-run available, idempotent).
 - **Order re-scan**: Members page → "Re-scan this year's paid orders" replays every paid order through the grant logic with the *current* product/category configuration — run it after adding membership attributes to a product, since orders paid before the attributes were set granted nothing. Idempotent; backfilled grants are dated from the order's paid date. (Grants require the order to reach Processing/Completed *and* be linked to a WP account — guest orders never grant.)
