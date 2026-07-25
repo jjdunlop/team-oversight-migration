@@ -49,6 +49,28 @@ class TeamOversight_Fees {
      * start owes the full amount; joined later owes the fraction of the
      * season remaining from their join date. 1.0 when no dates are set.
      */
+    /**
+     * Resolve the WP user behind an identity email: the account with that
+     * email, else the user_id on any assignment row carrying it as a
+     * snapshot (covers accounts whose email changed after rows were
+     * written). Returns -1 when no account is found so the value can sit
+     * directly in "(user_id = %d OR email = %s)" clauses and match nothing
+     * by id — every fees query matches people this way, so one person's
+     * rows stay unified across email changes.
+     */
+    public static function resolve_user_id($email) {
+        $user = get_user_by('email', $email);
+        if ($user) {
+            return intval($user->ID);
+        }
+        global $wpdb;
+        $uid = intval($wpdb->get_var($wpdb->prepare("
+            SELECT user_id FROM {$wpdb->prefix}team_assignments
+            WHERE email = %s AND user_id > 0 ORDER BY id DESC LIMIT 1
+        ", $email)));
+        return $uid > 0 ? $uid : -1;
+    }
+
     public static function get_pro_rata_factor($email, $season) {
         $dates = self::get_season_dates($season);
         if (!$dates) {
@@ -56,10 +78,11 @@ class TeamOversight_Fees {
         }
 
         global $wpdb;
+        $uid = self::resolve_user_id($email);
         $join = $wpdb->get_var($wpdb->prepare("
             SELECT MIN(start_date) FROM {$wpdb->prefix}team_assignments
-            WHERE email = %s AND season = %s AND is_active = 1
-        ", $email, $season));
+            WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
+        ", $uid, $email, $season));
 
         $join_ts = $join ? strtotime($join) : current_time('timestamp');
         $start = strtotime($dates['start']);
@@ -84,17 +107,18 @@ class TeamOversight_Fees {
     public function checkpoint_fee_role($email, $season) {
         global $wpdb;
 
+        $uid = self::resolve_user_id($email);
         $assignments = $wpdb->get_results($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}team_assignments
-            WHERE email = %s AND season = %s AND is_active = 1
-        ", $email, $season));
+            WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
+        ", $uid, $email, $season));
 
         $today = current_time('Y-m-d');
         $open = $wpdb->get_row($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}team_fee_segments
-            WHERE email = %s AND season = %s AND end_date IS NULL
+            WHERE (user_id = %d OR email = %s) AND season = %s AND end_date IS NULL
             ORDER BY start_date DESC, id DESC LIMIT 1
-        ", $email, $season));
+        ", $uid, $email, $season));
 
         if (empty($assignments)) {
             // No active assignments: close the open segment — the fee
@@ -145,8 +169,8 @@ class TeamOversight_Fees {
         if (!$open) {
             $join = $wpdb->get_var($wpdb->prepare("
                 SELECT MIN(start_date) FROM {$wpdb->prefix}team_assignments
-                WHERE email = %s AND season = %s AND is_active = 1
-            ", $email, $season));
+                WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
+            ", $uid, $email, $season));
             if ($join) {
                 $start = $join;
             }
@@ -155,7 +179,7 @@ class TeamOversight_Fees {
         $wpdb->insert(
             $wpdb->prefix . 'team_fee_segments',
             array(
-                'user_id' => intval($assignments[0]->user_id),
+                'user_id' => $uid > 0 ? $uid : intval($assignments[0]->user_id),
                 'email' => $email,
                 'season' => $season,
                 'fee_role' => $best_role,
@@ -174,11 +198,12 @@ class TeamOversight_Fees {
     private function compute_segment_fee($email, $season, $fee_class) {
         global $wpdb;
 
+        $uid = self::resolve_user_id($email);
         $segments = $wpdb->get_results($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}team_fee_segments
-            WHERE email = %s AND season = %s
+            WHERE (user_id = %d OR email = %s) AND season = %s
             ORDER BY start_date, id
-        ", $email, $season));
+        ", $uid, $email, $season));
 
         if (empty($segments)) {
             return null;
@@ -222,9 +247,10 @@ class TeamOversight_Fees {
     public function recalculate_after_assignment_change($email, $season) {
         global $wpdb;
 
+        $uid = self::resolve_user_id($email);
         $has_invoice = $wpdb->get_var($wpdb->prepare("
-            SELECT id FROM {$wpdb->prefix}team_invoices WHERE email = %s AND season = %s
-        ", $email, $season));
+            SELECT id FROM {$wpdb->prefix}team_invoices WHERE (user_id = %d OR email = %s) AND season = %s
+        ", $uid, $email, $season));
 
         if ($has_invoice) {
             $this->generate_invoice($email, $season);
@@ -1074,7 +1100,8 @@ class TeamOversight_Fees {
     
     // Keep existing methods for backwards compatibility
     public function determine_fee_class($email, $season = null) {
-        $user = get_user_by('email', $email);
+        $uid = self::resolve_user_id($email);
+        $user = $uid > 0 ? get_userdata($uid) : false;
         if (!$user) return 'Full Adult';
         
         // Default to current year if no season provided
@@ -1130,21 +1157,22 @@ class TeamOversight_Fees {
         global $wpdb;
         
         // Check if invoice already exists for this user and season
+        $uid = self::resolve_user_id($email);
         $existing_invoice = $wpdb->get_row($wpdb->prepare("
-            SELECT id, invoice_amount FROM {$wpdb->prefix}team_invoices 
-            WHERE email = %s AND season = %s
-        ", $email, $season));
-        
+            SELECT id, invoice_amount FROM {$wpdb->prefix}team_invoices
+            WHERE (user_id = %d OR email = %s) AND season = %s
+        ", $uid, $email, $season));
+
         if ($existing_invoice) {
             // Invoice already exists - update it if needed with new minimum fee calculation
             return $this->update_existing_invoice($email, $season, $existing_invoice->id);
         }
-        
+
         // Get all active assignments for this user and season
         $assignments = $wpdb->get_results($wpdb->prepare("
-            SELECT * FROM {$wpdb->prefix}team_assignments 
-            WHERE email = %s AND season = %s AND is_active = 1
-        ", $email, $season));
+            SELECT * FROM {$wpdb->prefix}team_assignments
+            WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
+        ", $uid, $email, $season));
         
         if (empty($assignments)) {
             return false;
@@ -1198,12 +1226,12 @@ class TeamOversight_Fees {
         }
 
         // Create single invoice for all assignments
-        $user = get_user_by('email', $email);
+        $user = $uid > 0 ? get_userdata($uid) : false;
         $name = $user ? $user->display_name : $email;
-        
+
         // Generate sequential invoice reference: SEASON-MBRFEE-NNNN
         $invoice_reference = $this->generate_invoice_reference($season);
-        
+
         $result = $wpdb->insert(
             $wpdb->prefix . 'team_invoices',
             array(
@@ -1242,12 +1270,13 @@ class TeamOversight_Fees {
     
     private function get_user_teams($email, $season) {
         global $wpdb;
-        
+
+        $uid = self::resolve_user_id($email);
         $teams = $wpdb->get_col($wpdb->prepare("
-            SELECT team FROM {$wpdb->prefix}team_assignments 
-            WHERE email = %s AND season = %s AND is_active = 1
-        ", $email, $season));
-        
+            SELECT team FROM {$wpdb->prefix}team_assignments
+            WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
+        ", $uid, $email, $season));
+
         return $teams;
     }
     
@@ -1266,10 +1295,11 @@ class TeamOversight_Fees {
         }
 
         // Fallback (no segment history): flat minimum fee × pro-rata.
+        $uid = self::resolve_user_id($email);
         $assignments = $wpdb->get_results($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}team_assignments
-            WHERE email = %s AND season = %s AND is_active = 1
-        ", $email, $season));
+            WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
+        ", $uid, $email, $season));
 
         if (empty($assignments)) {
             return true; // No active assignments, keep existing invoice

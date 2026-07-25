@@ -499,7 +499,8 @@ class TeamOversight_Payments {
 
             <?php foreach ($invoices as $invoice): ?>
                 <?php
-                $paid = floatval($invoice->invoice_amount) - floatval($invoice->outstanding_amount);
+                $paid = self::get_ledger_paid($invoice->id);
+                $credit = round($paid - floatval($invoice->invoice_amount), 2);
                 $overdue = self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
                 $total_outstanding += floatval($invoice->outstanding_amount);
                 $dates = TeamOversight_Fees::get_season_dates($invoice->season);
@@ -514,6 +515,9 @@ class TeamOversight_Payments {
                         <tr><th>Paid so far</th><td>$<?php echo number_format(max(0, $paid), 2); ?></td></tr>
                         <tr class="member-fees-owing"><th>Remaining</th><td>$<?php echo number_format($invoice->outstanding_amount, 2); ?></td></tr>
                         <tr class="<?php echo $overdue > 0 ? 'member-fees-overdue' : ''; ?>"><th>Overdue now</th><td>$<?php echo number_format($overdue, 2); ?></td></tr>
+                        <?php if ($credit >= 0.01 && floatval($invoice->outstanding_amount) <= 0): ?>
+                            <tr class="member-fees-uptodate"><th>In credit</th><td>$<?php echo number_format($credit, 2); ?> — you've paid more than this season's fee; the club will offset or refund it.</td></tr>
+                        <?php endif; ?>
                         <?php $paid_through = self::get_paid_through_date($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season); ?>
                         <?php if ($overdue <= 0 && floatval($invoice->outstanding_amount) > 0 && $paid_through): ?>
                             <tr class="member-fees-uptodate"><th>Next payment due</th><td><?php echo esc_html(date('j M Y', strtotime($paid_through))); ?></td></tr>

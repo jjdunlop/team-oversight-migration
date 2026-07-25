@@ -1678,7 +1678,17 @@ class TeamOversight_Admin {
                                     <input type="number" class="edit-value" value="<?php echo $invoice->invoice_amount; ?>" step="0.01" min="0" style="display: none; width: 80px;">
                                 </td>
                                 <td>$<?php echo number_format(isset($payments_by_invoice[$invoice->id]) ? $payments_by_invoice[$invoice->id]['total'] : 0, 2); ?></td>
-                                <td class="outstanding-cell">$<?php echo number_format($invoice->outstanding_amount, 2); ?></td>
+                                <td class="outstanding-cell">
+                                    $<?php echo number_format($invoice->outstanding_amount, 2); ?>
+                                    <?php
+                                    // Paid more than the (possibly reduced) fee? Surface the credit.
+                                    $ledger_paid = isset($payments_by_invoice[$invoice->id]) ? $payments_by_invoice[$invoice->id]['total'] : 0;
+                                    $credit = round($ledger_paid - floatval($invoice->invoice_amount), 2);
+                                    if ($credit >= 0.01 && floatval($invoice->outstanding_amount) <= 0):
+                                    ?>
+                                        <br><small style="color: #1a7a2e;" title="They have paid more than the current fee — reduce a future fee or refund via Record Payment with a negative amount.">in credit $<?php echo number_format($credit, 2); ?></small>
+                                    <?php endif; ?>
+                                </td>
                                 <td>
                                     <?php $overdue = TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season); ?>
                                     <?php if ($overdue > 0): ?>
@@ -3052,15 +3062,24 @@ class TeamOversight_Admin {
         }
         
         global $wpdb;
-        
+
         $invoice_id = intval($_POST['invoice_id']);
-        
+
+        // The ledger is the source of truth: deleting an invoice that has
+        // recorded payments would orphan real money. Zero the fee instead.
+        $payment_count = intval($wpdb->get_var($wpdb->prepare("
+            SELECT COUNT(*) FROM {$wpdb->prefix}team_invoice_payments WHERE invoice_id = %d
+        ", $invoice_id)));
+        if ($payment_count > 0) {
+            wp_send_json_error('This invoice has ' . $payment_count . ' recorded payment(s) — deleting it would orphan that money. Set the fee to $0 instead (Edit Fee), or remove the payments first.');
+        }
+
         $result = $wpdb->delete(
             $wpdb->prefix . 'team_invoices',
             array('id' => $invoice_id),
             array('%d')
         );
-        
+
         if ($result !== false) {
             wp_send_json_success('Invoice deleted successfully');
         } else {

@@ -254,6 +254,32 @@ class TeamOversight_Database {
             $fees->import_price_matrix();
         }
 
+        // 1.21.0: dedupe by database constraint, not check-then-insert.
+        // Concurrent order hooks (Square webhook + admin save) could both
+        // pass the SELECT dedupe and double-apply; a UNIQUE index on
+        // order_item_id makes duplicates impossible (NULLs — manual
+        // payments, manual grants — are exempt by MySQL semantics).
+        $pay_unique = $wpdb->get_results("SHOW INDEX FROM {$wpdb->prefix}team_invoice_payments WHERE Key_name = 'uniq_order_item'");
+        if (empty($pay_unique)) {
+            $wpdb->query("
+                DELETE p1 FROM {$wpdb->prefix}team_invoice_payments p1
+                JOIN {$wpdb->prefix}team_invoice_payments p2
+                    ON p1.order_item_id = p2.order_item_id AND p1.id > p2.id
+                WHERE p1.order_item_id IS NOT NULL
+            ");
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}team_invoice_payments ADD UNIQUE KEY uniq_order_item (order_item_id)");
+        }
+        $mem_unique = $wpdb->get_results("SHOW INDEX FROM {$wpdb->prefix}team_memberships WHERE Key_name = 'uniq_order_item'");
+        if (empty($mem_unique)) {
+            $wpdb->query("
+                DELETE m1 FROM {$wpdb->prefix}team_memberships m1
+                JOIN {$wpdb->prefix}team_memberships m2
+                    ON m1.order_item_id = m2.order_item_id AND m1.id > m2.id
+                WHERE m1.order_item_id IS NOT NULL
+            ");
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}team_memberships ADD UNIQUE KEY uniq_order_item (order_item_id)");
+        }
+
         // 1.18.0: the payments ledger became the single source of truth
         // (paid = SUM(ledger), outstanding = fee - paid). One-time backfill:
         // wherever the old derived paid (fee - outstanding) exceeds what the
