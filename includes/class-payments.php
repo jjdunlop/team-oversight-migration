@@ -65,6 +65,72 @@ class TeamOversight_Payments {
     }
 
     // ------------------------------------------------------------------
+    // Payments ledger — the single source of truth for money received.
+    // "Paid" is ALWAYS the sum of ledger rows; outstanding is ALWAYS
+    // fee − paid. Nothing else may write outstanding_amount directly.
+    // ------------------------------------------------------------------
+
+    /** Total recorded payments for an invoice. */
+    public static function get_ledger_paid($invoice_id) {
+        global $wpdb;
+        return round(floatval($wpdb->get_var($wpdb->prepare("
+            SELECT COALESCE(SUM(amount), 0) FROM {$wpdb->prefix}team_invoice_payments WHERE invoice_id = %d
+        ", $invoice_id))), 2);
+    }
+
+    /** Resync outstanding = fee − ledger paid (never negative). */
+    public static function recompute_invoice($invoice_id) {
+        global $wpdb;
+        $fee = $wpdb->get_var($wpdb->prepare("
+            SELECT invoice_amount FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice_id));
+        if ($fee === null) {
+            return null;
+        }
+        $outstanding = max(0, round(floatval($fee) - self::get_ledger_paid($invoice_id), 2));
+        $wpdb->update(
+            $wpdb->prefix . 'team_invoices',
+            array('outstanding_amount' => $outstanding),
+            array('id' => $invoice_id),
+            array('%f'),
+            array('%d')
+        );
+        return $outstanding;
+    }
+
+    /**
+     * Record a payment (or negative correction) against an invoice and
+     * resync its outstanding. The only way money enters the books.
+     */
+    public static function record_payment($invoice_id, $amount, $source = 'manual', $note = '', $order_id = null, $order_item_id = null) {
+        global $wpdb;
+
+        $invoice = $wpdb->get_row($wpdb->prepare("
+            SELECT id, user_id FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice_id));
+        if (!$invoice || abs(floatval($amount)) < 0.005) {
+            return false;
+        }
+
+        $wpdb->insert(
+            $wpdb->prefix . 'team_invoice_payments',
+            array(
+                'invoice_id' => intval($invoice_id),
+                'user_id' => intval($invoice->user_id),
+                'order_id' => $order_id ? intval($order_id) : null,
+                'order_item_id' => $order_item_id ? intval($order_item_id) : null,
+                'amount' => round(floatval($amount), 2),
+                'source' => $source,
+                'note' => $note,
+            ),
+            array('%d', '%d', '%d', '%d', '%f', '%s', '%s')
+        );
+
+        self::recompute_invoice($invoice_id);
+        return true;
+    }
+
+    // ------------------------------------------------------------------
     // Overdue reminder emails
     // ------------------------------------------------------------------
 
@@ -639,27 +705,7 @@ class TeamOversight_Payments {
                 }
 
                 $applied = min($remaining, $outstanding);
-                $wpdb->update(
-                    $wpdb->prefix . 'team_invoices',
-                    array('outstanding_amount' => round($outstanding - $applied, 2)),
-                    array('id' => $invoice->id),
-                    array('%f'),
-                    array('%d')
-                );
-
-                $wpdb->insert(
-                    $wpdb->prefix . 'team_invoice_payments',
-                    array(
-                        'invoice_id' => $invoice->id,
-                        'user_id' => $payer_id,
-                        'order_id' => $order_id,
-                        'order_item_id' => $item_id,
-                        'amount' => $applied,
-                        'source' => 'online',
-                    ),
-                    array('%d', '%d', '%d', '%d', '%f', '%s')
-                );
-
+                self::record_payment($invoice->id, $applied, 'online', '', $order_id, $item_id);
                 $remaining = round($remaining - $applied, 2);
             }
         }

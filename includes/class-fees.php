@@ -1300,28 +1300,24 @@ class TeamOversight_Fees {
     private function apply_invoice_amount($invoice_id, $new_fee) {
         global $wpdb;
 
-        $current_invoice = $wpdb->get_row($wpdb->prepare("
-            SELECT invoice_amount, outstanding_amount FROM {$wpdb->prefix}team_invoices
-            WHERE id = %d
+        $current_fee = $wpdb->get_var($wpdb->prepare("
+            SELECT invoice_amount FROM {$wpdb->prefix}team_invoices WHERE id = %d
         ", $invoice_id));
 
-        if (!$current_invoice || floatval($current_invoice->invoice_amount) == floatval($new_fee)) {
+        if ($current_fee === null || floatval($current_fee) == floatval($new_fee)) {
             return;
         }
 
-        $payment_made = floatval($current_invoice->invoice_amount) - floatval($current_invoice->outstanding_amount);
-        $new_outstanding = max(0, round($new_fee - $payment_made, 2));
-
+        // Set the new fee; outstanding is always fee minus the payments
+        // ledger — recorded money is never touched by repricing.
         $wpdb->update(
             $wpdb->prefix . 'team_invoices',
-            array(
-                'invoice_amount' => $new_fee,
-                'outstanding_amount' => $new_outstanding
-            ),
+            array('invoice_amount' => $new_fee),
             array('id' => $invoice_id),
-            array('%f', '%f'),
+            array('%f'),
             array('%d')
         );
+        TeamOversight_Payments::recompute_invoice($invoice_id);
     }
     
     private function generate_invoice_reference($season) {

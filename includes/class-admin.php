@@ -13,6 +13,7 @@ class TeamOversight_Admin {
         add_action('wp_ajax_update_assignment', array($this, 'ajax_update_assignment'));
         add_action('wp_ajax_delete_assignment', array($this, 'ajax_delete_assignment'));
         add_action('wp_ajax_update_invoice', array($this, 'ajax_update_invoice'));
+        add_action('wp_ajax_record_invoice_payment', array($this, 'ajax_record_invoice_payment'));
         add_action('wp_ajax_delete_invoice', array($this, 'ajax_delete_invoice'));
         add_action('wp_ajax_bulk_accept_trials', array($this, 'ajax_bulk_accept_trials'));
         add_action('wp_ajax_bulk_reject_trials', array($this, 'ajax_bulk_reject_trials'));
@@ -1360,9 +1361,10 @@ class TeamOversight_Admin {
         ", $season));
         foreach ($payment_rows as $payment) {
             if (!isset($payments_by_invoice[$payment->invoice_id])) {
-                $payments_by_invoice[$payment->invoice_id] = array('count' => 0, 'lines' => array());
+                $payments_by_invoice[$payment->invoice_id] = array('count' => 0, 'total' => 0, 'lines' => array());
             }
             $payments_by_invoice[$payment->invoice_id]['count']++;
+            $payments_by_invoice[$payment->invoice_id]['total'] += floatval($payment->amount);
             $payments_by_invoice[$payment->invoice_id]['lines'][] = $payment->paid_date . ': $' . number_format($payment->amount, 2) . ' (' . $payment->source . ')';
         }
 
@@ -1545,11 +1547,8 @@ class TeamOversight_Admin {
                                     <span class="display-value">$<?php echo number_format($invoice->invoice_amount, 2); ?></span>
                                     <input type="number" class="edit-value" value="<?php echo $invoice->invoice_amount; ?>" step="0.01" min="0" style="display: none; width: 80px;">
                                 </td>
-                                <td>$<?php echo number_format(max(0, $invoice->invoice_amount - $invoice->outstanding_amount), 2); ?></td>
-                                <td class="editable-outstanding-amount" data-field="outstanding_amount" data-value="<?php echo esc_attr($invoice->outstanding_amount); ?>">
-                                    <span class="display-value">$<?php echo number_format($invoice->outstanding_amount, 2); ?></span>
-                                    <input type="number" class="edit-value" value="<?php echo $invoice->outstanding_amount; ?>" step="0.01" min="0" style="display: none; width: 80px;">
-                                </td>
+                                <td>$<?php echo number_format(isset($payments_by_invoice[$invoice->id]) ? $payments_by_invoice[$invoice->id]['total'] : 0, 2); ?></td>
+                                <td class="outstanding-cell">$<?php echo number_format($invoice->outstanding_amount, 2); ?></td>
                                 <td>
                                     <?php $overdue = TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season); ?>
                                     <?php if ($overdue > 0): ?>
@@ -1566,7 +1565,8 @@ class TeamOversight_Admin {
                                     <?php endif; ?>
                                 </td>
                                 <td>
-                                    <button type="button" class="button edit-invoice" onclick="editInvoice(this)">Edit</button>
+                                    <button type="button" class="button edit-invoice" onclick="editInvoice(this)">Edit Fee</button>
+                                    <button type="button" class="button record-payment" onclick="recordPayment(this)">Record Payment</button>
                                     <button type="button" class="button button-primary save-invoice" onclick="saveInvoice(this)" style="display: none;">Save</button>
                                     <button type="button" class="button cancel-edit-invoice" onclick="cancelEditInvoice(this)" style="display: none;">Cancel</button>
                                     <button type="button" class="button button-link-delete delete-invoice" onclick="deleteInvoice(this)" style="display: none; color: #a00;">Delete</button>
@@ -1604,27 +1604,31 @@ class TeamOversight_Admin {
             document.getElementById('filter-team').addEventListener('change', filterInvoices);
             document.getElementById('filter-status').addEventListener('change', filterInvoices);
             
-            // Invoice inline editing
+            // Invoice inline editing — the FEE only. Paid comes from the
+            // payments ledger and outstanding is always fee minus paid, so
+            // use Record Payment to move money, never a direct edit.
             function editInvoice(button) {
                 const row = button.closest('tr');
                 row.querySelectorAll('.display-value').forEach(span => span.style.display = 'none');
                 row.querySelectorAll('.edit-value').forEach(input => input.style.display = 'inline-block');
                 row.querySelector('.edit-invoice').style.display = 'none';
+                row.querySelector('.record-payment').style.display = 'none';
                 row.querySelector('.save-invoice').style.display = 'inline-block';
                 row.querySelector('.cancel-edit-invoice').style.display = 'inline-block';
                 row.querySelector('.delete-invoice').style.display = 'inline-block';
             }
-            
+
             function cancelEditInvoice(button) {
                 const row = button.closest('tr');
                 row.querySelectorAll('.display-value').forEach(span => span.style.display = 'inline-block');
                 row.querySelectorAll('.edit-value').forEach(input => input.style.display = 'none');
                 row.querySelector('.edit-invoice').style.display = 'inline-block';
+                row.querySelector('.record-payment').style.display = 'inline-block';
                 row.querySelector('.save-invoice').style.display = 'none';
                 row.querySelector('.cancel-edit-invoice').style.display = 'none';
                 row.querySelector('.delete-invoice').style.display = 'none';
             }
-            
+
             function saveInvoice(button) {
                 const row = button.closest('tr');
                 const invoiceId = row.dataset.invoiceId;
@@ -1632,10 +1636,9 @@ class TeamOversight_Admin {
                     action: 'update_invoice',
                     invoice_id: invoiceId,
                     invoice_amount: row.querySelector('.editable-invoice-amount .edit-value').value,
-                    outstanding_amount: row.querySelector('.editable-outstanding-amount .edit-value').value,
                     nonce: '<?php echo wp_create_nonce('update_invoice'); ?>'
                 };
-                
+
                 fetch(ajaxurl, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -1644,23 +1647,39 @@ class TeamOversight_Admin {
                 .then(response => response.json())
                 .then(response => {
                     if (response.success) {
-                        // Update display values
-                        row.querySelector('.editable-invoice-amount .display-value').textContent = '$' + parseFloat(data.invoice_amount).toFixed(2);
-                        row.querySelector('.editable-outstanding-amount .display-value').textContent = '$' + parseFloat(data.outstanding_amount).toFixed(2);
-                        
-                        // Update payment status
-                        const outstanding = parseFloat(data.outstanding_amount);
-                        const invoice = parseFloat(data.invoice_amount);
-                        let status = 'outstanding';
-                        if (outstanding <= 0) {
-                            status = 'paid';
-                        } else if (outstanding < invoice) {
-                            status = 'partial';
-                        }
-                        row.dataset.status = status;
-                        
-                        cancelEditInvoice(button);
-                        alert('Invoice updated successfully');
+                        location.reload();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+
+            function recordPayment(button) {
+                const row = button.closest('tr');
+                const name = row.children[1].textContent;
+                const amount = prompt('Record a payment for ' + name + ' (amount in dollars; use a negative amount for a refund/correction):');
+                if (amount === null || amount.trim() === '' || isNaN(parseFloat(amount))) {
+                    return;
+                }
+                const note = prompt('Note for the ledger (e.g. cash at training, bank transfer 24/7):') || '';
+
+                const data = {
+                    action: 'record_invoice_payment',
+                    invoice_id: row.dataset.invoiceId,
+                    amount: parseFloat(amount),
+                    note: note,
+                    nonce: '<?php echo wp_create_nonce('record_invoice_payment'); ?>'
+                };
+
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: Object.keys(data).map(key => key + '=' + encodeURIComponent(data[key])).join('&')
+                })
+                .then(response => response.json())
+                .then(response => {
+                    if (response.success) {
+                        location.reload();
                     } else {
                         alert('Error: ' + response.data);
                     }
@@ -2830,42 +2849,55 @@ class TeamOversight_Admin {
 
         $invoice_id = intval($_POST['invoice_id']);
         $invoice_amount = floatval($_POST['invoice_amount']);
-        $outstanding_amount = floatval($_POST['outstanding_amount']);
 
-        $current = $wpdb->get_row($wpdb->prepare("
-            SELECT invoice_amount, outstanding_amount FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        $exists = $wpdb->get_var($wpdb->prepare("
+            SELECT id FROM {$wpdb->prefix}team_invoices WHERE id = %d
         ", $invoice_id));
-        if (!$current) {
+        if (!$exists) {
             wp_send_json_error('Invoice not found');
         }
 
-        // "Paid" is derived (fee - outstanding). When the admin changes the
-        // FEE but leaves outstanding untouched, they mean "reprice this
-        // invoice, keep the payments" — so hold paid constant and recompute
-        // outstanding, instead of silently inventing paid money. An
-        // explicit outstanding edit (recording an offline payment) is
-        // honoured as entered.
-        $outstanding_untouched = abs($outstanding_amount - floatval($current->outstanding_amount)) < 0.005;
-        if ($outstanding_untouched) {
-            $paid = max(0, floatval($current->invoice_amount) - floatval($current->outstanding_amount));
-            $outstanding_amount = max(0, round($invoice_amount - $paid, 2));
-        }
-
+        // Only the FEE is editable. Paid is the payments ledger and
+        // outstanding is always fee minus paid — money moves only through
+        // Record Payment, never through an edit.
         $result = $wpdb->update(
             $wpdb->prefix . 'team_invoices',
-            array(
-                'invoice_amount' => $invoice_amount,
-                'outstanding_amount' => $outstanding_amount
-            ),
+            array('invoice_amount' => $invoice_amount),
             array('id' => $invoice_id),
-            array('%f', '%f'),
+            array('%f'),
             array('%d')
         );
+        $outstanding = TeamOversight_Payments::recompute_invoice($invoice_id);
 
         if ($result !== false) {
-            wp_send_json_success('Invoice updated successfully');
+            wp_send_json_success(array('outstanding' => $outstanding));
         } else {
             wp_send_json_error('Failed to update invoice');
+        }
+    }
+
+    public function ajax_record_invoice_payment() {
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'record_invoice_payment')) {
+            wp_send_json_error('Security check failed');
+        }
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        $invoice_id = intval($_POST['invoice_id']);
+        $amount = round(floatval($_POST['amount']), 2);
+        $note = sanitize_text_field(isset($_POST['note']) ? $_POST['note'] : '');
+
+        if (abs($amount) < 0.01) {
+            wp_send_json_error('Amount must not be zero');
+        }
+
+        $note = trim('Recorded by ' . wp_get_current_user()->display_name . ($note !== '' ? ' — ' . $note : ''));
+        if (TeamOversight_Payments::record_payment($invoice_id, $amount, 'manual', $note)) {
+            wp_send_json_success('Payment recorded');
+        } else {
+            wp_send_json_error('Invoice not found');
         }
     }
     

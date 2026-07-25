@@ -233,6 +233,36 @@ class TeamOversight_Database {
             $fees = new TeamOversight_Fees();
             $fees->import_price_matrix();
         }
+
+        // 1.18.0: the payments ledger became the single source of truth
+        // (paid = SUM(ledger), outstanding = fee - paid). One-time backfill:
+        // wherever the old derived paid (fee - outstanding) exceeds what the
+        // ledger holds, record the difference as a reconciliation row, then
+        // resync every invoice's outstanding from the ledger.
+        if (!get_option('team_oversight_ledger_backfilled')) {
+            $wpdb->query("
+                INSERT INTO {$wpdb->prefix}team_invoice_payments (invoice_id, user_id, amount, source, note)
+                SELECT i.id, i.user_id,
+                    ROUND(i.invoice_amount - i.outstanding_amount - COALESCE(p.total, 0), 2),
+                    'reconciliation',
+                    'Backfill of payments recorded before the ledger became the source of truth'
+                FROM {$wpdb->prefix}team_invoices i
+                LEFT JOIN (
+                    SELECT invoice_id, SUM(amount) AS total
+                    FROM {$wpdb->prefix}team_invoice_payments GROUP BY invoice_id
+                ) p ON p.invoice_id = i.id
+                WHERE ROUND(i.invoice_amount - i.outstanding_amount - COALESCE(p.total, 0), 2) >= 0.01
+            ");
+            $wpdb->query("
+                UPDATE {$wpdb->prefix}team_invoices i
+                LEFT JOIN (
+                    SELECT invoice_id, SUM(amount) AS total
+                    FROM {$wpdb->prefix}team_invoice_payments GROUP BY invoice_id
+                ) p ON p.invoice_id = i.id
+                SET i.outstanding_amount = GREATEST(0, ROUND(i.invoice_amount - COALESCE(p.total, 0), 2))
+            ");
+            add_option('team_oversight_ledger_backfilled', 1, '', 'no');
+        }
     }
     
     public function create_tables() {
