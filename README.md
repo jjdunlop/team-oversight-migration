@@ -116,12 +116,12 @@ Fees are a **balance against a season timeline**, not an invoice event:
 
 ### Ready to Play
 
-`[ready_to_play]` — renders only for players selected into a team (confirmed playing/training assignment or a coach Selected/Training-Only verdict) for the current or next season; safe to place on profile pages. Steps in priority order:
+`[ready_to_play]` — renders only for people selected into a team (confirmed assignment or a coach Selected/Training-Only verdict) for the current or next season; safe to place on profile pages. Team managers count as players (their role only exists for the fee discount). Coaches/assistant coaches who aren't also playing get a reduced "Get Ready to Coach" checklist: VV registration + fees only, no kit steps. Player steps in priority order:
 
 1. **VV membership** — external registration link + manual tick.
 2. **Playing shirt payment** — the club issues the shirt; the payment is once-ever, so **all-time** purchases of the configured shirt products count, no self-tick, and admins can record a **credit** (with note) for shirts paid under a different account. Quantity from the team config.
 3. **Shorts & socks** — regular products: this-season purchases auto-complete, manual tick for older kit, shop link always available for re-orders.
-4. **Fees** — breakdown, schedule status, and the pay box (live when the payment product is configured).
+4. **Fees** — breakdown across **all seasons** (carried-over debts surface here as overdue), schedule status for the panel's season, and the pay box (live when the payment product is configured).
 
 Admin: VVL Oversight → **Player Readiness** — every selected player's VV/shirt/kit/fees status and a Ready flag, plus the settings (URLs and kit product IDs) and per-player shirt credits. Each player appears once, evaluated for the **latest season they're in** (current year or later) — so end-of-year selections for next season show next-season readiness immediately.
 
@@ -139,7 +139,7 @@ Admin: VVL Oversight → **Player Readiness** — every selected player's VV/shi
 | `[team_trial_form]` | Logged-in members | Trial application (+ payment) |
 | `[team_coach_portal]` | Coaches | Selections, notes, rosters |
 | `[member_fees]` | Logged-in members | Fee balance + pay any amount |
-| `[player_fees]` | Invoiced members only | Same as `[member_fees]`, but renders nothing at all for logged-out visitors or anyone without a fee record — safe on any page |
+| `[player_fees]` | Members with overdue fees | Compact overdue-fees flag linking to the Player Checklist page (`url` attribute overrides the default `/player-checklist/`); renders nothing at all unless the viewer has overdue fees — safe on any page |
 | `[ready_to_play]` | Selected players | Pre-season checklist |
 | `[murvc_member_role]` | Profile pages | Membership tier badge |
 

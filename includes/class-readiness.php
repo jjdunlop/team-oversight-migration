@@ -101,10 +101,12 @@ class TeamOversight_Readiness {
     public static function get_player_teams($user_id, $email, $season) {
         global $wpdb;
 
+        // Team managers count as players: the separate role only exists for
+        // their fee discount, so they need the full kit checklist too.
         $assigned = $wpdb->get_col($wpdb->prepare("
             SELECT DISTINCT team FROM {$wpdb->prefix}team_assignments
             WHERE season = %s AND is_active = 1
-                AND role IN ('playing_member', 'training_only')
+                AND role IN ('playing_member', 'training_only', 'team_manager')
                 AND (user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s))
         ", $season, $user_id, $email));
 
@@ -118,6 +120,23 @@ class TeamOversight_Readiness {
         ", $season, $user_id));
 
         return array_values(array_unique(array_merge($assigned, $selected)));
+    }
+
+    /**
+     * Teams the user coaches this season (coach / assistant coach only —
+     * team managers are players who happen to get a fee discount, so they
+     * take the full player checklist). Coaches get a reduced checklist:
+     * VV registration and fees, no kit steps.
+     */
+    public static function get_staff_teams($user_id, $email, $season) {
+        global $wpdb;
+
+        return $wpdb->get_col($wpdb->prepare("
+            SELECT DISTINCT team FROM {$wpdb->prefix}team_assignments
+            WHERE season = %s AND is_active = 1
+                AND role IN ('coach', 'assistant_coach')
+                AND (user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s))
+        ", $season, $user_id, $email));
     }
 
     /**
@@ -184,8 +203,17 @@ class TeamOversight_Readiness {
      */
     public static function compute($user, $season) {
         $teams = self::get_player_teams($user->ID, $user->user_email, $season);
+
+        // Coaches/staff who aren't also playing get a reduced checklist:
+        // VV registration + fees only (no shirt, no shorts & socks).
+        $is_staff_only = false;
         if (empty($teams)) {
-            return null;
+            $staff_teams = self::get_staff_teams($user->ID, $user->user_email, $season);
+            if (empty($staff_teams)) {
+                return null;
+            }
+            $teams = $staff_teams;
+            $is_staff_only = true;
         }
 
         $database = new TeamOversight_Database();
@@ -208,17 +236,20 @@ class TeamOversight_Readiness {
             'manual' => true,
             'url' => get_option(self::VV_URL_OPTION),
             'url_label' => 'Register with VV',
-            'detail' => 'Every player needs a current VV membership before taking the court. Register on the VV website, then tick this off.',
+            'detail' => $is_staff_only
+                ? 'Every coach needs a current VV membership before taking the bench. Register on the VV website, then tick this off.'
+                : 'Every player needs a current VV membership before taking the court. Register on the VV website, then tick this off.',
         );
 
-        $purchased = self::get_kit_purchases($user->ID, $season);
+        $purchased = $is_staff_only ? array('shirt' => 0, 'shorts' => 0, 'socks' => 0) : self::get_kit_purchases($user->ID, $season);
         $kit_products = self::get_kit_products();
 
         // 2. Playing shirt — a payment obligation, not a purchase decision.
         // The club issues the shirt regardless; it must be PAID for, once
         // ever (all-time purchases count, plus any admin-recorded credit for
         // payments made under a different account). No self-tick.
-        if ($shirts_required > 0) {
+        // Coaches don't play, so no shirt step for them.
+        if (!$is_staff_only && $shirts_required > 0) {
             $credit = self::get_shirt_credit($user->ID);
             $shirts_paid = $purchased['shirt'] + $credit['qty'];
             $shirt_done = !empty($kit_products['shirt']) && $shirts_paid >= $shirts_required;
@@ -247,51 +278,62 @@ class TeamOversight_Readiness {
         }
 
         // 3. Shorts & socks — regular products, only issued once purchased.
-        $required = array('shorts' => 1, 'socks' => 1);
-        $labels = array('shorts' => 'Playing shorts', 'socks' => 'Club socks');
-        $items = array();
-        $auto_done = true;
-        foreach ($required as $category => $qty) {
-            $have = $purchased[$category];
-            $satisfied = !empty($kit_products[$category]) && $have >= $qty;
-            if (!$satisfied) {
-                $auto_done = false;
+        // Coaches don't need kit either.
+        if (!$is_staff_only) {
+            $required = array('shorts' => 1, 'socks' => 1);
+            $labels = array('shorts' => 'Playing shorts', 'socks' => 'Club socks');
+            $items = array();
+            $auto_done = true;
+            foreach ($required as $category => $qty) {
+                $have = $purchased[$category];
+                $satisfied = !empty($kit_products[$category]) && $have >= $qty;
+                if (!$satisfied) {
+                    $auto_done = false;
+                }
+                $items[] = array(
+                    'label' => $labels[$category],
+                    'purchased' => $have,
+                    'satisfied' => $satisfied,
+                );
             }
-            $items[] = array(
-                'label' => $labels[$category],
-                'purchased' => $have,
-                'satisfied' => $satisfied,
+
+            $steps['kit'] = array(
+                'title' => 'Get your shorts and socks',
+                'done' => $auto_done || in_array('kit', $manual, true),
+                'auto_done' => $auto_done,
+                'manual' => true,
+                'url' => get_option(self::KIT_URL_OPTION),
+                'url_label' => 'Shop shorts & socks',
+                'items' => $items,
+                'detail' => 'Purchases from the club shop this season tick off automatically. Still using shorts and socks from a previous season? Tick the box.',
             );
         }
 
-        $steps['kit'] = array(
-            'title' => 'Get your shorts and socks',
-            'done' => $auto_done || in_array('kit', $manual, true),
-            'auto_done' => $auto_done,
-            'manual' => true,
-            'url' => get_option(self::KIT_URL_OPTION),
-            'url_label' => 'Shop shorts & socks',
-            'items' => $items,
-            'detail' => 'Purchases from the club shop this season tick off automatically. Still using shorts and socks from a previous season? Tick the box.',
-        );
-
-        // 3. Club fees.
+        // 4. Club fees — ALL seasons, so debts carried over from earlier
+        // years surface here too (they count as fully overdue). The
+        // schedule bar and next-due date stay scoped to this panel's season.
         global $wpdb;
         $invoices = $wpdb->get_results($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}team_invoices
-            WHERE season = %s AND (user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s))
-        ", $season, $user->ID, $user->user_email));
+            WHERE user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s)
+        ", $user->ID, $user->user_email));
 
         $outstanding = 0;
         $overdue = 0;
+        $invoiced_total = 0;
+        $season_invoiced = 0;
+        $season_outstanding = 0;
+        $other_season_debt = false;
         foreach ($invoices as $invoice) {
             $outstanding += floatval($invoice->outstanding_amount);
-            $overdue += TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $season);
-        }
-
-        $invoiced_total = 0;
-        foreach ($invoices as $invoice) {
             $invoiced_total += floatval($invoice->invoice_amount);
+            $overdue += TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+            if ((string) $invoice->season === (string) $season) {
+                $season_invoiced += floatval($invoice->invoice_amount);
+                $season_outstanding += floatval($invoice->outstanding_amount);
+            } elseif (floatval($invoice->outstanding_amount) > 0) {
+                $other_season_debt = true;
+            }
         }
 
         if (empty($invoices)) {
@@ -306,6 +348,9 @@ class TeamOversight_Readiness {
         } else {
             $fees_done = false;
             $fees_detail = 'You\'ve fallen behind the payment schedule — please make a payment to get back on track.';
+            if ($other_season_debt) {
+                $fees_detail .= ' Your balance includes unpaid fees carried over from another season.';
+            }
         }
 
         $steps['fees'] = array(
@@ -320,7 +365,10 @@ class TeamOversight_Readiness {
             'paid' => round(max(0, $invoiced_total - $outstanding), 2),
             'outstanding' => round($outstanding, 2),
             'overdue' => round($overdue, 2),
-            'paid_through' => TeamOversight_Payments::get_paid_through_date($invoiced_total, $outstanding, $season),
+            'other_season_debt' => $other_season_debt,
+            'season_invoiced' => round($season_invoiced, 2),
+            'season_outstanding' => round($season_outstanding, 2),
+            'paid_through' => TeamOversight_Payments::get_paid_through_date($season_invoiced, $season_outstanding, $season),
         );
 
         $ready = true;
@@ -332,6 +380,7 @@ class TeamOversight_Readiness {
 
         return array(
             'teams' => $teams,
+            'staff_only' => $is_staff_only,
             'shirts_required' => $shirts_required,
             'steps' => $steps,
             'ready' => $ready,
@@ -376,8 +425,8 @@ class TeamOversight_Readiness {
         ob_start();
         ?>
         <div class="rtp-panel">
-            <h3>Get Ready to Play — <?php echo esc_html($season); ?></h3>
-            <p class="rtp-teams">You're in: <strong><?php echo esc_html(implode(', ', $team_names)); ?></strong></p>
+            <h3>Get Ready to <?php echo !empty($checklist['staff_only']) ? 'Coach' : 'Play'; ?> — <?php echo esc_html($season); ?></h3>
+            <p class="rtp-teams"><?php echo !empty($checklist['staff_only']) ? "You're coaching:" : "You're in:"; ?> <strong><?php echo esc_html(implode(', ', $team_names)); ?></strong></p>
 
             <?php if ($checklist['ready']): ?>
                 <p class="rtp-all-done">✔ You're all set — see you on court!</p>
@@ -408,7 +457,7 @@ class TeamOversight_Readiness {
 
                         <?php if ($step_key === 'fees' && !empty($step['has_invoice'])): ?>
                             <table class="rtp-fees-table">
-                                <tr><th>Season fee</th><td>$<?php echo number_format($step['invoiced'], 2); ?></td></tr>
+                                <tr><th><?php echo !empty($step['other_season_debt']) ? 'Total fees (all seasons)' : 'Season fee'; ?></th><td>$<?php echo number_format($step['invoiced'], 2); ?></td></tr>
                                 <tr><th>Paid so far</th><td>$<?php echo number_format($step['paid'], 2); ?></td></tr>
                                 <tr class="rtp-fees-owing"><th>Remaining</th><td>$<?php echo number_format($step['outstanding'], 2); ?></td></tr>
                                 <tr class="<?php echo $step['overdue'] > 0 ? 'rtp-fees-overdue' : ''; ?>"><th>Overdue now</th><td>$<?php echo number_format($step['overdue'], 2); ?></td></tr>
@@ -416,7 +465,9 @@ class TeamOversight_Readiness {
                                     <tr class="rtp-fees-uptodate"><th>Next payment due</th><td><?php echo esc_html(date('j M Y', strtotime($step['paid_through']))); ?></td></tr>
                                 <?php endif; ?>
                             </table>
-                            <?php echo TeamOversight_Payments::render_fee_progress($step['invoiced'], $step['outstanding'], $season); ?>
+                            <?php if ($step['season_invoiced'] > 0): ?>
+                                <?php echo TeamOversight_Payments::render_fee_progress($step['season_invoiced'], $step['season_outstanding'], $season); ?>
+                            <?php endif; ?>
 
                             <?php if ($step['outstanding'] > 0): ?>
                                 <?php $payment_product = TeamOversight_Payments::get_payment_product(); ?>
@@ -665,7 +716,7 @@ class TeamOversight_Readiness {
         $player_rows = $wpdb->get_results($wpdb->prepare("
             SELECT user_id, MAX(season) AS season FROM (
                 SELECT ta.user_id, ta.season FROM {$wpdb->prefix}team_assignments ta
-                WHERE ta.season >= %s AND ta.is_active = 1 AND ta.role IN ('playing_member', 'training_only') AND ta.user_id > 0
+                WHERE ta.season >= %s AND ta.is_active = 1 AND ta.role IN ('playing_member', 'training_only', 'team_manager') AND ta.user_id > 0
                 UNION ALL
                 SELECT a.user_id, s.season FROM {$wpdb->prefix}team_trial_selections s
                 JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id

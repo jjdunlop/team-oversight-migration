@@ -159,20 +159,41 @@ class TeamOversight_Payments {
     // ------------------------------------------------------------------
 
     /**
-     * [player_fees] — the same fee panel as [member_fees], but completely
-     * invisible (renders nothing at all) for logged-out visitors and for
-     * anyone without a fee record. Safe to drop on any page: only people
-     * who have been assigned to a team (and therefore invoiced) see it.
+     * [player_fees] — a compact overdue-fees flag. Completely invisible
+     * (renders nothing at all) unless the logged-in viewer has overdue
+     * fees; when they do, it shows the amount and sends them to the
+     * Player Checklist page to pay. Safe to drop on any page.
+     *
+     * Attributes: url — where the button goes (default /player-checklist/).
      */
-    public function render_player_fees() {
+    public function render_player_fees($atts = array()) {
         if (!is_user_logged_in()) {
             return '';
         }
+
+        $atts = shortcode_atts(array(
+            'url' => home_url('/player-checklist/'),
+        ), $atts, 'player_fees');
+
         $invoices = self::get_user_invoices(wp_get_current_user());
         if (empty($invoices)) {
             return '';
         }
-        return $this->render_member_fees();
+
+        $overdue = 0;
+        foreach ($invoices as $invoice) {
+            $overdue += self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+        }
+        if ($overdue <= 0) {
+            return '';
+        }
+
+        return '<div class="murvc-fees-flag">'
+            . '<p><strong>You have overdue club fees: $' . number_format($overdue, 2) . '</strong></p>'
+            . '<p>Please make a payment to stay on court.</p>'
+            . '<p><a class="button button-primary" href="' . esc_url($atts['url']) . '">Go to your Player Checklist</a></p>'
+            . '<style>.murvc-fees-flag{border:2px solid #dc3232;background:#fdf0f0;border-radius:8px;padding:14px 18px;max-width:560px;margin:0 0 40px 0;clear:both;overflow:hidden;}.murvc-fees-flag p{margin:5px 0;}</style>'
+            . '</div>';
     }
 
     public function render_member_fees() {
