@@ -26,6 +26,8 @@ class TeamOversight_Payments {
     const REMINDER_DAYS_OPTION = 'team_oversight_overdue_reminder_days';
     const REMINDER_META = 'murvc_overdue_last_reminded';
     const REMINDER_CRON = 'team_oversight_overdue_reminders';
+    const EMAIL_SUBJECT_OPTION = 'team_oversight_overdue_email_subject';
+    const EMAIL_BODY_OPTION = 'team_oversight_overdue_email_body';
 
     private static $hooks_registered = false;
 
@@ -174,6 +176,54 @@ class TeamOversight_Payments {
         }));
     }
 
+    public static function get_default_reminder_subject() {
+        return 'MURVC club fees overdue — ${overdue}';
+    }
+
+    public static function get_default_reminder_body() {
+        return "Hi {first_name},\n\n"
+            . "Our records show your MURVC club fees have fallen behind the payment schedule.\n\n"
+            . "  Overdue now:     \${overdue}\n"
+            . "  Total remaining: \${outstanding}\n\n"
+            . "You can pay any amount online — every payment comes straight off your balance:\n"
+            . "{link}\n\n"
+            . "If you think this is a mistake, or you'd like to arrange a payment plan, just reply to this email.\n\n"
+            . "Melbourne University Renegades Volleyball Club";
+    }
+
+    /** The link reminders point at: configured fees page or the checklist. */
+    public static function get_reminder_link() {
+        $url = get_option('team_oversight_fees_page_url');
+        return $url ? $url : home_url('/player-checklist/');
+    }
+
+    /**
+     * Render the reminder subject+body from the saved templates (or the
+     * defaults). Placeholders: {name} {first_name} {overdue} {outstanding}
+     * {link}. Returns array(subject, body).
+     */
+    public static function render_reminder_email($name, $overdue, $outstanding, $link = null) {
+        $subject_tpl = get_option(self::EMAIL_SUBJECT_OPTION);
+        if (!is_string($subject_tpl) || trim($subject_tpl) === '') {
+            $subject_tpl = self::get_default_reminder_subject();
+        }
+        $body_tpl = get_option(self::EMAIL_BODY_OPTION);
+        if (!is_string($body_tpl) || trim($body_tpl) === '') {
+            $body_tpl = self::get_default_reminder_body();
+        }
+
+        $first = trim((string) strtok((string) $name, ' '));
+        $replacements = array(
+            '{name}' => $name,
+            '{first_name}' => $first !== '' ? $first : $name,
+            '{overdue}' => number_format(floatval($overdue), 2),
+            '{outstanding}' => number_format(floatval($outstanding), 2),
+            '{link}' => $link !== null ? $link : self::get_reminder_link(),
+        );
+
+        return array(strtr($subject_tpl, $replacements), strtr($body_tpl, $replacements));
+    }
+
     /**
      * Email everyone whose fees are overdue, at most once per configured
      * interval per person. $force ignores the master switch (admin "send
@@ -188,10 +238,7 @@ class TeamOversight_Payments {
         }
 
         $days = max(1, intval(get_option(self::REMINDER_DAYS_OPTION, 7)));
-        $checklist_url = get_option('team_oversight_fees_page_url');
-        if (!$checklist_url) {
-            $checklist_url = home_url('/player-checklist/');
-        }
+        $checklist_url = self::get_reminder_link();
 
         foreach (self::get_overdue_people() as $person) {
             if (!$person['user_id']) {
@@ -212,15 +259,7 @@ class TeamOversight_Payments {
                 continue;
             }
 
-            $subject = 'MURVC club fees overdue — $' . number_format($person['overdue'], 2);
-            $message = 'Hi ' . $person['name'] . ",\n\n"
-                . "Our records show your MURVC club fees have fallen behind the payment schedule.\n\n"
-                . '  Overdue now:     $' . number_format($person['overdue'], 2) . "\n"
-                . '  Total remaining: $' . number_format($person['outstanding'], 2) . "\n\n"
-                . "You can pay any amount online — every payment comes straight off your balance:\n"
-                . $checklist_url . "\n\n"
-                . "If you think this is a mistake, or you'd like to arrange a payment plan, just reply to this email.\n\n"
-                . "Melbourne University Renegades Volleyball Club";
+            list($subject, $message) = self::render_reminder_email($person['name'], $person['overdue'], $person['outstanding'], $checklist_url);
 
             if (wp_mail($person['email'], $subject, $message)) {
                 update_user_meta($person['user_id'], self::REMINDER_META, time());

@@ -113,6 +113,15 @@ class TeamOversight_Admin {
             'team-oversight-readiness',
             array($this, 'readiness_page')
         );
+
+        add_submenu_page(
+            'team-oversight',
+            'Emails',
+            'Emails',
+            'manage_options',
+            'team-oversight-emails',
+            array($this, 'emails_page')
+        );
         
         add_submenu_page(
             'team-oversight',
@@ -343,15 +352,132 @@ class TeamOversight_Admin {
             $this->save_payment_settings();
         }
 
+        $this->render_invoices_table();
+    }
+
+    public function emails_page() {
+        if (isset($_POST['action']) && $_POST['action'] === 'save_email_settings') {
+            $this->save_email_settings();
+        }
+        if (isset($_POST['action']) && $_POST['action'] === 'send_test_reminder') {
+            $this->send_test_reminder();
+        }
         if (isset($_POST['action']) && in_array($_POST['action'], array('preview_overdue_reminders', 'send_overdue_reminders'), true)) {
             $this->run_overdue_reminders($_POST['action'] === 'preview_overdue_reminders');
         }
 
-        $this->render_invoices_table();
+        $subject = get_option(TeamOversight_Payments::EMAIL_SUBJECT_OPTION);
+        if (!is_string($subject) || trim($subject) === '') {
+            $subject = TeamOversight_Payments::get_default_reminder_subject();
+        }
+        $body = get_option(TeamOversight_Payments::EMAIL_BODY_OPTION);
+        if (!is_string($body) || trim($body) === '') {
+            $body = TeamOversight_Payments::get_default_reminder_body();
+        }
+
+        // Live preview with sample numbers.
+        list($preview_subject, $preview_body) = TeamOversight_Payments::render_reminder_email('Alex Example', 150, 425.50);
+
+        ?>
+        <div class="wrap">
+            <h1>Emails</h1>
+            <p class="description">Club emails sent by the plugin. Currently: the overdue-fees reminder. Placeholders available in the subject and body: <code>{first_name}</code>, <code>{name}</code>, <code>{overdue}</code>, <code>{outstanding}</code>, <code>{link}</code> (the fees/checklist page from Player Readiness settings).</p>
+
+            <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start;">
+                <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; min-width: 420px; flex: 1; max-width: 620px;">
+                    <h2 style="margin-top: 0;">Overdue fee reminder</h2>
+                    <form method="post">
+                        <p>
+                            <label>
+                                <input type="checkbox" name="reminders_enabled" value="1" <?php checked(get_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION)); ?>>
+                                <strong>Send automatically</strong> (daily check; each person emailed at most every
+                                <input type="number" name="reminder_days" value="<?php echo intval(get_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, 7)); ?>" min="1" max="90" style="width: 55px;"> days)
+                            </label>
+                        </p>
+                        <p>
+                            <label><strong>Subject</strong><br>
+                                <input type="text" name="email_subject" value="<?php echo esc_attr($subject); ?>" style="width: 100%;">
+                            </label>
+                        </p>
+                        <p>
+                            <label><strong>Body</strong><br>
+                                <textarea name="email_body" rows="14" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($body); ?></textarea>
+                            </label>
+                        </p>
+                        <p>
+                            <input type="submit" class="button button-primary" value="Save Email Settings">
+                            <input type="hidden" name="action" value="save_email_settings">
+                            <?php wp_nonce_field('email_settings', 'email_settings_nonce'); ?>
+                        </p>
+                    </form>
+
+                    <form method="post" style="display: inline-block; margin-right: 8px;">
+                        <input type="hidden" name="action" value="send_test_reminder">
+                        <?php wp_nonce_field('email_settings', 'email_settings_nonce'); ?>
+                        <input type="submit" class="button" value="Send test email to me">
+                    </form>
+                    <form method="post" style="display: inline-block; margin-right: 8px;">
+                        <input type="hidden" name="action" value="preview_overdue_reminders">
+                        <?php wp_nonce_field('email_settings', 'email_settings_nonce'); ?>
+                        <input type="submit" class="button" value="Preview recipients (no emails)">
+                    </form>
+                    <form method="post" style="display: inline-block;" onsubmit="return confirm('Send overdue reminder emails NOW to everyone in the recipients preview (respecting the per-person interval)?');">
+                        <input type="hidden" name="action" value="send_overdue_reminders">
+                        <?php wp_nonce_field('email_settings', 'email_settings_nonce'); ?>
+                        <input type="submit" class="button" value="Send reminders now">
+                    </form>
+                </div>
+
+                <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; min-width: 380px; flex: 1; max-width: 560px;">
+                    <h2 style="margin-top: 0;">Preview <small style="font-weight: normal; color: #666;">(sample member: Alex Example, $150.00 overdue of $425.50)</small></h2>
+                    <p style="background: #f0f0f1; padding: 8px 12px; border-radius: 4px;"><strong>Subject:</strong> <?php echo esc_html($preview_subject); ?></p>
+                    <pre style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 4px; padding: 14px; white-space: pre-wrap; font-size: 13px;"><?php echo esc_html($preview_body); ?></pre>
+                    <p class="description">Saved changes show here immediately. "Send test email to me" delivers this exact preview to your own address.</p>
+                </div>
+            </div>
+        </div>
+        <?php
+    }
+
+    private function save_email_settings() {
+        if (!isset($_POST['email_settings_nonce']) || !wp_verify_nonce($_POST['email_settings_nonce'], 'email_settings')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
+        update_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION, !empty($_POST['reminders_enabled']) ? 1 : 0);
+        update_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, max(1, min(90, intval($_POST['reminder_days']))));
+        update_option(TeamOversight_Payments::EMAIL_SUBJECT_OPTION, sanitize_text_field(wp_unslash($_POST['email_subject'])));
+        update_option(TeamOversight_Payments::EMAIL_BODY_OPTION, sanitize_textarea_field(wp_unslash($_POST['email_body'])));
+
+        echo '<div class="notice notice-success"><p>Email settings saved.</p></div>';
+    }
+
+    private function send_test_reminder() {
+        if (!isset($_POST['email_settings_nonce']) || !wp_verify_nonce($_POST['email_settings_nonce'], 'email_settings')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
+        $admin = wp_get_current_user();
+        list($subject, $body) = TeamOversight_Payments::render_reminder_email($admin->display_name, 150, 425.50);
+        if (wp_mail($admin->user_email, '[TEST] ' . $subject, $body)) {
+            echo '<div class="notice notice-success"><p>Test email sent to ' . esc_html($admin->user_email) . '.</p></div>';
+        } else {
+            echo '<div class="notice notice-error"><p>Sending failed — check the site\'s email configuration.</p></div>';
+        }
     }
 
     private function run_overdue_reminders($dry_run) {
-        if (!isset($_POST['payment_settings_nonce']) || !wp_verify_nonce($_POST['payment_settings_nonce'], 'save_payment_settings')) {
+        if (!isset($_POST['email_settings_nonce']) || !wp_verify_nonce($_POST['email_settings_nonce'], 'email_settings')) {
             echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
             return;
         }
@@ -396,9 +522,6 @@ class TeamOversight_Admin {
 
         $product_id = intval($_POST['payment_product']);
         update_option(TeamOversight_Payments::PAYMENT_PRODUCT_OPTION, $product_id);
-
-        update_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION, !empty($_POST['reminders_enabled']) ? 1 : 0);
-        update_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, max(1, min(90, intval($_POST['reminder_days']))));
 
         if ($product_id) {
             echo '<div class="notice notice-success"><p>Payment settings saved. Members can pay any amount against their fees via the [member_fees] page.</p></div>';
@@ -1410,32 +1533,11 @@ class TeamOversight_Admin {
                             <option value="<?php echo $product_post->ID; ?>" <?php selected($payment_product_id, $product_post->ID); ?>><?php echo esc_html($product_post->post_title); ?> (#<?php echo $product_post->ID; ?>)</option>
                         <?php endforeach; ?>
                     </select>
-                    <div style="margin: 12px 0; padding-top: 10px; border-top: 1px solid #eee;">
-                        <strong>Overdue reminder emails</strong>
-                        <p class="description">When enabled, a daily check emails everyone whose fees are overdue (including debts carried over from past seasons), at most once per interval per person, with their amount and a link to the checklist page. Use Preview first — it lists exactly who would be emailed without sending anything.</p>
-                        <label>
-                            <input type="checkbox" name="reminders_enabled" value="1" <?php checked(get_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION)); ?>>
-                            Send automatic overdue reminders
-                        </label>
-                        <label style="margin-left: 20px;">
-                            Remind each person at most every
-                            <input type="number" name="reminder_days" value="<?php echo intval(get_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, 7)); ?>" min="1" max="90" style="width: 60px;"> days
-                        </label>
-                    </div>
                     <input type="submit" class="button button-primary" value="Save">
                     <input type="hidden" name="action" value="save_payment_settings">
                     <?php wp_nonce_field('save_payment_settings', 'payment_settings_nonce'); ?>
                 </form>
-                <form method="post" style="display: inline-block; margin-top: 8px; margin-right: 8px;">
-                    <input type="hidden" name="action" value="preview_overdue_reminders">
-                    <?php wp_nonce_field('save_payment_settings', 'payment_settings_nonce'); ?>
-                    <input type="submit" class="button" value="Preview recipients (no emails)">
-                </form>
-                <form method="post" style="display: inline-block; margin-top: 8px;" onsubmit="return confirm('Send overdue reminder emails NOW to everyone listed in the preview (respecting the per-person interval)?');">
-                    <input type="hidden" name="action" value="send_overdue_reminders">
-                    <?php wp_nonce_field('save_payment_settings', 'payment_settings_nonce'); ?>
-                    <input type="submit" class="button" value="Send reminders now">
-                </form>
+                <p class="description" style="margin-top: 10px;">Overdue reminder emails (templates, schedule, preview, send) live in <a href="<?php echo admin_url('admin.php?page=team-oversight-emails'); ?>">VVL Oversight → Emails</a>.</p>
             </details>
 
             <?php if (!empty($invoices)): ?>
