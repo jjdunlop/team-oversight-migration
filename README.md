@@ -127,6 +127,10 @@ Fees are a **balance against a season timeline**, not an invoice event:
 
 Admin: VVL Oversight → **Player Readiness** — every selected player's VV/shirt/kit/fees status and a Ready flag, plus the settings (URLs and kit product IDs) and per-player shirt credits. Each player appears once, evaluated for the **latest season they're in** (current year or later) — so end-of-year selections for next season show next-season readiness immediately.
 
+### Logs
+
+VVL Oversight → **Logs**: an append-only activity log — online and manual payments (with amounts and notes), reminder emails sent, fee edits (old → new amount), membership grants — each stamped with when, who it was about, and which admin (or "System" for cron) did it. Filter by event type, search by name/email/message; entries kept for two years. Bulk reconciliation backfills deliberately stay out of the log.
+
 ### Data imports/exports
 
 - **RevSport CSV import** (accreditations: VA ID, payment status, coach/referee accreditation).
@@ -169,6 +173,7 @@ All created/migrated automatically on load (`TeamOversight_Database::migrate_dat
 - `team_trial_selections` — per-team coach verdicts
 - `team_trial_notes` — shared coach notes
 - `team_accreditations` — RevSport data (email keyed — CSV matches by email)
+- `team_activity_log` — append-only activity log (payments, emails, fee edits, grants; pruned after 2 years)
 - `fee_matrix`, `fee_matrix_versions` — season fee rates
 
 ## Season rollover checklist

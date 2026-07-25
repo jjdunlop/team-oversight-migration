@@ -132,6 +132,18 @@ class TeamOversight_Payments {
         );
 
         self::recompute_invoice($invoice_id);
+
+        if (class_exists('TeamOversight_Log') && in_array($source, array('online', 'manual'), true)) {
+            $season = $wpdb->get_var($wpdb->prepare("SELECT season FROM {$wpdb->prefix}team_invoices WHERE id = %d", $invoice_id));
+            TeamOversight_Log::add(
+                'payment_' . $source,
+                'Payment applied to ' . $season . ' fees'
+                    . ($order_id ? ' (order #' . intval($order_id) . ')' : '')
+                    . ($note !== '' ? ' — ' . $note : ''),
+                array('user_id' => intval($invoice->user_id), 'amount' => $amount)
+            );
+        }
+
         return true;
     }
 
@@ -286,6 +298,13 @@ class TeamOversight_Payments {
             if (wp_mail($person['email'], $subject, $message, self::get_email_headers())) {
                 update_user_meta($person['user_id'], self::REMINDER_META, time());
                 $report['sent']++;
+                if (class_exists('TeamOversight_Log')) {
+                    TeamOversight_Log::add(
+                        'email_reminder',
+                        'Overdue reminder sent to ' . $person['email'],
+                        array('user_id' => $person['user_id'], 'amount' => $person['overdue'])
+                    );
+                }
             }
         }
 

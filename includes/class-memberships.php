@@ -366,11 +366,24 @@ class TeamOversight_Memberships {
             return false;
         }
 
-        return $wpdb->insert(
+        $ok = $wpdb->insert(
             $wpdb->prefix . 'team_memberships',
             $data,
             array('%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d', '%s')
         ) !== false;
+
+        if ($ok && class_exists('TeamOversight_Log')) {
+            $tiers = self::get_tiers();
+            $end_display = ($data['end_date'] >= self::PERMANENT_FROM) ? 'no expiry' : $data['end_date'];
+            TeamOversight_Log::add(
+                'membership_grant',
+                (isset($tiers[$data['tier']]) ? $tiers[$data['tier']] : $data['tier'])
+                    . ' granted until ' . $end_display . ' (' . $data['source'] . ')'
+                    . ($data['note'] ? ' — ' . $data['note'] : ''),
+                array('user_id' => intval($data['user_id']))
+            );
+        }
+        return $ok;
     }
 
     /**

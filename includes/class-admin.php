@@ -122,6 +122,15 @@ class TeamOversight_Admin {
             'team-oversight-emails',
             array($this, 'emails_page')
         );
+
+        add_submenu_page(
+            'team-oversight',
+            'Logs',
+            'Logs',
+            'manage_options',
+            'team-oversight-logs',
+            array($this, 'logs_page')
+        );
         
         add_submenu_page(
             'team-oversight',
@@ -353,6 +362,10 @@ class TeamOversight_Admin {
         }
 
         $this->render_invoices_table();
+    }
+
+    public function logs_page() {
+        TeamOversight_Log::render_admin_page();
     }
 
     public function emails_page() {
@@ -2977,6 +2990,9 @@ class TeamOversight_Admin {
         // Only the FEE is editable. Paid is the payments ledger and
         // outstanding is always fee minus paid — money moves only through
         // Record Payment, never through an edit.
+        $before = $wpdb->get_row($wpdb->prepare("
+            SELECT invoice_amount, season, user_id FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice_id));
         $result = $wpdb->update(
             $wpdb->prefix . 'team_invoices',
             array('invoice_amount' => $invoice_amount),
@@ -2985,6 +3001,14 @@ class TeamOversight_Admin {
             array('%d')
         );
         $outstanding = TeamOversight_Payments::recompute_invoice($invoice_id);
+
+        if ($before && floatval($before->invoice_amount) !== $invoice_amount) {
+            TeamOversight_Log::add(
+                'fee_edit',
+                $before->season . ' season fee changed from $' . number_format($before->invoice_amount, 2) . ' to $' . number_format($invoice_amount, 2),
+                array('user_id' => intval($before->user_id), 'amount' => $invoice_amount)
+            );
+        }
 
         if ($result !== false) {
             wp_send_json_success(array('outstanding' => $outstanding));

@@ -226,6 +226,26 @@ class TeamOversight_Database {
         // Widen assigned_team so multi-team finalisation fits (added in 1.6.0).
         $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications MODIFY COLUMN assigned_team varchar(255) DEFAULT NULL");
 
+        // Activity log table (added in 1.20.0).
+        $log_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_activity_log'");
+        if (!$log_exists) {
+            $charset_collate = $wpdb->get_charset_collate();
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta("CREATE TABLE {$wpdb->prefix}team_activity_log (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                event_type varchar(40) NOT NULL,
+                subject_user_id bigint(20) unsigned DEFAULT NULL,
+                actor_id bigint(20) unsigned DEFAULT NULL,
+                amount decimal(10,2) DEFAULT NULL,
+                message varchar(500) DEFAULT '',
+                created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY event_type (event_type),
+                KEY subject_user_id (subject_user_id),
+                KEY created_date (created_date)
+            ) $charset_collate;");
+        }
+
         // Import price matrix if fee_matrix table is empty
         $existing_fees = $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}fee_matrix WHERE is_active = 1");
         if ($existing_fees == 0) {
