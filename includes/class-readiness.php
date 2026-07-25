@@ -412,6 +412,15 @@ class TeamOversight_Readiness {
                 $output .= $this->render_panel($season, $checklist);
             }
         }
+
+        // Not selected into anything? Fees still always show: someone
+        // removed from a team may carry a debt they need to see and pay,
+        // and paid-up members get a "nothing owing" confirmation.
+        if ($output === '') {
+            $payments = new TeamOversight_Payments();
+            $output = $payments->render_member_fees();
+        }
+
         return $output;
     }
 

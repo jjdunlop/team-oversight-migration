@@ -20,7 +20,16 @@ class TeamOversight_Payments {
 
     const PAYMENT_PRODUCT_OPTION = 'team_oversight_payment_product';
 
+    private static $hooks_registered = false;
+
     public function __construct() {
+        // Other classes instantiate this for rendering (e.g. the readiness
+        // fees fallback); only the first instance owns the hooks.
+        if (self::$hooks_registered) {
+            return;
+        }
+        self::$hooks_registered = true;
+
         add_shortcode('member_fees', array($this, 'render_member_fees'));
         add_shortcode('player_fees', array($this, 'render_player_fees'));
 
