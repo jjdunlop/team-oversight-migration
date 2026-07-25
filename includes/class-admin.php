@@ -2455,7 +2455,7 @@ class TeamOversight_Admin {
             $assignment_id = intval($_POST['assignment_id']);
 
             $deactivating = $wpdb->get_row($wpdb->prepare("
-                SELECT email, season FROM {$wpdb->prefix}team_assignments WHERE id = %d
+                SELECT email, season, team, role, user_id FROM {$wpdb->prefix}team_assignments WHERE id = %d
             ", $assignment_id));
 
             $result = $wpdb->update(
@@ -2471,6 +2471,9 @@ class TeamOversight_Admin {
 
             if ($result) {
                 if ($deactivating) {
+                    if (in_array($deactivating->role, array('playing_member', 'training_only'), true)) {
+                        $this->sync_trial_after_assignment_removal($deactivating->email, $deactivating->season, $deactivating->team, intval($deactivating->user_id));
+                    }
                     $fees = new TeamOversight_Fees();
                     $fees->recalculate_after_assignment_change($deactivating->email, $deactivating->season);
                 }
@@ -2642,7 +2645,7 @@ class TeamOversight_Admin {
 
         if ($result !== false) {
             if ($assignment && in_array($assignment->role, array('playing_member', 'training_only'), true)) {
-                $this->sync_trial_after_assignment_removal($assignment->email, $assignment->season, $assignment->team);
+                $this->sync_trial_after_assignment_removal($assignment->email, $assignment->season, $assignment->team, intval($assignment->user_id));
             }
             if ($assignment) {
                 $fees = new TeamOversight_Fees();
@@ -2662,60 +2665,63 @@ class TeamOversight_Admin {
      * finalisation run won't silently recreate the assignment (it only
      * processes Selected / Training Only verdicts).
      */
-    private function sync_trial_after_assignment_removal($email, $season, $team) {
+    private function sync_trial_after_assignment_removal($email, $season, $team, $user_id = 0) {
         global $wpdb;
 
-        $application = $wpdb->get_row($wpdb->prepare("
+        // Match the person's application by user_id or email, whatever its
+        // status — verdicts can exist without finalisation ever running.
+        $applications = $wpdb->get_results($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}trial_applications
-            WHERE season = %s AND email = %s AND application_status = 'accepted'
-        ", $season, $email));
+            WHERE season = %s AND (email = %s OR (user_id > 0 AND user_id = %d))
+        ", $season, $email, intval($user_id)));
 
-        if (!$application) {
-            return;
-        }
+        foreach ($applications as $application) {
+            // Downgrade any Selected / Training Only verdict for this team
+            // to Tentative: the coach still sees the player flagged, but
+            // finalisation won't silently recreate the assignment.
+            $wpdb->query($wpdb->prepare("
+                UPDATE {$wpdb->prefix}team_trial_selections
+                SET status = 'tentative', updated_date = %s
+                WHERE application_id = %d AND team = %s AND status IN ('selected', 'training_only')
+            ", current_time('mysql'), $application->id, $team));
 
-        // assigned_team tokens look like "SL2M" or "JPLM (T/O)".
-        $tokens = array_filter(array_map('trim', explode(',', (string) $application->assigned_team)));
-        $remaining = array();
-        $removed = false;
-        foreach ($tokens as $token) {
-            if (trim(str_replace('(T/O)', '', $token)) === $team) {
-                $removed = true;
-            } else {
-                $remaining[] = $token;
+            if ($application->application_status !== 'accepted') {
+                continue;
             }
-        }
 
-        if (!$removed) {
-            return;
-        }
+            // assigned_team tokens look like "SL2M" or "JPLM (T/O)".
+            $tokens = array_filter(array_map('trim', explode(',', (string) $application->assigned_team)));
+            $remaining = array();
+            $removed = false;
+            foreach ($tokens as $token) {
+                if (trim(str_replace('(T/O)', '', $token)) === $team) {
+                    $removed = true;
+                } else {
+                    $remaining[] = $token;
+                }
+            }
 
-        // Downgrade the verdict to Tentative so the coach still sees the
-        // player flagged, without finalisation recreating the assignment.
-        $wpdb->update(
-            $wpdb->prefix . 'team_trial_selections',
-            array('status' => 'tentative', 'updated_date' => current_time('mysql')),
-            array('application_id' => $application->id, 'team' => $team),
-            array('%s', '%s'),
-            array('%d', '%s')
-        );
+            if (!$removed) {
+                continue;
+            }
 
-        if (empty($remaining)) {
-            $wpdb->update(
-                $wpdb->prefix . 'trial_applications',
-                array('application_status' => 'pending', 'assigned_team' => null),
-                array('id' => $application->id),
-                array('%s', '%s'),
-                array('%d')
-            );
-        } else {
-            $wpdb->update(
-                $wpdb->prefix . 'trial_applications',
-                array('assigned_team' => implode(', ', $remaining)),
-                array('id' => $application->id),
-                array('%s'),
-                array('%d')
-            );
+            if (empty($remaining)) {
+                $wpdb->update(
+                    $wpdb->prefix . 'trial_applications',
+                    array('application_status' => 'pending', 'assigned_team' => null),
+                    array('id' => $application->id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+            } else {
+                $wpdb->update(
+                    $wpdb->prefix . 'trial_applications',
+                    array('assigned_team' => implode(', ', $remaining)),
+                    array('id' => $application->id),
+                    array('%s'),
+                    array('%d')
+                );
+            }
         }
     }
     

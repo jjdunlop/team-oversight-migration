@@ -22,6 +22,7 @@ class TeamOversight_Payments {
 
     public function __construct() {
         add_shortcode('member_fees', array($this, 'render_member_fees'));
+        add_shortcode('player_fees', array($this, 'render_player_fees'));
 
         // Pay-any-amount flow: process the form before output, override the
         // cart line price, carry meta onto the order, apply on payment.
@@ -65,9 +66,15 @@ class TeamOversight_Payments {
     }
 
     /**
-     * Overdue amount for an invoice under the linear schedule.
+     * Overdue amount for an invoice under the linear schedule. Debts left
+     * over from past seasons roll forward: once the season year is over,
+     * whatever is still outstanding is fully overdue, season dates or not.
      */
     public static function get_overdue($invoice_amount, $outstanding_amount, $season) {
+        if (intval($season) > 0 && intval($season) < intval(wp_date('Y'))) {
+            return round(max(0, floatval($outstanding_amount)), 2);
+        }
+
         $factor = self::get_expected_factor($season);
         if ($factor === null) {
             return 0.0;
@@ -150,6 +157,23 @@ class TeamOversight_Payments {
     // ------------------------------------------------------------------
     // Member-facing balance + payment form: [member_fees]
     // ------------------------------------------------------------------
+
+    /**
+     * [player_fees] — the same fee panel as [member_fees], but completely
+     * invisible (renders nothing at all) for logged-out visitors and for
+     * anyone without a fee record. Safe to drop on any page: only people
+     * who have been assigned to a team (and therefore invoiced) see it.
+     */
+    public function render_player_fees() {
+        if (!is_user_logged_in()) {
+            return '';
+        }
+        $invoices = self::get_user_invoices(wp_get_current_user());
+        if (empty($invoices)) {
+            return '';
+        }
+        return $this->render_member_fees();
+    }
 
     public function render_member_fees() {
         if (!is_user_logged_in()) {

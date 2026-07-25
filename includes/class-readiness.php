@@ -658,17 +658,21 @@ class TeamOversight_Readiness {
 
         global $wpdb;
 
-        // Everyone selected/confirmed as a player this season.
-        $player_ids = $wpdb->get_col($wpdb->prepare("
-            SELECT DISTINCT user_id FROM (
-                SELECT ta.user_id FROM {$wpdb->prefix}team_assignments ta
-                WHERE ta.season = %s AND ta.is_active = 1 AND ta.role IN ('playing_member', 'training_only') AND ta.user_id > 0
-                UNION
-                SELECT a.user_id FROM {$wpdb->prefix}team_trial_selections s
+        // Everyone selected/confirmed as a player, each shown for the
+        // LATEST season they're in (current year or later) — so end-of-year
+        // selections for next season appear here the moment they're made.
+        $year = wp_date('Y');
+        $player_rows = $wpdb->get_results($wpdb->prepare("
+            SELECT user_id, MAX(season) AS season FROM (
+                SELECT ta.user_id, ta.season FROM {$wpdb->prefix}team_assignments ta
+                WHERE ta.season >= %s AND ta.is_active = 1 AND ta.role IN ('playing_member', 'training_only') AND ta.user_id > 0
+                UNION ALL
+                SELECT a.user_id, s.season FROM {$wpdb->prefix}team_trial_selections s
                 JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
-                WHERE s.season = %s AND s.status IN ('selected', 'training_only') AND a.user_id > 0
+                WHERE s.season >= %s AND s.status IN ('selected', 'training_only') AND a.user_id > 0
             ) players
-        ", $season, $season));
+            GROUP BY user_id
+        ", $year, $year));
 
         $kit_products = self::get_kit_products();
 
@@ -713,12 +717,13 @@ class TeamOversight_Readiness {
                 </form>
             </details>
 
-            <p><strong><?php echo count($player_ids); ?></strong> players selected/confirmed for <?php echo esc_html($season); ?>. Shirt requirements come from each team's configuration (Premier 2, YSL 0, default 1).</p>
+            <p><strong><?php echo count($player_rows); ?></strong> players selected/confirmed for <?php echo esc_html($year); ?> or later — each shown for the latest season they're in. Shirt requirements come from each team's configuration (Premier 2, YSL 0, default 1).</p>
 
-            <?php if (!empty($player_ids)): ?>
+            <?php if (!empty($player_rows)): ?>
                 <table class="wp-list-table widefat fixed striped">
                     <thead><tr>
                         <th>Player</th>
+                        <th style="width: 6%;">Season</th>
                         <th style="width: 10%;">Teams</th>
                         <th style="width: 12%;">VV Registration</th>
                         <th>Shirt Payment</th>
@@ -727,13 +732,15 @@ class TeamOversight_Readiness {
                         <th style="width: 55px;">Ready</th>
                     </tr></thead>
                     <tbody>
-                        <?php foreach ($player_ids as $player_id): ?>
+                        <?php foreach ($player_rows as $player_row): ?>
                             <?php
+                            $player_id = intval($player_row->user_id);
+                            $player_season = $player_row->season;
                             $player = get_userdata($player_id);
                             if (!$player) {
                                 continue;
                             }
-                            $checklist = self::compute($player, $season);
+                            $checklist = self::compute($player, $player_season);
                             if ($checklist === null) {
                                 continue;
                             }
@@ -746,6 +753,7 @@ class TeamOversight_Readiness {
                             ?>
                             <tr>
                                 <td><a href="<?php echo esc_url(get_edit_user_link($player_id)); ?>"><?php echo esc_html($player->display_name); ?></a><br><small><?php echo esc_html($player->user_email); ?></small></td>
+                                <td><?php echo esc_html($player_season); ?></td>
                                 <td><?php echo esc_html(implode(', ', $checklist['teams'])); ?></td>
                                 <td><?php echo $checklist['steps']['vv']['done'] ? '<span style="color:#1a7a2e;">✔ Confirmed by player</span>' : '<span style="color:#996800;">Not confirmed</span>'; ?></td>
                                 <td style="font-size: 12px;">

@@ -110,7 +110,7 @@ Fees are a **balance against a season timeline**, not an invoice event:
 - **Season dates** (Configuration, per season) drive everything. No dates = full fees, nothing overdue.
 - **Fee matrix** (Configuration, per season): rate per fee class × team role. The **minimum-fee rule** applies: a member pays the cheapest rate across their active roles (so coach/manager rows at $0 exempt playing coaches).
 - **Fee segments** (`team_fee_segments`): a dated history of each member's fee role per season. Every assignment change (accept, finalise, role edit, delete, deactivate) checkpoints it; the season fee is the sum of each segment's rate × its share of the season window. So joining mid-season pro-rates, upgrading training-only → playing mid-season charges each period at its own rate, becoming a coach mid-season applies the coach rate from that date, and leaving all teams freezes the fee at the accrued amount. Segments clamp to the season window, so anything effective before the season start charges from the start. Payments already made always carry forward (outstanding = new fee − paid).
-- **Payment schedule**: fees fall due linearly between the season dates. Overdue = expected-by-today − paid. Members see a breakdown (season fee / paid / remaining / overdue), a "Next payment due" date when on-track, and a progress bar (paid % vs season % elapsed).
+- **Payment schedule**: fees fall due linearly between the season dates. Overdue = expected-by-today − paid. Members see a breakdown (season fee / paid / remaining / overdue), a "Next payment due" date when on-track, and a progress bar (paid % vs season % elapsed). **Past-season debts roll forward**: once a season's year is over, whatever remains outstanding counts as fully overdue (season dates or not) everywhere overdue is shown, and payments always clear the oldest season first.
 - **Pay-any-amount**: `[member_fees]` (and the Ready to Play fees step) let members pay whatever they choose whenever they like via a dedicated payment product whose price is overridden to the entered amount. Paid orders reduce outstanding (oldest season first) and are recorded in the `team_invoice_payments` ledger.
 - **Payment Management** (admin): one row per member per season — fee, paid, outstanding, overdue, payment count (hover for ledger) — with inline amount overrides, the payment-product setting, and a season-dates status hint.
 
@@ -123,7 +123,7 @@ Fees are a **balance against a season timeline**, not an invoice event:
 3. **Shorts & socks** — regular products: this-season purchases auto-complete, manual tick for older kit, shop link always available for re-orders.
 4. **Fees** — breakdown, schedule status, and the pay box (live when the payment product is configured).
 
-Admin: VVL Oversight → **Player Readiness** — every selected player's VV/shirt/kit/fees status and a Ready flag, plus the settings (URLs and kit product IDs) and per-player shirt credits.
+Admin: VVL Oversight → **Player Readiness** — every selected player's VV/shirt/kit/fees status and a Ready flag, plus the settings (URLs and kit product IDs) and per-player shirt credits. Each player appears once, evaluated for the **latest season they're in** (current year or later) — so end-of-year selections for next season show next-season readiness immediately.
 
 ### Data imports/exports
 
@@ -139,6 +139,7 @@ Admin: VVL Oversight → **Player Readiness** — every selected player's VV/shi
 | `[team_trial_form]` | Logged-in members | Trial application (+ payment) |
 | `[team_coach_portal]` | Coaches | Selections, notes, rosters |
 | `[member_fees]` | Logged-in members | Fee balance + pay any amount |
+| `[player_fees]` | Invoiced members only | Same as `[member_fees]`, but renders nothing at all for logged-out visitors or anyone without a fee record — safe on any page |
 | `[ready_to_play]` | Selected players | Pre-season checklist |
 | `[murvc_member_role]` | Profile pages | Membership tier badge |
 
