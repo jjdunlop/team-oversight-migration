@@ -8,6 +8,7 @@ class TeamOversight_Admin {
     
     public function __construct() {
         add_action('admin_menu', array($this, 'add_admin_menu'));
+        add_action('wp_dashboard_setup', array($this, 'customise_dashboard'), 99);
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
         add_action('wp_ajax_search_users', array($this, 'ajax_search_users'));
         add_action('wp_ajax_update_assignment', array($this, 'ajax_update_assignment'));
@@ -371,6 +372,137 @@ class TeamOversight_Admin {
         }
 
         $this->render_invoices_table();
+    }
+
+    /**
+     * A dashboard that loads fast and says something useful: remove the
+     * widgets that run slow report queries or phone home, add a club
+     * overview built from the plugin's own (indexed, local) tables.
+     */
+    public function customise_dashboard() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        remove_meta_box('dashboard_primary', 'dashboard', 'side');          // WP news — remote HTTP
+        remove_meta_box('dashboard_quick_press', 'dashboard', 'side');
+        remove_meta_box('dashboard_recent_drafts', 'dashboard', 'side');
+        remove_meta_box('dashboard_recent_comments', 'dashboard', 'normal');
+        remove_meta_box('dashboard_activity', 'dashboard', 'normal');
+        remove_meta_box('woocommerce_dashboard_status', 'dashboard', 'normal'); // heavy report queries
+        remove_meta_box('wc_admin_dashboard_setup', 'dashboard', 'normal');
+        remove_meta_box('itsec_dashboard_widget', 'dashboard', 'normal');
+
+        wp_add_dashboard_widget('murvc_club_overview', 'MURVC Club Overview', array($this, 'render_dashboard_widget'));
+
+        // Float our widget to the top of the main column.
+        global $wp_meta_boxes;
+        if (isset($wp_meta_boxes['dashboard']['normal']['core']['murvc_club_overview'])) {
+            $ours = $wp_meta_boxes['dashboard']['normal']['core']['murvc_club_overview'];
+            unset($wp_meta_boxes['dashboard']['normal']['core']['murvc_club_overview']);
+            $wp_meta_boxes['dashboard']['normal']['core'] = array_merge(
+                array('murvc_club_overview' => $ours),
+                $wp_meta_boxes['dashboard']['normal']['core']
+            );
+        }
+    }
+
+    public function render_dashboard_widget() {
+        global $wpdb;
+
+        $today = current_time('Y-m-d');
+        $year = wp_date('Y');
+        $next = strval(intval($year) + 1);
+
+        $members = intval($wpdb->get_var($wpdb->prepare("
+            SELECT COUNT(DISTINCT user_id) FROM {$wpdb->prefix}team_memberships
+            WHERE start_date <= %s AND end_date >= %s
+        ", $today, $today)));
+
+        $invoices = $wpdb->get_results("
+            SELECT invoice_amount, outstanding_amount, season
+            FROM {$wpdb->prefix}team_invoices WHERE outstanding_amount > 0
+        ");
+        $outstanding_total = 0;
+        $overdue_total = 0;
+        $overdue_people = 0;
+        foreach ($invoices as $invoice) {
+            $outstanding_total += floatval($invoice->outstanding_amount);
+            $overdue = TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+            if ($overdue >= 1) {
+                $overdue_total += $overdue;
+                $overdue_people++;
+            }
+        }
+
+        $pending_trials = intval($wpdb->get_var($wpdb->prepare("
+            SELECT COUNT(*) FROM {$wpdb->prefix}trial_applications
+            WHERE season IN (%s, %s) AND application_status IN ('pending', 'awaiting_payment')
+        ", $year, $next)));
+
+        $selected = intval($wpdb->get_var($wpdb->prepare("
+            SELECT COUNT(DISTINCT COALESCE(NULLIF(user_id, 0), email)) FROM {$wpdb->prefix}team_assignments
+            WHERE season IN (%s, %s) AND is_active = 1
+        ", $year, $next)));
+
+        $recent = $wpdb->get_results("
+            SELECT l.event_type, l.message, l.created_date, u.display_name
+            FROM {$wpdb->prefix}team_activity_log l
+            LEFT JOIN {$wpdb->users} u ON u.ID = l.subject_user_id
+            ORDER BY l.id DESC LIMIT 6
+        ");
+        $type_labels = TeamOversight_Log::get_types();
+
+        $tiles = array(
+            array(admin_url('admin.php?page=club-membership'), number_format($members), 'Current members'),
+            array(admin_url('admin.php?page=team-oversight-invoices'), '$' . number_format($outstanding_total, 0), 'Fees outstanding'),
+            array(admin_url('admin.php?page=team-oversight-invoices'), $overdue_people . ' / $' . number_format($overdue_total, 0), 'Overdue people / amount'),
+            array(admin_url('admin.php?page=team-oversight-trials'), number_format($pending_trials), 'Trial apps awaiting action'),
+            array(admin_url('admin.php?page=team-oversight-assignments'), number_format($selected), 'People on teams (' . $year . '/' . $next . ')'),
+        );
+
+        ?>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;">
+            <?php foreach ($tiles as $tile): ?>
+                <a href="<?php echo esc_url($tile[0]); ?>" style="flex: 1; min-width: 105px; text-decoration: none; background: #f6f7f7; border: 1px solid #dcdcde; border-radius: 6px; padding: 10px 12px; text-align: center;">
+                    <div style="font-size: 20px; font-weight: 600; color: #1d2327;"><?php echo esc_html($tile[1]); ?></div>
+                    <div style="font-size: 11px; color: #646970;"><?php echo esc_html($tile[2]); ?></div>
+                </a>
+            <?php endforeach; ?>
+        </div>
+
+        <?php if (!empty($recent)): ?>
+            <strong style="font-size: 12px;">Latest activity</strong>
+            <ul style="margin: 6px 0 12px 0;">
+                <?php foreach ($recent as $row): ?>
+                    <li style="font-size: 12px; margin-bottom: 3px; color: #50575e;">
+                        <span style="color: #999;"><?php echo esc_html(date('j M', strtotime($row->created_date))); ?></span>
+                        <?php echo esc_html(isset($type_labels[$row->event_type]) ? $type_labels[$row->event_type] : $row->event_type); ?><?php echo $row->display_name ? ' — ' . esc_html($row->display_name) : ''; ?>:
+                        <?php echo esc_html(mb_strimwidth($row->message, 0, 70, '…')); ?>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
+
+        <p style="margin: 0;">
+            <?php
+            $links = array(
+                'Members' => 'club-membership',
+                'Payments' => 'team-oversight-invoices',
+                'Trials' => 'team-oversight-trials',
+                'Readiness' => 'team-oversight-readiness',
+                'Stats' => 'club-membership-stats',
+                'Emails' => 'team-oversight-emails',
+                'Logs' => 'team-oversight-logs',
+            );
+            $out = array();
+            foreach ($links as $label => $slug) {
+                $out[] = '<a href="' . esc_url(admin_url('admin.php?page=' . $slug)) . '">' . esc_html($label) . '</a>';
+            }
+            echo implode(' &middot; ', $out);
+            ?>
+        </p>
+        <?php
     }
 
     public function logs_page() {

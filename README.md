@@ -50,6 +50,10 @@ Memberships are **time-bound grants** stored in `team_memberships`: tier + start
 - **Order re-scan**: Members page → "Re-scan this year's paid orders" replays every paid order through the grant logic with the *current* product/category configuration — run it after adding membership attributes to a product, since orders paid before the attributes were set granted nothing. Idempotent; backfilled grants are dated from the order's paid date. (Grants require the order to reach Processing/Completed *and* be linked to a WP account — guest orders never grant.)
 - The `[murvc_member_role]` shortcode (registered by the plugin) shows the profile owner's tier badge on Ultimate Member profiles.
 
+### Admin dashboard
+
+The WP dashboard is replaced (for admins) with a fast **MURVC Club Overview** widget: current members, fees outstanding, overdue people/amount, trial applications awaiting action, people on teams — each tile linking to its admin page — plus the latest activity-log entries and quick links. The slow stock widgets (WordPress news, WooCommerce status/report queries, quick draft, activity, Solid Security panel) are removed; the widget itself renders from the plugin's indexed tables in a few milliseconds.
+
 ### Members page (Club Membership menu)
 
 One row per person: membership status + expiry, age, gender, MUS category, VVL teams for the season, fees owing, VA accreditation, profile-confirmation status. Filter/search/sort, CSV export, manual grant (with email autocomplete) and revoke.
