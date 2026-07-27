@@ -315,16 +315,18 @@ class TeamOversight_Memberships {
      * Idempotent: items that already granted are skipped by the per-item dedupe.
      */
     public function rescan_paid_orders() {
-        global $wpdb;
-
         $year = wp_date('Y');
-        $order_ids = $wpdb->get_col($wpdb->prepare("
-            SELECT ID FROM {$wpdb->posts}
-            WHERE post_type = 'shop_order'
-                AND post_status IN ('wc-processing', 'wc-completed')
-                AND post_date >= %s AND post_date < %s
-            ORDER BY ID
-        ", $year . '-01-01', ((int) $year + 1) . '-01-01'));
+
+        // wc_get_orders works under both legacy (posts) and HPOS storage.
+        $order_ids = function_exists('wc_get_orders') ? wc_get_orders(array(
+            'type' => 'shop_order', // orders only — never refund records
+            'status' => array('processing', 'completed'),
+            'date_created' => $year . '-01-01...' . $year . '-12-31',
+            'return' => 'ids',
+            'limit' => -1,
+            'orderby' => 'ID',
+            'order' => 'ASC',
+        )) : array();
 
         $report = array('year' => $year, 'orders_checked' => 0, 'grants_created' => 0);
         foreach ($order_ids as $order_id) {

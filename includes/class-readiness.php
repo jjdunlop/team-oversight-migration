@@ -160,11 +160,13 @@ class TeamOversight_Readiness {
 
         $season_start = intval($season) . '-01-01';
         $id_list = implode(',', array_map('intval', $all_ids));
+        // Status via wc_order_stats (WooCommerce analytics) — maintained
+        // under both legacy and HPOS order storage, unlike wp_posts.
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT opl.product_id, opl.date_created, opl.product_qty
             FROM {$wpdb->prefix}wc_order_product_lookup opl
             JOIN {$wpdb->prefix}wc_customer_lookup cl ON cl.customer_id = opl.customer_id
-            JOIN {$wpdb->posts} p ON p.ID = opl.order_id AND p.post_status IN ('wc-processing', 'wc-completed')
+            JOIN {$wpdb->prefix}wc_order_stats os ON os.order_id = opl.order_id AND os.status IN ('wc-processing', 'wc-completed')
             WHERE cl.user_id = %d
                 AND opl.product_id IN ({$id_list})
         ", $user_id));
