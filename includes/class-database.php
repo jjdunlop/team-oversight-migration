@@ -226,6 +226,27 @@ class TeamOversight_Database {
         // Widen assigned_team so multi-team finalisation fits (added in 1.6.0).
         $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications MODIFY COLUMN assigned_team varchar(255) DEFAULT NULL");
 
+        // Club program attendance ticks (added in 1.35.0). One row per
+        // booking per session; absence means "not marked".
+        $attendance_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_program_attendance'");
+        if (!$attendance_exists) {
+            $charset_collate = $wpdb->get_charset_collate();
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta("CREATE TABLE {$wpdb->prefix}team_program_attendance (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                program_key varchar(60) NOT NULL,
+                session_label varchar(60) NOT NULL,
+                order_id bigint(20) unsigned NOT NULL,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                attended tinyint(1) NOT NULL DEFAULT 1,
+                marked_by bigint(20) unsigned DEFAULT NULL,
+                marked_at datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uniq_booking (program_key, session_label, order_id),
+                KEY session_lookup (program_key, session_label)
+            ) $charset_collate;");
+        }
+
         // Activity log table (added in 1.20.0).
         $log_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_activity_log'");
         if (!$log_exists) {

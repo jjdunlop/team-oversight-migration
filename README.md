@@ -156,7 +156,9 @@ Casual programs (Mixed Development and similar) sell one WooCommerce product per
 - **Session roster**: a session picker defaulting to today (or the next upcoming session), a booked count, and one card per paying attendee — name, email, tap-to-call mobile, order number, and the same **emergency contact dropdown** the coach portal uses.
 - **Guests**: someone who books multiple spots shows a `×3 (2 guests)` chip — the extra spots are real attendees whose names the club doesn't have. Orders placed without a club account show a **No account** chip (no profile, so no emergency contact).
 - **First-timers**: someone with no earlier session of that program gets a **👋 New here** badge and a highlighted card; everyone else shows an unobtrusive "5th session" count, and the header totals the first-timers. History is computed from paid orders for the program's product with a session date *before* the one being viewed, so booking three weeks ahead doesn't hide a genuine first-timer.
-- **Supervisor access**: `[session_attendance]` on a page shows the roster to administrators and to the supervisors listed (by email) in Club Programs → Settings; everyone else gets a polite notice. Lock a page to one program with `[session_attendance program="mixed-dev"]`.
+- **Ticking people off**: each card has a **Mark here** button (undo-able). Ticked attendees fade, strike through, and **sort to the bottom**, so the top of the list is always "still to arrive"; the header counts who's in. Ticks are stored per program + session in `team_program_attendance`, are explicit-state (a refresh can't flip anyone), and work on both the front-end page and the admin sub-page.
+- **Search**: an instant filter over name and email — no page reload, sized for a phone at the door.
+- **Supervisor access is per program**: each program has its own supervisor list (by email) in Club Programs → Settings, so Mixed Dev supervisors see only Mixed Dev. Administrators see everything. `[session_attendance]` shows a supervisor only the programs they run; everyone else gets a polite notice. Lock a page to one program with `[session_attendance program="mixed-dev"]`. (A pre-1.35 club-wide supervisor list is still honoured, with a tick-box in Settings to clear it once migrated.)
 - **Mixed Development** has its own shortcode, `[mixed_dev_attendance]`, so the club's weekly program can grow its own behaviour without touching the generic one. Both accept `history="0"` to hide the first-timer/session-count badges.
 
 ### Data imports/exports
@@ -207,6 +209,7 @@ All created/migrated automatically on load (`TeamOversight_Database::migrate_dat
 - `team_trial_notes` — shared coach notes
 - `team_accreditations` — RevSport data (email keyed — CSV matches by email)
 - `team_activity_log` — append-only activity log (payments, emails, fee edits, grants; pruned after 2 years)
+- `team_program_attendance` — club program attendance ticks (one row per booking per session)
 - `fee_matrix`, `fee_matrix_versions` — season fee rates
 
 ## Season rollover checklist
