@@ -255,6 +255,9 @@ class TeamOversight_Coach_Portal {
                                 <span class="cac-number">#<?php echo intval($member->trial_number); ?></span>
                                 <span class="cac-name"><?php echo esc_html($member->name); ?></span>
                                 <span class="cac-chips">
+                                    <?php if (!empty($member->is_transfer)): ?>
+                                        <span class="verdict-chip chip-transfer" title="Club transfer required<?php echo $member->transfer_club ? ' — transferring from ' . esc_attr($member->transfer_club) : ''; ?>">⇄ <?php echo esc_html($member->transfer_club ?: 'Transfer'); ?></span>
+                                    <?php endif; ?>
                                     <?php if ($member->status === 'selected'): ?>
                                         <span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>
                                     <?php elseif ($member->status === 'training_only'): ?>
@@ -351,6 +354,9 @@ class TeamOversight_Coach_Portal {
                                     <span class="cac-number">#<?php echo intval($a['trial_number']); ?></span>
                                     <span class="cac-name"><?php echo esc_html($a['name']); ?></span>
                                     <span class="cac-chips">
+                                        <?php if (!empty($a['is_transfer'])): ?>
+                                            <span class="verdict-chip chip-transfer" title="Club transfer required<?php echo $a['transfer_club'] ? ' — transferring from ' . esc_attr($a['transfer_club']) : ''; ?>">⇄ <?php echo esc_html($a['transfer_club'] ?: 'Transfer'); ?></span>
+                                        <?php endif; ?>
                                         <?php echo $this->render_verdict_chips($a['selections']); ?>
                                     </span>
                                 </div>
@@ -567,6 +573,21 @@ class TeamOversight_Coach_Portal {
             background: #fff7f0;
             border-left: 3px solid #e07b00;
             border-radius: 4px;
+        }
+
+        /* Transfer chip: distinct from verdict colours, club name inline,
+           truncated so long club names never blow the card layout (full
+           name in the hover title). */
+        .chip-transfer {
+            background: #eee6f7;
+            color: #4b2e83;
+            border: 1px solid #b9a3d8;
+            max-width: 160px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            display: inline-block;
+            vertical-align: middle;
         }
 
         .coach-app-details summary {
@@ -1112,6 +1133,7 @@ class TeamOversight_Coach_Portal {
 
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT s.status, s.application_id, a.name, a.email, a.trial_number, a.user_id, a.preferred_positions,
+                a.is_transfer_player, a.form_data,
                 um_mobile.meta_value AS mobile
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
@@ -1147,6 +1169,9 @@ class TeamOversight_Coach_Portal {
             $row->age = '';
             $row->dob_display = '';
             $row->rule_label = strtoupper($age_rule);
+            $row->is_transfer = intval($row->is_transfer_player) === 1;
+            $decoded = $row->form_data ? json_decode($row->form_data, true) : array();
+            $row->transfer_club = (is_array($decoded) && isset($decoded['Transfer: Previous Club'])) ? $decoded['Transfer: Previous Club'] : '';
             if ($cutoff) {
                 $birth_date = get_user_meta($row->user_id, 'birth_date', true);
                 $birth_ts = $birth_date ? strtotime(str_replace('/', '-', $birth_date)) : false;
@@ -1285,6 +1310,8 @@ class TeamOversight_Coach_Portal {
             $applicants[] = array(
                 'id' => intval($row->id),
                 'trial_number' => intval($row->trial_number),
+                'is_transfer' => intval($row->is_transfer_player) === 1,
+                'transfer_club' => isset($form_data['Transfer: Previous Club']) ? $form_data['Transfer: Previous Club'] : '',
                 'name' => $row->name,
                 'email' => $row->email,
                 'age' => $age,
