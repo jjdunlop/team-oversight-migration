@@ -104,6 +104,7 @@ Front-end form via `[team_trial_form]` (login required; prompts to log in / crea
 - **Selection board**: per-team verdicts — Tentative / Selected / Training Only / Rejected — via a dropdown on each applicant card. Verdicts are per team, never global: a player can be Selected by multiple teams (e.g. YSL + JPL), and every coach sees every team's verdicts. "Unclaimed" = no verdicts anywhere.
 - Applicant pools are **competition-wide** (all men's or women's applicants, not just those who picked the team — players get redirected between trials and VV grants age exemptions), sectioned: *awaiting your verdict* first, then *verdict recorded*, then *other applicants*. Search + only-my-verdicts filter.
 - **Shared notes** on applications (author + date, visible to all coaches and admins).
+- **Emergency contact dropdown** on every player and applicant card (name, relationship, tap-to-call number from the member's profile, with legacy field fallback) — and a nudge when a member has none recorded.
 - **Roster CSV export** (with positions and selection status).
 - Coaches never trigger fees: converting Selected/Training-Only verdicts into real assignments + invoices is the admin **"Finalise Coach Selections"** button on Trial Applications (idempotent; Training Only finalises as the `training_only` role and rate).
 

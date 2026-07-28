@@ -243,6 +243,9 @@ class TeamOversight_Coach_Portal {
                                 <?php if ($member->mobile): ?> &middot; <?php echo esc_html($member->mobile); ?><?php endif; ?>
                                 <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
                             </div>
+                            <div class="cac-footer">
+                                <span class="cac-expanders"><?php echo $this->render_emergency_details($member->email); ?></span>
+                            </div>
                         </div>
                     <?php endforeach; ?>
 
@@ -270,6 +273,7 @@ class TeamOversight_Coach_Portal {
                                 <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
                             </div>
                             <div class="cac-footer">
+                                <span class="cac-expanders"><?php echo $this->render_emergency_details($member->email); ?></span>
                                 <span class="cac-actions">
                                     <form method="post">
                                         <input type="hidden" name="coach_action" value="set_selection">
@@ -367,6 +371,7 @@ class TeamOversight_Coach_Portal {
 
                                 <div class="cac-footer">
                                     <span class="cac-expanders">
+                                        <?php echo $this->render_emergency_details($a['email']); ?>
                                         <?php if (!empty($a['form_data'])): ?>
                                             <details class="coach-app-details">
                                                 <summary>Application</summary>
@@ -979,6 +984,51 @@ class TeamOversight_Coach_Portal {
             GROUP BY ta.id
             ORDER BY FIELD(ta.role, 'coach', 'assistant_coach', 'team_manager', 'playing_member', 'training_only', 'supporter'), MAX(u.display_name)
         ", $team_code, $season));
+    }
+
+    /**
+     * Emergency contact from the member's profile (older duplicated UM
+     * field keys as fallback). Rendered as the same details-dropdown
+     * pattern as Application/Notes so coaches can reach it at trainings.
+     */
+    private function render_emergency_details($email) {
+        $user = get_user_by('email', $email);
+        $contact = null;
+        if ($user) {
+            $name = get_user_meta($user->ID, 'emergency_contact_name', true);
+            if (!$name) {
+                $name = get_user_meta($user->ID, 'emergency_contact_name_37', true);
+            }
+            $number = get_user_meta($user->ID, 'emergency_contact_number', true);
+            if (!$number) {
+                $number = get_user_meta($user->ID, 'emergency_contact_number_38', true);
+            }
+            $relationship = get_user_meta($user->ID, 'emergency_contact_relationship', true);
+            if (!$relationship) {
+                $relationship = get_user_meta($user->ID, 'emergency_contact_relationship_39', true);
+            }
+            if ($name || $number) {
+                $contact = array('name' => $name, 'number' => $number, 'relationship' => $relationship);
+            }
+        }
+
+        ob_start();
+        ?>
+        <details class="coach-app-details">
+            <summary>Emergency contact</summary>
+            <?php if ($contact): ?>
+                <p class="coach-emergency">
+                    <strong><?php echo esc_html($contact['name'] ?: 'Name not recorded'); ?></strong><?php if ($contact['relationship']): ?> (<?php echo esc_html($contact['relationship']); ?>)<?php endif; ?>
+                    <?php if ($contact['number']): ?>
+                        &middot; <a href="tel:<?php echo esc_attr(preg_replace('/[^0-9+]/', '', $contact['number'])); ?>"><?php echo esc_html($contact['number']); ?></a>
+                    <?php endif; ?>
+                </p>
+            <?php else: ?>
+                <p class="coach-emergency">No emergency contact recorded on this member's profile — worth chasing before the season starts.</p>
+            <?php endif; ?>
+        </details>
+        <?php
+        return ob_get_clean();
     }
 
     /**
