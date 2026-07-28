@@ -1044,42 +1044,43 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
-     * Emergency contact from the member's profile (older duplicated UM
-     * field keys as fallback). Rendered as the same details-dropdown
-     * pattern as Application/Notes so coaches can reach it at trainings.
+     * Emergency contacts from the member's profile. The profile form holds
+     * up to two: the primary (emergency_contact_*) and a second set stored
+     * under UM's duplicated-field keys (_37/_38/_39). Rendered as the same
+     * details-dropdown pattern as Application/Notes so coaches can reach
+     * them at trainings.
      */
     private function render_emergency_details($email) {
         $user = get_user_by('email', $email);
-        $contact = null;
+        $contacts = array();
         if ($user) {
-            $name = get_user_meta($user->ID, 'emergency_contact_name', true);
-            if (!$name) {
-                $name = get_user_meta($user->ID, 'emergency_contact_name_37', true);
-            }
-            $number = get_user_meta($user->ID, 'emergency_contact_number', true);
-            if (!$number) {
-                $number = get_user_meta($user->ID, 'emergency_contact_number_38', true);
-            }
-            $relationship = get_user_meta($user->ID, 'emergency_contact_relationship', true);
-            if (!$relationship) {
-                $relationship = get_user_meta($user->ID, 'emergency_contact_relationship_39', true);
-            }
-            if ($name || $number) {
-                $contact = array('name' => $name, 'number' => $number, 'relationship' => $relationship);
+            $sets = array(
+                array('emergency_contact_name', 'emergency_contact_number', 'emergency_contact_relationship'),
+                array('emergency_contact_name_37', 'emergency_contact_number_38', 'emergency_contact_relationship_39'),
+            );
+            foreach ($sets as $keys) {
+                $name = get_user_meta($user->ID, $keys[0], true);
+                $number = get_user_meta($user->ID, $keys[1], true);
+                $relationship = get_user_meta($user->ID, $keys[2], true);
+                if ($name || $number) {
+                    $contacts[] = array('name' => $name, 'number' => $number, 'relationship' => $relationship);
+                }
             }
         }
 
         ob_start();
         ?>
         <details class="coach-app-details">
-            <summary>Emergency contact</summary>
-            <?php if ($contact): ?>
-                <p class="coach-emergency">
-                    <strong><?php echo esc_html($contact['name'] ?: 'Name not recorded'); ?></strong><?php if ($contact['relationship']): ?> (<?php echo esc_html($contact['relationship']); ?>)<?php endif; ?>
-                    <?php if ($contact['number']): ?>
-                        &middot; <a href="tel:<?php echo esc_attr(self::phone_tel_href($contact['number'])); ?>"><?php echo esc_html(self::format_phone($contact['number'])); ?></a>
-                    <?php endif; ?>
-                </p>
+            <summary>Emergency contact<?php echo count($contacts) > 1 ? 's' : ''; ?></summary>
+            <?php if (!empty($contacts)): ?>
+                <?php foreach ($contacts as $contact): ?>
+                    <p class="coach-emergency">
+                        <strong><?php echo esc_html($contact['name'] ?: 'Name not recorded'); ?></strong><?php if ($contact['relationship']): ?> (<?php echo esc_html($contact['relationship']); ?>)<?php endif; ?>
+                        <?php if ($contact['number']): ?>
+                            &middot; <a href="tel:<?php echo esc_attr(self::phone_tel_href($contact['number'])); ?>"><?php echo esc_html(self::format_phone($contact['number'])); ?></a>
+                        <?php endif; ?>
+                    </p>
+                <?php endforeach; ?>
             <?php else: ?>
                 <p class="coach-emergency">No emergency contact recorded on this member's profile — worth chasing before the season starts.</p>
             <?php endif; ?>
