@@ -155,7 +155,9 @@ Casual programs (Mixed Development and similar) sell one WooCommerce product per
 - **Programs** are configured in Club Programs → Settings as `Name | product ID` (Mixed Development is auto-detected on first use). Each configured program gets its own admin sub-page listing its sessions.
 - **Session roster**: a session picker defaulting to today (or the next upcoming session), a booked count, and one card per paying attendee — name, email, tap-to-call mobile, order number, and the same **emergency contact dropdown** the coach portal uses.
 - **Guests**: someone who books multiple spots shows a `×3 (2 guests)` chip — the extra spots are real attendees whose names the club doesn't have. Orders placed without a club account show a **No account** chip (no profile, so no emergency contact).
+- **First-timers**: someone with no earlier session of that program gets a **👋 New here** badge and a highlighted card; everyone else shows an unobtrusive "5th session" count, and the header totals the first-timers. History is computed from paid orders for the program's product with a session date *before* the one being viewed, so booking three weeks ahead doesn't hide a genuine first-timer.
 - **Supervisor access**: `[session_attendance]` on a page shows the roster to administrators and to the supervisors listed (by email) in Club Programs → Settings; everyone else gets a polite notice. Lock a page to one program with `[session_attendance program="mixed-dev"]`.
+- **Mixed Development** has its own shortcode, `[mixed_dev_attendance]`, so the club's weekly program can grow its own behaviour without touching the generic one. Both accept `history="0"` to hide the first-timer/session-count badges.
 
 ### Data imports/exports
 
@@ -175,6 +177,7 @@ Casual programs (Mixed Development and similar) sell one WooCommerce product per
 | `[ready_to_play]` | Selected players | Pre-season checklist |
 | `[murvc_member_role]` | Profile pages | Membership tier badge |
 | `[session_attendance]` | Program supervisors | Club program session roster + emergency contacts |
+| `[mixed_dev_attendance]` | Program supervisors | Mixed Development roster (program-specific variant) |
 
 ## Options reference
 
