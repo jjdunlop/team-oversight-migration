@@ -351,16 +351,39 @@ class TeamOversight_Admin {
         $training_url = isset($_POST['training_info_url']) ? esc_url_raw(trim($_POST['training_info_url'])) : '';
         update_option('team_oversight_training_info_url', $training_url);
 
-        $open = !empty($_POST['trials_open']) ? '1' : '0';
-        update_option('team_oversight_trials_open', $open);
-
-        if ($open !== '1') {
-            echo '<div class="notice notice-warning"><p>Trial settings saved — <strong>applications are CLOSED</strong>. The trial form shows a closed notice (existing applicants still see their trial number and status).</p></div>';
-        } elseif ($product_id) {
-            echo '<div class="notice notice-success"><p>Trial settings saved — applications are open. New applications will be sent to checkout to pay before review.</p></div>';
-        } else {
-            echo '<div class="notice notice-success"><p>Trial settings saved — applications are open, no fee (applications submit directly).</p></div>';
+        $open_seasons = array();
+        if (!empty($_POST['open_seasons']) && is_array($_POST['open_seasons'])) {
+            foreach ($_POST['open_seasons'] as $s) {
+                if (preg_match('/^\d{4}$/', $s)) {
+                    $open_seasons[] = $s;
+                }
+            }
         }
+        update_option('team_oversight_trial_open_seasons', $open_seasons);
+
+        if (empty($open_seasons)) {
+            echo '<div class="notice notice-warning"><p>Trial settings saved — <strong>applications are CLOSED for all seasons</strong>. The trial form shows a closed notice (existing applicants still see their trial number and status).</p></div>';
+        } else {
+            echo '<div class="notice notice-success"><p>Trial settings saved — accepting applications for <strong>' . esc_html(implode(', ', $open_seasons)) . '</strong>' . ($product_id ? ' (fee product active)' : ' (no fee — applications submit directly)') . '.</p></div>';
+        }
+    }
+
+    /**
+     * Seasons an admin can open trials for / configure: everything the
+     * data knows about plus explicitly created future seasons, current
+     * year onward.
+     */
+    private function get_trial_setting_seasons() {
+        $seasons = array_map('strval', $this->get_available_seasons('main'));
+        $created = get_option('team_oversight_created_seasons', array());
+        if (is_array($created)) {
+            $seasons = array_merge($seasons, array_map('strval', $created));
+        }
+        $seasons = array_values(array_unique(array_filter($seasons, function ($s) {
+            return intval($s) >= intval(date('Y'));
+        })));
+        sort($seasons);
+        return $seasons;
     }
     
     public function assignments_page() {
@@ -784,10 +807,12 @@ class TeamOversight_Admin {
         $seasons_invoices = $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}team_invoices ORDER BY season DESC");
         $seasons_trials = $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}trial_applications ORDER BY season DESC");
         
-        // Merge and deduplicate all seasons from different tables
-        $all_seasons = array_unique(array_merge($seasons_assignments, $seasons_invoices, $seasons_trials));
+        // Merge and deduplicate all seasons from different tables, plus
+        // explicitly created future seasons (Configuration → Create season).
+        $created_seasons = get_option('team_oversight_created_seasons', array());
+        $all_seasons = array_unique(array_merge($seasons_assignments, $seasons_invoices, $seasons_trials, is_array($created_seasons) ? $created_seasons : array()));
         rsort($all_seasons); // Sort descending
-        
+
         $current_year = date('Y');
         $next_year = $current_year + 1;
         $previous_year = $current_year - 1;
@@ -821,8 +846,17 @@ class TeamOversight_Admin {
                     $filtered_seasons[] = $year;
                 }
             }
+            // Explicitly created seasons always show, even beyond next year.
+            if (is_array($created_seasons)) {
+                foreach ($created_seasons as $created) {
+                    if (!in_array($created, $filtered_seasons)) {
+                        $filtered_seasons[] = $created;
+                    }
+                }
+            }
+            $filtered_seasons = array_unique(array_map('strval', $filtered_seasons));
             rsort($filtered_seasons);
-            return $filtered_seasons;
+            return array_values($filtered_seasons);
         }
     }
     
@@ -1091,25 +1125,26 @@ class TeamOversight_Admin {
 
             <?php $trial_fee_product_id = intval(get_option('team_oversight_trial_fee_product')); ?>
             <details class="import-export-section" style="margin: 15px 0; padding: 10px 15px; background: #fff; border: 1px solid #ccd0d4;">
+                <?php $open_seasons_now = TeamOversight_Trials::get_open_seasons(); ?>
                 <summary style="cursor: pointer; font-weight: 600;">
                     Trial settings
-                    <?php if (get_option('team_oversight_trials_open', '1') !== '1'): ?>
+                    <?php if (empty($open_seasons_now)): ?>
                         <span style="color: #a00; font-weight: 700;">(APPLICATIONS CLOSED)</span>
-                    <?php elseif ($trial_fee_product_id): ?>
-                        <span style="color: #1a7a2e;">(open — fee: #<?php echo $trial_fee_product_id; ?> <?php echo esc_html(get_the_title($trial_fee_product_id)); ?>)</span>
                     <?php else: ?>
-                        <span style="color: #996800;">(open — no fee, applications submit directly)</span>
+                        <span style="color: #1a7a2e;">(accepting for <?php echo esc_html(implode(', ', $open_seasons_now)); ?><?php echo $trial_fee_product_id ? ' — fee active' : ' — no fee'; ?>)</span>
                     <?php endif; ?>
                 </summary>
                 <p class="description">When a product is selected, submitting the trial form saves the application as "Awaiting Payment", adds this product to the cart and sends the applicant to checkout. The application only becomes reviewable once the order is paid. Unpaid applications expire after 7 days.</p>
                 <form method="post">
-                    <p style="margin: 0 0 12px 0;">
-                        <label>
-                            <input type="checkbox" name="trials_open" value="1" <?php checked(get_option('team_oversight_trials_open', '1'), '1'); ?>>
-                            <strong>Accepting trial applications</strong>
-                        </label>
-                        <span class="description" style="margin-left: 8px;">Untick when the season's trials are done — the form shows a friendly closed notice and rejects submissions, while existing applicants keep seeing their trial number and status.</span>
+                    <p style="margin: 0 0 4px 0;"><strong>Accepting trial applications for:</strong>
+                        <?php foreach ($this->get_trial_setting_seasons() as $setting_season): ?>
+                            <label style="margin-left: 12px;">
+                                <input type="checkbox" name="open_seasons[]" value="<?php echo esc_attr($setting_season); ?>" <?php checked(in_array($setting_season, $open_seasons_now, true)); ?>>
+                                <?php echo esc_html($setting_season); ?>
+                            </label>
+                        <?php endforeach; ?>
                     </p>
+                    <p class="description" style="margin: 0 0 12px 0;">Only ticked seasons appear in the trial form's season selector. Untick a season once its trials are done — the form rejects it server-side too, and existing applicants keep seeing their trial number and status. Untick everything to close applications entirely. Need a further-out season? Create it on the <a href="<?php echo admin_url('admin.php?page=team-oversight-fees'); ?>">Configuration page</a>.</p>
                     <select name="trial_fee_product" style="max-width: 400px;">
                         <option value="0">No fee — applications submit directly</option>
                         <?php

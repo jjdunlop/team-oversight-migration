@@ -514,6 +514,22 @@ class TeamOversight_Fees {
             }
         }
 
+        // Create the next season so it appears in every season selector
+        // before any data exists for it.
+        if (isset($_POST['action']) && $_POST['action'] === 'create_season') {
+            if (isset($_POST['create_season_nonce']) && wp_verify_nonce($_POST['create_season_nonce'], 'create_season') && current_user_can('manage_options')) {
+                $created = get_option('team_oversight_created_seasons', array());
+                $created = is_array($created) ? $created : array();
+                $known = array_map('intval', array_merge($this->get_available_seasons(), $created));
+                $next_season = strval(max($known) + 1); // one past the highest known season
+                $created[] = $next_season;
+                update_option('team_oversight_created_seasons', array_values(array_unique(array_map('strval', $created))));
+                echo '<div class="notice notice-success"><p>Season <strong>' . esc_html($next_season) . '</strong> created — it now appears in all season selectors. Set its season dates and fee matrix here when ready, and open its trial applications from the Trial Applications settings.</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            }
+        }
+
         // Save season start/end dates
         if (isset($_POST['action']) && $_POST['action'] === 'save_season_dates') {
             if (isset($_POST['season_dates_nonce']) && wp_verify_nonce($_POST['season_dates_nonce'], 'save_season_dates') && current_user_can('manage_options')) {
@@ -543,13 +559,22 @@ class TeamOversight_Fees {
             <h1>Configuration</h1>
             
             <!-- Season Selector -->
-            <div class="season-filter" style="margin-bottom: 20px;">
+            <div class="season-filter" style="margin-bottom: 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                 <label for="season-select"><strong>Season:</strong></label>
-                <select id="season-select" onchange="location.href=this.value;" style="margin-left: 10px;">
+                <select id="season-select" onchange="location.href=this.value;">
                     <?php foreach ($available_seasons as $season): ?>
                         <option value="<?php echo admin_url('admin.php?page=team-oversight-fees&season=' . $season); ?>" <?php selected($selected_season, $season); ?>><?php echo esc_html($season); ?></option>
                     <?php endforeach; ?>
                 </select>
+                <?php
+                $created_list = get_option('team_oversight_created_seasons', array());
+                $known_max = max(array_map('intval', array_merge($available_seasons, is_array($created_list) ? $created_list : array())));
+                ?>
+                <form method="post" style="display: inline; margin-left: 10px;" onsubmit="return confirm('Create season <?php echo intval($known_max) + 1; ?>? It will appear in every season selector, ready for dates, fee matrix and trial settings.');">
+                    <input type="hidden" name="action" value="create_season">
+                    <?php wp_nonce_field('create_season', 'create_season_nonce'); ?>
+                    <button type="submit" class="button">+ Create season <?php echo intval($known_max) + 1; ?></button>
+                </form>
             </div>
             
             <!-- Season Context Note -->
@@ -1052,10 +1077,12 @@ class TeamOversight_Fees {
         $seasons_invoices = $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}team_invoices ORDER BY season DESC");
         $seasons_trials = $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}trial_applications ORDER BY season DESC");
         
-        // Merge and deduplicate all seasons from different tables
-        $all_seasons = array_unique(array_merge($seasons_assignments, $seasons_invoices, $seasons_trials));
+        // Merge and deduplicate all seasons from different tables, plus
+        // explicitly created future seasons.
+        $created_seasons = get_option('team_oversight_created_seasons', array());
+        $all_seasons = array_unique(array_map('strval', array_merge($seasons_assignments, $seasons_invoices, $seasons_trials, is_array($created_seasons) ? $created_seasons : array())));
         rsort($all_seasons); // Sort descending
-        
+
         $current_year = date('Y');
         $next_year = $current_year + 1;
         $previous_year = $current_year - 1;
@@ -1084,10 +1111,19 @@ class TeamOversight_Fees {
                 $filtered_seasons[] = $year;
             }
         }
+        // Explicitly created seasons always show, even beyond next year.
+        if (is_array($created_seasons)) {
+            foreach ($created_seasons as $created) {
+                if (!in_array($created, $filtered_seasons)) {
+                    $filtered_seasons[] = $created;
+                }
+            }
+        }
+        $filtered_seasons = array_values(array_unique(array_map('strval', $filtered_seasons)));
         rsort($filtered_seasons);
         return $filtered_seasons;
     }
-    
+
     public function get_fee_matrix_for_season($season) {
         global $wpdb;
         

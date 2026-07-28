@@ -230,9 +230,9 @@ class TeamOversight_Trials {
                         <th><label for="season">Season</label></th>
                         <td>
                             <select name="season" id="season" required>
-                                <?php $current_year = date('Y'); ?>
-                                <option value="<?php echo $current_year; ?>" selected><?php echo $current_year; ?></option>
-                                <option value="<?php echo $current_year + 1; ?>"><?php echo $current_year + 1; ?></option>
+                                <?php foreach (self::get_open_seasons() as $i => $open_season): ?>
+                                    <option value="<?php echo esc_attr($open_season); ?>" <?php selected($i, 0); ?>><?php echo esc_html($open_season); ?></option>
+                                <?php endforeach; ?>
                             </select>
                         </td>
                     </tr>
@@ -790,6 +790,9 @@ class TeamOversight_Trials {
             wp_send_json_error(array('message' => 'Please complete your profile information before submitting your trial application. Missing fields: ' . implode(', ', $profile_validation['missing_fields'])));
         }
         $season = sanitize_text_field($_POST['season']);
+        if (!self::applications_open($season)) {
+            wp_send_json_error(array('message' => 'Applications for the ' . $season . ' season are closed.'));
+        }
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config();
         $interested_teams = isset($_POST['interested_teams']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['interested_teams']), array_keys($teams_config))) : array();
@@ -1183,9 +1186,34 @@ class TeamOversight_Trials {
         return false;
     }
     
-    /** Master switch: is the club currently taking trial applications? */
-    public static function applications_open() {
-        return get_option('team_oversight_trials_open', '1') === '1';
+    /**
+     * Seasons currently open for trial applications. Never-configured
+     * default: current + next year (matching pre-1.28 behaviour), unless
+     * the old global switch was turned off.
+     */
+    public static function get_open_seasons() {
+        $open = get_option('team_oversight_trial_open_seasons', null);
+        if (is_array($open)) {
+            $open = array_values(array_filter(array_map('strval', $open)));
+            sort($open);
+            return $open;
+        }
+        if (get_option('team_oversight_trials_open', '1') !== '1') {
+            return array();
+        }
+        return array(date('Y'), strval(intval(date('Y')) + 1));
+    }
+
+    /**
+     * Is the club taking trial applications — for a specific season, or
+     * at all (null)?
+     */
+    public static function applications_open($season = null) {
+        $open = self::get_open_seasons();
+        if ($season === null) {
+            return !empty($open);
+        }
+        return in_array(strval($season), $open, true);
     }
 
     public function validate_user_profile($user_id) {
