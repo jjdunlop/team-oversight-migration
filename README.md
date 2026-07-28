@@ -92,6 +92,7 @@ Front-end form via `[team_trial_form]` (login required; prompts to log in / crea
 - **Prefilled, read-only account details** (name, email, phone, DOB, gender, institution) — edited via the profile, never the form. Submission requires only what trials genuinely need: name, contact number, DOB and gender (age rules + competition). MUS/degree fields are **not** required to apply — they're a fee-class matter, collected by the annual profile wall and resolved at invoicing.
 - Competition (men's/women's) derives from profile gender; the question is only asked when the profile can't answer (unset/non-binary).
 - Questionnaire mirrors the club's VVL trials form: VVL history (with conditional returning-player and club-transfer sections), international player details, team selection (real teams, grouped by gender, with ineligible teams greyed out live by competition and DOB cutoff — enforced server-side too), positions, venue availability, trial-date availability, experience. Answers stored as JSON (`form_data`).
+- **Open/closed switch**: the "Accepting trial applications" checkbox (Trial Applications → settings) closes the form between seasons — visitors see a friendly closed notice, submissions are rejected server-side, and existing applicants keep seeing their trial number and status. The settings summary shows APPLICATIONS CLOSED in red while off.
 - **Trial fee**: configure a product in the Trial Applications settings box. Submissions save as `awaiting_payment`, go to checkout, and become reviewable (`pending`) when the order is paid. Unpaid applications expire after 7 days; "Mark as Paid" covers offline payments. No fee product = direct submission.
 - **Trial numbers**: per-season sequential number assigned at submission, shown persistently to the player (status panel on the form page) and throughout admin/coach views — players can write it on themselves at busy trials.
 - Optional **training-info page URL** linked at the top of the form so players pick teams by training venue/day.
@@ -164,7 +165,7 @@ One append-only activity log, two windows onto it (filter by event type, search 
 |--------|----------|
 | `team_oversight_teams` / `team_oversight_team_meta` | Configuration → Team Management |
 | `team_oversight_season_dates` | Configuration → Season Dates |
-| `team_oversight_trial_fee_product`, `team_oversight_training_info_url` | Trial Applications → settings |
+| `team_oversight_trial_fee_product`, `team_oversight_training_info_url`, `team_oversight_trials_open` | Trial Applications → settings |
 | `team_oversight_payment_product` | Payment Management → settings |
 | `team_oversight_vv_reg_url`, `team_oversight_kit_shop_url`, `team_oversight_fees_page_url`, `team_oversight_kit_products` | Player Readiness → settings |
 | `team_oversight_membership_category_rules` | Club Membership → category rules |

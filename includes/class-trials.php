@@ -169,7 +169,16 @@ class TeamOversight_Trials {
                     </div>
                 </div>
             <?php endif; ?>
-            
+
+            <?php if (!self::applications_open()): ?>
+                <div class="trial-closed-notice" style="border: 2px solid #e0e0e0; background: #f9f9f9; border-radius: 8px; padding: 16px 20px;">
+                    <p style="margin: 0 0 6px 0;"><strong>Trial applications are currently closed.</strong></p>
+                    <p style="margin: 0;">Keep an eye on the club's socials and emails for when applications open for the next season.</p>
+                </div>
+        </div>
+                <?php return ob_get_clean(); ?>
+            <?php endif; ?>
+
             <?php if (!$profile_validation['is_complete']): ?>
                 <div class="trial-profile-incomplete" style="border: 2px solid #dc3232; background: #fdf0f0; border-radius: 8px; padding: 14px 18px; margin-bottom: 20px;">
                     <p style="margin: 0 0 6px 0;"><strong>⚠ A few profile details are missing:</strong> <?php echo esc_html(implode(', ', $profile_validation['missing_fields'])); ?></p>
@@ -770,7 +779,11 @@ class TeamOversight_Trials {
         }
         
         $user = wp_get_current_user();
-        
+
+        if (!self::applications_open()) {
+            wp_send_json_error(array('message' => 'Trial applications are currently closed.'));
+        }
+
         // Validate profile completeness before allowing submission
         $profile_validation = $this->validate_user_profile($user->ID);
         if (!$profile_validation['is_complete']) {
@@ -1170,6 +1183,11 @@ class TeamOversight_Trials {
         return false;
     }
     
+    /** Master switch: is the club currently taking trial applications? */
+    public static function applications_open() {
+        return get_option('team_oversight_trials_open', '1') === '1';
+    }
+
     public function validate_user_profile($user_id) {
         // Only what a trial application genuinely needs: contact details
         // plus DOB and gender (age rules and competition). MUS/degree
