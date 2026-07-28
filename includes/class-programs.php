@@ -26,6 +26,10 @@ class TeamOversight_Programs {
         // Attendance ticks post back and redirect (PRG) so a refresh never
         // re-submits; state is explicit, not a flip.
         add_action('template_redirect', array($this, 'maybe_handle_attendance'));
+        // Instant marking + a poll so supervisors on different courts see
+        // each other's ticks without reloading.
+        add_action('wp_ajax_murvc_mark_attendance', array($this, 'ajax_mark_attendance'));
+        add_action('wp_ajax_murvc_attendance_state', array($this, 'ajax_attendance_state'));
         add_shortcode('session_attendance', array($this, 'render_shortcode'));
         // Mixed Development runs weekly and has its own page, so it gets a
         // dedicated shortcode — a stable place to hang program-specific
@@ -58,8 +62,24 @@ class TeamOversight_Programs {
             return array();
         }
         return array(
-            'mixed-dev' => array('name' => 'Mixed Development', 'product_id' => intval($product_id)),
+            // Mixed Dev runs Tuesdays; the variation labels carry no year,
+            // so the weekday is what pins each one to the right year.
+            'mixed-dev' => array('name' => 'Mixed Development', 'product_id' => intval($product_id), 'weekday' => 2),
         );
+    }
+
+    /** ISO weekday (1 Mon … 7 Sun) a program runs on, or 0 if unset. */
+    public static function get_program_weekday($program) {
+        if (empty($program['weekday'])) {
+            return 0;
+        }
+        $value = $program['weekday'];
+        if (is_numeric($value)) {
+            $n = intval($value);
+            return ($n >= 1 && $n <= 7) ? $n : 0;
+        }
+        $ts = strtotime((string) $value);
+        return $ts ? intval(date('N', $ts)) : 0;
     }
 
     public static function get_program($key) {
@@ -125,18 +145,28 @@ class TeamOversight_Programs {
     // Attendance ticks
     // ------------------------------------------------------------------
 
-    /** order_id => attended (bool) for one session. */
+    /**
+     * order_id => array(attended, by, at) for one session. Includes who
+     * ticked it so supervisors on different courts can see each other's
+     * marks rather than wondering.
+     */
     public static function get_attendance($program_key, $session_label) {
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT order_id, attended FROM {$wpdb->prefix}team_program_attendance
-            WHERE program_key = %s AND session_label = %s
+            SELECT a.order_id, a.attended, a.marked_at, u.display_name AS marked_by
+            FROM {$wpdb->prefix}team_program_attendance a
+            LEFT JOIN {$wpdb->users} u ON u.ID = a.marked_by
+            WHERE a.program_key = %s AND a.session_label = %s
         ", $program_key, $session_label));
 
         $marked = array();
         foreach ($rows as $row) {
-            $marked[intval($row->order_id)] = (bool) intval($row->attended);
+            $marked[intval($row->order_id)] = array(
+                'attended' => (bool) intval($row->attended),
+                'by' => $row->marked_by ? $row->marked_by : '',
+                'at' => $row->marked_at ? date('g:ia', strtotime($row->marked_at)) : '',
+            );
         }
         return $marked;
     }
@@ -152,9 +182,80 @@ class TeamOversight_Programs {
         ", $program_key, $session_label, intval($order_id), intval($user_id), $attended ? 1 : 0, get_current_user_id(), current_time('mysql')));
     }
 
+    /** Shared by both AJAX endpoints: validate and return the request context. */
+    private function ajax_context() {
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'murvc_attendance')) {
+            wp_send_json_error('Security check failed');
+        }
+        $program_key = isset($_POST['program_key']) ? sanitize_key($_POST['program_key']) : '';
+        $program = self::get_program($program_key);
+        if (!$program || !self::user_can_view($program_key)) {
+            wp_send_json_error('You do not have access to this program');
+        }
+        return array(
+            'key' => $program_key,
+            'program' => $program,
+            'session' => sanitize_text_field(wp_unslash($_POST['session_label'])),
+        );
+    }
+
+    /** Count the spots currently marked present for a session. */
+    private function checked_in_count($program, $program_key, $session_label) {
+        $marked = self::get_attendance($program_key, $session_label);
+        $count = 0;
+        foreach (self::get_attendees($program['product_id'], $session_label) as $attendee) {
+            if (!empty($marked[$attendee['order_id']]['attended'])) {
+                $count += $attendee['qty'];
+            }
+        }
+        return $count;
+    }
+
+    public function ajax_mark_attendance() {
+        $ctx = $this->ajax_context();
+
+        self::set_attendance(
+            $ctx['key'],
+            $ctx['session'],
+            intval($_POST['order_id']),
+            !empty($_POST['attended']),
+            intval($_POST['attendee_user_id'])
+        );
+
+        $marked = self::get_attendance($ctx['key'], $ctx['session']);
+        $entry = isset($marked[intval($_POST['order_id'])]) ? $marked[intval($_POST['order_id'])] : null;
+
+        wp_send_json_success(array(
+            'attended' => (bool) ($entry && $entry['attended']),
+            'note' => ($entry && $entry['attended'] && $entry['by'])
+                ? 'Marked by ' . $entry['by'] . ($entry['at'] ? ' at ' . $entry['at'] : '')
+                : '',
+            'checked_in' => $this->checked_in_count($ctx['program'], $ctx['key'], $ctx['session']),
+        ));
+    }
+
+    public function ajax_attendance_state() {
+        $ctx = $this->ajax_context();
+
+        $state = array();
+        foreach (self::get_attendance($ctx['key'], $ctx['session']) as $order_id => $entry) {
+            $state[$order_id] = array(
+                'attended' => (bool) $entry['attended'],
+                'note' => ($entry['attended'] && $entry['by'])
+                    ? 'Marked by ' . $entry['by'] . ($entry['at'] ? ' at ' . $entry['at'] : '')
+                    : '',
+            );
+        }
+
+        wp_send_json_success(array(
+            'marked' => $state,
+            'checked_in' => $this->checked_in_count($ctx['program'], $ctx['key'], $ctx['session']),
+        ));
+    }
+
     /**
-     * Process an attendance tick before output, then redirect back so a
-     * refresh can't resubmit. State is explicit (attended=1/0).
+     * No-JS fallback: process an attendance tick before output, then
+     * redirect back so a refresh can't resubmit. State is explicit.
      */
     public function maybe_handle_attendance() {
         if (!isset($_POST['murvc_attendance_action']) || $_POST['murvc_attendance_action'] !== 'mark') {
@@ -191,7 +292,7 @@ class TeamOversight_Programs {
      * parsed to a real date so they sort and "today" can be found.
      * Returns array of array(label, date) sorted chronologically.
      */
-    public static function get_sessions($product_id) {
+    public static function get_sessions($product_id, $weekday = 0) {
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare("
@@ -209,7 +310,7 @@ class TeamOversight_Programs {
             if (isset($sessions[$label])) {
                 continue;
             }
-            $date = self::parse_session_date($label, $year);
+            $date = self::parse_session_date($label, $year, $weekday);
             $sessions[$label] = array('label' => $label, 'date' => $date);
         }
 
@@ -222,13 +323,41 @@ class TeamOversight_Programs {
     /**
      * "14-Jul" / "14 Jul" / "2026-07-14" -> Y-m-d. Empty when unparseable
      * (those sessions still list, just without date intelligence).
+     *
+     * Year-less labels are ambiguous, so when the program runs on a known
+     * weekday we pick the candidate year where the date actually falls on
+     * that day — the only reliable way to tell a "13-May" that belongs to
+     * last season from this season's dates. Ties (impossible for a weekly
+     * program, since weekdays shift each year) resolve to the year nearest
+     * today, and anything that matches no candidate falls back to $year.
      */
-    public static function parse_session_date($label, $year) {
+    public static function parse_session_date($label, $year, $weekday = 0) {
         $label = trim($label);
         if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $label)) {
             return $label;
         }
         $normalised = str_replace(array('-', '.', '/'), ' ', $label);
+
+        if ($weekday >= 1 && $weekday <= 7) {
+            $today = strtotime(current_time('Y-m-d'));
+            $best = '';
+            $best_distance = null;
+            foreach (array($year - 2, $year - 1, $year, $year + 1) as $candidate) {
+                $ts = strtotime($normalised . ' ' . $candidate);
+                if (!$ts || intval(date('N', $ts)) !== $weekday) {
+                    continue;
+                }
+                $distance = abs($ts - $today);
+                if ($best_distance === null || $distance < $best_distance) {
+                    $best = date('Y-m-d', $ts);
+                    $best_distance = $distance;
+                }
+            }
+            if ($best !== '') {
+                return $best;
+            }
+        }
+
         $ts = strtotime($normalised . ' ' . $year);
         return $ts ? date('Y-m-d', $ts) : '';
     }
@@ -310,7 +439,7 @@ class TeamOversight_Programs {
      * still reads as a first-timer at their first one.
      * Returns array keyed by user id ('u123') or lowercased email.
      */
-    public static function get_prior_session_counts($product_id, $before_date) {
+    public static function get_prior_session_counts($product_id, $before_date, $weekday = 0) {
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare("
@@ -330,7 +459,7 @@ class TeamOversight_Programs {
         $year = intval(wp_date('Y'));
         $counts = array();
         foreach ($rows as $row) {
-            $date = self::parse_session_date($row->label, $year);
+            $date = self::parse_session_date($row->label, $year, $weekday);
             // Undated labels can't be ordered, so they don't count as prior.
             if ($date === '' || ($before_date !== '' && $date >= $before_date)) {
                 continue;
@@ -377,7 +506,8 @@ class TeamOversight_Programs {
     public static function render_roster($program, $selected_label, $base_url, $query_arg = 'session', $options = array()) {
         $options = array_merge(array('show_history' => true, 'program_key' => ''), $options);
         $program_key = $options['program_key'];
-        $sessions = self::get_sessions($program['product_id']);
+        $weekday = self::get_program_weekday($program);
+        $sessions = self::get_sessions($program['product_id'], $weekday);
 
         if (empty($sessions)) {
             return '<p>No sessions found for ' . esc_html($program['name']) . '. Check the program\'s product has published date variations.</p>';
@@ -399,7 +529,7 @@ class TeamOversight_Programs {
         $is_today = ($session_date !== '' && $session_date === current_time('Y-m-d'));
 
         // First-timers: nobody has "attended before" without prior sessions.
-        $prior_counts = $options['show_history'] ? self::get_prior_session_counts($program['product_id'], $session_date) : array();
+        $prior_counts = $options['show_history'] ? self::get_prior_session_counts($program['product_id'], $session_date, $weekday) : array();
         $first_timers = 0;
         if ($options['show_history']) {
             foreach ($attendees as $attendee) {
@@ -414,7 +544,11 @@ class TeamOversight_Programs {
         $marked = $program_key !== '' ? self::get_attendance($program_key, $selected_label) : array();
         $checked_in = 0;
         foreach ($attendees as $index => $attendee) {
-            $attendees[$index]['attended'] = !empty($marked[$attendee['order_id']]);
+            $entry = isset($marked[$attendee['order_id']]) ? $marked[$attendee['order_id']] : null;
+            $attendees[$index]['attended'] = ($entry && $entry['attended']);
+            $attendees[$index]['marked_note'] = ($entry && $entry['attended'] && $entry['by'])
+                ? 'Marked by ' . $entry['by'] . ($entry['at'] ? ' at ' . $entry['at'] : '')
+                : '';
             if ($attendees[$index]['attended']) {
                 $checked_in += $attendee['qty'];
             }
@@ -434,7 +568,12 @@ class TeamOversight_Programs {
                 <select id="murvc-session-select" onchange="location.href=this.value;">
                     <?php foreach ($sessions as $label => $session): ?>
                         <option value="<?php echo esc_url(add_query_arg($query_arg, rawurlencode($label), $base_url)); ?>" <?php selected($selected_label, $label); ?>>
-                            <?php echo esc_html($label); ?><?php echo ($session['date'] !== '' && $session['date'] === current_time('Y-m-d')) ? ' — today' : ''; ?>
+                            <?php
+                            // Show the resolved date so year-less labels
+                            // ("13-May") can't be mistaken for this season.
+                            echo esc_html($session['date'] !== '' ? date('D j M Y', strtotime($session['date'])) : $label);
+                            echo ($session['date'] !== '' && $session['date'] === current_time('Y-m-d')) ? ' — today' : '';
+                            ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
@@ -498,7 +637,12 @@ class TeamOversight_Programs {
                             </span>
                             <?php if ($program_key !== ''): ?>
                                 <span class="cac-actions">
-                                    <form method="post" class="murvc-attendance-form">
+                                    <?php if (!empty($attendee['marked_note'])): ?>
+                                        <small class="murvc-marked-note"><?php echo esc_html($attendee['marked_note']); ?></small>
+                                    <?php endif; ?>
+                                    <form method="post" class="murvc-attendance-form"
+                                          data-order="<?php echo intval($attendee['order_id']); ?>"
+                                          data-user="<?php echo intval($attendee['user_id']); ?>">
                                         <input type="hidden" name="murvc_attendance_action" value="mark">
                                         <input type="hidden" name="program_key" value="<?php echo esc_attr($program_key); ?>">
                                         <input type="hidden" name="session_label" value="<?php echo esc_attr($selected_label); ?>">
@@ -521,20 +665,132 @@ class TeamOversight_Programs {
         </div>
         <script>
         (function () {
+            var root = document.querySelector('.murvc-sessions');
+            if (!root) { return; }
+            var ajaxUrl = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            var nonce = <?php echo wp_json_encode(wp_create_nonce('murvc_attendance')); ?>;
+            var programKey = <?php echo wp_json_encode($program_key); ?>;
+            var sessionLabel = <?php echo wp_json_encode($selected_label); ?>;
+
+            // --- Search ---------------------------------------------------
             var box = document.getElementById('murvc-attendee-search');
-            if (!box) { return; }
-            var cards = document.querySelectorAll('.murvc-sessions .coach-applicant-card');
             var counter = document.querySelector('.murvc-search-count');
-            box.addEventListener('input', function () {
-                var term = box.value.toLowerCase().trim();
-                var shown = 0;
-                cards.forEach(function (card) {
-                    var match = term === '' || (card.dataset.search || '').indexOf(term) !== -1;
-                    card.style.display = match ? '' : 'none';
-                    if (match) { shown++; }
+            if (box) {
+                box.addEventListener('input', function () {
+                    var term = box.value.toLowerCase().trim();
+                    var shown = 0;
+                    root.querySelectorAll('.coach-applicant-card').forEach(function (card) {
+                        var match = term === '' || (card.dataset.search || '').indexOf(term) !== -1;
+                        card.style.display = match ? '' : 'none';
+                        if (match) { shown++; }
+                    });
+                    counter.textContent = term === '' ? '' : shown + ' match' + (shown === 1 ? '' : 'es');
                 });
-                counter.textContent = term === '' ? '' : shown + ' match' + (shown === 1 ? '' : 'es');
+            }
+
+            if (!programKey) { return; }
+
+            // --- Marking (no page reload) --------------------------------
+            function applyState(card, attended, note) {
+                var form = card.querySelector('.murvc-attendance-form');
+                var button = form.querySelector('button');
+                var noteEl = card.querySelector('.murvc-marked-note');
+                card.classList.toggle('murvc-attended', attended);
+                form.querySelector('input[name="attended"]').value = attended ? '0' : '1';
+                button.textContent = attended ? '✔ Here — undo' : 'Mark here';
+                button.className = attended ? 'button murvc-untick' : 'button button-primary murvc-tick';
+                if (note) {
+                    if (!noteEl) {
+                        noteEl = document.createElement('small');
+                        noteEl.className = 'murvc-marked-note';
+                        form.parentNode.insertBefore(noteEl, form);
+                    }
+                    noteEl.textContent = note;
+                } else if (noteEl) {
+                    noteEl.remove();
+                }
+                // Ticked people drop to the bottom of their list.
+                var list = card.parentNode;
+                if (attended) { list.appendChild(card); }
+            }
+
+            function refreshCount(count) {
+                var el = document.querySelector('.murvc-checked-count');
+                if (el && typeof count === 'number') { el.textContent = count; }
+            }
+
+            root.addEventListener('submit', function (event) {
+                var form = event.target.closest('.murvc-attendance-form');
+                if (!form) { return; }
+                event.preventDefault();
+
+                var button = form.querySelector('button');
+                var card = form.closest('.coach-applicant-card');
+                var wanted = form.querySelector('input[name="attended"]').value === '1';
+                button.disabled = true;
+                var original = button.textContent;
+                button.textContent = 'Saving…';
+
+                var body = new URLSearchParams({
+                    action: 'murvc_mark_attendance',
+                    nonce: nonce,
+                    program_key: programKey,
+                    session_label: sessionLabel,
+                    order_id: form.dataset.order,
+                    attendee_user_id: form.dataset.user,
+                    attended: wanted ? '1' : '0'
+                });
+
+                fetch(ajaxUrl, {method: 'POST', credentials: 'same-origin', body: body})
+                    .then(function (r) { return r.json(); })
+                    .then(function (res) {
+                        button.disabled = false;
+                        if (!res || !res.success) {
+                            button.textContent = original;
+                            alert(res && res.data ? res.data : 'Could not save — please try again.');
+                            return;
+                        }
+                        applyState(card, res.data.attended, res.data.note);
+                        refreshCount(res.data.checked_in);
+                    })
+                    .catch(function () {
+                        button.disabled = false;
+                        button.textContent = original;
+                        alert('Network problem — please try again.');
+                    });
             });
+
+            // --- Stay in sync with other supervisors ----------------------
+            // Several people can be marking at once (multiple courts), so
+            // poll for everyone else's ticks; our own writes are atomic
+            // upserts server-side, so nothing is lost either way.
+            setInterval(function () {
+                fetch(ajaxUrl, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    body: new URLSearchParams({
+                        action: 'murvc_attendance_state',
+                        nonce: nonce,
+                        program_key: programKey,
+                        session_label: sessionLabel
+                    })
+                })
+                    .then(function (r) { return r.json(); })
+                    .then(function (res) {
+                        if (!res || !res.success) { return; }
+                        root.querySelectorAll('.coach-applicant-card').forEach(function (card) {
+                            var form = card.querySelector('.murvc-attendance-form');
+                            if (!form) { return; }
+                            var state = res.data.marked[form.dataset.order];
+                            var attended = !!(state && state.attended);
+                            if (attended !== card.classList.contains('murvc-attended')) {
+                                applyState(card, attended, state ? state.note : '');
+                            }
+                        });
+                        refreshCount(res.data.checked_in);
+                    })
+                    .catch(function () {});
+            }, 20000);
         })();
         </script>
         <?php echo self::render_styles(); ?>
@@ -570,6 +826,7 @@ class TeamOversight_Programs {
         .murvc-sessions .cac-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
         .murvc-sessions .cac-actions { margin-left: auto; }
         .murvc-sessions .murvc-tick, .murvc-sessions .murvc-untick { padding: 6px 14px; font-size: 14px; }
+        .murvc-marked-note { color: #646970; font-size: 11px; margin-right: 8px; }
         @media (max-width: 640px) {
             .murvc-sessions .cac-actions { margin-left: 0; width: 100%; }
             .murvc-sessions .murvc-tick, .murvc-sessions .murvc-untick { width: 100%; padding: 10px; }
@@ -732,31 +989,111 @@ class TeamOversight_Programs {
 
             <form method="post" style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; max-width: 720px;">
                 <h2 style="margin-top: 0;">Programs</h2>
-                <p class="description">One line per program: <code>Name | product ID</code>. The product's date variations become the sessions. Each program gets its own admin sub-page (reload after saving).</p>
+                <p class="description">One line per program: <code>Name | product ID | weekday</code>. The product's date variations become the sessions; each program gets its own admin sub-page (reload after saving). <strong>Weekday is optional but important</strong> when the variation labels have no year (e.g. "13-May") — it pins each session to the right year, so last season's dates sort and filter correctly. Use a day name or 1–7 (Mon–Sun).</p>
                 <textarea name="programs" rows="5" style="width: 100%; font-family: monospace;"><?php
                     $lines = array();
                     foreach ($programs as $program) {
-                        $lines[] = $program['name'] . ' | ' . $program['product_id'];
+                        $weekday = self::get_program_weekday($program);
+                        $lines[] = $program['name'] . ' | ' . $program['product_id']
+                            . ($weekday ? ' | ' . date('l', strtotime('Sunday +' . $weekday . ' days')) : '');
                     }
                     echo esc_textarea(implode("\n", $lines));
                 ?></textarea>
 
                 <h2>Supervisors</h2>
-                <p class="description">Per program: email addresses (one per line) of the people who can see that program's attendance and tick people off. Administrators always have access to everything.</p>
+                <p class="description">Per program: the accounts that can see that program's attendance and tick people off. Search by name or email, click to add. Administrators always have access to everything.</p>
                 <?php foreach ($programs as $key => $program): ?>
                     <?php
-                    $emails = array();
                     $own = (!empty($program['supervisors']) && is_array($program['supervisors'])) ? $program['supervisors'] : array();
-                    foreach ($own as $user_id) {
-                        $user = get_userdata(intval($user_id));
-                        if ($user) {
-                            $emails[] = $user->user_email;
-                        }
-                    }
                     ?>
-                    <p style="margin-bottom: 4px;"><strong><?php echo esc_html($program['name']); ?></strong></p>
-                    <textarea name="supervisors[<?php echo esc_attr($key); ?>]" rows="4" style="width: 100%; font-family: monospace; margin-bottom: 12px;"><?php echo esc_textarea(implode("\n", $emails)); ?></textarea>
+                    <div class="murvc-sup-group" data-program="<?php echo esc_attr($key); ?>" style="margin-bottom: 18px;">
+                        <p style="margin-bottom: 4px;"><strong><?php echo esc_html($program['name']); ?></strong></p>
+                        <div class="murvc-sup-list" style="margin-bottom: 6px;">
+                            <?php foreach ($own as $user_id): ?>
+                                <?php $user = get_userdata(intval($user_id)); ?>
+                                <?php if (!$user) { continue; } ?>
+                                <span class="murvc-sup-chip" style="display: inline-flex; align-items: center; gap: 6px; background: #f0f0f1; border: 1px solid #c3c4c7; border-radius: 12px; padding: 3px 6px 3px 12px; margin: 0 6px 6px 0;">
+                                    <?php echo esc_html($user->display_name); ?> <small style="color: #646970;"><?php echo esc_html($user->user_email); ?></small>
+                                    <input type="hidden" name="supervisors[<?php echo esc_attr($key); ?>][]" value="<?php echo esc_attr($user->user_email); ?>">
+                                    <button type="button" class="button-link murvc-sup-remove" title="Remove" style="color: #a00; text-decoration: none; font-size: 16px; line-height: 1;">&times;</button>
+                                </span>
+                            <?php endforeach; ?>
+                        </div>
+                        <input type="text" class="murvc-sup-search" autocomplete="off" placeholder="Search members by name or email…" style="width: 320px;">
+                        <div class="murvc-sup-results" style="display: none; position: absolute; z-index: 1000; background: #fff; border: 1px solid #ccc; max-height: 200px; overflow-y: auto; width: 320px;"></div>
+                    </div>
                 <?php endforeach; ?>
+
+                <script>
+                (function () {
+                    var ajaxUrl = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+                    var nonce = <?php echo wp_json_encode(wp_create_nonce('search_users')); ?>;
+
+                    document.querySelectorAll('.murvc-sup-group').forEach(function (group) {
+                        var key = group.dataset.program;
+                        var input = group.querySelector('.murvc-sup-search');
+                        var results = group.querySelector('.murvc-sup-results');
+                        var list = group.querySelector('.murvc-sup-list');
+                        var timer = null;
+
+                        function addSupervisor(name, email) {
+                            if (list.querySelector('input[value="' + email.replace(/"/g, '\\"') + '"]')) { return; }
+                            var chip = document.createElement('span');
+                            chip.className = 'murvc-sup-chip';
+                            chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;background:#f0f0f1;border:1px solid #c3c4c7;border-radius:12px;padding:3px 6px 3px 12px;margin:0 6px 6px 0;';
+                            chip.innerHTML = '<span></span> <small style="color:#646970;"></small>'
+                                + '<input type="hidden" name="supervisors[' + key + '][]">'
+                                + '<button type="button" class="button-link murvc-sup-remove" title="Remove" style="color:#a00;text-decoration:none;font-size:16px;line-height:1;">&times;</button>';
+                            chip.querySelector('span').textContent = name;
+                            chip.querySelector('small').textContent = email;
+                            chip.querySelector('input').value = email;
+                            list.appendChild(chip);
+                        }
+
+                        input.addEventListener('input', function () {
+                            clearTimeout(timer);
+                            var query = input.value.trim();
+                            if (query.length < 2) { results.style.display = 'none'; return; }
+                            timer = setTimeout(function () {
+                                fetch(ajaxUrl, {
+                                    method: 'POST',
+                                    credentials: 'same-origin',
+                                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                                    body: 'action=search_users&search_type=both&nonce=' + nonce + '&query=' + encodeURIComponent(query)
+                                })
+                                    .then(function (r) { return r.json(); })
+                                    .then(function (res) {
+                                        results.innerHTML = '';
+                                        if (!res.success || !res.data || !res.data.length) { results.style.display = 'none'; return; }
+                                        res.data.forEach(function (user) {
+                                            var row = document.createElement('div');
+                                            row.style.cssText = 'padding:6px 10px;cursor:pointer;';
+                                            row.textContent = user.name + ' — ' + user.email;
+                                            row.addEventListener('mouseenter', function () { row.style.background = '#f0f0f1'; });
+                                            row.addEventListener('mouseleave', function () { row.style.background = '#fff'; });
+                                            row.addEventListener('click', function () {
+                                                addSupervisor(user.name, user.email);
+                                                input.value = '';
+                                                results.style.display = 'none';
+                                            });
+                                            results.appendChild(row);
+                                        });
+                                        results.style.display = 'block';
+                                    });
+                            }, 250);
+                        });
+
+                        list.addEventListener('click', function (event) {
+                            if (event.target.classList.contains('murvc-sup-remove')) {
+                                event.target.closest('.murvc-sup-chip').remove();
+                            }
+                        });
+                        document.addEventListener('click', function (event) {
+                            if (!group.contains(event.target)) { results.style.display = 'none'; }
+                        });
+                    });
+                })();
+                </script>
 
                 <?php if (!empty($legacy)): ?>
                     <p class="description"><strong>Note:</strong> <?php echo count($legacy); ?> club-wide supervisor(s) from the previous setting still have access to every program. Move them into the per-program boxes above, then clear this list.
@@ -799,8 +1136,10 @@ class TeamOversight_Programs {
             if ($line === '' || strpos($line, '|') === false) {
                 continue;
             }
-            list($name, $product_id) = array_map('trim', explode('|', $line, 2));
-            $product_id = intval($product_id);
+            $parts = array_map('trim', explode('|', $line));
+            $name = isset($parts[0]) ? $parts[0] : '';
+            $product_id = isset($parts[1]) ? intval($parts[1]) : 0;
+            $weekday = isset($parts[2]) ? self::get_program_weekday(array('weekday' => $parts[2])) : 0;
             if ($name === '' || !$product_id) {
                 continue;
             }
@@ -810,8 +1149,11 @@ class TeamOversight_Programs {
             // reported rather than silently dropped.
             $ids = array();
             if (isset($submitted_supervisors[$key])) {
-                foreach (explode("\n", sanitize_textarea_field(wp_unslash($submitted_supervisors[$key]))) as $email_line) {
-                    $email = sanitize_email(trim($email_line));
+                $entries = is_array($submitted_supervisors[$key])
+                    ? $submitted_supervisors[$key]
+                    : explode("\n", (string) $submitted_supervisors[$key]);
+                foreach ($entries as $entry) {
+                    $email = sanitize_email(trim(wp_unslash($entry)));
                     if ($email === '') {
                         continue;
                     }
@@ -826,7 +1168,7 @@ class TeamOversight_Programs {
             $ids = array_values(array_unique($ids));
             $supervisor_total += count($ids);
 
-            $programs[$key] = array('name' => $name, 'product_id' => $product_id, 'supervisors' => $ids);
+            $programs[$key] = array('name' => $name, 'product_id' => $product_id, 'weekday' => $weekday, 'supervisors' => $ids);
         }
         update_option(self::PROGRAMS_OPTION, $programs);
 
