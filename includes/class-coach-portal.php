@@ -550,6 +550,25 @@ class TeamOversight_Coach_Portal {
         .verdict-chip-confirmed { background: #e2e6ea; color: #1b1e21; border: 1px solid #c6c8ca; }
 
         /* Application / Notes toggles look like buttons, not plain text. */
+        /* One typeface throughout the portal: headings, summaries, form
+           controls and tables all inherit the page body font instead of
+           the theme's mixed families. */
+        .coach-portal h2, .coach-portal h3, .coach-portal h4,
+        .coach-portal summary, .coach-portal input, .coach-portal select,
+        .coach-portal textarea, .coach-portal button, .coach-portal table,
+        .coach-portal dl, .coach-portal p {
+            font-family: inherit;
+        }
+
+        .coach-emergency {
+            font-size: 13px;
+            margin: 8px 0 2px 0;
+            padding: 6px 8px;
+            background: #fff7f0;
+            border-left: 3px solid #e07b00;
+            border-radius: 4px;
+        }
+
         .coach-app-details summary {
             display: inline-block;
             cursor: pointer;
