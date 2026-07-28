@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name: Team Oversight
- * Description: MURVC club management - club membership tiers (Club Membership menu) and VVL team oversight: trials, assignments, fees and dashboard (VVL Oversight menu).
- * Version: 1.32.0
- * Author: Team Management System
+ * Plugin Name: MURVC Club Manager
+ * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), and casual program attendance (Club Programs).
+ * Version: 1.33.0
+ * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
  * Text Domain: team-oversight
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.32.0');
+define('TEAM_OVERSIGHT_VERSION', '1.33.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -251,6 +251,7 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-memberships.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-members-page.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-stats-page.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-programs.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coach-portal.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-payments.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-readiness.php';
@@ -264,6 +265,7 @@ function team_oversight_init() {
     new TeamOversight_Memberships();
     new TeamOversight_Stats_Page(); // hooks the daily snapshot onto the membership cron
     new TeamOversight_Coach_Portal();
+    new TeamOversight_Programs();
     new TeamOversight_Payments();
     new TeamOversight_Readiness();
     

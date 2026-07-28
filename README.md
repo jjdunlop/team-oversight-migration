@@ -16,12 +16,15 @@
         B u m p .   S e t .   S p i k e .   A d m i n i s t r a t e .
 ```
 
-# Team Oversight Plugin
+# MURVC Club Manager
 
-MURVC's club management system for WordPress, integrating Ultimate Member (accounts/profiles) and WooCommerce (payments via Square). The admin splits into two areas:
+MURVC's club management system for WordPress, integrating Ultimate Member (accounts/profiles) and WooCommerce (payments via Square). The admin splits into three areas:
 
-- **Club Membership** — club-wide member list, time-bound membership tiers, membership history reporting
+- **Club Membership** — club-wide member list, time-bound membership tiers, membership history reporting, stats and logs
 - **VVL Oversight** — competition machinery: teams, trials, coach selections, team assignments, fees and payments, player readiness
+- **Club Programs** — attendance for casual programs (Mixed Development and anything else sold as a product with date variations)
+
+> The plugin folder is still `team-oversight-migration` and the constant is `TEAM_OVERSIGHT_VERSION`; the display name changed in 1.33.0. Renaming the folder/slug is a deliberate cutover-day job (it deactivates the plugin and changes the deploy path).
 
 ## Requirements
 
@@ -143,6 +146,17 @@ One append-only activity log, two windows onto it (filter by event type, search 
 - **VVL Oversight → Logs**: online and manual payments (amounts, notes, order refs), reminder emails sent, fee edits (old → new amount). Bulk reconciliation backfills deliberately stay out.
 - **Club Membership → Logs**: the membership lifecycle — **Granted** (first membership, or one that doesn't change current status), **Extended** (same tier, new end date), **Upgraded** (e.g. Associate → Full, message shows the transition), **Expired** (logged once by the daily role sync when the last grant lapses), **Revoked** (admin action, shows the tier held). Past-dated grants from seeding log as "recorded".
 
+---
+
+## Club Programs
+
+Casual programs (Mixed Development and similar) sell one WooCommerce product per program with a **variation per session date**, so "who is coming on Monday?" is already in the orders. This area reads it live — no separate attendance database.
+
+- **Programs** are configured in Club Programs → Settings as `Name | product ID` (Mixed Development is auto-detected on first use). Each configured program gets its own admin sub-page listing its sessions.
+- **Session roster**: a session picker defaulting to today (or the next upcoming session), a booked count, and one card per paying attendee — name, email, tap-to-call mobile, order number, and the same **emergency contact dropdown** the coach portal uses.
+- **Guests**: someone who books multiple spots shows a `×3 (2 guests)` chip — the extra spots are real attendees whose names the club doesn't have. Orders placed without a club account show a **No account** chip (no profile, so no emergency contact).
+- **Supervisor access**: `[session_attendance]` on a page shows the roster to administrators and to the supervisors listed (by email) in Club Programs → Settings; everyone else gets a polite notice. Lock a page to one program with `[session_attendance program="mixed-dev"]`.
+
 ### Data imports/exports
 
 - **RevSport CSV import** (accreditations: VA ID, payment status, coach/referee accreditation).
@@ -160,6 +174,7 @@ One append-only activity log, two windows onto it (filter by event type, search 
 | `[player_fees]` | Members with overdue fees | Compact overdue-fees flag linking to the Player Checklist page (`url` attribute overrides the default `/player-checklist/`); renders nothing at all unless the viewer has overdue fees — safe on any page |
 | `[ready_to_play]` | Selected players | Pre-season checklist |
 | `[murvc_member_role]` | Profile pages | Membership tier badge |
+| `[session_attendance]` | Program supervisors | Club program session roster + emergency contacts |
 
 ## Options reference
 
@@ -170,6 +185,7 @@ One append-only activity log, two windows onto it (filter by event type, search 
 | `team_oversight_trial_fee_product`, `team_oversight_training_info_url`, `team_oversight_trial_open_seasons` | Trial Applications → settings |
 | `team_oversight_created_seasons` | Configuration → Create season |
 | `team_oversight_transfer_clubs`, `team_oversight_trial_fee_rules` | Configuration → Trial application rules |
+| `team_oversight_programs`, `team_oversight_program_supervisors` | Club Programs → Settings |
 | `team_oversight_payment_product` | Payment Management → settings |
 | `team_oversight_vv_reg_url`, `team_oversight_kit_shop_url`, `team_oversight_fees_page_url`, `team_oversight_kit_products` | Player Readiness → settings |
 | `team_oversight_membership_category_rules` | Club Membership → category rules |

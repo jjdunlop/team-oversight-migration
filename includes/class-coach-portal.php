@@ -1234,7 +1234,7 @@ class TeamOversight_Coach_Portal {
      * details-dropdown pattern as Application/Notes so coaches can reach
      * them at trainings.
      */
-    private function render_emergency_details($email) {
+    public static function render_emergency_details($email) {
         $user = get_user_by('email', $email);
         $contacts = array();
         if ($user) {

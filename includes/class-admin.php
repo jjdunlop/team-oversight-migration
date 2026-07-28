@@ -141,6 +141,41 @@ class TeamOversight_Admin {
             'team-oversight-logs',
             array($this, 'logs_page')
         );
+
+        // Club Programs: casual programs (Mixed Dev etc.) with a
+        // sub-page per configured program plus settings.
+        $programs = TeamOversight_Programs::get_programs();
+        $first_program = !empty($programs) ? key($programs) : '';
+
+        add_menu_page(
+            'Club Programs',
+            'Club Programs',
+            'manage_options',
+            $first_program !== '' ? 'club-programs-' . $first_program : 'club-programs-settings',
+            $first_program !== '' ? array($this, 'program_page') : array($this, 'program_settings_page'),
+            'dashicons-calendar-alt',
+            32
+        );
+
+        foreach ($programs as $program_key => $program) {
+            add_submenu_page(
+                $first_program !== '' ? 'club-programs-' . $first_program : 'club-programs-settings',
+                $program['name'],
+                $program['name'],
+                'manage_options',
+                'club-programs-' . $program_key,
+                array($this, 'program_page')
+            );
+        }
+
+        add_submenu_page(
+            $first_program !== '' ? 'club-programs-' . $first_program : 'club-programs-settings',
+            'Program Settings',
+            'Settings',
+            'manage_options',
+            'club-programs-settings',
+            array($this, 'program_settings_page')
+        );
         
         add_submenu_page(
             'team-oversight',
@@ -535,6 +570,18 @@ class TeamOversight_Admin {
 
     public function logs_page() {
         TeamOversight_Log::render_admin_page('vvl');
+    }
+
+    public function program_page() {
+        $page = isset($_GET['page']) ? sanitize_key($_GET['page']) : '';
+        $program_key = str_replace('club-programs-', '', $page);
+        $programs = new TeamOversight_Programs();
+        $programs->render_admin_page($program_key);
+    }
+
+    public function program_settings_page() {
+        $programs = new TeamOversight_Programs();
+        $programs->render_settings_page();
     }
 
     public function membership_logs_page() {

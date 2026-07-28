@@ -27,7 +27,8 @@ push as a production deploy: lint and test first (see Workflow below).
 - `includes/class-fees.php` — fee matrix, season dates, pro-rata, fee segments (dated fee-role history), invoice generation.
 - `includes/class-payments.php` — payment schedule/overdue, `[member_fees]`, pay-any-amount checkout flow, payment ledger.
 - `includes/class-trials.php` — `[team_trial_form]`, trial fee payment flow, trial numbers, eligibility.
-- `includes/class-coach-portal.php` — `[team_coach_portal]`: selection board, verdicts, notes, roster export.
+- `includes/class-coach-portal.php` — `[team_coach_portal]`: selection board, verdicts, notes, roster export. Also owns the shared card helpers other areas reuse: `render_emergency_details()`, `format_phone()`, `phone_tel_href()` (all public static).
+- `includes/class-programs.php` — Club Programs: casual-program session attendance read live from paid orders (product per program, variation per session date), admin sub-page per program + `[session_attendance]` for supervisors.
 - `includes/class-readiness.php` — `[ready_to_play]` checklist + Player Readiness admin.
 - `includes/class-imports.php` / `class-exports.php` — RevSport CSV import; team list / MUS CSV exports.
 
