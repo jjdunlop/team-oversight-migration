@@ -530,6 +530,31 @@ class TeamOversight_Fees {
             }
         }
 
+        // Save trial application rules: the transfer club list and the
+        // trial-fee if-then rules.
+        if (isset($_POST['action']) && $_POST['action'] === 'save_trial_rules') {
+            if (isset($_POST['trial_rules_nonce']) && wp_verify_nonce($_POST['trial_rules_nonce'], 'save_trial_rules') && current_user_can('manage_options')) {
+                $clubs_raw = isset($_POST['transfer_clubs']) ? sanitize_textarea_field(wp_unslash($_POST['transfer_clubs'])) : '';
+                $clubs = array_values(array_unique(array_filter(array_map('trim', explode("\n", $clubs_raw)))));
+                if (!empty($clubs)) {
+                    update_option('team_oversight_transfer_clubs', $clubs);
+                } else {
+                    delete_option('team_oversight_transfer_clubs'); // fall back to the built-in default list
+                }
+
+                update_option('team_oversight_trial_fee_rules', array(
+                    'charge_transfer' => !empty($_POST['charge_transfer']) ? 1 : 0,
+                    'charge_new' => !empty($_POST['charge_new']) ? 1 : 0,
+                    'charge_returning' => !empty($_POST['charge_returning']) ? 1 : 0,
+                    'free_under' => max(0, min(30, intval(isset($_POST['free_under']) ? $_POST['free_under'] : 0))),
+                ));
+
+                echo '<div class="notice notice-success"><p>Trial application rules saved — ' . (count($clubs) ? count($clubs) . ' clubs in the transfer list' : 'transfer club list reset to the built-in default') . '.</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            }
+        }
+
         // Save season start/end dates
         if (isset($_POST['action']) && $_POST['action'] === 'save_season_dates') {
             if (isset($_POST['season_dates_nonce']) && wp_verify_nonce($_POST['season_dates_nonce'], 'save_season_dates') && current_user_can('manage_options')) {
@@ -582,6 +607,33 @@ class TeamOversight_Fees {
                 <p><strong>Configuration for <?php echo esc_html($selected_season); ?> Season</strong> - Each season has its own independent fee structure and team settings.</p>
             </div>
             
+            <!-- Trial application rules (season-independent) -->
+            <?php $trial_fee_rules = TeamOversight_Trials::get_trial_fee_rules(); ?>
+            <details class="import-export-section" style="margin-bottom: 20px; padding: 10px 15px; background: #fff; border: 1px solid #ccd0d4;">
+                <summary style="cursor: pointer; font-weight: 600;">Trial application rules — fee rules &amp; transfer club list</summary>
+                <form method="post">
+                    <p style="margin: 12px 0 4px 0;"><strong>Who pays the trial fee?</strong> <span class="description">(only applies when a trial fee product is set on the Trial Applications page)</span></p>
+                    <p style="margin: 0 0 4px 0;">
+                        <label><input type="checkbox" name="charge_new" value="1" <?php checked(!empty($trial_fee_rules['charge_new'])); ?>> New to VVL</label>
+                        <label style="margin-left: 15px;"><input type="checkbox" name="charge_transfer" value="1" <?php checked(!empty($trial_fee_rules['charge_transfer'])); ?>> Transferring from another club</label>
+                        <label style="margin-left: 15px;"><input type="checkbox" name="charge_returning" value="1" <?php checked(!empty($trial_fee_rules['charge_returning'])); ?>> Returning Renegades players</label>
+                    </p>
+                    <p style="margin: 0 0 12px 0;">
+                        <label>Always free under age
+                            <input type="number" name="free_under" value="<?php echo intval($trial_fee_rules['free_under']); ?>" min="0" max="30" style="width: 60px;">
+                        </label>
+                        <span class="description">(applies regardless of history; 0 disables the age exemption)</span>
+                    </p>
+                    <p style="margin: 0 0 4px 0;"><strong>Transfer club list</strong> <span class="description">— the dropdown on the trial form, one club per line. Empty the box and save to reset to the built-in VVL list.</span></p>
+                    <textarea name="transfer_clubs" rows="10" style="width: 100%; max-width: 480px; font-family: monospace;"><?php echo esc_textarea(implode("\n", TeamOversight_Trials::get_transfer_clubs())); ?></textarea>
+                    <p>
+                        <input type="submit" class="button button-primary" value="Save Trial Rules">
+                        <input type="hidden" name="action" value="save_trial_rules">
+                        <?php wp_nonce_field('save_trial_rules', 'trial_rules_nonce'); ?>
+                    </p>
+                </form>
+            </details>
+
             <!-- Season Dates -->
             <?php $season_dates = self::get_season_dates($selected_season); ?>
             <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; margin-bottom: 20px;">

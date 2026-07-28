@@ -186,11 +186,27 @@ class TeamOversight_Trials {
                 </div>
             <?php endif; ?>
 
-            <?php $fee_product = $this->get_trial_fee_product(); ?>
-            <?php if ($fee_product): ?>
+            <?php
+            $fee_product = $this->get_trial_fee_product();
+            $fee_rules = self::get_trial_fee_rules();
+            // Is the viewer under the free-age threshold? (DOB is on file.)
+            $viewer_free_by_age = false;
+            if ($fee_product && intval($fee_rules['free_under']) > 0) {
+                $viewer_dob = get_user_meta($user->ID, 'birth_date', true);
+                $viewer_ts = $viewer_dob ? strtotime(str_replace('/', '-', $viewer_dob)) : false;
+                if ($viewer_ts && (new DateTime('@' . $viewer_ts))->diff(new DateTime())->y < intval($fee_rules['free_under'])) {
+                    $viewer_free_by_age = true;
+                }
+            }
+            ?>
+            <?php if ($fee_product && $viewer_free_by_age): ?>
                 <div class="trial-fee-notice">
+                    <p><strong>Good news — trials are free for players under <?php echo intval($fee_rules['free_under']); ?>.</strong> Your application submits directly, no payment needed.</p>
+                </div>
+            <?php elseif ($fee_product): ?>
+                <div class="trial-fee-notice" id="trial-fee-notice">
                     <p><strong>Trial registration fee: <?php echo wp_kses_post($fee_product->get_price_html()); ?></strong><br>
-                    After submitting this form you will be taken to the checkout to pay. Your application is only reviewed once payment is complete.</p>
+                    The fee applies to players <strong>new to VVL or transferring from another club</strong> — after submitting you'll be taken to the checkout to pay, and your application is reviewed once payment is complete.<?php if (empty($fee_rules['charge_returning'])): ?> Returning Renegades players trial free.<?php endif; ?></p>
                 </div>
             <?php endif; ?>
 
@@ -967,7 +983,12 @@ class TeamOversight_Trials {
             wp_send_json_error(array('message' => 'You already have a pending application for this season.'));
         }
 
+        // Fee rules: returning Renegades players and juniors trial free by
+        // default; new/transferring players pay when a product is set.
         $fee_product = $this->get_trial_fee_product();
+        $fee_decision = self::trial_fee_decision($history, $prefill['birth_date']);
+        $charge_fee = $fee_product && $fee_decision['payable'];
+        $form_data['Trial Fee'] = $charge_fee ? 'Payable' : 'Waived — ' . ($fee_decision['reason'] ?: 'no fee product configured');
 
         $application_data = array(
             'user_id' => $user->ID,
@@ -978,7 +999,7 @@ class TeamOversight_Trials {
             'preferred_positions' => json_encode($preferred_positions),
             'is_transfer_player' => $is_transfer_player,
             'form_data' => wp_json_encode($form_data),
-            'application_status' => $fee_product ? 'awaiting_payment' : 'pending'
+            'application_status' => $charge_fee ? 'awaiting_payment' : 'pending'
         );
         $application_formats = array('%d', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s');
 
@@ -1017,7 +1038,7 @@ class TeamOversight_Trials {
             wp_send_json_error(array('message' => 'There was an error submitting your application. Please try again.'));
         }
 
-        if (!$fee_product) {
+        if (!$charge_fee) {
             wp_send_json_success(array('message' => 'Your trial application has been submitted successfully! Your trial number is <strong>#' . $trial_number . '</strong> — a coach may ask you for it at trials, so make a note of it (it is also shown whenever you revisit this page). You will be contacted regarding team assignments.'));
         }
 
@@ -1230,10 +1251,22 @@ class TeamOversight_Trials {
     }
     
     /**
-     * VVL clubs a transferring player can be coming from. Anything not
-     * listed goes through the Other / Interstate / International options.
+     * VVL clubs a transferring player can be coming from. Editable on the
+     * Configuration page (one club per line); this hardcoded list is the
+     * default when nothing has been saved.
      */
     public static function get_transfer_clubs() {
+        $clubs = get_option('team_oversight_transfer_clubs', null);
+        if (is_array($clubs)) {
+            $clubs = array_values(array_filter(array_map('trim', $clubs)));
+            if (!empty($clubs)) {
+                return $clubs;
+            }
+        }
+        return self::get_default_transfer_clubs();
+    }
+
+    public static function get_default_transfer_clubs() {
         return array(
             'Alliance Volleyball Club',
             'Carrum Downs Royals Volleyball Club',
@@ -1276,6 +1309,53 @@ class TeamOversight_Trials {
         }
         $options['earlier'] = ($year - 13) . ' or earlier';
         return $options;
+    }
+
+    /**
+     * Trial fee rules (Configuration → Trial application rules). Simple
+     * if-then: which history categories pay the trial fee, and an age
+     * below which trials are always free.
+     */
+    public static function get_trial_fee_rules() {
+        $defaults = array(
+            'charge_transfer' => 1,   // last VVL club was another club
+            'charge_new' => 1,        // never played VVL
+            'charge_returning' => 0,  // Renegades history: free
+            'free_under' => 18,       // under this age: always free (0 disables)
+        );
+        $rules = get_option('team_oversight_trial_fee_rules', array());
+        return array_merge($defaults, is_array($rules) ? $rules : array());
+    }
+
+    /**
+     * Should this applicant pay the trial fee? Age exemption first, then
+     * the per-history-category rule. Returns array(payable, reason) —
+     * reason explains a waiver for the admin trail.
+     */
+    public static function trial_fee_decision($history, $birth_date) {
+        $rules = self::get_trial_fee_rules();
+
+        $free_under = intval($rules['free_under']);
+        if ($free_under > 0 && $birth_date) {
+            $ts = strtotime(str_replace('/', '-', $birth_date));
+            if ($ts) {
+                $age = (new DateTime('@' . $ts))->diff(new DateTime())->y;
+                if ($age < $free_under) {
+                    return array('payable' => false, 'reason' => 'under ' . $free_under);
+                }
+            }
+        }
+
+        if (in_array($history, array('renegades_last_season', 'renegades_previously'), true)) {
+            return !empty($rules['charge_returning'])
+                ? array('payable' => true, 'reason' => '')
+                : array('payable' => false, 'reason' => 'returning Renegades player');
+        }
+
+        $charged = ($history === 'transfer') ? !empty($rules['charge_transfer']) : !empty($rules['charge_new']);
+        return $charged
+            ? array('payable' => true, 'reason' => '')
+            : array('payable' => false, 'reason' => 'fee disabled for this category');
     }
 
     /** Premier League 1 team codes start with PL1 (PL1M / PL1W). */
