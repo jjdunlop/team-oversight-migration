@@ -89,7 +89,7 @@ Teams are configured with a **code** (stable internal ID — never shown to play
 
 Front-end form via `[team_trial_form]` (login required; prompts to log in / create an account with an explanation):
 
-- **Prefilled, read-only account details** (name, email, phone, DOB, gender, institution) — edited via the profile, never the form. Profile-completeness (incl. MUS fields, contact number, gender) gates submission.
+- **Prefilled, read-only account details** (name, email, phone, DOB, gender, institution) — edited via the profile, never the form. Submission requires only what trials genuinely need: name, contact number, DOB and gender (age rules + competition). MUS/degree fields are **not** required to apply — they're a fee-class matter, collected by the annual profile wall and resolved at invoicing.
 - Competition (men's/women's) derives from profile gender; the question is only asked when the profile can't answer (unset/non-binary).
 - Questionnaire mirrors the club's VVL trials form: VVL history (with conditional returning-player and club-transfer sections), international player details, team selection (real teams, grouped by gender, with ineligible teams greyed out live by competition and DOB cutoff — enforced server-side too), positions, venue availability, trial-date availability, experience. Answers stored as JSON (`form_data`).
 - **Trial fee**: configure a product in the Trial Applications settings box. Submissions save as `awaiting_payment`, go to checkout, and become reviewable (`pending`) when the order is paid. Unpaid applications expire after 7 days; "Mark as Paid" covers offline payments. No fee product = direct submission.

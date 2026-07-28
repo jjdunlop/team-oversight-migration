@@ -11,8 +11,6 @@ class TeamOversight_Trials {
         add_shortcode('team_trial_form', array($this, 'render_trial_form'));
         add_action('wp_ajax_submit_trial_application', array($this, 'handle_trial_submission'));
         add_action('wp_ajax_nopriv_submit_trial_application', array($this, 'handle_trial_submission'));
-        add_action('wp_ajax_check_profile_status', array($this, 'check_profile_status'));
-        add_action('wp_ajax_nopriv_check_profile_status', array($this, 'check_profile_status'));
 
         // Trial fee payment via WooCommerce: the form saves the application as
         // awaiting_payment, sends the user to checkout with the configured fee
@@ -131,10 +129,7 @@ class TeamOversight_Trials {
         
         $user = wp_get_current_user();
         $database = new TeamOversight_Database();
-        $fees = new TeamOversight_Fees();
 
-        // Calculate MUS status and validate profile
-        $mus_status = $fees->determine_fee_class($user->user_email);
         $profile_validation = $this->validate_user_profile($user->ID);
 
         // Their most recent live application, so the trial number is always
@@ -175,51 +170,13 @@ class TeamOversight_Trials {
                 </div>
             <?php endif; ?>
             
-            <!-- MUS Status Display Section -->
-            <div id="mus-status-section" class="mus-status-container">
-                <div class="mus-status-header">
-                    <h4>Your Melbourne University Status (MUS)</h4>
+            <?php if (!$profile_validation['is_complete']): ?>
+                <div class="trial-profile-incomplete" style="border: 2px solid #dc3232; background: #fdf0f0; border-radius: 8px; padding: 14px 18px; margin-bottom: 20px;">
+                    <p style="margin: 0 0 6px 0;"><strong>⚠ A few profile details are missing:</strong> <?php echo esc_html(implode(', ', $profile_validation['missing_fields'])); ?></p>
+                    <p style="margin: 0;">We need these for trial contact and team eligibility. <a class="button button-primary" href="<?php echo home_url('/um-member-profile-custom/?profiletab=main&um_action=edit'); ?>" target="_blank">Edit Profile</a> <small>then refresh this page.</small></p>
                 </div>
-                
-                <div class="mus-status-content">
-                    <div class="mus-status-display <?php echo $profile_validation['is_complete'] ? 'complete' : 'incomplete'; ?>">
-                        <div class="status-indicator">
-                            <?php if ($profile_validation['is_complete']): ?>
-                                <span class="status-icon complete">✓</span>
-                                <strong>Calculated MUS: <?php echo esc_html($mus_status); ?></strong>
-                            <?php else: ?>
-                                <span class="status-icon incomplete">⚠</span>
-                                <strong>Profile Incomplete</strong>
-                            <?php endif; ?>
-                        </div>
-                        
-                        <?php if (!$profile_validation['is_complete']): ?>
-                            <div class="missing-fields">
-                                <p><strong>Please complete the following profile fields to calculate your MUS status:</strong></p>
-                                <ul>
-                                    <?php foreach ($profile_validation['missing_fields'] as $field): ?>
-                                        <li><?php echo esc_html($field); ?></li>
-                                    <?php endforeach; ?>
-                                </ul>
-                            </div>
-                        <?php else: ?>
-                            <div class="mus-explanation">
-                                <p>Your fee category has been calculated based on your profile information. If this doesn't look correct, please update your profile.</p>
-                            </div>
-                        <?php endif; ?>
-                        
-                        <div class="profile-actions">
-                            <a href="<?php echo home_url('/um-member-profile-custom/?profiletab=main&um_action=edit'); ?>" class="button button-primary" target="_blank">
-                                Edit Profile
-                            </a>
-                            <button type="button" id="refresh-status" class="button button-secondary">
-                                Refresh Status
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
+            <?php endif; ?>
+
             <?php $fee_product = $this->get_trial_fee_product(); ?>
             <?php if ($fee_product): ?>
                 <div class="trial-fee-notice">
@@ -243,7 +200,7 @@ class TeamOversight_Trials {
             <?php endif; ?>
             <div class="trial-prefill-section">
                 <h4>Your Details</h4>
-                <p class="prefill-note">These details come from your account. <a href="<?php echo esc_url($profile_edit_url); ?>" target="_blank">Edit your profile</a> to change them, then use the Refresh Status button above.</p>
+                <p class="prefill-note">These details come from your account. <a href="<?php echo esc_url($profile_edit_url); ?>" target="_blank">Edit your profile</a> to change them, then refresh this page.</p>
                 <table class="trial-prefill-table">
                     <tr><th>First Name</th><td><?php echo esc_html($prefill['first_name'] ?: '—'); ?></td></tr>
                     <tr><th>Last Name</th><td><?php echo esc_html($prefill['last_name'] ?: '—'); ?></td></tr>
@@ -547,39 +504,6 @@ class TeamOversight_Trials {
                 });
             });
             
-            // Handle refresh status button
-            $('#refresh-status').on('click', function() {
-                var button = $(this);
-                button.prop('disabled', true).text('Checking...');
-                
-                $.ajax({
-                    url: '<?php echo admin_url('admin-ajax.php'); ?>',
-                    type: 'POST',
-                    data: {
-                        action: 'check_profile_status'
-                    },
-                    success: function(response) {
-                        if (response.success) {
-                            // Update the MUS status section
-                            $('#mus-status-section').replaceWith(response.data.html);
-                            
-                            // Update submit button state
-                            if (response.data.is_complete) {
-                                $('#submit-trial-btn').prop('disabled', false);
-                                $('.profile-incomplete-notice').hide();
-                            } else {
-                                $('#submit-trial-btn').prop('disabled', true);
-                                $('.profile-incomplete-notice').show();
-                            }
-                        }
-                        button.prop('disabled', false).text('Refresh Status');
-                    },
-                    error: function() {
-                        alert('Error checking profile status. Please try again.');
-                        button.prop('disabled', false).text('Refresh Status');
-                    }
-                });
-            });
         });
         </script>
         
@@ -1247,15 +1171,16 @@ class TeamOversight_Trials {
     }
     
     public function validate_user_profile($user_id) {
+        // Only what a trial application genuinely needs: contact details
+        // plus DOB and gender (age rules and competition). MUS/degree
+        // fields are a FEE matter — the annual profile wall collects them,
+        // and fee class is resolved at invoicing, not at registration.
         $required_fields = array(
             'first_name' => 'First Name',
             'last_name' => 'Last Name',
             'mobile_number' => 'Contact Number',
             'birth_date' => 'Date of Birth',
             'gender' => 'Gender',
-            'degree1type' => 'Degree Type',
-            'institution1' => 'Institution',
-            'degree1enddate' => 'Degree End Date'
         );
         
         $missing_fields = array();
@@ -1275,72 +1200,4 @@ class TeamOversight_Trials {
         );
     }
     
-    public function check_profile_status() {
-        if (!is_user_logged_in()) {
-            wp_send_json_error(array('message' => 'You must be logged in.'));
-        }
-        
-        $user = wp_get_current_user();
-        $fees = new TeamOversight_Fees();
-        
-        // Calculate MUS status and validate profile
-        $mus_status = $fees->determine_fee_class($user->user_email);
-        $profile_validation = $this->validate_user_profile($user->ID);
-        
-        // Generate the HTML for the MUS status section
-        ob_start();
-        ?>
-        <div id="mus-status-section" class="mus-status-container">
-            <div class="mus-status-header">
-                <h4>Your Melbourne University Status (MUS)</h4>
-            </div>
-            
-            <div class="mus-status-content">
-                <div class="mus-status-display <?php echo $profile_validation['is_complete'] ? 'complete' : 'incomplete'; ?>">
-                    <div class="status-indicator">
-                        <?php if ($profile_validation['is_complete']): ?>
-                            <span class="status-icon complete">✓</span>
-                            <strong>Calculated MUS: <?php echo esc_html($mus_status); ?></strong>
-                        <?php else: ?>
-                            <span class="status-icon incomplete">⚠</span>
-                            <strong>Profile Incomplete</strong>
-                        <?php endif; ?>
-                    </div>
-                    
-                    <?php if (!$profile_validation['is_complete']): ?>
-                        <div class="missing-fields">
-                            <p><strong>Please complete the following profile fields to calculate your MUS status:</strong></p>
-                            <ul>
-                                <?php foreach ($profile_validation['missing_fields'] as $field): ?>
-                                    <li><?php echo esc_html($field); ?></li>
-                                <?php endforeach; ?>
-                            </ul>
-                        </div>
-                    <?php else: ?>
-                        <div class="mus-explanation">
-                            <p>Your fee category has been calculated based on your profile information. If this doesn't look correct, please update your profile.</p>
-                        </div>
-                    <?php endif; ?>
-                    
-                    <div class="profile-actions">
-                        <a href="<?php echo home_url('/um-member-profile-custom/?profiletab=main&um_action=edit'); ?>" class="button button-primary" target="_blank">
-                            Edit Profile
-                        </a>
-                        <button type="button" id="refresh-status" class="button button-secondary">
-                            Refresh Status
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <?php
-        $html = ob_get_clean();
-        
-        wp_send_json_success(array(
-            'html' => $html,
-            'is_complete' => $profile_validation['is_complete'],
-            'mus_status' => $mus_status,
-            'missing_fields' => $profile_validation['missing_fields']
-        ));
-    }
 }
