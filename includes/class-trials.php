@@ -27,10 +27,10 @@ class TeamOversight_Trials {
 
     public static function get_history_options() {
         return array(
-            'renegades_last_season' => 'I played with Renegades last season (no transfer needed)',
-            'renegades_previously' => 'I have played with Renegades previously, and have not played VVL for any other club since leaving Renegades (no transfer needed)',
-            'transfer' => 'I am transferring from a different club (transfer needed)',
-            'never_played' => 'I have never played in Volleyball Victoria League',
+            'renegades_last_season' => 'I played VVL for Renegades last season (no transfer needed)',
+            'renegades_previously' => 'I\'ve played VVL for Renegades before, and haven\'t played VVL for any other club since (no transfer needed)',
+            'transfer' => 'The last club I played VVL for was a different club (club transfer required)',
+            'never_played' => 'I\'ve never played VVL — this will be my first Volleyball Victoria League season',
         );
     }
 
@@ -238,7 +238,9 @@ class TeamOversight_Trials {
                     </tr>
 
                     <tr>
-                        <th>What is your history within Volleyball Victoria League? <span class="required">*</span></th>
+                        <th>What's your VVL playing history? <span class="required">*</span><br>
+                            <small style="font-weight: normal; color: #666;">VVL (Volleyball Victoria League) only — social competitions and leagues outside Volleyball Victoria don't count here.</small>
+                        </th>
                         <td>
                             <?php foreach (self::get_history_options() as $key => $label): ?>
                                 <label><input type="radio" name="vvl_history" value="<?php echo esc_attr($key); ?>" required> <?php echo esc_html($label); ?></label><br>
