@@ -261,12 +261,23 @@ class TeamOversight_Trials {
                     </tr>
 
                     <tr class="transfer-section" style="display: none;">
-                        <th>Enter the season you last played VVL (e.g. <?php echo $current_year - 1; ?>) <span class="required">*</span></th>
+                        <th>Enter the season you last played VVL (e.g. <?php echo date('Y') - 1; ?>) <span class="required">*</span></th>
                         <td><input type="text" name="transfer_season" maxlength="10"></td>
                     </tr>
                     <tr class="transfer-section" style="display: none;">
                         <th>For which club did you play your last season <span class="required">*</span></th>
-                        <td><input type="text" name="transfer_club" maxlength="100"></td>
+                        <td>
+                            <select name="transfer_club">
+                                <option value="">Select Club</option>
+                                <?php foreach (self::get_transfer_clubs() as $club): ?>
+                                    <option value="<?php echo esc_attr($club); ?>"><?php echo esc_html($club); ?></option>
+                                <?php endforeach; ?>
+                                <option value="__other">Other Victorian club</option>
+                                <option value="__interstate">Interstate club</option>
+                                <option value="__international">International club</option>
+                            </select>
+                            <input type="text" name="transfer_club_other" maxlength="100" placeholder="Club name" style="display: none; margin-top: 6px;">
+                        </td>
                     </tr>
                     <tr class="transfer-section" style="display: none;">
                         <th>Select the level at which you played <span class="required">*</span></th>
@@ -479,6 +490,11 @@ class TeamOversight_Trials {
 
             $('select[name="transfer_level"]').on('change', function() {
                 $('input[name="transfer_level_other"]').toggle($(this).val() === 'other');
+            });
+
+            $('select[name="transfer_club"]').on('change', function() {
+                var v = $(this).val();
+                $('input[name="transfer_club_other"]').toggle(v === '__other' || v === '__interstate' || v === '__international');
             });
 
             // Handle form submission
@@ -881,9 +897,12 @@ class TeamOversight_Trials {
 
         if ($history === 'transfer') {
             $transfer_season = isset($_POST['transfer_season']) ? sanitize_text_field($_POST['transfer_season']) : '';
-            $transfer_club = isset($_POST['transfer_club']) ? sanitize_text_field($_POST['transfer_club']) : '';
+            $transfer_club = self::resolve_transfer_club(
+                isset($_POST['transfer_club']) ? sanitize_text_field($_POST['transfer_club']) : '',
+                isset($_POST['transfer_club_other']) ? sanitize_text_field($_POST['transfer_club_other']) : ''
+            );
             $transfer_level = $resolve_level('transfer_level');
-            if ($transfer_season === '' || $transfer_club === '' || $transfer_level === '') {
+            if ($transfer_season === '' || $transfer_club === null || $transfer_level === '') {
                 wp_send_json_error(array('message' => 'Please complete the club transfer details.'));
             }
             $form_data['Transfer: Last VVL Season'] = $transfer_season;
@@ -1186,6 +1205,63 @@ class TeamOversight_Trials {
         return false;
     }
     
+    /**
+     * VVL clubs a transferring player can be coming from. Anything not
+     * listed goes through the Other / Interstate / International options.
+     */
+    public static function get_transfer_clubs() {
+        return array(
+            'Alliance Volleyball Club',
+            'Carrum Downs Royals Volleyball Club',
+            'Dandenong Volleyball Club',
+            'Derrimut Knights',
+            'Eastside Hawks Volleyball Club',
+            'Heidelberg Volleyball Club Inc',
+            'KVA Future Stars Academy',
+            'La Trobe University Volleyball Club',
+            'Macedon Ranges Volleyball Association',
+            'Manningham Volleyball Association',
+            'Maroondah Volleyball',
+            'Mazenod Volleyball Club',
+            'Melbourne University Renegades Volleyball Club',
+            'Monash University Volleyball Club',
+            'Mornington Volleyball Club',
+            'Oakleigh Volleyball Club',
+            'Phantoms Volleyball Club',
+            'South Gippsland',
+            'Strive Volleyball',
+            'VIP',
+            'Volley Friends United Melbourne',
+            'Volleyball Horsham',
+            'VR1 Volley',
+            'Western Region Volleyball',
+            'Yarra Ranges Volleyball Club',
+        );
+    }
+
+    /**
+     * Resolve the submitted transfer-club selection into the stored value:
+     * a listed club verbatim, or "Other/Interstate/International: <name>".
+     * Null when invalid or incomplete.
+     */
+    public static function resolve_transfer_club($select, $other) {
+        $select = trim((string) $select);
+        $other = trim((string) $other);
+        $specials = array(
+            '__other' => 'Other',
+            '__interstate' => 'Interstate',
+            '__international' => 'International',
+        );
+
+        if (isset($specials[$select])) {
+            return $other !== '' ? $specials[$select] . ': ' . $other : null;
+        }
+        if (in_array($select, self::get_transfer_clubs(), true)) {
+            return $select;
+        }
+        return null;
+    }
+
     /**
      * Seasons currently open for trial applications. Never-configured
      * default: current + next year (matching pre-1.28 behaviour), unless
