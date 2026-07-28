@@ -1130,6 +1130,18 @@ class TeamOversight_Programs {
         $unknown = array();
         $supervisor_total = 0;
 
+        // Keep each program's existing key across saves. The form posts
+        // supervisors under the key that was rendered, and attendance rows
+        // are stored against it, so regenerating keys from the name would
+        // drop the supervisors being saved and orphan attendance history.
+        $existing = self::get_programs();
+        $key_by_name = array();
+        $key_by_product = array();
+        foreach ($existing as $existing_key => $existing_program) {
+            $key_by_name[strtolower($existing_program['name'])] = $existing_key;
+            $key_by_product[intval($existing_program['product_id'])] = $existing_key;
+        }
+
         $programs = array();
         foreach (explode("\n", sanitize_textarea_field(wp_unslash($_POST['programs']))) as $line) {
             $line = trim($line);
@@ -1143,7 +1155,15 @@ class TeamOversight_Programs {
             if ($name === '' || !$product_id) {
                 continue;
             }
-            $key = sanitize_title($name);
+            // Same name (or same product, so renames keep their history)
+            // reuses the existing key; genuinely new programs get one.
+            if (isset($key_by_name[strtolower($name)])) {
+                $key = $key_by_name[strtolower($name)];
+            } elseif (isset($key_by_product[$product_id])) {
+                $key = $key_by_product[$product_id];
+            } else {
+                $key = sanitize_title($name);
+            }
 
             // Supervisor emails resolve to accounts; unknown ones are
             // reported rather than silently dropped.
