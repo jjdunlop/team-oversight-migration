@@ -219,7 +219,7 @@ class TeamOversight_Coach_Portal {
                                     <td data-label="Name"><?php echo esc_html($member->name ?: $member->email); ?></td>
                                     <td data-label="Role"><?php echo esc_html(str_replace('_', ' ', ucwords($member->role, '_'))); ?></td>
                                     <td data-label="Email"><a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a></td>
-                                    <td data-label="Mobile"><?php echo esc_html($member->mobile ?: ''); ?></td>
+                                    <td data-label="Mobile"><?php echo esc_html($member->mobile ? self::format_phone($member->mobile) : ''); ?></td>
                                 </tr>
                             <?php endforeach; ?>
                         </tbody>
@@ -240,7 +240,7 @@ class TeamOversight_Coach_Portal {
                             </div>
                             <div class="cac-meta">
                                 <a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a>
-                                <?php if ($member->mobile): ?> &middot; <?php echo esc_html($member->mobile); ?><?php endif; ?>
+                                <?php if ($member->mobile): ?> &middot; <?php echo esc_html(self::format_phone($member->mobile)); ?><?php endif; ?>
                                 <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
                             </div>
                             <div class="cac-footer">
@@ -266,7 +266,7 @@ class TeamOversight_Coach_Portal {
                             </div>
                             <div class="cac-meta">
                                 <a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a>
-                                <?php if ($member->mobile): ?> &middot; <?php echo esc_html($member->mobile); ?><?php endif; ?>
+                                <?php if ($member->mobile): ?> &middot; <?php echo esc_html(self::format_phone($member->mobile)); ?><?php endif; ?>
                                 <?php if (!empty($member->age_flag)): ?>
                                     &middot; <span class="cac-age-flag">Age <?php echo esc_html($member->age); ?> (born <?php echo esc_html($member->dob_display); ?>) — over the <?php echo esc_html($member->rule_label); ?> limit for this team; VV exemption required</span>
                                 <?php endif; ?>
@@ -938,7 +938,7 @@ class TeamOversight_Coach_Portal {
                 $this->format_positions($member->preferred_positions),
                 'Confirmed',
                 $member->email,
-                $member->mobile ?: '',
+                $member->mobile ? self::format_phone($member->mobile) : '',
             ));
         }
 
@@ -954,7 +954,7 @@ class TeamOversight_Coach_Portal {
                 $this->format_positions($member->preferred_positions),
                 isset($status_labels[$member->status]) ? $status_labels[$member->status] : ucfirst($member->status),
                 $member->email,
-                $member->mobile ?: '',
+                $member->mobile ? self::format_phone($member->mobile) : '',
             ));
         }
 
@@ -984,6 +984,44 @@ class TeamOversight_Coach_Portal {
             GROUP BY ta.id
             ORDER BY FIELD(ta.role, 'coach', 'assistant_coach', 'team_manager', 'playing_member', 'training_only', 'supporter'), MAX(u.display_name)
         ", $team_code, $season));
+    }
+
+    /**
+     * Normalise an Australian phone number for display: restore the
+     * leading zero that spreadsheets/imports strip (411222333 becomes
+     * 0411 222 333), fold +61 forms back to local, and space-group.
+     * Returns the input unchanged when it doesn't look like an AU number.
+     */
+    public static function format_phone($raw) {
+        $raw = trim((string) $raw);
+        if ($raw === '') {
+            return '';
+        }
+
+        $digits = preg_replace('/[^0-9]/', '', $raw);
+
+        // +61 / 61 country-code forms -> local 0-form.
+        if (preg_match('/^61([2-478]\d{8})$/', $digits, $m)) {
+            $digits = '0' . $m[1];
+        }
+        // Nine digits starting 4 (mobile) or 2/3/7/8 (landline): the
+        // classic stripped leading zero.
+        if (preg_match('/^[2-478]\d{8}$/', $digits)) {
+            $digits = '0' . $digits;
+        }
+
+        if (preg_match('/^04\d{8}$/', $digits)) {
+            return substr($digits, 0, 4) . ' ' . substr($digits, 4, 3) . ' ' . substr($digits, 7); // 04xx xxx xxx
+        }
+        if (preg_match('/^0[2378]\d{8}$/', $digits)) {
+            return substr($digits, 0, 2) . ' ' . substr($digits, 2, 4) . ' ' . substr($digits, 6); // 0x xxxx xxxx
+        }
+        return $raw;
+    }
+
+    /** Digits-only form for tel: links (leading zero restored). */
+    public static function phone_tel_href($raw) {
+        return preg_replace('/[^0-9+]/', '', self::format_phone($raw));
     }
 
     /**
@@ -1020,7 +1058,7 @@ class TeamOversight_Coach_Portal {
                 <p class="coach-emergency">
                     <strong><?php echo esc_html($contact['name'] ?: 'Name not recorded'); ?></strong><?php if ($contact['relationship']): ?> (<?php echo esc_html($contact['relationship']); ?>)<?php endif; ?>
                     <?php if ($contact['number']): ?>
-                        &middot; <a href="tel:<?php echo esc_attr(preg_replace('/[^0-9+]/', '', $contact['number'])); ?>"><?php echo esc_html($contact['number']); ?></a>
+                        &middot; <a href="tel:<?php echo esc_attr(self::phone_tel_href($contact['number'])); ?>"><?php echo esc_html(self::format_phone($contact['number'])); ?></a>
                     <?php endif; ?>
                 </p>
             <?php else: ?>
