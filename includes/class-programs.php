@@ -861,14 +861,25 @@ class TeamOversight_Programs {
             return '<div class="coach-portal-notice"><p>This page is for club program supervisors. If you should have access, ask the committee to add you in Club Programs → Settings.</p></div>';
         }
 
-        // Only programs this supervisor actually runs.
+        // A shortcode that names a program is authoritative: if the viewer
+        // doesn't supervise that one, refuse rather than quietly showing
+        // them a different program's roster.
+        if ($atts['program'] !== '') {
+            $program = self::get_program($atts['program']);
+            if (!$program) {
+                return '<p>That club program isn\'t configured.</p>';
+            }
+            return $this->render_program_for_supervisor($program, $atts['program']);
+        }
+
+        // Otherwise: only programs this supervisor actually runs.
         $programs = self::get_viewable_programs();
         if (empty($programs)) {
             return '<p>No club programs are configured yet.</p>';
         }
 
-        $key = $atts['program'] !== '' && isset($programs[$atts['program']]) ? $atts['program'] : '';
-        if ($key === '' && isset($_GET['program']) && isset($programs[sanitize_key($_GET['program'])])) {
+        $key = '';
+        if (isset($_GET['program']) && isset($programs[sanitize_key($_GET['program'])])) {
             $key = sanitize_key($_GET['program']);
         }
         if ($key === '') {
@@ -879,9 +890,8 @@ class TeamOversight_Programs {
         $base_url = remove_query_arg('session');
 
         $output = '';
-        // Program switcher only when there's a choice and the shortcode
-        // isn't locked to one program.
-        if (count($programs) > 1 && $atts['program'] === '') {
+        // Program switcher only when there's a choice.
+        if (count($programs) > 1) {
             $output .= '<p class="murvc-program-switcher">';
             foreach ($programs as $program_key => $program) {
                 $output .= ($program_key === $key)
