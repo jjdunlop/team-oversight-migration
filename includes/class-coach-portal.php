@@ -231,10 +231,17 @@ class TeamOversight_Coach_Portal {
                 <h4>Players (<?php echo count($confirmed_players); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?>)</h4>
                 <?php if (!empty($confirmed_players) || !empty($selection_roster)): ?>
                     <?php foreach ($confirmed_players as $member): ?>
+                        <?php $app_ctx = $this->get_application_context($member->user_id, $member->email, $season); ?>
                         <div class="coach-applicant-card">
                             <div class="cac-header">
+                                <?php if ($app_ctx): ?>
+                                    <span class="cac-number">#<?php echo intval($app_ctx['trial_number']); ?></span>
+                                <?php endif; ?>
                                 <span class="cac-name"><?php echo esc_html($member->name ?: $member->email); ?></span>
                                 <span class="cac-chips">
+                                    <?php if ($app_ctx): ?>
+                                        <?php echo $this->render_reg_chip($app_ctx['reg_type'], $app_ctx['transfer_club']); ?>
+                                    <?php endif; ?>
                                     <span class="verdict-chip verdict-chip-confirmed">Confirmed<?php echo $member->role === 'training_only' ? ' — Training Only' : ''; ?></span>
                                 </span>
                             </div>
@@ -244,7 +251,14 @@ class TeamOversight_Coach_Portal {
                                 <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
                             </div>
                             <div class="cac-footer">
-                                <span class="cac-expanders"><?php echo $this->render_emergency_details($member->email); ?></span>
+                                <span class="cac-expanders"><?php echo $this->render_card_expanders(
+                                    $member->email,
+                                    $app_ctx ? $app_ctx['id'] : 0,
+                                    $app_ctx ? $app_ctx['form_data'] : array(),
+                                    $app_ctx ? $app_ctx['notes'] : array(),
+                                    $active_team,
+                                    $season
+                                ); ?></span>
                             </div>
                         </div>
                     <?php endforeach; ?>
@@ -274,7 +288,14 @@ class TeamOversight_Coach_Portal {
                                 <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
                             </div>
                             <div class="cac-footer">
-                                <span class="cac-expanders"><?php echo $this->render_emergency_details($member->email); ?></span>
+                                <span class="cac-expanders"><?php echo $this->render_card_expanders(
+                                    $member->email,
+                                    intval($member->application_id),
+                                    (is_array($decoded_roster = ($member->form_data ? json_decode($member->form_data, true) : array())) ? $decoded_roster : array()),
+                                    $this->get_notes_for_application(intval($member->application_id)),
+                                    $active_team,
+                                    $season
+                                ); ?></span>
                                 <span class="cac-actions">
                                     <form method="post">
                                         <input type="hidden" name="coach_action" value="set_selection">
@@ -373,35 +394,7 @@ class TeamOversight_Coach_Portal {
 
                                 <div class="cac-footer">
                                     <span class="cac-expanders">
-                                        <?php echo $this->render_emergency_details($a['email']); ?>
-                                        <?php if (!empty($a['form_data'])): ?>
-                                            <details class="coach-app-details">
-                                                <summary>Application</summary>
-                                                <dl class="coach-application-details">
-                                                    <?php foreach ($a['form_data'] as $question => $answer): ?>
-                                                        <?php if ($answer !== '' && $answer !== null): ?>
-                                                            <dt><?php echo esc_html($question); ?></dt>
-                                                            <dd><?php echo nl2br(esc_html(is_array($answer) ? implode(', ', $answer) : $answer)); ?></dd>
-                                                        <?php endif; ?>
-                                                    <?php endforeach; ?>
-                                                </dl>
-                                            </details>
-                                        <?php endif; ?>
-                                        <details class="coach-app-details">
-                                            <summary>Notes (<?php echo count($a['notes']); ?>)</summary>
-                                            <?php foreach ($a['notes'] as $note): ?>
-                                                <p class="coach-note"><strong><?php echo esc_html($note['author']); ?></strong> <small><?php echo esc_html($note['date']); ?></small><br><?php echo nl2br(esc_html($note['note'])); ?></p>
-                                            <?php endforeach; ?>
-                                            <form method="post" class="coach-note-form">
-                                                <input type="hidden" name="coach_action" value="add_note">
-                                                <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
-                                                <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
-                                                <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
-                                                <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                                                <textarea name="coach_note" rows="2" placeholder="Add a note visible to all coaches..." required></textarea>
-                                                <button type="submit" class="button button-small">Add Note</button>
-                                            </form>
-                                        </details>
+                                        <?php echo $this->render_card_expanders($a['email'], $a['id'], $a['form_data'], $a['notes'], $active_team, $season); ?>
                                     </span>
                                     <span class="cac-actions">
                                         <form method="post">
@@ -1042,6 +1035,7 @@ class TeamOversight_Coach_Portal {
 
         return $wpdb->get_results($wpdb->prepare("
             SELECT ta.role, ta.email,
+                MAX(ta.user_id) AS user_id,
                 MAX(u.display_name) AS name,
                 MAX(um_mobile.meta_value) AS mobile,
                 MAX(app.preferred_positions) AS preferred_positions
@@ -1055,6 +1049,111 @@ class TeamOversight_Coach_Portal {
             GROUP BY ta.id
             ORDER BY FIELD(ta.role, 'coach', 'assistant_coach', 'team_manager', 'playing_member', 'training_only', 'supporter'), MAX(u.display_name)
         ", $team_code, $season));
+    }
+
+    /** Shared notes for one application, oldest first. */
+    private function get_notes_for_application($application_id) {
+        global $wpdb;
+
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT n.*, u.display_name AS author
+            FROM {$wpdb->prefix}team_trial_notes n
+            LEFT JOIN {$wpdb->users} u ON u.ID = n.author_id
+            WHERE n.application_id = %d
+            ORDER BY n.created_date
+        ", $application_id));
+
+        $notes = array();
+        foreach ($rows as $note) {
+            $notes[] = array(
+                'author' => $note->author ?: 'Unknown',
+                'date' => date('j M Y', strtotime($note->created_date)),
+                'note' => $note->note,
+            );
+        }
+        return $notes;
+    }
+
+    /**
+     * A confirmed player's trial application for the season (if any):
+     * everything the applicant cards show — trial number, questionnaire,
+     * notes, registration status — so confirmed players keep their full
+     * context on the roster.
+     */
+    private function get_application_context($user_id, $email, $season) {
+        global $wpdb;
+
+        // Match by user id only when we actually have one — user_id = 0
+        // would otherwise pair the card with any legacy application row.
+        $app = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}trial_applications
+            WHERE season = %s AND ((user_id > 0 AND user_id = %d) OR email = %s)
+            ORDER BY id DESC LIMIT 1
+        ", $season, intval($user_id), $email));
+
+        if (!$app) {
+            return null;
+        }
+
+        $form_data = $app->form_data ? json_decode($app->form_data, true) : array();
+        $form_data = is_array($form_data) ? $form_data : array();
+
+        return array(
+            'id' => intval($app->id),
+            'trial_number' => intval($app->trial_number),
+            'form_data' => $form_data,
+            'notes' => $this->get_notes_for_application(intval($app->id)),
+            'reg_type' => isset($form_data['Registration Type']) ? $form_data['Registration Type'] : (intval($app->is_transfer_player) === 1 ? 'Club Transfer' : ''),
+            'transfer_club' => isset($form_data['Transfer: Previous Club']) ? $form_data['Transfer: Previous Club'] : '',
+        );
+    }
+
+    /**
+     * The one expander row every card shares: emergency contact,
+     * application details, and coach notes with the add-note form.
+     * Application/Notes only render when an application exists.
+     */
+    private function render_card_expanders($email, $application_id, $form_data, $notes, $active_team, $season) {
+        ob_start();
+        echo $this->render_emergency_details($email);
+
+        if (!empty($form_data)) {
+            ?>
+            <details class="coach-app-details">
+                <summary>Application</summary>
+                <dl class="coach-application-details">
+                    <?php foreach ($form_data as $question => $answer): ?>
+                        <?php if ($answer !== '' && $answer !== null): ?>
+                            <dt><?php echo esc_html($question); ?></dt>
+                            <dd><?php echo nl2br(esc_html(is_array($answer) ? implode(', ', $answer) : $answer)); ?></dd>
+                        <?php endif; ?>
+                    <?php endforeach; ?>
+                </dl>
+            </details>
+            <?php
+        }
+
+        if ($application_id) {
+            ?>
+            <details class="coach-app-details">
+                <summary>Notes (<?php echo count($notes); ?>)</summary>
+                <?php foreach ($notes as $note): ?>
+                    <p class="coach-note"><strong><?php echo esc_html($note['author']); ?></strong> <small><?php echo esc_html($note['date']); ?></small><br><?php echo nl2br(esc_html($note['note'])); ?></p>
+                <?php endforeach; ?>
+                <form method="post" class="coach-note-form">
+                    <input type="hidden" name="coach_action" value="add_note">
+                    <input type="hidden" name="application_id" value="<?php echo intval($application_id); ?>">
+                    <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                    <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                    <textarea name="coach_note" rows="2" placeholder="Add a note visible to all coaches..." required></textarea>
+                    <button type="submit" class="button button-small">Add Note</button>
+                </form>
+            </details>
+            <?php
+        }
+
+        return ob_get_clean();
     }
 
     /**

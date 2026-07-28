@@ -102,7 +102,7 @@ Front-end form via `[team_trial_form]` (login required; prompts to log in / crea
 
 `[team_coach_portal]` — visible only to logged-in users with an active coach/assistant-coach assignment; each coach sees only their own teams (server-enforced). Mobile-friendly card layout.
 
-- **Team switcher** for multi-team coaches; **Coaching Staff** table + **Players** cards (confirmed members plus selection-board players, tinted by verdict, over-age players flagged with DOB and "VV exemption required").
+- **Team switcher** for multi-team coaches; **Coaching Staff** table + **Players** cards (confirmed members plus selection-board players, tinted by verdict, over-age players flagged with DOB and "VV exemption required"). **All cards share one format**: trial number, registration-status chip, and the expander row (emergency contact / application details / shared notes with add-note) appear on confirmed players and selection-roster players too — a confirmed player keeps their full trial context. Players without an application (added manually) get the plain card.
 - **Selection board**: per-team verdicts — Tentative / Selected / Training Only / Rejected — via a dropdown on each applicant card. Verdicts are per team, never global: a player can be Selected by multiple teams (e.g. YSL + JPL), and every coach sees every team's verdicts. "Unclaimed" = no verdicts anywhere.
 - Applicant pools are **competition-wide** (all men's or women's applicants, not just those who picked the team — players get redirected between trials and VV grants age exemptions), sectioned: *awaiting your verdict* first, then *verdict recorded*, then *other applicants*. Search + only-my-verdicts filter.
 - **Shared notes** on applications (author + date, visible to all coaches and admins).
