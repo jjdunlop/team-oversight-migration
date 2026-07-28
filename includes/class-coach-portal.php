@@ -255,9 +255,7 @@ class TeamOversight_Coach_Portal {
                                 <span class="cac-number">#<?php echo intval($member->trial_number); ?></span>
                                 <span class="cac-name"><?php echo esc_html($member->name); ?></span>
                                 <span class="cac-chips">
-                                    <?php if (!empty($member->is_transfer)): ?>
-                                        <span class="verdict-chip chip-transfer" title="Club transfer required<?php echo $member->transfer_club ? ' — transferring from ' . esc_attr($member->transfer_club) : ''; ?>">⇄ <?php echo esc_html($member->transfer_club ?: 'Transfer'); ?></span>
-                                    <?php endif; ?>
+                                    <?php echo $this->render_reg_chip($member->reg_type, $member->transfer_club); ?>
                                     <?php if ($member->status === 'selected'): ?>
                                         <span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>
                                     <?php elseif ($member->status === 'training_only'): ?>
@@ -354,9 +352,7 @@ class TeamOversight_Coach_Portal {
                                     <span class="cac-number">#<?php echo intval($a['trial_number']); ?></span>
                                     <span class="cac-name"><?php echo esc_html($a['name']); ?></span>
                                     <span class="cac-chips">
-                                        <?php if (!empty($a['is_transfer'])): ?>
-                                            <span class="verdict-chip chip-transfer" title="Club transfer required<?php echo $a['transfer_club'] ? ' — transferring from ' . esc_attr($a['transfer_club']) : ''; ?>">⇄ <?php echo esc_html($a['transfer_club'] ?: 'Transfer'); ?></span>
-                                        <?php endif; ?>
+                                        <?php echo $this->render_reg_chip($a['reg_type'], $a['transfer_club']); ?>
                                         <?php echo $this->render_verdict_chips($a['selections']); ?>
                                     </span>
                                 </div>
@@ -578,16 +574,51 @@ class TeamOversight_Coach_Portal {
         /* Transfer chip: distinct from verdict colours, club name inline,
            truncated so long club names never blow the card layout (full
            name in the hover title). */
-        .chip-transfer {
-            background: #eee6f7;
-            color: #4b2e83;
-            border: 1px solid #b9a3d8;
+        .chip-transfer,
+        .chip-itc,
+        .chip-freeagent,
+        .chip-new,
+        .chip-returning {
             max-width: 160px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
             display: inline-block;
             vertical-align: middle;
+        }
+
+        .chip-transfer {
+            background: #eee6f7;
+            color: #4b2e83;
+            border: 1px solid #b9a3d8;
+        }
+
+        /* ITC: overseas clearance, slowest paperwork — warm warning tint. */
+        .chip-itc {
+            background: #fdeee0;
+            color: #8a4b00;
+            border: 1px solid #e0a86b;
+        }
+
+        /* Free agent: no paperwork needed — calm green. */
+        .chip-freeagent {
+            background: #e6f4ea;
+            color: #1a5c31;
+            border: 1px solid #9fcfae;
+        }
+
+        /* New to VVL: fresh blue. */
+        .chip-new {
+            background: #e7f1fa;
+            color: #1d4f7c;
+            border: 1px solid #9cc3e5;
+        }
+
+        /* Returning Renegade: neutral grey — the unremarkable happy path. */
+        .chip-returning {
+            background: #f0f0f1;
+            color: #50575e;
+            border: 1px solid #c3c4c7;
         }
 
         .coach-app-details summary {
@@ -1027,6 +1058,39 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
+     * VV registration-status chip — every applicant gets one:
+     * New / Returning / Free Agent / Transfer / ITC. Empty string only
+     * for legacy applications with no derivable status.
+     */
+    private function render_reg_chip($reg_type, $club) {
+        if ($reg_type === '' || $reg_type === null) {
+            return '';
+        }
+        if ($reg_type === 'ITC') {
+            $class = 'chip-itc';
+            $label = 'ITC' . ($club ? ': ' . $club : '');
+            $title = 'International Transfer Certificate required for Premier League 1 — registered with a volleyball federation in another country. Allow extra processing time.';
+        } elseif ($reg_type === 'Free Agent') {
+            $class = 'chip-freeagent';
+            $label = 'FA' . ($club ? ': ' . $club : '');
+            $title = 'Free agent — skipped at least one VVL season, no club transfer required' . ($club ? ' (previously ' . $club . ')' : '') . '.';
+        } elseif ($reg_type === 'New') {
+            $class = 'chip-new';
+            $label = 'New';
+            $title = 'New to VVL — first Volleyball Victoria League season, no transfer paperwork.';
+        } elseif ($reg_type === 'Returning') {
+            $class = 'chip-returning';
+            $label = 'Returning';
+            $title = 'Renegades history with no other VVL club since — no transfer paperwork.';
+        } else {
+            $class = 'chip-transfer';
+            $label = '⇄ ' . ($club ? $club : 'Transfer');
+            $title = 'Club transfer required' . ($club ? ' — transferring from ' . $club : '') . '.';
+        }
+        return '<span class="verdict-chip ' . $class . '" title="' . esc_attr($title) . '">' . esc_html($label) . '</span>';
+    }
+
+    /**
      * Normalise an Australian phone number for display: restore the
      * leading zero that spreadsheets/imports strip (411222333 becomes
      * 0411 222 333), fold +61 forms back to local, and space-group.
@@ -1172,6 +1236,7 @@ class TeamOversight_Coach_Portal {
             $row->is_transfer = intval($row->is_transfer_player) === 1;
             $decoded = $row->form_data ? json_decode($row->form_data, true) : array();
             $row->transfer_club = (is_array($decoded) && isset($decoded['Transfer: Previous Club'])) ? $decoded['Transfer: Previous Club'] : '';
+            $row->reg_type = (is_array($decoded) && isset($decoded['Registration Type'])) ? $decoded['Registration Type'] : ($row->is_transfer ? 'Club Transfer' : '');
             if ($cutoff) {
                 $birth_date = get_user_meta($row->user_id, 'birth_date', true);
                 $birth_ts = $birth_date ? strtotime(str_replace('/', '-', $birth_date)) : false;
@@ -1312,6 +1377,7 @@ class TeamOversight_Coach_Portal {
                 'trial_number' => intval($row->trial_number),
                 'is_transfer' => intval($row->is_transfer_player) === 1,
                 'transfer_club' => isset($form_data['Transfer: Previous Club']) ? $form_data['Transfer: Previous Club'] : '',
+                'reg_type' => isset($form_data['Registration Type']) ? $form_data['Registration Type'] : (intval($row->is_transfer_player) === 1 ? 'Club Transfer' : ''),
                 'name' => $row->name,
                 'email' => $row->email,
                 'age' => $age,

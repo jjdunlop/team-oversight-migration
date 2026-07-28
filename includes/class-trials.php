@@ -263,8 +263,15 @@ class TeamOversight_Trials {
                     </tr>
 
                     <tr class="transfer-section" style="display: none;">
-                        <th>Enter the season you last played VVL (e.g. <?php echo date('Y') - 1; ?>) <span class="required">*</span></th>
-                        <td><input type="text" name="transfer_season" maxlength="10"></td>
+                        <th>Which season did you last play VVL? <span class="required">*</span></th>
+                        <td>
+                            <select name="transfer_season">
+                                <option value="">Select Season</option>
+                                <?php foreach (self::get_transfer_season_options() as $value => $label): ?>
+                                    <option value="<?php echo esc_attr($value); ?>"><?php echo esc_html($label); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
                     </tr>
                     <tr class="transfer-section" style="display: none;">
                         <th>For which club did you play your last season <span class="required">*</span></th>
@@ -897,6 +904,8 @@ class TeamOversight_Trials {
             $form_data['Last Level Played'] = $last_level;
         }
 
+        $season_options = self::get_transfer_season_options();
+        $transfer_season = '';
         if ($history === 'transfer') {
             $transfer_season = isset($_POST['transfer_season']) ? sanitize_text_field($_POST['transfer_season']) : '';
             $transfer_club = self::resolve_transfer_club(
@@ -904,14 +913,15 @@ class TeamOversight_Trials {
                 isset($_POST['transfer_club_other']) ? sanitize_text_field($_POST['transfer_club_other']) : ''
             );
             $transfer_level = $resolve_level('transfer_level');
-            if ($transfer_season === '' || $transfer_club === null || $transfer_level === '') {
+            if (!isset($season_options[$transfer_season]) || $transfer_club === null || $transfer_level === '') {
                 wp_send_json_error(array('message' => 'Please complete the club transfer details.'));
             }
-            $form_data['Transfer: Last VVL Season'] = $transfer_season;
+            $form_data['Transfer: Last VVL Season'] = $season_options[$transfer_season];
             $form_data['Transfer: Previous Club'] = $transfer_club;
             $form_data['Transfer: Level Played'] = $transfer_level;
         }
 
+        $registered_abroad_flag = false;
         if ($international === 'yes') {
             $country_origin = isset($_POST['country_origin']) ? sanitize_text_field($_POST['country_origin']) : '';
             $registered_abroad = isset($_POST['registered_abroad']) ? sanitize_text_field($_POST['registered_abroad']) : '';
@@ -921,6 +931,7 @@ class TeamOversight_Trials {
             $form_data['International Player'] = 'Yes';
             $form_data['Country of Origin'] = $country_origin;
             if ($registered_abroad === 'yes') {
+                $registered_abroad_flag = true;
                 $registered_country = isset($_POST['registered_country']) ? sanitize_text_field($_POST['registered_country']) : '';
                 $form_data['Registered Player In Another Country'] = 'Yes' . ($registered_country !== '' ? ' — ' . $registered_country : '');
             } else {
@@ -929,6 +940,17 @@ class TeamOversight_Trials {
         } else {
             $form_data['International Player'] = 'No';
         }
+
+        // VV registration status: every applicant gets one. ITC only
+        // applies when registered abroad AND trialling for a P1 team;
+        // otherwise their VVL history decides.
+        $trialling_p1 = false;
+        foreach ($interested_teams as $team_code) {
+            if (self::is_p1_team($team_code)) {
+                $trialling_p1 = true;
+            }
+        }
+        $form_data['Registration Type'] = self::classify_registration($season, $history, $transfer_season, $registered_abroad_flag, $trialling_p1);
 
         // Snapshot the account details as they were at submission time.
         $form_data['Contact Number (at submission)'] = $prefill['mobile'];
@@ -1239,6 +1261,52 @@ class TeamOversight_Trials {
             'Western Region Volleyball',
             'Yarra Ranges Volleyball Club',
         );
+    }
+
+    /**
+     * Years offered for "the season you last played VVL": a structured
+     * dropdown so registration type can be derived reliably. Values are
+     * 'YYYY', plus 'earlier' for anything before the listed range.
+     */
+    public static function get_transfer_season_options() {
+        $options = array();
+        $year = intval(date('Y'));
+        for ($y = $year; $y >= $year - 12; $y--) {
+            $options[strval($y)] = strval($y);
+        }
+        $options['earlier'] = ($year - 13) . ' or earlier';
+        return $options;
+    }
+
+    /** Premier League 1 team codes start with PL1 (PL1M / PL1W). */
+    public static function is_p1_team($code) {
+        return strpos((string) $code, 'PL1') === 0;
+    }
+
+    /**
+     * VV registration status for every applicant:
+     *  - ITC           registered with an overseas federation AND
+     *                  trialling for a Premier League 1 team (the ITC only
+     *                  matters at P1 — at any other level their history
+     *                  decides)
+     *  - Club Transfer last VVL club was a different club, as recently as
+     *                  the season before the one applied for
+     *  - Free Agent    played VVL elsewhere but skipped at least one season
+     *  - Returning     Renegades history, no other VVL club since
+     *  - New           never played VVL
+     */
+    public static function classify_registration($app_season, $history, $last_season_raw, $registered_abroad, $trialling_p1 = false) {
+        if ($registered_abroad && $trialling_p1) {
+            return 'ITC';
+        }
+        if ($history === 'transfer') {
+            $last = ($last_season_raw === 'earlier') ? 0 : intval($last_season_raw);
+            return ($last >= intval($app_season) - 1) ? 'Club Transfer' : 'Free Agent';
+        }
+        if ($history === 'never_played') {
+            return 'New';
+        }
+        return 'Returning';
     }
 
     /**
