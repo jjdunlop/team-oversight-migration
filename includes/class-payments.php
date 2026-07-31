@@ -405,6 +405,100 @@ class TeamOversight_Payments {
             . '<p class="fee-progress-caption">Paid ' . $paid_pct . '% &middot; season ' . $sched_pct . '% elapsed</p>';
     }
 
+    /**
+     * The pay box, shared by [member_fees] and the Ready to Play fees
+     * step. Members kept missing that the amount is theirs to choose —
+     * a prefilled box reads as fixed — so the choice is now explicit
+     * radio options and the button states exactly what it will charge.
+     * The chosen option is resolved server-side, so it holds without JS.
+     */
+    public static function render_pay_box($outstanding, $overdue, $class = 'member-fees-pay-form') {
+        $outstanding = round(floatval($outstanding), 2);
+        $overdue = round(min(floatval($overdue), $outstanding), 2);
+        $show_overdue = ($overdue >= 1 && $overdue < $outstanding);
+        $uid = 'murvc-pay-' . wp_rand(1000, 9999);
+
+        ob_start();
+        ?>
+        <form method="post" class="<?php echo esc_attr($class); ?> murvc-pay-box" id="<?php echo esc_attr($uid); ?>">
+            <h4>Make a payment</h4>
+            <p class="murvc-pay-intro">You can pay <strong>any amount, any time</strong> — pay it off gradually or all at once.</p>
+
+            <?php if ($show_overdue): ?>
+                <label class="murvc-pay-option">
+                    <input type="radio" name="murvc_pay_choice" value="overdue" checked>
+                    <span>Pay what's <strong>overdue now</strong> — $<?php echo number_format($overdue, 2); ?></span>
+                </label>
+            <?php endif; ?>
+
+            <label class="murvc-pay-option">
+                <input type="radio" name="murvc_pay_choice" value="full" <?php checked(!$show_overdue); ?>>
+                <span>Pay the <strong>full remaining balance</strong> — $<?php echo number_format($outstanding, 2); ?></span>
+            </label>
+
+            <label class="murvc-pay-option">
+                <input type="radio" name="murvc_pay_choice" value="other">
+                <span>Pay a <strong>different amount</strong></span>
+            </label>
+
+            <p class="murvc-pay-custom">
+                <label for="<?php echo esc_attr($uid); ?>-amount">Amount ($)</label>
+                <input type="number" name="murvc_pay_amount" id="<?php echo esc_attr($uid); ?>-amount"
+                       min="1" max="<?php echo esc_attr(number_format($outstanding, 2, '.', '')); ?>" step="0.01"
+                       placeholder="e.g. 50.00">
+                <small>Anything from $1 up to $<?php echo number_format($outstanding, 2); ?>.</small>
+            </p>
+
+            <input type="hidden" name="murvc_pay_action" value="pay_fees">
+            <?php wp_nonce_field('murvc_pay_fees', 'murvc_pay_nonce'); ?>
+            <button type="submit" class="button button-primary murvc-pay-submit">Continue to payment</button>
+        </form>
+
+        <script>
+        (function () {
+            var form = document.getElementById(<?php echo wp_json_encode($uid); ?>);
+            if (!form) { return; }
+            var custom = form.querySelector('.murvc-pay-custom');
+            var amount = form.querySelector('input[name="murvc_pay_amount"]');
+            var button = form.querySelector('.murvc-pay-submit');
+            var amounts = {
+                overdue: <?php echo wp_json_encode(number_format($overdue, 2, '.', '')); ?>,
+                full: <?php echo wp_json_encode(number_format($outstanding, 2, '.', '')); ?>
+            };
+
+            function sync() {
+                var choice = form.querySelector('input[name="murvc_pay_choice"]:checked').value;
+                var isOther = choice === 'other';
+                custom.style.display = isOther ? '' : 'none';
+                amount.required = isOther;
+                if (isOther) {
+                    button.textContent = amount.value ? 'Pay $' + parseFloat(amount.value).toFixed(2) + ' now' : 'Continue to payment';
+                } else {
+                    button.textContent = 'Pay $' + parseFloat(amounts[choice]).toFixed(2) + ' now';
+                }
+            }
+
+            form.querySelectorAll('input[name="murvc_pay_choice"]').forEach(function (radio) {
+                radio.addEventListener('change', sync);
+            });
+            amount.addEventListener('input', sync);
+            sync();
+        })();
+        </script>
+
+        <style>
+        .murvc-pay-box .murvc-pay-intro { font-size: 13px; color: #555; margin: 0 0 10px 0; }
+        .murvc-pay-box .murvc-pay-option { display: block; margin: 0 0 6px 0; cursor: pointer; }
+        .murvc-pay-box .murvc-pay-option input { margin-right: 8px; }
+        .murvc-pay-box .murvc-pay-custom { margin: 8px 0 12px 26px; }
+        .murvc-pay-box .murvc-pay-custom input { width: 130px; margin: 0 8px; }
+        .murvc-pay-box .murvc-pay-custom small { display: block; color: #666; font-size: 12px; margin-top: 4px; }
+        .murvc-pay-box .murvc-pay-submit { margin-top: 4px; }
+        </style>
+        <?php
+        return ob_get_clean();
+    }
+
     public static function get_payment_product() {
         if (!function_exists('wc_get_product')) {
             return null;
@@ -491,6 +585,7 @@ class TeamOversight_Payments {
 
         $payment_product = self::get_payment_product();
         $total_outstanding = 0;
+        $total_overdue = 0;
 
         ob_start();
         ?>
@@ -503,6 +598,7 @@ class TeamOversight_Payments {
                 $credit = round($paid - floatval($invoice->invoice_amount), 2);
                 $overdue = self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
                 $total_outstanding += floatval($invoice->outstanding_amount);
+                $total_overdue += $overdue;
                 $dates = TeamOversight_Fees::get_season_dates($invoice->season);
                 ?>
                 <div class="member-fees-season">
@@ -528,16 +624,7 @@ class TeamOversight_Payments {
             <?php endforeach; ?>
 
             <?php if ($total_outstanding > 0 && $payment_product): ?>
-                <form method="post" class="member-fees-pay-form">
-                    <h4>Make a Payment</h4>
-                    <p>
-                        <label for="murvc_pay_amount">Amount ($)</label>
-                        <input type="number" name="murvc_pay_amount" id="murvc_pay_amount" min="1" max="<?php echo esc_attr(number_format($total_outstanding, 2, '.', '')); ?>" step="0.01" value="<?php echo esc_attr(number_format($total_outstanding, 2, '.', '')); ?>" required>
-                    </p>
-                    <input type="hidden" name="murvc_pay_action" value="pay_fees">
-                    <?php wp_nonce_field('murvc_pay_fees', 'murvc_pay_nonce'); ?>
-                    <button type="submit" class="button button-primary">Pay Now</button>
-                </form>
+                <?php echo self::render_pay_box($total_outstanding, $total_overdue); ?>
             <?php elseif ($total_outstanding > 0): ?>
                 <p><em>Online payment isn't available yet — please contact the club to arrange payment.</em></p>
             <?php else: ?>
@@ -677,7 +764,21 @@ class TeamOversight_Payments {
             $total_outstanding += floatval($invoice->outstanding_amount);
         }
 
-        $amount = round(floatval($_POST['murvc_pay_amount']), 2);
+        // Resolve the chosen option server-side so the amount charged is
+        // always the one the button named, with or without JS.
+        $choice = isset($_POST['murvc_pay_choice']) ? sanitize_text_field($_POST['murvc_pay_choice']) : 'other';
+        if ($choice === 'full') {
+            $amount = round($total_outstanding, 2);
+        } elseif ($choice === 'overdue') {
+            $overdue = 0;
+            foreach ($invoices as $invoice) {
+                $overdue += self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+            }
+            $amount = round(min($overdue, $total_outstanding), 2);
+        } else {
+            $amount = round(floatval(isset($_POST['murvc_pay_amount']) ? $_POST['murvc_pay_amount'] : 0), 2);
+        }
+
         if ($amount < 1 || $total_outstanding <= 0) {
             return;
         }

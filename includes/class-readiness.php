@@ -483,15 +483,7 @@ class TeamOversight_Readiness {
                             <?php if ($step['outstanding'] > 0): ?>
                                 <?php $payment_product = TeamOversight_Payments::get_payment_product(); ?>
                                 <?php if ($payment_product): ?>
-                                    <form method="post" class="rtp-pay-form">
-                                        <label>Pay amount ($)
-                                            <input type="number" name="murvc_pay_amount" min="1" max="<?php echo esc_attr(number_format($step['outstanding'], 2, '.', '')); ?>" step="0.01" value="<?php echo esc_attr(number_format($step['overdue'] > 0 ? $step['overdue'] : $step['outstanding'], 2, '.', '')); ?>" required>
-                                        </label>
-                                        <input type="hidden" name="murvc_pay_action" value="pay_fees">
-                                        <?php wp_nonce_field('murvc_pay_fees', 'murvc_pay_nonce'); ?>
-                                        <button type="submit" class="button button-primary">Pay Now</button>
-                                        <small class="rtp-pay-note">Pay any amount — it comes straight off your balance.</small>
-                                    </form>
+                                    <?php echo TeamOversight_Payments::render_pay_box($step['outstanding'], $step['overdue'], 'rtp-pay-form'); ?>
                                 <?php else: ?>
                                     <p class="rtp-pay-form rtp-pay-disabled">
                                         <label>Pay amount ($)
