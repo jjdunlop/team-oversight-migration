@@ -580,7 +580,11 @@ class TeamOversight_Payments {
         $invoices = self::get_user_invoices($user);
 
         if (empty($invoices)) {
-            return '<div class="member-fees-panel"><p>If you had any outstanding VVL fees, they would appear here.</p></div>';
+            // Deliberately silent. Saying "your fees would appear here"
+            // implies the club has nothing on record for them, which isn't
+            // safe while legacy fees exist outside this system — better to
+            // show nothing than to imply they're square.
+            return '';
         }
 
         $payment_product = self::get_payment_product();
