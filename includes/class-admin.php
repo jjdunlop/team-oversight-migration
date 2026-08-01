@@ -609,12 +609,12 @@ class TeamOversight_Admin {
         }
 
         // Live preview with sample numbers.
-        list($preview_subject, $preview_body) = TeamOversight_Payments::render_reminder_email('Alex Example', 150, 425.50);
+        list($preview_subject, $preview_body) = TeamOversight_Payments::render_reminder_email('Alex Example', 150, 425.50, null, 9);
 
         ?>
         <div class="wrap">
             <h1>Emails</h1>
-            <p class="description">Club emails sent by the plugin. Currently: the overdue-fees reminder. Placeholders available in the subject and body: <code>{first_name}</code>, <code>{name}</code>, <code>{overdue}</code>, <code>{outstanding}</code>, <code>{link}</code> (the fees/checklist page from Player Readiness settings).</p>
+            <p class="description">Club emails sent by the plugin. Currently: the overdue-fees reminder. Placeholders available in the subject and body: <code>{first_name}</code>, <code>{name}</code>, <code>{overdue}</code>, <code>{outstanding}</code>, <code>{time_overdue}</code> ("a week", "3 weeks"), <code>{days_overdue}</code>, <code>{link}</code> (the fees/checklist page from Player Readiness settings).</p>
 
             <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start;">
                 <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; min-width: 420px; flex: 1; max-width: 620px;">
@@ -628,8 +628,10 @@ class TeamOversight_Admin {
                             </label>
                         </p>
                         <p>
-                            <label>Only email once someone is at least $<input type="number" name="reminder_minimum" value="<?php echo esc_attr(number_format(TeamOversight_Payments::get_reminder_minimum(), 2, '.', '')); ?>" min="1" step="1" style="width: 70px;"> overdue</label>
-                            <span class="description" style="display: block; margin-top: 4px;">Fees fall due gradually, so everyone is a few dollars "overdue" within days of the season starting. This floor keeps reminders meaningful — members still see the exact figure on their fees page either way.</span>
+                            <label>Only email once someone has been behind for
+                                <input type="number" name="reminder_grace_days" value="<?php echo intval(TeamOversight_Payments::get_reminder_grace_days()); ?>" min="0" max="90" style="width: 60px;"> days</label>
+                            <label style="margin-left: 12px;">and owes at least $<input type="number" name="reminder_minimum" value="<?php echo esc_attr(number_format(TeamOversight_Payments::get_reminder_minimum(), 2, '.', '')); ?>" min="0.01" step="1" style="width: 70px;"></label>
+                            <span class="description" style="display: block; margin-top: 4px;">Fees fall due gradually, so everyone tips a few dollars "overdue" almost immediately. Waiting a few days means the email only goes to people who are genuinely behind — and it can say so ("behind for a week") instead of chasing a dollar. Keep the amount at $1 unless you also want to ignore small balances. Members always see their exact figure on the fees page.</span>
                         </p>
                         <p>
                             <label>Send at
@@ -737,7 +739,8 @@ class TeamOversight_Admin {
         update_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION, !empty($_POST['reminders_enabled']) ? 1 : 0);
         update_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, max(1, min(90, intval($_POST['reminder_days']))));
 
-        update_option(TeamOversight_Payments::REMINDER_MIN_OPTION, max(1, floatval($_POST['reminder_minimum'])));
+        update_option(TeamOversight_Payments::REMINDER_MIN_OPTION, max(0.01, floatval($_POST['reminder_minimum'])));
+        update_option(TeamOversight_Payments::REMINDER_GRACE_OPTION, max(0, min(90, intval($_POST['reminder_grace_days']))));
 
         // Send time: store, then re-anchor the daily cron to it.
         update_option(TeamOversight_Payments::REMINDER_HOUR_OPTION, max(0, min(23, intval($_POST['reminder_hour']))));
@@ -767,7 +770,7 @@ class TeamOversight_Admin {
         }
 
         $admin = wp_get_current_user();
-        list($subject, $body) = TeamOversight_Payments::render_reminder_email($admin->display_name, 150, 425.50);
+        list($subject, $body) = TeamOversight_Payments::render_reminder_email($admin->display_name, 150, 425.50, null, 9);
         if (wp_mail($admin->user_email, '[TEST] ' . $subject, $body, TeamOversight_Payments::get_email_headers())) {
             echo '<div class="notice notice-success"><p>Test email sent to ' . esc_html($admin->user_email) . '.</p></div>';
         } else {
@@ -796,6 +799,9 @@ class TeamOversight_Admin {
         }
         if ($report['skipped_no_account'] > 0) {
             echo ', ' . intval($report['skipped_no_account']) . ' skipped (no matching account)';
+        }
+        if (!empty($report['skipped_grace'])) {
+            echo ', ' . intval($report['skipped_grace']) . ' skipped (behind less than ' . intval($report['grace_days']) . ' days)';
         }
         if (!empty($report['skipped_small'])) {
             echo ', ' . intval($report['skipped_small']) . ' skipped (under the $' . number_format($report['minimum'], 2) . ' minimum)';

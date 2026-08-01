@@ -29,6 +29,7 @@ class TeamOversight_Payments {
     const EMAIL_SUBJECT_OPTION = 'team_oversight_overdue_email_subject';
     const EMAIL_BODY_OPTION = 'team_oversight_overdue_email_body';
     const REMINDER_MIN_OPTION = 'team_oversight_reminder_minimum';
+    const REMINDER_GRACE_OPTION = 'team_oversight_reminder_grace_days';
     const REMINDER_HOUR_OPTION = 'team_oversight_reminder_hour';
     const REMINDER_TZ_OPTION = 'team_oversight_reminder_timezone';
     const EMAIL_FROM_NAME_OPTION = 'team_oversight_email_from_name';
@@ -204,14 +205,38 @@ class TeamOversight_Payments {
      * can't be matched to an account are returned with user_id 0.
      */
     /**
-     * Don't email trivial amounts. The linear schedule makes everyone
-     * technically overdue within days of the season starting, so without
-     * a floor the club would chase people for a few dollars — which reads
-     * as petty and trains members to ignore the emails that matter.
+     * A token floor so cent-level rounding never triggers an email. The
+     * real gate is time (see the grace period) rather than an arbitrary
+     * dollar line, which would leave real amounts uncollected.
      */
     public static function get_reminder_minimum() {
         $minimum = get_option(self::REMINDER_MIN_OPTION, null);
-        return ($minimum === null || $minimum === '') ? 20.0 : max(1, floatval($minimum));
+        return ($minimum === null || $minimum === '') ? 1.0 : max(0.01, floatval($minimum));
+    }
+
+    /** Days someone must have been behind before they're emailed. */
+    public static function get_reminder_grace_days() {
+        $days = get_option(self::REMINDER_GRACE_OPTION, null);
+        return ($days === null || $days === '') ? 7 : max(0, intval($days));
+    }
+
+    /**
+     * The date an invoice fell behind: the point where the linear schedule
+     * overtook what had been paid. Past seasons are behind from the day
+     * the season ended (or that year's end when no dates were set).
+     * Null when the invoice isn't behind at all.
+     */
+    public static function get_overdue_since($invoice) {
+        if (self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season) <= 0) {
+            return null;
+        }
+
+        if (intval($invoice->season) > 0 && intval($invoice->season) < intval(wp_date('Y'))) {
+            $dates = TeamOversight_Fees::get_season_dates($invoice->season);
+            return $dates ? $dates['end'] : intval($invoice->season) . '-12-31';
+        }
+
+        return self::get_paid_through_date($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
     }
 
     public static function get_overdue_people($minimum = null) {
@@ -240,10 +265,25 @@ class TeamOversight_Payments {
                     'name' => $account ? $account->display_name : $invoice->name,
                     'overdue' => 0.0,
                     'outstanding' => 0.0,
+                    'overdue_since' => null,
+                    'days_overdue' => 0,
                 );
             }
             $people[$key]['outstanding'] += floatval($invoice->outstanding_amount);
             $people[$key]['overdue'] += self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+
+            // Track the earliest date anything of theirs fell behind.
+            $since = self::get_overdue_since($invoice);
+            if ($since && ($people[$key]['overdue_since'] === null || $since < $people[$key]['overdue_since'])) {
+                $people[$key]['overdue_since'] = $since;
+            }
+        }
+
+        $today = strtotime(current_time('Y-m-d'));
+        foreach ($people as $key => $person) {
+            $people[$key]['days_overdue'] = $person['overdue_since']
+                ? max(0, (int) floor(($today - strtotime($person['overdue_since'])) / DAY_IN_SECONDS))
+                : 0;
         }
 
         return array_values(array_filter($people, function ($p) use ($minimum) {
@@ -257,13 +297,28 @@ class TeamOversight_Payments {
 
     public static function get_default_reminder_body() {
         return "Hi {first_name},\n\n"
-            . "Our records show your MURVC club fees have fallen behind the payment schedule.\n\n"
+            . "Your MURVC club fees have been behind the payment schedule for {time_overdue}.\n\n"
             . "  Overdue now:     \${overdue}\n"
             . "  Total remaining: \${outstanding}\n\n"
-            . "You can pay any amount online — every payment comes straight off your balance:\n"
+            . "You can pay any amount online — part of it or all of it, whatever suits — and it comes straight off your balance:\n"
             . "{link}\n\n"
             . "If you think this is a mistake, or you'd like to arrange a payment plan, just reply to this email.\n\n"
             . "Melbourne University Renegades Volleyball Club";
+    }
+
+    /** "a week" / "3 weeks" / "2 months" — readable, not "37 days". */
+    public static function describe_duration($days) {
+        $days = max(0, intval($days));
+        if ($days < 7) {
+            return $days === 1 ? 'a day' : $days . ' days';
+        }
+        if ($days < 14) {
+            return 'a week';
+        }
+        if ($days < 60) {
+            return floor($days / 7) . ' weeks';
+        }
+        return floor($days / 30) . ' months';
     }
 
     /**
@@ -296,7 +351,7 @@ class TeamOversight_Payments {
      * defaults). Placeholders: {name} {first_name} {overdue} {outstanding}
      * {link}. Returns array(subject, body).
      */
-    public static function render_reminder_email($name, $overdue, $outstanding, $link = null) {
+    public static function render_reminder_email($name, $overdue, $outstanding, $link = null, $days_overdue = 0) {
         $subject_tpl = get_option(self::EMAIL_SUBJECT_OPTION);
         if (!is_string($subject_tpl) || trim($subject_tpl) === '') {
             $subject_tpl = self::get_default_reminder_subject();
@@ -313,6 +368,8 @@ class TeamOversight_Payments {
             '{overdue}' => number_format(floatval($overdue), 2),
             '{outstanding}' => number_format(floatval($outstanding), 2),
             '{link}' => $link !== null ? $link : self::get_reminder_link(),
+            '{days_overdue}' => intval($days_overdue),
+            '{time_overdue}' => self::describe_duration(intval($days_overdue)),
         );
 
         return array(strtr($subject_tpl, $replacements), strtr($body_tpl, $replacements));
@@ -325,22 +382,30 @@ class TeamOversight_Payments {
      * Returns a report array.
      */
     public function send_overdue_reminders($force = false, $dry_run = false) {
-        $report = array('enabled' => (bool) get_option(self::REMINDERS_ENABLED_OPTION), 'sent' => 0, 'skipped_recent' => 0, 'skipped_no_account' => 0, 'skipped_small' => 0, 'minimum' => self::get_reminder_minimum(), 'recipients' => array());
+        $report = array('enabled' => (bool) get_option(self::REMINDERS_ENABLED_OPTION), 'sent' => 0, 'skipped_recent' => 0, 'skipped_no_account' => 0, 'skipped_small' => 0, 'skipped_grace' => 0, 'minimum' => self::get_reminder_minimum(), 'grace_days' => self::get_reminder_grace_days(), 'recipients' => array());
 
         if (!$force && !$report['enabled']) {
             return $report;
         }
 
         $days = max(1, intval(get_option(self::REMINDER_DAYS_OPTION, 7)));
+        $grace = self::get_reminder_grace_days();
         $checklist_url = self::get_reminder_link();
 
-        // People overdue by less than the floor are deliberately left
-        // alone — counted so the admin can see the policy working.
+        // Sub-cent rounding is filtered by the token floor; the real gate
+        // is the grace period, both counted so the policy is visible.
         $report['skipped_small'] = count(self::get_overdue_people(0.01)) - count(self::get_overdue_people());
 
         foreach (self::get_overdue_people() as $person) {
             if (!$person['user_id']) {
                 $report['skipped_no_account']++;
+                continue;
+            }
+
+            // Just tipped over? Leave them be until they've actually been
+            // behind for a while — that's what makes the email meaningful.
+            if ($person['days_overdue'] < $grace) {
+                $report['skipped_grace']++;
                 continue;
             }
 
@@ -350,14 +415,15 @@ class TeamOversight_Payments {
                 continue;
             }
 
-            $report['recipients'][] = $person['name'] . ' <' . $person['email'] . '> $' . number_format($person['overdue'], 2);
+            $report['recipients'][] = $person['name'] . ' <' . $person['email'] . '> $' . number_format($person['overdue'], 2)
+                . ' (' . intval($person['days_overdue']) . ' days behind)';
 
             if ($dry_run) {
                 $report['sent']++;
                 continue;
             }
 
-            list($subject, $message) = self::render_reminder_email($person['name'], $person['overdue'], $person['outstanding'], $checklist_url);
+            list($subject, $message) = self::render_reminder_email($person['name'], $person['overdue'], $person['outstanding'], $checklist_url, $person['days_overdue']);
 
             if (wp_mail($person['email'], $subject, $message, self::get_email_headers())) {
                 update_user_meta($person['user_id'], self::REMINDER_META, time());
