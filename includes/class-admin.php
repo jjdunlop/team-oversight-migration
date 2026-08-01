@@ -628,6 +628,10 @@ class TeamOversight_Admin {
                             </label>
                         </p>
                         <p>
+                            <label>Only email once someone is at least $<input type="number" name="reminder_minimum" value="<?php echo esc_attr(number_format(TeamOversight_Payments::get_reminder_minimum(), 2, '.', '')); ?>" min="1" step="1" style="width: 70px;"> overdue</label>
+                            <span class="description" style="display: block; margin-top: 4px;">Fees fall due gradually, so everyone is a few dollars "overdue" within days of the season starting. This floor keeps reminders meaningful — members still see the exact figure on their fees page either way.</span>
+                        </p>
+                        <p>
                             <label>Send at
                                 <select name="reminder_hour">
                                     <?php for ($h = 0; $h < 24; $h++): ?>
@@ -733,6 +737,8 @@ class TeamOversight_Admin {
         update_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION, !empty($_POST['reminders_enabled']) ? 1 : 0);
         update_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, max(1, min(90, intval($_POST['reminder_days']))));
 
+        update_option(TeamOversight_Payments::REMINDER_MIN_OPTION, max(1, floatval($_POST['reminder_minimum'])));
+
         // Send time: store, then re-anchor the daily cron to it.
         update_option(TeamOversight_Payments::REMINDER_HOUR_OPTION, max(0, min(23, intval($_POST['reminder_hour']))));
         $timezone = sanitize_text_field(wp_unslash($_POST['reminder_timezone']));
@@ -790,6 +796,9 @@ class TeamOversight_Admin {
         }
         if ($report['skipped_no_account'] > 0) {
             echo ', ' . intval($report['skipped_no_account']) . ' skipped (no matching account)';
+        }
+        if (!empty($report['skipped_small'])) {
+            echo ', ' . intval($report['skipped_small']) . ' skipped (under the $' . number_format($report['minimum'], 2) . ' minimum)';
         }
         echo '.';
         if (!empty($report['recipients'])) {

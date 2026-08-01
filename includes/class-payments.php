@@ -28,6 +28,7 @@ class TeamOversight_Payments {
     const REMINDER_CRON = 'team_oversight_overdue_reminders';
     const EMAIL_SUBJECT_OPTION = 'team_oversight_overdue_email_subject';
     const EMAIL_BODY_OPTION = 'team_oversight_overdue_email_body';
+    const REMINDER_MIN_OPTION = 'team_oversight_reminder_minimum';
     const REMINDER_HOUR_OPTION = 'team_oversight_reminder_hour';
     const REMINDER_TZ_OPTION = 'team_oversight_reminder_timezone';
     const EMAIL_FROM_NAME_OPTION = 'team_oversight_email_from_name';
@@ -202,8 +203,21 @@ class TeamOversight_Payments {
      * full), one entry per person, resolved to their WP account. Rows that
      * can't be matched to an account are returned with user_id 0.
      */
-    public static function get_overdue_people() {
+    /**
+     * Don't email trivial amounts. The linear schedule makes everyone
+     * technically overdue within days of the season starting, so without
+     * a floor the club would chase people for a few dollars — which reads
+     * as petty and trains members to ignore the emails that matter.
+     */
+    public static function get_reminder_minimum() {
+        $minimum = get_option(self::REMINDER_MIN_OPTION, null);
+        return ($minimum === null || $minimum === '') ? 20.0 : max(1, floatval($minimum));
+    }
+
+    public static function get_overdue_people($minimum = null) {
         global $wpdb;
+
+        $minimum = ($minimum === null) ? self::get_reminder_minimum() : floatval($minimum);
 
         $invoices = $wpdb->get_results("
             SELECT * FROM {$wpdb->prefix}team_invoices WHERE outstanding_amount > 0
@@ -232,8 +246,8 @@ class TeamOversight_Payments {
             $people[$key]['overdue'] += self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
         }
 
-        return array_values(array_filter($people, function ($p) {
-            return $p['overdue'] >= 1;
+        return array_values(array_filter($people, function ($p) use ($minimum) {
+            return $p['overdue'] >= $minimum;
         }));
     }
 
@@ -311,7 +325,7 @@ class TeamOversight_Payments {
      * Returns a report array.
      */
     public function send_overdue_reminders($force = false, $dry_run = false) {
-        $report = array('enabled' => (bool) get_option(self::REMINDERS_ENABLED_OPTION), 'sent' => 0, 'skipped_recent' => 0, 'skipped_no_account' => 0, 'recipients' => array());
+        $report = array('enabled' => (bool) get_option(self::REMINDERS_ENABLED_OPTION), 'sent' => 0, 'skipped_recent' => 0, 'skipped_no_account' => 0, 'skipped_small' => 0, 'minimum' => self::get_reminder_minimum(), 'recipients' => array());
 
         if (!$force && !$report['enabled']) {
             return $report;
@@ -319,6 +333,10 @@ class TeamOversight_Payments {
 
         $days = max(1, intval(get_option(self::REMINDER_DAYS_OPTION, 7)));
         $checklist_url = self::get_reminder_link();
+
+        // People overdue by less than the floor are deliberately left
+        // alone — counted so the admin can see the policy working.
+        $report['skipped_small'] = count(self::get_overdue_people(0.01)) - count(self::get_overdue_people());
 
         foreach (self::get_overdue_people() as $person) {
             if (!$person['user_id']) {
