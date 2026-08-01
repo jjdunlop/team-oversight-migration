@@ -623,9 +623,45 @@ class TeamOversight_Admin {
                         <p>
                             <label>
                                 <input type="checkbox" name="reminders_enabled" value="1" <?php checked(get_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION)); ?>>
-                                <strong>Send automatically</strong> (daily check; each person emailed at most every
+                                <strong>Send automatically</strong> (each person emailed at most every
                                 <input type="number" name="reminder_days" value="<?php echo intval(get_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, 7)); ?>" min="1" max="90" style="width: 55px;"> days)
                             </label>
+                        </p>
+                        <p>
+                            <label>Send at
+                                <select name="reminder_hour">
+                                    <?php for ($h = 0; $h < 24; $h++): ?>
+                                        <option value="<?php echo $h; ?>" <?php selected(TeamOversight_Payments::get_reminder_hour(), $h); ?>>
+                                            <?php echo esc_html(date('g:i a', mktime($h, 0, 0, 1, 1, 2000))); ?>
+                                        </option>
+                                    <?php endfor; ?>
+                                </select>
+                            </label>
+                            <label style="margin-left: 8px;">
+                                <select name="reminder_timezone">
+                                    <?php
+                                    $current_tz = TeamOversight_Payments::get_reminder_timezone()->getName();
+                                    $zones = timezone_identifiers_list(DateTimeZone::AUSTRALIA);
+                                    if (!in_array($current_tz, $zones, true)) {
+                                        array_unshift($zones, $current_tz);
+                                    }
+                                    foreach ($zones as $zone):
+                                        ?>
+                                        <option value="<?php echo esc_attr($zone); ?>" <?php selected($current_tz, $zone); ?>><?php echo esc_html(str_replace('_', ' ', $zone)); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </label>
+                            <?php
+                            $next = wp_next_scheduled(TeamOversight_Payments::REMINDER_CRON);
+                            if ($next):
+                                $next_local = new DateTime('@' . $next);
+                                $next_local->setTimezone(TeamOversight_Payments::get_reminder_timezone());
+                                ?>
+                                <span class="description" style="display: block; margin-top: 4px;">
+                                    Next run: <strong><?php echo esc_html($next_local->format('D j M, g:i a')); ?></strong> (<?php echo esc_html($current_tz); ?>).
+                                    Reminders only go out when the automatic switch above is on.
+                                </span>
+                            <?php endif; ?>
                         </p>
                         <p style="display: flex; gap: 10px;">
                             <label style="flex: 1;"><strong>From name</strong><br>
@@ -696,6 +732,15 @@ class TeamOversight_Admin {
 
         update_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION, !empty($_POST['reminders_enabled']) ? 1 : 0);
         update_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, max(1, min(90, intval($_POST['reminder_days']))));
+
+        // Send time: store, then re-anchor the daily cron to it.
+        update_option(TeamOversight_Payments::REMINDER_HOUR_OPTION, max(0, min(23, intval($_POST['reminder_hour']))));
+        $timezone = sanitize_text_field(wp_unslash($_POST['reminder_timezone']));
+        if (in_array($timezone, timezone_identifiers_list(), true)) {
+            update_option(TeamOversight_Payments::REMINDER_TZ_OPTION, $timezone);
+        }
+        $payments = new TeamOversight_Payments();
+        $payments->maybe_schedule_reminder_cron();
         update_option(TeamOversight_Payments::EMAIL_SUBJECT_OPTION, sanitize_text_field(wp_unslash($_POST['email_subject'])));
         update_option(TeamOversight_Payments::EMAIL_BODY_OPTION, sanitize_textarea_field(wp_unslash($_POST['email_body'])));
         update_option(TeamOversight_Payments::EMAIL_FROM_NAME_OPTION, sanitize_text_field(wp_unslash($_POST['email_from_name'])));

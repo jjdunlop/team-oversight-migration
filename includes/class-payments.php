@@ -28,6 +28,8 @@ class TeamOversight_Payments {
     const REMINDER_CRON = 'team_oversight_overdue_reminders';
     const EMAIL_SUBJECT_OPTION = 'team_oversight_overdue_email_subject';
     const EMAIL_BODY_OPTION = 'team_oversight_overdue_email_body';
+    const REMINDER_HOUR_OPTION = 'team_oversight_reminder_hour';
+    const REMINDER_TZ_OPTION = 'team_oversight_reminder_timezone';
     const EMAIL_FROM_NAME_OPTION = 'team_oversight_email_from_name';
     const EMAIL_FROM_OPTION = 'team_oversight_email_from_address';
     const EMAIL_REPLYTO_OPTION = 'team_oversight_email_replyto';
@@ -59,10 +61,54 @@ class TeamOversight_Payments {
         add_action(self::REMINDER_CRON, array($this, 'run_reminder_cron'));
     }
 
-    public function maybe_schedule_reminder_cron() {
-        if (!wp_next_scheduled(self::REMINDER_CRON)) {
-            wp_schedule_event(time() + 2 * HOUR_IN_SECONDS, 'daily', self::REMINDER_CRON);
+    /** Club timezone reminders are scheduled against. */
+    public static function get_reminder_timezone() {
+        $tz = (string) get_option(self::REMINDER_TZ_OPTION, '');
+        if ($tz === '') {
+            $tz = 'Australia/Melbourne';
         }
+        try {
+            return new DateTimeZone($tz);
+        } catch (Exception $e) {
+            return new DateTimeZone('Australia/Melbourne');
+        }
+    }
+
+    /** Hour of the day (0-23) reminders are sent. Default 6pm. */
+    public static function get_reminder_hour() {
+        $hour = get_option(self::REMINDER_HOUR_OPTION, null);
+        return ($hour === null || $hour === '') ? 18 : max(0, min(23, intval($hour)));
+    }
+
+    /** UTC timestamp of the next send at the configured local time. */
+    public static function next_reminder_timestamp() {
+        $tz = self::get_reminder_timezone();
+        $now = new DateTime('now', $tz);
+        $next = clone $now;
+        $next->setTime(self::get_reminder_hour(), 0, 0);
+        if ($next <= $now) {
+            $next->modify('+1 day');
+        }
+        return $next->getTimestamp();
+    }
+
+    /**
+     * Keep the daily cron anchored to the configured local time,
+     * rescheduling whenever the setting (or a DST shift) moves it.
+     */
+    public function maybe_schedule_reminder_cron() {
+        $scheduled = wp_next_scheduled(self::REMINDER_CRON);
+
+        if ($scheduled) {
+            $when = new DateTime('@' . $scheduled);
+            $when->setTimezone(self::get_reminder_timezone());
+            if (intval($when->format('G')) === self::get_reminder_hour()) {
+                return; // already lands on the right hour locally
+            }
+            wp_unschedule_event($scheduled, self::REMINDER_CRON);
+        }
+
+        wp_schedule_event(self::next_reminder_timestamp(), 'daily', self::REMINDER_CRON);
     }
 
     public function run_reminder_cron() {
