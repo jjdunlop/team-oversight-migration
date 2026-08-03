@@ -1228,6 +1228,31 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
+     * The emergency contacts on a member's profile, in order. The profile
+     * form holds up to two: the primary (emergency_contact_*) and a second
+     * set stored under UM's duplicated-field keys (_37/_38/_39) — those are
+     * a genuine second contact, not a legacy duplicate of the first.
+     * Returns rows of name / number / relationship; empty when none.
+     */
+    public static function get_emergency_contacts($user_id) {
+        $sets = array(
+            array('emergency_contact_name', 'emergency_contact_number', 'emergency_contact_relationship'),
+            array('emergency_contact_name_37', 'emergency_contact_number_38', 'emergency_contact_relationship_39'),
+        );
+
+        $contacts = array();
+        foreach ($sets as $keys) {
+            $name = get_user_meta($user_id, $keys[0], true);
+            $number = get_user_meta($user_id, $keys[1], true);
+            $relationship = get_user_meta($user_id, $keys[2], true);
+            if ($name || $number) {
+                $contacts[] = array('name' => $name, 'number' => $number, 'relationship' => $relationship);
+            }
+        }
+        return $contacts;
+    }
+
+    /**
      * Emergency contacts from the member's profile. The profile form holds
      * up to two: the primary (emergency_contact_*) and a second set stored
      * under UM's duplicated-field keys (_37/_38/_39). Rendered as the same
@@ -1236,21 +1261,7 @@ class TeamOversight_Coach_Portal {
      */
     public static function render_emergency_details($email) {
         $user = get_user_by('email', $email);
-        $contacts = array();
-        if ($user) {
-            $sets = array(
-                array('emergency_contact_name', 'emergency_contact_number', 'emergency_contact_relationship'),
-                array('emergency_contact_name_37', 'emergency_contact_number_38', 'emergency_contact_relationship_39'),
-            );
-            foreach ($sets as $keys) {
-                $name = get_user_meta($user->ID, $keys[0], true);
-                $number = get_user_meta($user->ID, $keys[1], true);
-                $relationship = get_user_meta($user->ID, $keys[2], true);
-                if ($name || $number) {
-                    $contacts[] = array('name' => $name, 'number' => $number, 'relationship' => $relationship);
-                }
-            }
-        }
+        $contacts = $user ? self::get_emergency_contacts($user->ID) : array();
 
         ob_start();
         ?>

@@ -61,6 +61,14 @@ The WP dashboard is replaced (for admins) with a fast **MURVC Club Overview** wi
 
 One row per person: membership status + expiry, age, gender, MUS category, VVL teams for the season, fees owing, VA accreditation, profile-confirmation status. Filter/search/sort, CSV export, manual grant (with email autocomplete) and revoke.
 
+### Member Lookup
+
+Club Membership → Member Lookup: search **any account on the site** — not just people on the membership ledger — and get everything the club holds about that one person on a single screen. Emergency contacts sit at the top (both of them, phone numbers repaired and tap-to-call), followed by profile details, membership grant history, every team assignment across all seasons, fees with the payment ledger and computed overdue amount, trial applications, recent WooCommerce orders and recent activity-log entries.
+
+Search matches display name, email, username, first/last name, mobile and student ID. Phone searches also try the number without its leading zero, since some imported numbers lost it.
+
+Deliberately search-first: with thousands of accounts the page never lists them all. Nothing is queried until you type at least two characters, results are capped at 25, and the detail view costs one person's worth of queries (a search runs in ~20ms against ~3,800 accounts). The **Profile** button on the Members page opens this view.
+
 ### Stats
 
 Club Membership → Stats — statistics about **current members** (unexpired ledger grants), in tabs designed to grow over time:

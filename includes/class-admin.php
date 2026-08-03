@@ -43,6 +43,15 @@ class TeamOversight_Admin {
 
         add_submenu_page(
             'club-membership',
+            'Member Lookup',
+            'Member Lookup',
+            'manage_options',
+            'club-membership-lookup',
+            array($this, 'member_lookup_page')
+        );
+
+        add_submenu_page(
+            'club-membership',
             'Membership History',
             'Membership History',
             'manage_options',
@@ -253,6 +262,11 @@ class TeamOversight_Admin {
     public function stats_page() {
         $stats_page = new TeamOversight_Stats_Page();
         $stats_page->render_page();
+    }
+
+    public function member_lookup_page() {
+        $lookup = new TeamOversight_Member_Lookup();
+        $lookup->render_page();
     }
 
     public function trials_page() {

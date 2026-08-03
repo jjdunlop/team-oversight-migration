@@ -22,12 +22,13 @@ push as a production deploy: lint and test first (see Workflow below).
 - `includes/class-database.php` — table creation + `migrate_database` (additive, idempotent, runs on every load), team config (`get_teams_config`), age rules / DOB cutoffs.
 - `includes/class-admin.php` — all VVL Oversight admin pages (trials, assignments, payment management, configuration, readiness) + menu registration.
 - `includes/class-members-page.php` — Club Membership admin: Members list, Membership History, MUS Matrix, VV Report, seeding, order re-scan.
+- `includes/class-member-lookup.php` — Club Membership → Member Lookup: search-first single-person view (profile, emergency contacts, grants, assignments, fees, trials, orders, activity) over *all* accounts, not just ledger members. Never lists accounts — searches are capped and require a term.
 - `includes/class-stats-page.php` — Club Membership → Stats: data-quality snapshots/trends and postcode distribution + watchlist, scoped to current ledger members.
 - `includes/class-memberships.php` — membership tier engine: grants ledger, product/category → tier mapping, order hooks, role sync, cron.
 - `includes/class-fees.php` — fee matrix, season dates, pro-rata, fee segments (dated fee-role history), invoice generation.
 - `includes/class-payments.php` — payment schedule/overdue, `[member_fees]`, pay-any-amount checkout flow, payment ledger.
 - `includes/class-trials.php` — `[team_trial_form]`, trial fee payment flow, trial numbers, eligibility.
-- `includes/class-coach-portal.php` — `[team_coach_portal]`: selection board, verdicts, notes, roster export. Also owns the shared card helpers other areas reuse: `render_emergency_details()`, `format_phone()`, `phone_tel_href()` (all public static).
+- `includes/class-coach-portal.php` — `[team_coach_portal]`: selection board, verdicts, notes, roster export. Also owns the shared card helpers other areas reuse: `get_emergency_contacts()`, `render_emergency_details()`, `format_phone()`, `phone_tel_href()` (all public static).
 - `includes/class-programs.php` — Club Programs: casual-program session attendance read live from paid orders (product per program, variation per session date), admin sub-page per program + `[session_attendance]` for supervisors.
 - `includes/class-readiness.php` — `[ready_to_play]` checklist + Player Readiness admin.
 - `includes/class-imports.php` / `class-exports.php` — RevSport CSV import; team list / MUS CSV exports.

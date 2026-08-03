@@ -250,7 +250,7 @@ class TeamOversight_Members_Page {
                                 <td title="<?php echo esc_attr($m['accreditation']); ?>"><?php echo $m['accreditation'] ? '&#10003;' : ''; ?></td>
                                 <td><?php echo $m['confirmed'] ? '&#10003; ' . esc_html(date('Y')) : ''; ?></td>
                                 <td>
-                                    <a href="<?php echo esc_url(get_edit_user_link($m['user_id'])); ?>" class="button button-small">Profile</a>
+                                    <a href="<?php echo esc_url(TeamOversight_Member_Lookup::profile_url($m['user_id'])); ?>" class="button button-small">Profile</a>
                                     <?php if ($m['has_active_grant'] || $m['role_only']): ?>
                                         <form method="post" style="display: inline;" onsubmit="return confirm('Revoke <?php echo esc_js($m['name']); ?>\'s membership? Active grants are ended today and tier roles removed.');">
                                             <input type="hidden" name="action" value="revoke_membership">
