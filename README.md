@@ -65,7 +65,9 @@ One row per person: membership status + expiry, age, gender, MUS category, VVL t
 
 Club Membership → Member Lookup: search **any account on the site** — not just people on the membership ledger — and get everything the club holds about that one person on a single screen. Emergency contacts sit at the top (both of them, phone numbers repaired and tap-to-call), followed by profile details, membership grant history, every team assignment across all seasons, fees with the payment ledger and computed overdue amount, trial applications, recent WooCommerce orders and recent activity-log entries.
 
-Search matches display name, email, username, first/last name, mobile and student ID. Phone searches also try the number without its leading zero, since some imported numbers lost it.
+Search matches display name, email, username, first/last name, mobile, student ID **and emergency contacts** — so an unknown number that rings the club can be traced back to whose contact it is. When a result matched on someone else's details the row says so ("emergency contact: Jane Smith — 0411 222 333") rather than looking unexplained.
+
+Phone matching compares digits to digits, so formatting never gets in the way: `0411 222 333`, `0411222333`, `411222333` and `+61 411 222 333` all find each other. That covers both the imports that dropped the leading zero and the profiles saved with spaces or a country code.
 
 Deliberately search-first: with thousands of accounts the page never lists them all. Nothing is queried until you type at least two characters, results are capped at 25, and the detail view costs one person's worth of queries (a search runs in ~20ms against ~3,800 accounts). The **Profile** button on the Members page opens this view.
 

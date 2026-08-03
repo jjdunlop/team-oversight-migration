@@ -22,7 +22,7 @@ push as a production deploy: lint and test first (see Workflow below).
 - `includes/class-database.php` — table creation + `migrate_database` (additive, idempotent, runs on every load), team config (`get_teams_config`), age rules / DOB cutoffs.
 - `includes/class-admin.php` — all VVL Oversight admin pages (trials, assignments, payment management, configuration, readiness) + menu registration.
 - `includes/class-members-page.php` — Club Membership admin: Members list, Membership History, MUS Matrix, VV Report, seeding, order re-scan.
-- `includes/class-member-lookup.php` — Club Membership → Member Lookup: search-first single-person view (profile, emergency contacts, grants, assignments, fees, trials, orders, activity) over *all* accounts, not just ledger members. Never lists accounts — searches are capped and require a term.
+- `includes/class-member-lookup.php` — Club Membership → Member Lookup: search-first single-person view (profile, emergency contacts, grants, assignments, fees, trials, orders, activity) over *all* accounts, not just ledger members. Never lists accounts — searches are capped and require a term. Search covers emergency-contact name/number too (reverse lookup); phone matching is digits-to-digits so formatting and missing leading zeros never block a match.
 - `includes/class-stats-page.php` — Club Membership → Stats: data-quality snapshots/trends and postcode distribution + watchlist, scoped to current ledger members.
 - `includes/class-memberships.php` — membership tier engine: grants ledger, product/category → tier mapping, order hooks, role sync, cron.
 - `includes/class-fees.php` — fee matrix, season dates, pro-rata, fee segments (dated fee-role history), invoice generation.

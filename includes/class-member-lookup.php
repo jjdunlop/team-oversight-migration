@@ -25,6 +25,19 @@ class TeamOversight_Member_Lookup {
     /** Minimum search length — stops a stray keystroke scanning the table. */
     const MIN_TERM = 2;
 
+    /** Profile fields worth searching, beyond the users table itself. */
+    const SEARCH_META = array(
+        'first_name', 'last_name', 'full_name', 'mobile_number', 'StudentID',
+        'emergency_contact_name', 'emergency_contact_number',
+        'emergency_contact_name_37', 'emergency_contact_number_38',
+    );
+
+    /** The subset of the above that identifies someone's emergency contact. */
+    const EMERGENCY_META = array(
+        'emergency_contact_name' => 'emergency_contact_number',
+        'emergency_contact_name_37' => 'emergency_contact_number_38',
+    );
+
     public function render_page() {
         if (!current_user_can('manage_options')) {
             wp_die('Insufficient permissions');
@@ -40,7 +53,9 @@ class TeamOversight_Member_Lookup {
             <p class="description" style="max-width: 760px;">
                 Search any account on the site — members, casual program participants, lapsed
                 accounts, anyone with a login. Emergency contacts, fees, teams and membership
-                history for one person, in one place.
+                history for one person, in one place. Searching a name or number also matches
+                <strong>emergency contacts</strong>, so an unknown number that rings the club can
+                be traced back to whose contact it is.
             </p>
 
             <?php $this->render_styles(); ?>
@@ -48,7 +63,7 @@ class TeamOversight_Member_Lookup {
             <form method="get" class="murvc-lookup-search">
                 <input type="hidden" name="page" value="club-membership-lookup">
                 <input type="search" name="s" value="<?php echo esc_attr($term); ?>"
-                       placeholder="Name, email, username, mobile or student ID&hellip;"
+                       placeholder="Name, email, username, mobile, student ID or emergency contact&hellip;"
                        autofocus autocomplete="off">
                 <input type="submit" class="button button-primary" value="Search">
                 <?php if ($user): ?>
@@ -76,29 +91,30 @@ class TeamOversight_Member_Lookup {
     // ------------------------------------------------------------------
 
     /**
-     * Accounts matching a term across the users table and the handful of
-     * profile fields worth searching. Capped at RESULT_LIMIT + 1 so the
-     * page can say "narrow this down" without counting the whole table.
+     * Accounts matching a term across the users table and the profile
+     * fields worth searching — including emergency contacts, so an unknown
+     * number that rings the club can be traced back to whose contact it is.
+     * Capped at RESULT_LIMIT + 1 so the page can say "narrow this down"
+     * without counting the whole table.
      */
     private function search_users($term) {
         global $wpdb;
 
         $like = '%' . $wpdb->esc_like($term) . '%';
+        $meta_clauses = array('m.meta_value LIKE %s');
+        $meta_params = array($like);
 
-        // Phone numbers are stored inconsistently (some imports dropped the
-        // leading zero), so a search for 0412... also tries 412...
-        $digits = preg_replace('/[^0-9]/', '', $term);
-        $meta_likes = array($like);
-        if (strlen($digits) >= 6) {
-            $meta_likes[] = '%' . $wpdb->esc_like($digits) . '%';
-            if (strpos($digits, '0') === 0) {
-                $meta_likes[] = '%' . $wpdb->esc_like(substr($digits, 1)) . '%';
-            }
+        // Phone numbers are stored every which way — spaced, +61, and some
+        // imports dropped the leading zero — so numeric searches compare
+        // digits to digits, with and without that zero.
+        foreach ($this->phone_variants($term) as $variant) {
+            $meta_clauses[] = self::PHONE_NORMALISE . ' LIKE %s';
+            $meta_params[] = '%' . $wpdb->esc_like($variant) . '%';
         }
-        $meta_likes = array_values(array_unique($meta_likes));
-        $meta_clause = implode(' OR ', array_fill(0, count($meta_likes), 'm.meta_value LIKE %s'));
 
-        $params = array_merge(array($like, $like, $like), $meta_likes, array(self::RESULT_LIMIT + 1));
+        $meta_clause = implode(' OR ', $meta_clauses);
+        $keys = "'" . implode("', '", self::SEARCH_META) . "'";
+        $params = array_merge(array($like, $like, $like), $meta_params, array(self::RESULT_LIMIT + 1));
 
         return $wpdb->get_results($wpdb->prepare("
             SELECT u.ID, u.display_name, u.user_email, u.user_login, u.user_registered
@@ -109,12 +125,97 @@ class TeamOversight_Member_Lookup {
                 OR EXISTS (
                     SELECT 1 FROM {$wpdb->usermeta} m
                     WHERE m.user_id = u.ID
-                        AND m.meta_key IN ('first_name', 'last_name', 'full_name', 'mobile_number', 'StudentID')
+                        AND m.meta_key IN ({$keys})
                         AND ({$meta_clause})
                 )
             ORDER BY u.display_name
             LIMIT %d
         ", $params));
+    }
+
+    /** Strips formatting off a stored number so digits can be compared. */
+    const PHONE_NORMALISE = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(m.meta_value, ' ', ''), '-', ''), '(', ''), ')', ''), '+', '')";
+
+    /**
+     * Digit forms of a search term worth trying against stored numbers:
+     * the digits as typed, and the same without a leading zero (so 0411…
+     * finds 411… and +61411…). Empty when the term isn't phone-like.
+     */
+    private function phone_variants($term) {
+        $digits = preg_replace('/[^0-9]/', '', $term);
+        if (strlen($digits) < 6) {
+            return array();
+        }
+
+        $variants = array($digits);
+        if (strpos($digits, '0') === 0) {
+            $variants[] = substr($digits, 1);
+        }
+        return array_values(array_unique($variants));
+    }
+
+    /**
+     * For a batch of results, which of their emergency contacts matched the
+     * search term — so a hit on someone else's number is labelled as such
+     * rather than looking like an unexplained result. One query.
+     */
+    private function get_emergency_matches($user_ids, $term) {
+        global $wpdb;
+
+        $user_ids = array_filter(array_map('intval', (array) $user_ids));
+        if (empty($user_ids)) {
+            return array();
+        }
+
+        $ids = implode(',', $user_ids);
+        $keys = "'" . implode("', '", array_merge(array_keys(self::EMERGENCY_META), array_values(self::EMERGENCY_META))) . "'";
+        $rows = $wpdb->get_results("
+            SELECT user_id, meta_key, meta_value FROM {$wpdb->usermeta}
+            WHERE user_id IN ({$ids}) AND meta_key IN ({$keys})
+        ");
+
+        $by_user = array();
+        foreach ($rows as $row) {
+            $by_user[$row->user_id][$row->meta_key] = $row->meta_value;
+        }
+
+        $variants = $this->phone_variants($term);
+        $matches = array();
+        foreach ($by_user as $user_id => $meta) {
+            foreach (self::EMERGENCY_META as $name_key => $number_key) {
+                $name = isset($meta[$name_key]) ? $meta[$name_key] : '';
+                $number = isset($meta[$number_key]) ? $meta[$number_key] : '';
+                if ($this->value_matches($name, $term, array()) || $this->value_matches($number, $term, $variants)) {
+                    $label = $name !== '' ? $name : 'Unnamed contact';
+                    if ($number !== '') {
+                        $label .= ' — ' . TeamOversight_Coach_Portal::format_phone($number);
+                    }
+                    $matches[$user_id][] = $label;
+                }
+            }
+        }
+        return $matches;
+    }
+
+    /** Same matching rule as the SQL above, applied to one stored value. */
+    private function value_matches($value, $term, $phone_variants) {
+        if ($value === '' || $term === '') {
+            return false;
+        }
+        if (stripos($value, $term) !== false) {
+            return true;
+        }
+
+        $value_digits = preg_replace('/[^0-9]/', '', $value);
+        if ($value_digits === '') {
+            return false;
+        }
+        foreach ($phone_variants as $variant) {
+            if (strpos($value_digits, $variant) !== false) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function render_results($term) {
@@ -136,6 +237,7 @@ class TeamOversight_Member_Lookup {
 
         $tiers = $this->get_active_tiers(wp_list_pluck($rows, 'ID'));
         $tier_labels = TeamOversight_Memberships::get_tiers();
+        $emergency = $this->get_emergency_matches(wp_list_pluck($rows, 'ID'), $term);
         ?>
         <p><strong><?php echo count($rows); ?></strong> match<?php echo count($rows) === 1 ? '' : 'es'; ?><?php echo $truncated ? ' (showing the first ' . intval(self::RESULT_LIMIT) . ' — narrow your search)' : ''; ?>.</p>
         <table class="wp-list-table widefat fixed striped">
@@ -155,7 +257,14 @@ class TeamOversight_Member_Lookup {
                     $tier = isset($tiers[$row->ID]) ? $tiers[$row->ID] : '';
                     ?>
                     <tr>
-                        <td><strong><?php echo esc_html($row->display_name); ?></strong></td>
+                        <td>
+                            <strong><?php echo esc_html($row->display_name); ?></strong>
+                            <?php if (!empty($emergency[$row->ID])): ?>
+                                <?php foreach ($emergency[$row->ID] as $match): ?>
+                                    <div class="murvc-match">emergency contact: <?php echo esc_html($match); ?></div>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </td>
                         <td><?php echo esc_html($row->user_email); ?></td>
                         <td><?php echo esc_html(TeamOversight_Coach_Portal::format_phone($mobile)); ?></td>
                         <td><?php echo $tier ? esc_html(isset($tier_labels[$tier]) ? $tier_labels[$tier] : $tier) : '<span class="murvc-muted">&mdash;</span>'; ?></td>
@@ -624,6 +733,7 @@ class TeamOversight_Member_Lookup {
         .murvc-list tr.is-current td { background: #f4fbf5; }
         .murvc-list tr.is-inactive { opacity: .55; }
         .murvc-muted { color: #888; }
+        .murvc-match { font-size: 12px; color: #8a5000; background: #fff7ec; border-left: 3px solid #e07b00; padding: 1px 6px; margin-top: 3px; display: inline-block; }
         .murvc-owing { color: #a00; font-weight: 600; }
         .murvc-payment { font-size: 12px; padding: 2px 0 2px 10px; }
         .murvc-fees details summary { cursor: pointer; }
