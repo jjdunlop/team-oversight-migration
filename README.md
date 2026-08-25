@@ -172,6 +172,14 @@ Casual programs (Mixed Development and similar) sell one WooCommerce product per
 - **Session dates**: programs can declare the weekday they run on (e.g. Mixed Dev = Tuesday). Variation labels like "13-May" carry no year, so the weekday is what pins each session to the right year — without it, last season's dates sort into this season. Pickers show the fully resolved date ("Tue 14 Jul 2026").
 - **Search**: an instant filter over name and email — no page reload, sized for a phone at the door.
 - **Supervisor access is per program**: each program has its own supervisors, added in Club Programs → Settings with an account search (type a name or email, click to add, × to remove), so Mixed Dev supervisors see only Mixed Dev. Administrators see everything. `[session_attendance]` shows a supervisor only the programs they run; everyone else gets a polite notice. Lock a page to one program with `[session_attendance program="mixed-dev"]`. (A pre-1.35 club-wide supervisor list is still honoured, with a tick-box in Settings to clear it once migrated.)
+- **Participation stats** sit above the roster on each program's admin page, over a date range that defaults to **year to date** (with Last 12 months / All time shortcuts). Five tiles, plus a collapsible session-by-session table:
+  - **Participants** — distinct people, however many sessions each booked.
+  - **Newcomers** — first-ever session of this program falls in the range. Measured against *all* history, so last year's regulars never read as new, and it matches the roster's 👋 New here badge.
+  - **Returning** — the remainder: they had been before the range started.
+  - **New to the club** — a different question, worth seeing beside the others when a program is an on-ramp: their *account* was created in the range. A three-season VVL player trying Mixed Dev is a newcomer to the program but not new to the club. Bookings made without an account can't answer this and are reported separately.
+  - **Spots booked** — guests included (a booking of 3 is one participant, three spots), with the per-session average.
+
+  Counted from paid bookings rather than attendance ticks, so the numbers hold whether or not anyone marked people off. Sessions whose label has no readable date are excluded and disclosed rather than silently dropped.
 - **Mixed Development** has its own shortcode, `[mixed_dev_attendance]`, so the club's weekly program can grow its own behaviour without touching the generic one. Both accept `history="0"` to hide the first-timer/session-count badges.
 
 ### Data imports/exports

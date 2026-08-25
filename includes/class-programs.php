@@ -478,6 +478,164 @@ class TeamOversight_Programs {
         return $counts;
     }
 
+    /**
+     * Participation over a date range, from paid bookings.
+     *
+     * A **participant** is one person, however many sessions they booked.
+     * A **newcomer** is someone whose first-ever session for this program
+     * falls inside the range — so the split is against all of history, not
+     * just the window, and last year's regulars never read as new.
+     * **New to the club** is a different question answered separately:
+     * their account was created inside the range. A long-standing member
+     * trying the program is a newcomer but not new to the club, and the
+     * two numbers are worth seeing side by side.
+     * **Spots** counts guests too (a booking of 3 is one participant but
+     * three spots), which is the number that matters for court capacity.
+     *
+     * $from/$to are Y-m-d and inclusive; either may be '' for unbounded.
+     * Sessions whose date label can't be parsed are excluded and counted
+     * separately rather than silently dropped.
+     */
+    public static function get_participation_stats($product_id, $from, $to, $weekday = 0) {
+        global $wpdb;
+
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT oi.order_item_id,
+                MAX(oi.order_id) AS order_id,
+                MAX(sess.meta_value) AS label,
+                MAX(qty.meta_value) AS qty,
+                MAX(cl.user_id) AS user_id,
+                LOWER(MAX(cl.email)) AS email
+            FROM {$wpdb->prefix}woocommerce_order_items oi
+            JOIN {$wpdb->prefix}woocommerce_order_itemmeta prod
+                ON prod.order_item_id = oi.order_item_id AND prod.meta_key = '_product_id' AND prod.meta_value = %d
+            JOIN {$wpdb->prefix}woocommerce_order_itemmeta sess
+                ON sess.order_item_id = oi.order_item_id AND sess.meta_key IN ('date', 'pa_date') AND sess.meta_value <> ''
+            LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta qty
+                ON qty.order_item_id = oi.order_item_id AND qty.meta_key = '_qty'
+            JOIN {$wpdb->prefix}wc_order_stats os ON os.order_id = oi.order_id
+            LEFT JOIN {$wpdb->prefix}wc_customer_lookup cl ON cl.customer_id = os.customer_id
+            WHERE os.status IN ('wc-processing', 'wc-completed')
+            GROUP BY oi.order_item_id
+        ", intval($product_id)));
+
+        $year = intval(wp_date('Y'));
+        $first_ever = array();   // person => earliest session date, all time
+        $in_range = array();     // person => sessions booked in range
+        $sessions = array();     // date => label, people, spots, newcomers
+        $undated = 0;
+        $spots = 0;
+
+        // Pass one: everyone's first-ever session, across all of history.
+        // Labels repeat across hundreds of bookings, so parse each once.
+        $bookings = array();
+        $person_users = array();
+        $parsed = array();
+        foreach ($rows as $row) {
+            if (!isset($parsed[$row->label])) {
+                $parsed[$row->label] = self::parse_session_date($row->label, $year, $weekday);
+            }
+            $date = $parsed[$row->label];
+            if ($date === '') {
+                $undated++;
+                continue;
+            }
+
+            $person = self::person_key($row);
+            $person_users[$person] = intval($row->user_id);
+            if (!isset($first_ever[$person]) || $date < $first_ever[$person]) {
+                $first_ever[$person] = $date;
+            }
+            $bookings[] = array('person' => $person, 'date' => $date, 'label' => $row->label, 'qty' => max(1, intval($row->qty)));
+        }
+
+        // Pass two: only what falls inside the window.
+        foreach ($bookings as $booking) {
+            if (($from !== '' && $booking['date'] < $from) || ($to !== '' && $booking['date'] > $to)) {
+                continue;
+            }
+
+            $person = $booking['person'];
+            $in_range[$person] = isset($in_range[$person]) ? $in_range[$person] + 1 : 1;
+            $spots += $booking['qty'];
+
+            $date = $booking['date'];
+            if (!isset($sessions[$date])) {
+                $sessions[$date] = array('label' => $booking['label'], 'date' => $date, 'people' => array(), 'spots' => 0, 'newcomers' => 0);
+            }
+            $sessions[$date]['spots'] += $booking['qty'];
+            if (!isset($sessions[$date]['people'][$person])) {
+                $sessions[$date]['people'][$person] = true;
+                if (isset($first_ever[$person]) && $first_ever[$person] === $date) {
+                    $sessions[$date]['newcomers']++;
+                }
+            }
+        }
+
+        $newcomers = 0;
+        $user_ids = array();
+        $no_account = 0;
+        foreach ($in_range as $person => $count) {
+            if (isset($first_ever[$person]) && $first_ever[$person] >= $from && ($to === '' || $first_ever[$person] <= $to)) {
+                $newcomers++;
+            }
+            if (!empty($person_users[$person])) {
+                $user_ids[] = $person_users[$person];
+            } else {
+                $no_account++;
+            }
+        }
+
+        // New to the club: account created inside the window. Bookings made
+        // without an account can't answer this, so they're reported apart.
+        $new_to_club = 0;
+        if (!empty($user_ids)) {
+            $placeholders = implode(',', array_fill(0, count($user_ids), '%d'));
+            $registered = $wpdb->get_col($wpdb->prepare("
+                SELECT DATE(user_registered) FROM {$wpdb->users} WHERE ID IN ({$placeholders})
+            ", $user_ids));
+            foreach ($registered as $date) {
+                if ($date >= $from && ($to === '' || $date <= $to)) {
+                    $new_to_club++;
+                }
+            }
+        }
+
+        ksort($sessions);
+        foreach ($sessions as $date => $session) {
+            $sessions[$date]['people'] = count($session['people']);
+        }
+
+        $participants = count($in_range);
+        return array(
+            'participants' => $participants,
+            'newcomers' => $newcomers,
+            'returning' => $participants - $newcomers,
+            'new_to_club' => $new_to_club,
+            'no_account' => $no_account,
+            'sessions' => count($sessions),
+            'spots' => $spots,
+            'repeat_bookings' => array_sum($in_range),
+            'by_session' => array_values($sessions),
+            'undated' => $undated,
+        );
+    }
+
+    /**
+     * One person across orders: their account if they have one, else the
+     * email they ordered with, else the order itself (a guest checkout with
+     * no email recorded can't be linked to anything else).
+     */
+    private static function person_key($row) {
+        if (intval($row->user_id)) {
+            return 'u' . intval($row->user_id);
+        }
+        if ($row->email) {
+            return $row->email;
+        }
+        return 'o' . intval($row->order_id);
+    }
+
     private static function prior_count_for($counts, $attendee) {
         if ($attendee['user_id'] && isset($counts['u' . $attendee['user_id']])) {
             return intval($counts['u' . $attendee['user_id']]);
@@ -498,6 +656,159 @@ class TeamOversight_Programs {
     // ------------------------------------------------------------------
     // Shared rendering (front end + admin use the same roster)
     // ------------------------------------------------------------------
+
+    /**
+     * Participation stats for a program over a date range, defaulting to
+     * year to date. Sits above the roster on the admin page.
+     */
+    public static function render_stats($program, $program_key, $base_url) {
+        $default_from = wp_date('Y') . '-01-01';
+        $default_to = current_time('Y-m-d');
+
+        // An absent parameter means "first visit, show year to date"; an
+        // empty one means the range was deliberately opened up.
+        $from = isset($_GET['from']) ? self::sanitise_date(wp_unslash($_GET['from'])) : $default_from;
+        $to = isset($_GET['to']) ? self::sanitise_date(wp_unslash($_GET['to'])) : $default_to;
+        if ($from !== '' && $to !== '' && $from > $to) {
+            $swap = $from;
+            $from = $to;
+            $to = $swap;
+        }
+
+        $stats = self::get_participation_stats(
+            $program['product_id'],
+            $from,
+            $to,
+            self::get_program_weekday($program)
+        );
+
+        $ranges = array(
+            'Year to date' => array($default_from, $default_to),
+            'Last 12 months' => array(date('Y-m-d', strtotime('-1 year', strtotime($default_to))), $default_to),
+            'All time' => array('', ''),
+        );
+
+        ob_start();
+        ?>
+        <style>
+        .murvc-program-stats { background: #fff; border: 1px solid #ccd0d4; border-radius: 4px; padding: 14px 16px; margin: 15px 0 20px; }
+        .murvc-stats-range { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+        .murvc-stats-range label { color: #555; }
+        .murvc-stats-presets { margin-left: auto; font-size: 13px; }
+        .murvc-stats-presets a { margin-left: 12px; }
+        .murvc-stat-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+        .murvc-stat { background: #f6f7f7; border-radius: 4px; padding: 10px 12px; border-left: 4px solid #c3c4c7; }
+        .murvc-stat.stat-new { border-left-color: #e07b00; background: #fff9f2; }
+        .murvc-stat.stat-return { border-left-color: #2b7a2f; background: #f5fbf5; }
+        .murvc-stat.stat-club { border-left-color: #2b4d80; background: #f4f7fc; }
+        .murvc-stat-n { display: block; font-size: 26px; font-weight: 600; line-height: 1.1; }
+        .murvc-stat-l { display: block; font-weight: 600; font-size: 13px; margin-top: 2px; }
+        .murvc-stat-s { display: block; color: #777; font-size: 11px; margin-top: 1px; }
+        .murvc-stats-note { margin: 12px 0 0; }
+        .murvc-stats-breakdown { margin-top: 12px; }
+        .murvc-stats-breakdown summary { cursor: pointer; font-weight: 600; }
+        .murvc-stats-breakdown table { margin-top: 8px; max-width: 620px; }
+        .murvc-muted-small { color: #999; font-size: 11px; margin-left: 6px; }
+        </style>
+        <div class="murvc-program-stats">
+            <form method="get" class="murvc-stats-range">
+                <?php foreach (array('page', 'program', 'session') as $keep): ?>
+                    <?php if (isset($_GET[$keep])): ?>
+                        <input type="hidden" name="<?php echo esc_attr($keep); ?>" value="<?php echo esc_attr(sanitize_text_field(wp_unslash($_GET[$keep]))); ?>">
+                    <?php endif; ?>
+                <?php endforeach; ?>
+                <label>From <input type="date" name="from" value="<?php echo esc_attr($from); ?>"></label>
+                <label>To <input type="date" name="to" value="<?php echo esc_attr($to); ?>"></label>
+                <input type="submit" class="button" value="Update">
+                <span class="murvc-stats-presets">
+                    <?php foreach ($ranges as $label => $range): ?>
+                        <a href="<?php echo esc_url(add_query_arg(array('from' => $range[0], 'to' => $range[1]), $base_url)); ?>"><?php echo esc_html($label); ?></a>
+                    <?php endforeach; ?>
+                </span>
+            </form>
+
+            <div class="murvc-stat-tiles">
+                <div class="murvc-stat">
+                    <span class="murvc-stat-n"><?php echo intval($stats['participants']); ?></span>
+                    <span class="murvc-stat-l">Participants</span>
+                    <span class="murvc-stat-s">distinct people</span>
+                </div>
+                <div class="murvc-stat stat-new">
+                    <span class="murvc-stat-n"><?php echo intval($stats['newcomers']); ?></span>
+                    <span class="murvc-stat-l">Newcomers</span>
+                    <span class="murvc-stat-s">first time at this program</span>
+                </div>
+                <div class="murvc-stat stat-return">
+                    <span class="murvc-stat-n"><?php echo intval($stats['returning']); ?></span>
+                    <span class="murvc-stat-l">Returning</span>
+                    <span class="murvc-stat-s">had been before this range</span>
+                </div>
+                <div class="murvc-stat stat-club">
+                    <span class="murvc-stat-n"><?php echo intval($stats['new_to_club']); ?></span>
+                    <span class="murvc-stat-l">New to the club</span>
+                    <span class="murvc-stat-s">
+                        account created in this range<?php if ($stats['no_account'] > 0): ?>; <?php echo intval($stats['no_account']); ?> booked without one<?php endif; ?>
+                    </span>
+                </div>
+                <div class="murvc-stat">
+                    <span class="murvc-stat-n"><?php echo intval($stats['sessions']); ?></span>
+                    <span class="murvc-stat-l">Sessions</span>
+                    <span class="murvc-stat-s">with at least one booking</span>
+                </div>
+                <div class="murvc-stat">
+                    <span class="murvc-stat-n"><?php echo intval($stats['spots']); ?></span>
+                    <span class="murvc-stat-l">Spots booked</span>
+                    <span class="murvc-stat-s">
+                        guests included<?php if ($stats['sessions'] > 0): ?>, <?php echo esc_html(number_format($stats['spots'] / $stats['sessions'], 1)); ?> per session<?php endif; ?>
+                    </span>
+                </div>
+            </div>
+
+            <p class="description murvc-stats-note">
+                <?php if ($from === '' && $to === ''): ?>
+                    All sessions on record.
+                <?php else: ?>
+                    <?php echo esc_html($from !== '' ? date('j M Y', strtotime($from)) : 'the beginning'); ?>
+                    to <?php echo esc_html($to !== '' ? date('j M Y', strtotime($to)) : 'today'); ?>.
+                <?php endif; ?>
+                Counted from paid bookings, not attendance ticks, so it holds whether or not anyone marked people off.
+                <?php if ($from === ''): ?>
+                    With no start date every participant counts as a newcomer — there is no history before the range for anyone to return from.
+                <?php endif; ?>
+                <?php if ($stats['undated'] > 0): ?>
+                    <strong><?php echo intval($stats['undated']); ?> booking<?php echo $stats['undated'] === 1 ? '' : 's'; ?></strong>
+                    sit on session labels with no readable date and are excluded.
+                <?php endif; ?>
+            </p>
+
+            <?php if (!empty($stats['by_session'])): ?>
+                <details class="murvc-stats-breakdown">
+                    <summary>Session by session</summary>
+                    <table class="wp-list-table widefat striped">
+                        <thead><tr><th>Session</th><th>Participants</th><th>Newcomers</th><th>Spots</th></tr></thead>
+                        <tbody>
+                            <?php foreach ($stats['by_session'] as $session): ?>
+                                <tr>
+                                    <td><?php echo esc_html(date('D j M Y', strtotime($session['date']))); ?>
+                                        <span class="murvc-muted-small"><?php echo esc_html($session['label']); ?></span></td>
+                                    <td><?php echo intval($session['people']); ?></td>
+                                    <td><?php echo $session['newcomers'] > 0 ? intval($session['newcomers']) : '—'; ?></td>
+                                    <td><?php echo intval($session['spots']); ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </details>
+            <?php endif; ?>
+        </div>
+        <?php
+        return ob_get_clean();
+    }
+
+    private static function sanitise_date($value) {
+        $value = trim((string) $value);
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) ? $value : '';
+    }
 
     /**
      * Session roster: picker + attendee cards. $base_url decides where the
@@ -978,8 +1289,18 @@ class TeamOversight_Programs {
             <?php else: ?>
                 <p class="description">Who has paid for each session, read live from orders. Supervisors can see this on the front end via the <code>[session_attendance]</code> shortcode — grant access in <a href="<?php echo admin_url('admin.php?page=club-programs-settings'); ?>">Settings</a>.</p>
                 <?php
+                $page_url = admin_url('admin.php?page=club-programs-' . $program_key);
+                echo self::render_stats($program, $program_key, $page_url);
+
+                // Keep the chosen range when the session picker reloads.
+                foreach (array('from', 'to') as $range_arg) {
+                    if (isset($_GET[$range_arg])) {
+                        $page_url = add_query_arg($range_arg, self::sanitise_date(wp_unslash($_GET[$range_arg])), $page_url);
+                    }
+                }
+
                 $selected = isset($_GET['session']) ? sanitize_text_field(wp_unslash($_GET['session'])) : '';
-                echo self::render_roster($program, $selected, admin_url('admin.php?page=club-programs-' . $program_key), 'session', array('program_key' => $program_key));
+                echo self::render_roster($program, $selected, $page_url, 'session', array('program_key' => $program_key));
                 ?>
             <?php endif; ?>
         </div>
