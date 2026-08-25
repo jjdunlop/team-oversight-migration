@@ -701,6 +701,7 @@ class TeamOversight_Programs {
         .murvc-stat.stat-new { border-left-color: #e07b00; background: #fff9f2; }
         .murvc-stat.stat-return { border-left-color: #2b7a2f; background: #f5fbf5; }
         .murvc-stat.stat-club { border-left-color: #2b4d80; background: #f4f7fc; }
+        .murvc-stat.stat-total { border-left-color: #5a3a8a; background: #f8f5fc; }
         .murvc-stat-n { display: block; font-size: 26px; font-weight: 600; line-height: 1.1; }
         .murvc-stat-l { display: block; font-weight: 600; font-size: 13px; margin-top: 2px; }
         .murvc-stat-s { display: block; color: #777; font-size: 11px; margin-top: 1px; }
@@ -731,7 +732,16 @@ class TeamOversight_Programs {
                 <div class="murvc-stat">
                     <span class="murvc-stat-n"><?php echo intval($stats['participants']); ?></span>
                     <span class="murvc-stat-l">Participants</span>
-                    <span class="murvc-stat-s">distinct people</span>
+                    <span class="murvc-stat-s">
+                        distinct people<?php if ($stats['participants'] > 0): ?>, <?php echo esc_html(number_format($stats['spots'] / $stats['participants'], 1)); ?> sessions each<?php endif; ?>
+                    </span>
+                </div>
+                <div class="murvc-stat stat-total">
+                    <span class="murvc-stat-n"><?php echo intval($stats['spots']); ?></span>
+                    <span class="murvc-stat-l">Attendances</span>
+                    <span class="murvc-stat-s">
+                        every spot at every session, repeats and guests included<?php if ($stats['sessions'] > 0): ?>, <?php echo esc_html(number_format($stats['spots'] / $stats['sessions'], 1)); ?> per session<?php endif; ?>
+                    </span>
                 </div>
                 <div class="murvc-stat stat-new">
                     <span class="murvc-stat-n"><?php echo intval($stats['newcomers']); ?></span>
@@ -756,11 +766,9 @@ class TeamOversight_Programs {
                     <span class="murvc-stat-s">with at least one booking</span>
                 </div>
                 <div class="murvc-stat">
-                    <span class="murvc-stat-n"><?php echo intval($stats['spots']); ?></span>
-                    <span class="murvc-stat-l">Spots booked</span>
-                    <span class="murvc-stat-s">
-                        guests included<?php if ($stats['sessions'] > 0): ?>, <?php echo esc_html(number_format($stats['spots'] / $stats['sessions'], 1)); ?> per session<?php endif; ?>
-                    </span>
+                    <span class="murvc-stat-n"><?php echo intval($stats['repeat_bookings']); ?></span>
+                    <span class="murvc-stat-l">Bookings</span>
+                    <span class="murvc-stat-s">one per person per session, guests not counted</span>
                 </div>
             </div>
 

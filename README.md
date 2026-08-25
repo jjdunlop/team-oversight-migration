@@ -177,7 +177,8 @@ Casual programs (Mixed Development and similar) sell one WooCommerce product per
   - **Newcomers** — first-ever session of this program falls in the range. Measured against *all* history, so last year's regulars never read as new, and it matches the roster's 👋 New here badge.
   - **Returning** — the remainder: they had been before the range started.
   - **New to the club** — a different question, worth seeing beside the others when a program is an on-ramp: their *account* was created in the range. A three-season VVL player trying Mixed Dev is a newcomer to the program but not new to the club. Bookings made without an account can't answer this and are reported separately.
-  - **Spots booked** — guests included (a booking of 3 is one participant, three spots), with the per-session average.
+  - **Attendances** — the headcount with repeats: every spot at every session, so someone who came ten times counts ten times, and guests count too. Shown with the per-session average, and the Participants tile carries the flip side (average sessions each).
+  - **Bookings** — the same count with guests excluded: one per person per session.
 
   Counted from paid bookings rather than attendance ticks, so the numbers hold whether or not anyone marked people off. Sessions whose label has no readable date are excluded and disclosed rather than silently dropped.
 - **Mixed Development** has its own shortcode, `[mixed_dev_attendance]`, so the club's weekly program can grow its own behaviour without touching the generic one. Both accept `history="0"` to hide the first-timer/session-count badges.
