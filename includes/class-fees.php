@@ -795,6 +795,10 @@ class TeamOversight_Fees {
                                     $database = new TeamOversight_Database();
                                     $teams_config = $database->get_teams_config();
                                     $gender_labels = array('mens' => "Men's", 'womens' => "Women's", 'mixed' => 'Mixed');
+                                    // Listed by code, naturally (SL2M before SL10M), so a
+                                    // team is found by where its code sits, not by when
+                                    // it was added.
+                                    ksort($teams_config, SORT_NATURAL | SORT_FLAG_CASE);
                                     foreach ($teams_config as $code => $team):
                                     ?>
                                         <tr data-team-code="<?php echo esc_attr($code); ?>">
