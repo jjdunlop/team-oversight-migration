@@ -42,6 +42,8 @@ class TeamOversight_Coach_Portal {
         add_shortcode('team_coach_portal', array($this, 'render'));
         // CSV export must run before the theme outputs anything.
         add_action('template_redirect', array($this, 'maybe_export_roster'));
+        // The printable trial book, likewise before any theme output.
+        add_action('template_redirect', array($this, 'maybe_export_applicants'));
         // Verdicts and notes use Post/Redirect/Get: processed before output,
         // answered with a redirect, so refreshing never resubmits (which
         // would duplicate notes).
@@ -346,6 +348,17 @@ class TeamOversight_Coach_Portal {
                     <input type="text" id="coach-search" placeholder="Name, email, position, team..." style="width: 240px;">
                     <label style="margin-left: 12px;"><input type="checkbox" id="coach-filter-mine"> Only my verdicts</label>
                 </p>
+
+                <?php if (!empty($applicants)): ?>
+                    <form method="post" target="_blank" class="coach-export-form">
+                        <input type="hidden" name="coach_action" value="export_applicants">
+                        <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                        <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                        <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                        <button type="submit" class="button">Trial book (print / save as PDF)</button>
+                        <span class="coach-portal-hint">Every applicant with their application, emergency contacts, notes and verdicts — opens ready to print. Save it as a PDF before trials so you have it when the gym has no reception.</span>
+                    </form>
+                <?php endif; ?>
 
                 <?php if (!empty($applicants)): ?>
                     <?php
@@ -1043,6 +1056,252 @@ class TeamOversight_Coach_Portal {
     }
 
     // ------------------------------------------------------------------
+    // Printable trial book
+    // ------------------------------------------------------------------
+
+    /**
+     * Every applicant in the competition on one printable page, with
+     * everything the on-screen cards keep behind expanders: application
+     * answers, emergency contacts, notes and all teams' verdicts.
+     *
+     * Rendered as a print-optimised page rather than a server-generated
+     * PDF so the plugin carries no PDF library to maintain: the browser's
+     * own "Save as PDF" produces a searchable file, on a phone as well as
+     * a desktop. Halls without reception are the whole point, so the page
+     * is self-contained — no external CSS, fonts or images.
+     */
+    public function maybe_export_applicants() {
+        $context = $this->applicant_export_context();
+        if (!$context) {
+            return;
+        }
+
+        nocache_headers();
+        header('Content-Type: text/html; charset=utf-8');
+        echo $this->render_applicant_book($context['team'], $context['season']);
+        exit;
+    }
+
+    /**
+     * Is this request a valid trial-book export, and for which team?
+     * Returns array(team, season) or false. Separate from the rendering so
+     * the authority check is testable without the exit.
+     */
+    private function applicant_export_context() {
+        if (!isset($_POST['coach_action']) || $_POST['coach_action'] !== 'export_applicants') {
+            return false;
+        }
+
+        if (!is_user_logged_in()
+            || !isset($_POST['coach_nonce'])
+            || !wp_verify_nonce($_POST['coach_nonce'], 'coach_portal_action')) {
+            return false;
+        }
+
+        $season = isset($_POST['coach_season']) ? sanitize_text_field($_POST['coach_season']) : date('Y');
+        $team = isset($_POST['coach_team']) ? sanitize_text_field($_POST['coach_team']) : '';
+
+        // Same authority as the portal itself: you must coach this team.
+        $my_teams = $this->get_my_teams($season);
+        if (!isset($my_teams[$team])) {
+            return false;
+        }
+
+        return array('team' => $team, 'season' => $season);
+    }
+
+    private function render_applicant_book($team, $season) {
+        $my_team_codes = array_keys($this->get_my_teams($season));
+
+        $database = new TeamOversight_Database();
+        $teams_config = $database->get_teams_config($season);
+        $config = isset($teams_config[$team]) ? $teams_config[$team] : array('name' => $team, 'gender' => 'mixed', 'age_rule' => '');
+        $applicants = $this->get_applicants_by_gender($config['gender'], $season, $team, $my_team_codes);
+        $last_season_members = $this->get_last_season_team_members($team, $season);
+        $verdict_labels = self::get_verdict_labels();
+
+        $competition = $config['gender'] === 'womens' ? "Women's" : ($config['gender'] === 'mens' ? "Men's" : 'All');
+        $title = $config['name'] . ' — trial book ' . $season;
+
+        ob_start();
+        ?><!DOCTYPE html>
+<html <?php language_attributes(); ?>>
+<head>
+<meta charset="<?php bloginfo('charset'); ?>">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><?php echo esc_html($title); ?></title>
+<style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+           color: #222; margin: 0; padding: 24px; font-size: 13px; line-height: 1.45; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    h2 { font-size: 15px; margin: 24px 0 8px; border-bottom: 2px solid #333; padding-bottom: 4px; }
+    .meta { color: #555; margin: 0 0 16px; }
+    .toolbar { background: #eef3fa; border: 1px solid #b9cde6; border-radius: 6px; padding: 10px 14px; margin-bottom: 20px; }
+    .toolbar button { font: inherit; padding: 6px 14px; cursor: pointer; }
+    table.index { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+    table.index th, table.index td { border: 1px solid #ccc; padding: 4px 6px; text-align: left; vertical-align: top; }
+    table.index th { background: #f2f2f2; }
+    .applicant { border: 1px solid #bbb; border-radius: 6px; padding: 12px 14px; margin-bottom: 12px; }
+    .applicant h3 { margin: 0 0 6px; font-size: 15px; }
+    .num { display: inline-block; background: #333; color: #fff; border-radius: 4px; padding: 1px 7px; margin-right: 6px; }
+    .chip { display: inline-block; border: 1px solid #999; border-radius: 10px; padding: 0 8px; font-size: 11px; margin-right: 4px; }
+    .chip-flag { border-color: #a00; color: #a00; }
+    .line { margin: 2px 0; }
+    .label { color: #555; }
+    .section { margin-top: 8px; }
+    .section-title { font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: #444; margin-bottom: 2px; }
+    dl { margin: 0; }
+    dt { font-weight: 600; margin-top: 4px; }
+    dd { margin: 0 0 0 12px; }
+    .emergency { background: #fff7f0; border-left: 3px solid #e07b00; padding: 4px 8px; }
+    .note { border-left: 3px solid #ccc; padding: 2px 8px; margin: 4px 0; }
+    .none { color: #777; font-style: italic; }
+    @page { margin: 12mm; }
+    @media print {
+        body { padding: 0; font-size: 11px; }
+        .toolbar { display: none; }
+        .applicant { page-break-inside: avoid; border-color: #999; }
+        h2 { page-break-after: avoid; }
+    }
+</style>
+</head>
+<body>
+<div class="toolbar">
+    <button type="button" onclick="window.print()">Print / Save as PDF</button>
+    &nbsp; Choose <strong>Save as PDF</strong> as the destination to keep it on your phone for trials — it stays searchable offline.
+</div>
+
+<h1><?php echo esc_html($config['name']); ?> — trial book</h1>
+<p class="meta">
+    <?php echo esc_html($season); ?> season &middot; <?php echo esc_html($competition); ?> competition &middot;
+    <?php echo count($applicants); ?> applicant<?php echo count($applicants) === 1 ? '' : 's'; ?> &middot;
+    generated <?php echo esc_html(wp_date('j M Y, g:ia')); ?>
+</p>
+
+<?php if (empty($applicants)): ?>
+    <p class="none">No applicants yet for this competition.</p>
+<?php else: ?>
+
+<h2>All applicants</h2>
+<table class="index">
+    <thead><tr><th>#</th><th>Name</th><th>Age</th><th>Positions</th><th>Applied for</th><th>Verdicts</th></tr></thead>
+    <tbody>
+        <?php foreach ($applicants as $a): ?>
+            <tr>
+                <td><?php echo intval($a['trial_number']); ?></td>
+                <td><?php echo esc_html($a['name']); ?></td>
+                <td><?php echo esc_html($a['age']); ?></td>
+                <td><?php echo esc_html($a['positions']); ?></td>
+                <td><?php echo esc_html($a['teams_selected']); ?></td>
+                <td><?php
+                    $bits = array();
+                    foreach ($a['selections'] as $sel) {
+                        $bits[] = $sel['team'] . ': ' . (isset($verdict_labels[$sel['status']]) ? $verdict_labels[$sel['status']] : $sel['status']);
+                    }
+                    echo esc_html($bits ? implode(', ', $bits) : '—');
+                ?></td>
+            </tr>
+        <?php endforeach; ?>
+    </tbody>
+</table>
+<p class="meta">★ marks <?php echo esc_html($config['name']); ?> in the "applied for" column.</p>
+
+<h2>Applicant details</h2>
+<?php foreach ($applicants as $a): ?>
+    <div class="applicant">
+        <h3><span class="num">#<?php echo intval($a['trial_number']); ?></span><?php echo esc_html($a['name']); ?></h3>
+
+        <p class="line">
+            <?php if ($a['reg_type']): ?>
+                <span class="chip"><?php echo esc_html($a['reg_type'] . ($a['transfer_club'] ? ': ' . $a['transfer_club'] : '')); ?></span>
+            <?php endif; ?>
+            <?php if ($this->was_on_team_last_season($last_season_members, $a['user_id'], $a['email'])): ?>
+                <span class="chip">Same team last season</span>
+            <?php endif; ?>
+            <?php if (!empty($a['age_flag'])): ?>
+                <span class="chip chip-flag">Over age for <?php echo esc_html($a['age_rule_label']); ?> — exemption needed</span>
+            <?php endif; ?>
+            <?php if ($a['picked_mine']): ?><span class="chip">Applied to your team</span><?php endif; ?>
+        </p>
+
+        <p class="line">
+            <span class="label">Age</span> <?php echo esc_html($a['age'] !== '' ? $a['age'] : '—'); ?>
+            <?php if ($a['dob_display']): ?>(<?php echo esc_html($a['dob_display']); ?>)<?php endif; ?>
+            &middot; <span class="label">Positions</span> <?php echo esc_html($a['positions'] ?: '—'); ?>
+        </p>
+        <p class="line">
+            <span class="label">Email</span> <?php echo esc_html($a['email']); ?>
+            <?php if (!empty($a['mobile'])): ?> &middot; <span class="label">Mobile</span> <?php echo esc_html(self::format_phone($a['mobile'])); ?><?php endif; ?>
+        </p>
+        <p class="line">
+            <span class="label">Applied for</span> <?php echo esc_html($a['teams_selected_names'] ?: '—'); ?>
+        </p>
+
+        <div class="section">
+            <div class="section-title">Verdicts</div>
+            <?php if (!empty($a['selections'])): ?>
+                <?php foreach ($a['selections'] as $sel): ?>
+                    <div class="line"><?php echo esc_html($sel['team_name'] . ' — ' . (isset($verdict_labels[$sel['status']]) ? $verdict_labels[$sel['status']] : $sel['status'])); ?></div>
+                <?php endforeach; ?>
+            <?php else: ?>
+                <div class="none">No verdict from any team yet.</div>
+            <?php endif; ?>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Emergency contacts</div>
+            <?php $contacts = $a['user_id'] ? self::get_emergency_contacts($a['user_id']) : array(); ?>
+            <?php if (!empty($contacts)): ?>
+                <?php foreach ($contacts as $contact): ?>
+                    <div class="line emergency">
+                        <strong><?php echo esc_html($contact['name'] ? $contact['name'] : 'Name not recorded'); ?></strong>
+                        <?php if ($contact['relationship']): ?>(<?php echo esc_html($contact['relationship']); ?>)<?php endif; ?>
+                        <?php if ($contact['number']): ?> &middot; <?php echo esc_html(self::format_phone($contact['number'])); ?><?php endif; ?>
+                    </div>
+                <?php endforeach; ?>
+            <?php else: ?>
+                <div class="none">None recorded on their profile.</div>
+            <?php endif; ?>
+        </div>
+
+        <?php if (!empty($a['form_data'])): ?>
+            <div class="section">
+                <div class="section-title">Application</div>
+                <dl>
+                    <?php foreach ($a['form_data'] as $question => $answer): ?>
+                        <?php if ($answer !== '' && $answer !== null): ?>
+                            <dt><?php echo esc_html($question); ?></dt>
+                            <dd><?php echo nl2br(esc_html(is_array($answer) ? implode(', ', $answer) : $answer)); ?></dd>
+                        <?php endif; ?>
+                    <?php endforeach; ?>
+                </dl>
+            </div>
+        <?php endif; ?>
+
+        <div class="section">
+            <div class="section-title">Notes (<?php echo count($a['notes']); ?>)</div>
+            <?php if (!empty($a['notes'])): ?>
+                <?php foreach ($a['notes'] as $note): ?>
+                    <div class="note"><strong><?php echo esc_html($note['author']); ?></strong> <?php echo esc_html($note['date']); ?><br><?php echo nl2br(esc_html($note['note'])); ?></div>
+                <?php endforeach; ?>
+            <?php else: ?>
+                <div class="none">No notes recorded.</div>
+            <?php endif; ?>
+        </div>
+    </div>
+<?php endforeach; ?>
+
+<?php endif; ?>
+
+<p class="meta">Confidential — contains member contact and emergency details. Delete your copy once trials are done.</p>
+</body>
+</html>
+        <?php
+        return ob_get_clean();
+    }
+
+    // ------------------------------------------------------------------
     // Data
     // ------------------------------------------------------------------
 
@@ -1550,6 +1809,7 @@ class TeamOversight_Coach_Portal {
                 'reg_type' => isset($form_data['Registration Type']) ? $form_data['Registration Type'] : (intval($row->is_transfer_player) === 1 ? 'Club Transfer' : ''),
                 'name' => $row->name,
                 'email' => $row->email,
+                'mobile' => $row->user_id ? get_user_meta($row->user_id, 'mobile_number', true) : '',
                 'age' => $age,
                 'dob_display' => $dob_display,
                 'age_flag' => $age_flag,
