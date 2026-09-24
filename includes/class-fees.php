@@ -549,6 +549,7 @@ class TeamOversight_Fees {
                     'charge_transfer' => !empty($_POST['charge_transfer']) ? 1 : 0,
                     'charge_new' => !empty($_POST['charge_new']) ? 1 : 0,
                     'charge_returning' => !empty($_POST['charge_returning']) ? 1 : 0,
+                    'charge_lapsed' => !empty($_POST['charge_lapsed']) ? 1 : 0,
                     'free_under' => max(0, min(30, intval(isset($_POST['free_under']) ? $_POST['free_under'] : 0))),
                 ));
 
@@ -619,13 +620,15 @@ class TeamOversight_Fees {
                     <p style="margin: 0 0 4px 0;">
                         <label><input type="checkbox" name="charge_new" value="1" <?php checked(!empty($trial_fee_rules['charge_new'])); ?>> New to VVL</label>
                         <label style="margin-left: 15px;"><input type="checkbox" name="charge_transfer" value="1" <?php checked(!empty($trial_fee_rules['charge_transfer'])); ?>> Transferring from another club</label>
-                        <label style="margin-left: 15px;"><input type="checkbox" name="charge_returning" value="1" <?php checked(!empty($trial_fee_rules['charge_returning'])); ?>> Returning Renegades players</label>
+                        <label style="margin-left: 15px;"><input type="checkbox" name="charge_returning" value="1" <?php checked(!empty($trial_fee_rules['charge_returning'])); ?>> Played for Renegades <strong>last season</strong></label>
+                        <label style="margin-left: 15px;"><input type="checkbox" name="charge_lapsed" value="1" <?php checked(!empty($trial_fee_rules['charge_lapsed'])); ?>> Renegades history, but <strong>sat a season out</strong></label>
                     </p>
+                    <p class="description" style="margin: 0 0 12px 0;">The two Renegades categories are separate because the waiver exists for players whose yearly membership already covers the trial — someone returning after a season away holds no current membership, so by default they pay.</p>
                     <p style="margin: 0 0 12px 0;">
-                        <label>Always free under age
+                        <label>Free for Youth State League trials under age
                             <input type="number" name="free_under" value="<?php echo intval($trial_fee_rules['free_under']); ?>" min="0" max="30" style="width: 60px;">
                         </label>
-                        <span class="description">(applies regardless of history; 0 disables the age exemption)</span>
+                        <span class="description">(applies regardless of history, but <strong>only when every team they pick is YSL</strong> — U/17 or U/15. A junior reaching up to JPL or a senior team pays. 0 disables the age exemption.)</span>
                     </p>
                     <p style="margin: 0 0 4px 0;"><strong>Transfer club list</strong> <span class="description">— the dropdown on the trial form, one club per line. Empty the box and save to reset to the built-in VVL list.</span></p>
                     <textarea name="transfer_clubs" rows="10" style="width: 100%; max-width: 480px; font-family: monospace;"><?php echo esc_textarea(implode("\n", TeamOversight_Trials::get_transfer_clubs())); ?></textarea>

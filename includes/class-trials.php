@@ -19,6 +19,10 @@ class TeamOversight_Trials {
         add_action('woocommerce_order_status_processing', array($this, 'handle_trial_payment'));
         add_action('woocommerce_order_status_completed', array($this, 'handle_trial_payment'));
         add_filter('woocommerce_get_item_data', array($this, 'display_application_in_cart'), 10, 2);
+
+        // "Pay the trial fee" on an unpaid application: rebuild the cart
+        // line and hand them to checkout, without re-submitting the form.
+        add_action('template_redirect', array($this, 'maybe_resume_trial_payment'));
     }
     
     public function init() {
@@ -147,20 +151,32 @@ class TeamOversight_Trials {
             LIMIT 1
         ", $user->ID, $trial_season));
 
+        $fee_product = $this->get_trial_fee_product();
+        $fee_rules = self::get_trial_fee_rules();
+        $unpaid = ($my_application && $my_application->application_status === 'awaiting_payment');
+
         ob_start();
         ?>
         <div id="trial-application-form">
             <h3>Trial Application Form</h3>
 
             <?php if ($my_application): ?>
-                <div class="trial-status-panel">
+                <div class="trial-status-panel<?php echo $unpaid ? ' trial-status-unpaid' : ''; ?>">
                     <div class="trial-number-badge">
                         <span class="trial-number-label">Your Trial Number</span>
                         <span class="trial-number-value">#<?php echo intval($my_application->trial_number); ?></span>
                     </div>
                     <div class="trial-status-text">
-                        <?php if ($my_application->application_status === 'awaiting_payment'): ?>
-                            <p><strong>Your <?php echo esc_html($my_application->season); ?> application has been received but is awaiting payment.</strong> Submit the form below again to return to the checkout, or contact the club if you believe you have already paid.</p>
+                        <?php if ($unpaid): ?>
+                            <p><strong>Your <?php echo esc_html($my_application->season); ?> application has not been paid for yet.</strong> It won't be reviewed, and will be removed, until the trial fee is paid.</p>
+                            <?php if ($fee_product): ?>
+                                <p class="trial-pay-actions">
+                                    <a class="button button-primary" href="<?php echo esc_url(self::resume_payment_url($my_application->id)); ?>">Pay the trial fee<?php echo $fee_product->get_price() !== '' ? ' — ' . esc_html(wp_strip_all_tags(wc_price($fee_product->get_price()))) : ''; ?></a>
+                                    <span class="trial-pay-note">Already paid? Contact the club and we'll sort it out.</span>
+                                </p>
+                            <?php else: ?>
+                                <p class="trial-pay-note">Please contact the club to arrange payment.</p>
+                            <?php endif; ?>
                         <?php elseif ($my_application->application_status === 'accepted'): ?>
                             <?php
                             $assigned_config = $database->get_teams_config($my_application->season);
@@ -191,8 +207,6 @@ class TeamOversight_Trials {
             <?php endif; ?>
 
             <?php
-            $fee_product = $this->get_trial_fee_product();
-            $fee_rules = self::get_trial_fee_rules();
             // Is the viewer under the free-age threshold? (DOB is on file.)
             $viewer_free_by_age = false;
             if ($fee_product && intval($fee_rules['free_under']) > 0) {
@@ -203,14 +217,29 @@ class TeamOversight_Trials {
                 }
             }
             ?>
-            <?php if ($fee_product && $viewer_free_by_age): ?>
-                <div class="trial-fee-notice">
-                    <p><strong>Good news — trials are free for players under <?php echo intval($fee_rules['free_under']); ?>.</strong> Your application submits directly, no payment needed.</p>
-                </div>
-            <?php elseif ($fee_product): ?>
+            <?php if ($fee_product): ?>
+                <?php
+                // Who the fee applies to is read from the configured rules,
+                // so the sentence stays true when a rule is toggled.
+                $who = array();
+                if (!empty($fee_rules['charge_new'])) { $who[] = 'new to VVL'; }
+                if (!empty($fee_rules['charge_transfer'])) { $who[] = 'transferring from another club'; }
+                if (!empty($fee_rules['charge_lapsed'])) { $who[] = 'returning after a season away'; }
+                if (!empty($fee_rules['charge_returning'])) { $who[] = 'returning from last season'; }
+                $who_text = '';
+                if (count($who) === 1) {
+                    $who_text = $who[0];
+                } elseif (count($who) > 1) {
+                    $last = array_pop($who);
+                    $who_text = implode(', ', $who) . ' or ' . $last;
+                }
+                ?>
                 <div class="trial-fee-notice" id="trial-fee-notice">
                     <p><strong>Trial registration fee: <?php echo wp_kses_post($fee_product->get_price_html()); ?></strong><br>
-                    The fee applies to players <strong>new to VVL or transferring from another club</strong> — after submitting you'll be taken to the checkout to pay. Your application will be removed if the fee is unpaid.<?php if (empty($fee_rules['charge_returning'])): ?> Returning players can ignore this message as your yearly membership covers your cost.<?php endif; ?></p>
+                    <?php if ($who_text !== ''): ?>The fee applies to players <strong><?php echo esc_html($who_text); ?></strong> — after<?php else: ?>After<?php endif; ?> submitting you'll be taken to the checkout to pay. Your application will be removed if the fee is unpaid.<?php if (empty($fee_rules['charge_returning'])): ?> If you played for Renegades last season you can ignore this message, as your yearly membership covers your cost.<?php endif; ?></p>
+                    <?php if ($viewer_free_by_age): ?>
+                        <p><strong>You're under <?php echo intval($fee_rules['free_under']); ?>, so trials are free if you only pick Youth State League teams</strong> (U/17 and U/15). Trialling for Junior Premier League or a senior team means the fee applies as above.</p>
+                    <?php endif; ?>
                 </div>
             <?php endif; ?>
 
@@ -747,6 +776,29 @@ class TeamOversight_Trials {
             margin-bottom: 20px;
         }
 
+        /* Unpaid: this is a to-do, not a confirmation. */
+        .trial-status-panel.trial-status-unpaid {
+            background: #fdf0f0;
+            border-color: #dc3232;
+        }
+
+        .trial-status-unpaid .trial-number-badge {
+            background: #dc3232;
+        }
+
+        .trial-pay-actions {
+            margin: 10px 0 0 0 !important;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .trial-pay-note {
+            font-size: 13px;
+            color: #666;
+        }
+
         .trial-number-badge {
             text-align: center;
             background: #46b450;
@@ -1033,7 +1085,7 @@ class TeamOversight_Trials {
         // Fee rules: returning Renegades players and juniors trial free by
         // default; new/transferring players pay when a product is set.
         $fee_product = $this->get_trial_fee_product();
-        $fee_decision = self::trial_fee_decision($history, $prefill['birth_date']);
+        $fee_decision = self::trial_fee_decision($history, $prefill['birth_date'], $interested_teams, $season);
         $charge_fee = $fee_product && $fee_decision['payable'];
         $form_data['Trial Fee'] = $charge_fee ? 'Payable' : 'Waived — ' . ($fee_decision['reason'] ?: 'no fee product configured');
 
@@ -1117,6 +1169,57 @@ class TeamOversight_Trials {
 
         $product = wc_get_product($product_id);
         return ($product && $product->is_purchasable()) ? $product : null;
+    }
+
+    /**
+     * Link that puts an unpaid application's fee back in the cart and
+     * sends the applicant to checkout. Nonced and bound to the
+     * application, so it can only ever resume the owner's own payment.
+     */
+    public static function resume_payment_url($application_id) {
+        $application_id = intval($application_id);
+        return wp_nonce_url(
+            add_query_arg('murvc_pay_trial', $application_id, get_permalink()),
+            'murvc_pay_trial_' . $application_id
+        );
+    }
+
+    /**
+     * Handles that link. Re-adds the configured fee product for an
+     * application that is genuinely the current user's and genuinely
+     * unpaid, then redirects to checkout. Anything else falls through to
+     * the page with a flash message rather than a blank failure.
+     */
+    public function maybe_resume_trial_payment() {
+        if (empty($_GET['murvc_pay_trial']) || !is_user_logged_in()) {
+            return;
+        }
+
+        $application_id = intval($_GET['murvc_pay_trial']);
+        if (!isset($_GET['_wpnonce']) || !wp_verify_nonce($_GET['_wpnonce'], 'murvc_pay_trial_' . $application_id)) {
+            return;
+        }
+
+        global $wpdb;
+        $user_id = get_current_user_id();
+        $owned = $wpdb->get_var($wpdb->prepare("
+            SELECT id FROM {$wpdb->prefix}trial_applications
+            WHERE id = %d AND user_id = %d AND application_status = 'awaiting_payment'
+        ", $application_id, $user_id));
+
+        $target = remove_query_arg(array('murvc_pay_trial', '_wpnonce'));
+        if (!$owned) {
+            // Already paid, or not theirs: send them back to the page,
+            // which will show whatever the real status is.
+            wp_safe_redirect($target);
+            exit;
+        }
+
+        $product = $this->get_trial_fee_product();
+        $checkout_url = $product ? $this->add_fee_to_cart($product, $application_id) : false;
+
+        wp_safe_redirect($checkout_url ? $checkout_url : $target);
+        exit;
     }
 
     private function add_fee_to_cart($product, $application_id) {
@@ -1367,34 +1470,78 @@ class TeamOversight_Trials {
         $defaults = array(
             'charge_transfer' => 1,   // last VVL club was another club
             'charge_new' => 1,        // never played VVL
-            'charge_returning' => 0,  // Renegades history: free
+            'charge_returning' => 0,  // played for Renegades LAST season: free,
+                                      // their yearly membership covers it
+            'charge_lapsed' => 1,     // Renegades history but sat a season out:
+                                      // no current membership, so they pay
             'free_under' => 18,       // under this age: always free (0 disables)
         );
         $rules = get_option('team_oversight_trial_fee_rules', array());
         return array_merge($defaults, is_array($rules) ? $rules : array());
     }
 
+    /** VVL age rules that identify a Youth State League team. */
+    public static function youth_age_rules() {
+        return array('u17', 'u15');
+    }
+
     /**
-     * Should this applicant pay the trial fee? Age exemption first, then
-     * the per-history-category rule. Returns array(payable, reason) —
+     * Is every team they picked a Youth State League team? The junior age
+     * exemption hangs on this: a junior trialling only for YSL is free,
+     * but the same junior reaching up to JPL or a senior team pays like
+     * anyone else. An empty or unrecognised selection is not YSL-only —
+     * the form requires at least one team, so this only guards callers
+     * that pass nothing.
+     */
+    public static function is_youth_only($interested_teams, $season = null) {
+        $interested_teams = array_filter((array) $interested_teams);
+        if (empty($interested_teams)) {
+            return false;
+        }
+
+        $database = new TeamOversight_Database();
+        $config = $database->get_teams_config($season);
+        $youth = self::youth_age_rules();
+
+        foreach ($interested_teams as $code) {
+            if (!isset($config[$code]) || !in_array($config[$code]['age_rule'], $youth, true)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Should this applicant pay the trial fee? The junior exemption comes
+     * first but only covers a YSL-only selection; otherwise the
+     * per-history-category rule decides. Returns array(payable, reason) —
      * reason explains a waiver for the admin trail.
      */
-    public static function trial_fee_decision($history, $birth_date) {
+    public static function trial_fee_decision($history, $birth_date, $interested_teams = array(), $season = null) {
         $rules = self::get_trial_fee_rules();
 
         $free_under = intval($rules['free_under']);
-        if ($free_under > 0 && $birth_date) {
+        if ($free_under > 0 && $birth_date && self::is_youth_only($interested_teams, $season)) {
             $ts = strtotime(str_replace('/', '-', $birth_date));
             if ($ts) {
                 $age = (new DateTime('@' . $ts))->diff(new DateTime())->y;
                 if ($age < $free_under) {
-                    return array('payable' => false, 'reason' => 'under ' . $free_under);
+                    return array('payable' => false, 'reason' => 'under ' . $free_under . ', Youth State League only');
                 }
             }
         }
 
-        if (in_array($history, array('renegades_last_season', 'renegades_previously'), true)) {
+        // Renegades history splits in two: last season's players are covered
+        // by the yearly membership they already paid, whereas someone back
+        // after a season away holds no current membership and pays like
+        // anyone else.
+        if ($history === 'renegades_last_season') {
             return !empty($rules['charge_returning'])
+                ? array('payable' => true, 'reason' => '')
+                : array('payable' => false, 'reason' => 'played for Renegades last season');
+        }
+        if ($history === 'renegades_previously') {
+            return !empty($rules['charge_lapsed'])
                 ? array('payable' => true, 'reason' => '')
                 : array('payable' => false, 'reason' => 'returning Renegades player');
         }
