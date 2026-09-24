@@ -132,16 +132,19 @@ class TeamOversight_Trials {
 
         $profile_validation = $this->validate_user_profile($user->ID);
 
-        // Their most recent live application, so the trial number is always
-        // findable by revisiting this page.
+        // Their live application for the season trials are currently
+        // about — one season only, so the trial number is findable by
+        // revisiting this page but last season's confirmation never
+        // lingers once the next season opens.
         global $wpdb;
+        $trial_season = self::get_current_trial_season();
         $my_application = $wpdb->get_row($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}trial_applications
-            WHERE user_id = %d AND season >= %s
+            WHERE user_id = %d AND season = %s
                 AND application_status IN ('awaiting_payment', 'pending', 'accepted')
             ORDER BY created_date DESC
             LIMIT 1
-        ", $user->ID, date('Y')));
+        ", $user->ID, $trial_season));
 
         ob_start();
         ?>
@@ -206,7 +209,7 @@ class TeamOversight_Trials {
             <?php elseif ($fee_product): ?>
                 <div class="trial-fee-notice" id="trial-fee-notice">
                     <p><strong>Trial registration fee: <?php echo wp_kses_post($fee_product->get_price_html()); ?></strong><br>
-                    The fee applies to players <strong>new to VVL or transferring from another club</strong> — after submitting you'll be taken to the checkout to pay, and your application is reviewed once payment is complete.<?php if (empty($fee_rules['charge_returning'])): ?> Returning Renegades players trial free.<?php endif; ?></p>
+                    The fee applies to players <strong>new to VVL or transferring from another club</strong> — after submitting you'll be taken to the checkout to pay. Your application will be removed if the fee is unpaid.<?php if (empty($fee_rules['charge_returning'])): ?> Returning players can ignore this message as your yearly membership covers your cost.<?php endif; ?></p>
                 </div>
             <?php endif; ?>
 
@@ -220,7 +223,7 @@ class TeamOversight_Trials {
             ?>
             <?php if ($training_info_url): ?>
                 <div class="trial-training-notice">
-                    <p><strong>Before you start:</strong> team selection depends on when and where each team trains — <a href="<?php echo esc_url($training_info_url); ?>" target="_blank">check the training venues and days</a> so you pick teams whose sessions you can actually attend.</p>
+                    <p><strong>Before you start:</strong> make sure you can commit to the team for the season. <a href="<?php echo esc_url($training_info_url); ?>" target="_blank">Check the training venues and days</a> and pick teams whose sessions you can actually attend.</p>
                 </div>
             <?php endif; ?>
             <div class="trial-prefill-section">
@@ -358,6 +361,12 @@ class TeamOversight_Trials {
                                 <?php
                                 $teams_config = $database->get_teams_config();
                                 $team_groups = array('mens' => "Men's Teams", 'womens' => "Women's Teams", 'mixed' => 'Mixed / Open Teams');
+                                // The applicant's own competition leads, so
+                                // nobody scrolls past a greyed-out block to
+                                // reach the teams they can actually pick.
+                                if (!empty($competition['competition']) && isset($team_groups[$competition['competition']])) {
+                                    $team_groups = array($competition['competition'] => $team_groups[$competition['competition']]) + $team_groups;
+                                }
                                 foreach ($team_groups as $group_key => $group_label):
                                     $group_teams = array_filter($teams_config, function ($t) use ($group_key) {
                                         return $t['gender'] === $group_key;
@@ -1428,6 +1437,24 @@ class TeamOversight_Trials {
             return array();
         }
         return array(date('Y'), strval(intval(date('Y')) + 1));
+    }
+
+    /**
+     * The season trials are currently about: the latest season open for
+     * applications. When nothing is open, the latest season anyone has
+     * applied for — so an accepted player still sees their offer after
+     * applications close, but never a season older than the newest one.
+     */
+    public static function get_current_trial_season() {
+        global $wpdb;
+
+        $open = self::get_open_seasons();
+        if (!empty($open)) {
+            return strval(max(array_map('intval', $open)));
+        }
+
+        $latest = $wpdb->get_var("SELECT MAX(season) FROM {$wpdb->prefix}trial_applications");
+        return $latest ? strval($latest) : date('Y');
     }
 
     /**
