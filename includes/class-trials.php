@@ -371,6 +371,12 @@ class TeamOversight_Trials {
                             // the others so they can never submit.
                             foreach (self::get_open_seasons() as $open_season):
                                 $teams_config = $database->get_teams_config($open_season);
+                                // Same order as the Configuration page: by
+                                // code, naturally. The JS then sinks teams the
+                                // applicant can't pick to the bottom of each
+                                // group, keeping this order among the rest.
+                                ksort($teams_config, SORT_NATURAL | SORT_FLAG_CASE);
+                                $team_order = 0;
                             ?>
                             <div class="teams-checkboxes" data-season="<?php echo esc_attr($open_season); ?>">
                                 <?php
@@ -385,10 +391,10 @@ class TeamOversight_Trials {
                                     <div class="team-group">
                                         <h4><?php echo esc_html($group_label); ?></h4>
                                         <?php foreach ($group_teams as $code => $team): ?>
-                                            <label class="team-option" data-gender="<?php echo esc_attr($team['gender']); ?>" data-age-rule="<?php echo esc_attr($team['age_rule']); ?>">
+                                            <label class="team-option" data-order="<?php echo intval($team_order++); ?>" data-gender="<?php echo esc_attr($team['gender']); ?>" data-age-rule="<?php echo esc_attr($team['age_rule']); ?>">
                                                 <input type="checkbox" name="interested_teams[]" value="<?php echo esc_attr($code); ?>">
                                                 <?php echo esc_html($team['name']); ?><span class="ineligible-reason"></span>
-                                            </label><br>
+                                            </label>
                                         <?php endforeach; ?>
                                     </div>
                                 <?php endforeach; ?>
@@ -514,6 +520,19 @@ class TeamOversight_Trials {
                     if (reason) { $cb.prop('checked', false); }
                     $opt.toggleClass('team-ineligible', !!reason);
                     $opt.find('.ineligible-reason').text(reason ? ' — not eligible (' + reason + ')' : '');
+                });
+
+                // Teams they can pick first, in code order; the rest sink
+                // to the bottom of their group, still in code order.
+                $('.teams-checkboxes[data-season="' + seasonYear + '"] .team-group').each(function() {
+                    var $group = $(this);
+                    var sorted = $group.children('.team-option').get().sort(function(a, b) {
+                        var ia = $(a).hasClass('team-ineligible') ? 1 : 0;
+                        var ib = $(b).hasClass('team-ineligible') ? 1 : 0;
+                        if (ia !== ib) { return ia - ib; }
+                        return parseInt($(a).attr('data-order'), 10) - parseInt($(b).attr('data-order'), 10);
+                    });
+                    $group.append(sorted);
                 });
             }
 
