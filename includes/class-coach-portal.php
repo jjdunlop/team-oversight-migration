@@ -1140,36 +1140,47 @@ class TeamOversight_Coach_Portal {
     .toolbar { background: #eef3fa; border: 1px solid #b9cde6; border-radius: 6px; padding: 10px 14px; margin-bottom: 20px; }
     .toolbar button { font: inherit; padding: 6px 14px; cursor: pointer; }
     table.index { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
-    table.index th, table.index td { border: 1px solid #ccc; padding: 4px 6px; text-align: left; vertical-align: top; }
+    table.index th, table.index td { border: 1px solid #ccc; padding: 2px 5px; text-align: left; vertical-align: top; }
     table.index th { background: #f2f2f2; }
-    .applicant { border: 1px solid #bbb; border-radius: 6px; padding: 12px 14px; margin-bottom: 12px; }
-    .applicant h3 { margin: 0 0 6px; font-size: 15px; }
-    .num { display: inline-block; background: #333; color: #fff; border-radius: 4px; padding: 1px 7px; margin-right: 6px; }
-    .chip { display: inline-block; border: 1px solid #999; border-radius: 10px; padding: 0 8px; font-size: 11px; margin-right: 4px; }
+
+    /* One applicant = a few dense lines, so a squad fits on a page or two. */
+    .applicant { border-bottom: 1px solid #ccc; padding: 5px 0; }
+    .a-head { margin-bottom: 1px; }
+    .a-head strong { font-size: 14px; }
+    .num { display: inline-block; background: #333; color: #fff; border-radius: 3px;
+           padding: 0 5px; margin-right: 5px; font-variant-numeric: tabular-nums; }
+    .chip { display: inline-block; border: 1px solid #999; border-radius: 9px; padding: 0 6px; font-size: 10px; }
     .chip-flag { border-color: #a00; color: #a00; }
-    .line { margin: 2px 0; }
-    .label { color: #555; }
-    .section { margin-top: 8px; }
-    .section-title { font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: #444; margin-bottom: 2px; }
-    dl { margin: 0; }
-    dt { font-weight: 600; margin-top: 4px; }
-    dd { margin: 0 0 0 12px; }
-    .emergency { background: #fff7f0; border-left: 3px solid #e07b00; padding: 4px 8px; }
-    .note { border-left: 3px solid #ccc; padding: 2px 8px; margin: 4px 0; }
+    .line { margin: 0; }
+    .lbl { color: #666; font-weight: 600; }
+    .sep { color: #bbb; }
+    .ice { color: #8a4b00; }
     .none { color: #777; font-style: italic; }
-    @page { margin: 12mm; }
+
+    /* Application answers are the bulky part: off unless asked for. */
+    .app-answers { display: none; }
+    body.with-answers .app-answers { display: block; }
+
+    @page { margin: 10mm; }
     @media print {
-        body { padding: 0; font-size: 11px; }
+        body { padding: 0; font-size: 9.5px; line-height: 1.35; }
         .toolbar { display: none; }
-        .applicant { page-break-inside: avoid; border-color: #999; }
-        h2 { page-break-after: avoid; }
+        .applicant { page-break-inside: avoid; }
+        .a-head strong { font-size: 11px; }
+        h1 { font-size: 15px; }
+        h2 { font-size: 12px; page-break-after: avoid; }
+        table.index th, table.index td { padding: 1px 4px; }
     }
 </style>
 </head>
 <body>
 <div class="toolbar">
     <button type="button" onclick="window.print()">Print / Save as PDF</button>
-    &nbsp; Choose <strong>Save as PDF</strong> as the destination to keep it on your phone for trials — it stays searchable offline.
+    <label style="margin-left: 14px;">
+        <input type="checkbox" onchange="document.body.classList.toggle('with-answers', this.checked)">
+        Include full application answers
+    </label>
+    <div style="margin-top: 6px;">Choose <strong>Save as PDF</strong> as the destination to keep it on your phone for trials — it stays searchable offline. Leaving the answers off keeps it to a couple of pages if you're printing on paper.</div>
 </div>
 
 <h1><?php echo esc_html($config['name']); ?> — trial book</h1>
@@ -1208,87 +1219,88 @@ class TeamOversight_Coach_Portal {
 <p class="meta">★ marks <?php echo esc_html($config['name']); ?> in the "applied for" column.</p>
 
 <h2>Applicant details</h2>
+<p class="meta">ICE = emergency contact. Verdicts show every team's call, not just yours.</p>
 <?php foreach ($applicants as $a): ?>
     <div class="applicant">
-        <h3><span class="num">#<?php echo intval($a['trial_number']); ?></span><?php echo esc_html($a['name']); ?></h3>
-
-        <p class="line">
+        <div class="a-head">
+            <span class="num">#<?php echo intval($a['trial_number']); ?></span><strong><?php echo esc_html($a['name']); ?></strong>
+            <span class="sep">·</span> <?php echo esc_html($a['age'] !== '' ? $a['age'] . 'y' : 'age ?'); ?><?php if ($a['dob_display']): ?> (<?php echo esc_html($a['dob_display']); ?>)<?php endif; ?>
+            <span class="sep">·</span> <?php echo esc_html($a['positions'] ?: 'no position'); ?>
+            <span class="sep">·</span> <?php echo esc_html($a['teams_selected'] ?: 'no teams'); ?>
             <?php if ($a['reg_type']): ?>
                 <span class="chip"><?php echo esc_html($a['reg_type'] . ($a['transfer_club'] ? ': ' . $a['transfer_club'] : '')); ?></span>
             <?php endif; ?>
             <?php if ($this->was_on_team_last_season($last_season_members, $a['user_id'], $a['email'])): ?>
-                <span class="chip">Same team last season</span>
+                <span class="chip">Same team</span>
             <?php endif; ?>
             <?php if (!empty($a['age_flag'])): ?>
-                <span class="chip chip-flag">Over age for <?php echo esc_html($a['age_rule_label']); ?> — exemption needed</span>
-            <?php endif; ?>
-            <?php if ($a['picked_mine']): ?><span class="chip">Applied to your team</span><?php endif; ?>
-        </p>
-
-        <p class="line">
-            <span class="label">Age</span> <?php echo esc_html($a['age'] !== '' ? $a['age'] : '—'); ?>
-            <?php if ($a['dob_display']): ?>(<?php echo esc_html($a['dob_display']); ?>)<?php endif; ?>
-            &middot; <span class="label">Positions</span> <?php echo esc_html($a['positions'] ?: '—'); ?>
-        </p>
-        <p class="line">
-            <span class="label">Email</span> <?php echo esc_html($a['email']); ?>
-            <?php if (!empty($a['mobile'])): ?> &middot; <span class="label">Mobile</span> <?php echo esc_html(self::format_phone($a['mobile'])); ?><?php endif; ?>
-        </p>
-        <p class="line">
-            <span class="label">Applied for</span> <?php echo esc_html($a['teams_selected_names'] ?: '—'); ?>
-        </p>
-
-        <div class="section">
-            <div class="section-title">Verdicts</div>
-            <?php if (!empty($a['selections'])): ?>
-                <?php foreach ($a['selections'] as $sel): ?>
-                    <div class="line"><?php echo esc_html($sel['team_name'] . ' — ' . (isset($verdict_labels[$sel['status']]) ? $verdict_labels[$sel['status']] : $sel['status'])); ?></div>
-                <?php endforeach; ?>
-            <?php else: ?>
-                <div class="none">No verdict from any team yet.</div>
+                <span class="chip chip-flag">Over <?php echo esc_html($a['age_rule_label']); ?></span>
             <?php endif; ?>
         </div>
 
-        <div class="section">
-            <div class="section-title">Emergency contacts</div>
-            <?php $contacts = $a['user_id'] ? self::get_emergency_contacts($a['user_id']) : array(); ?>
-            <?php if (!empty($contacts)): ?>
-                <?php foreach ($contacts as $contact): ?>
-                    <div class="line emergency">
-                        <strong><?php echo esc_html($contact['name'] ? $contact['name'] : 'Name not recorded'); ?></strong>
-                        <?php if ($contact['relationship']): ?>(<?php echo esc_html($contact['relationship']); ?>)<?php endif; ?>
-                        <?php if ($contact['number']): ?> &middot; <?php echo esc_html(self::format_phone($contact['number'])); ?><?php endif; ?>
-                    </div>
-                <?php endforeach; ?>
-            <?php else: ?>
-                <div class="none">None recorded on their profile.</div>
-            <?php endif; ?>
+        <div class="line">
+            <span class="lbl">Contact</span> <?php echo esc_html($a['email']); ?><?php if (!empty($a['mobile'])): ?> <span class="sep">·</span> <?php echo esc_html(self::format_phone($a['mobile'])); ?><?php endif; ?>
+            <span class="sep">·</span> <span class="lbl">Verdicts</span>
+            <?php
+            if (!empty($a['selections'])) {
+                $bits = array();
+                foreach ($a['selections'] as $sel) {
+                    $bits[] = $sel['team'] . ' ' . (isset($verdict_labels[$sel['status']]) ? $verdict_labels[$sel['status']] : $sel['status']);
+                }
+                echo esc_html(implode(', ', $bits));
+            } else {
+                echo '<span class="none">none yet</span>';
+            }
+            ?>
         </div>
 
-        <?php if (!empty($a['form_data'])): ?>
-            <div class="section">
-                <div class="section-title">Application</div>
-                <dl>
-                    <?php foreach ($a['form_data'] as $question => $answer): ?>
-                        <?php if ($answer !== '' && $answer !== null): ?>
-                            <dt><?php echo esc_html($question); ?></dt>
-                            <dd><?php echo nl2br(esc_html(is_array($answer) ? implode(', ', $answer) : $answer)); ?></dd>
-                        <?php endif; ?>
-                    <?php endforeach; ?>
-                </dl>
+        <div class="line ice">
+            <span class="lbl">ICE</span>
+            <?php
+            $contacts = $a['user_id'] ? self::get_emergency_contacts($a['user_id']) : array();
+            if (!empty($contacts)) {
+                $bits = array();
+                foreach ($contacts as $contact) {
+                    $bit = $contact['name'] ? $contact['name'] : 'unnamed';
+                    if ($contact['relationship']) { $bit .= ' (' . $contact['relationship'] . ')'; }
+                    if ($contact['number']) { $bit .= ' ' . self::format_phone($contact['number']); }
+                    $bits[] = $bit;
+                }
+                echo esc_html(implode(' · ', $bits));
+            } else {
+                echo '<span class="none">none on file</span>';
+            }
+            ?>
+        </div>
+
+        <?php if (!empty($a['notes'])): ?>
+            <div class="line">
+                <span class="lbl">Notes</span>
+                <?php
+                $bits = array();
+                foreach ($a['notes'] as $note) {
+                    $bits[] = '[' . $note['author'] . ', ' . $note['date'] . '] ' . $note['note'];
+                }
+                echo esc_html(implode(' ', $bits));
+                ?>
             </div>
         <?php endif; ?>
 
-        <div class="section">
-            <div class="section-title">Notes (<?php echo count($a['notes']); ?>)</div>
-            <?php if (!empty($a['notes'])): ?>
-                <?php foreach ($a['notes'] as $note): ?>
-                    <div class="note"><strong><?php echo esc_html($note['author']); ?></strong> <?php echo esc_html($note['date']); ?><br><?php echo nl2br(esc_html($note['note'])); ?></div>
-                <?php endforeach; ?>
-            <?php else: ?>
-                <div class="none">No notes recorded.</div>
-            <?php endif; ?>
-        </div>
+        <?php if (!empty($a['form_data'])): ?>
+            <div class="line app-answers">
+                <span class="lbl">Application</span>
+                <?php
+                $bits = array();
+                foreach ($a['form_data'] as $question => $answer) {
+                    if ($answer === '' || $answer === null) {
+                        continue;
+                    }
+                    $bits[] = $question . ': ' . (is_array($answer) ? implode(', ', $answer) : str_replace(array("\r\n", "\n"), ' ', $answer));
+                }
+                echo esc_html(implode(' · ', $bits));
+                ?>
+            </div>
+        <?php endif; ?>
     </div>
 <?php endforeach; ?>
 
