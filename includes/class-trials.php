@@ -43,6 +43,7 @@ class TeamOversight_Trials {
             'SL2' => 'State League 2',
             'SL3' => 'State League 3',
             'YSL17' => 'Youth State League U/17',
+            'YSL15' => 'Youth State League U/15',
         );
     }
 
