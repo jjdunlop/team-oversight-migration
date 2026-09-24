@@ -162,7 +162,7 @@ class TeamOversight_Trials {
                             <p><strong>Your <?php echo esc_html($my_application->season); ?> application has been received but is awaiting payment.</strong> Submit the form below again to return to the checkout, or contact the club if you believe you have already paid.</p>
                         <?php elseif ($my_application->application_status === 'accepted'): ?>
                             <?php
-                            $assigned_config = $database->get_teams_config();
+                            $assigned_config = $database->get_teams_config($my_application->season);
                             $assigned_name = isset($assigned_config[$my_application->assigned_team]) ? $assigned_config[$my_application->assigned_team]['name'] : $my_application->assigned_team;
                             ?>
                             <p><strong>Congratulations — you've been assigned to <?php echo esc_html($assigned_name); ?> for <?php echo esc_html($my_application->season); ?>.</strong></p>
@@ -357,16 +357,23 @@ class TeamOversight_Trials {
                             <?php if ($training_info_url): ?>
                                 <p class="description" style="margin-top: 0;"><a href="<?php echo esc_url($training_info_url); ?>" target="_blank">Training venues and days for each team</a></p>
                             <?php endif; ?>
-                            <div class="teams-checkboxes">
+                            <?php
+                            $team_groups = array('mens' => "Men's Teams", 'womens' => "Women's Teams", 'mixed' => 'Mixed / Open Teams');
+                            // The applicant's own competition leads, so
+                            // nobody scrolls past a greyed-out block to
+                            // reach the teams they can actually pick.
+                            if (!empty($competition['competition']) && isset($team_groups[$competition['competition']])) {
+                                $team_groups = array($competition['competition'] => $team_groups[$competition['competition']]) + $team_groups;
+                            }
+                            // Teams are configured per season, so each open
+                            // season gets its own set of groups; the season
+                            // selector shows the matching set and disables
+                            // the others so they can never submit.
+                            foreach (self::get_open_seasons() as $open_season):
+                                $teams_config = $database->get_teams_config($open_season);
+                            ?>
+                            <div class="teams-checkboxes" data-season="<?php echo esc_attr($open_season); ?>">
                                 <?php
-                                $teams_config = $database->get_teams_config();
-                                $team_groups = array('mens' => "Men's Teams", 'womens' => "Women's Teams", 'mixed' => 'Mixed / Open Teams');
-                                // The applicant's own competition leads, so
-                                // nobody scrolls past a greyed-out block to
-                                // reach the teams they can actually pick.
-                                if (!empty($competition['competition']) && isset($team_groups[$competition['competition']])) {
-                                    $team_groups = array($competition['competition'] => $team_groups[$competition['competition']]) + $team_groups;
-                                }
                                 foreach ($team_groups as $group_key => $group_label):
                                     $group_teams = array_filter($teams_config, function ($t) use ($group_key) {
                                         return $t['gender'] === $group_key;
@@ -385,7 +392,11 @@ class TeamOversight_Trials {
                                         <?php endforeach; ?>
                                     </div>
                                 <?php endforeach; ?>
+                                <?php if (empty($teams_config)): ?>
+                                    <p class="description">No teams have been set up for the <?php echo esc_html($open_season); ?> season yet.</p>
+                                <?php endif; ?>
                             </div>
+                            <?php endforeach; ?>
                         </td>
                     </tr>
 
@@ -476,7 +487,14 @@ class TeamOversight_Trials {
                 var dob = murvcDob ? new Date(murvcDob.replace(/\//g, '-') + 'T00:00:00') : null;
                 if (dob && isNaN(dob.getTime())) { dob = null; }
 
-                $('.team-option').each(function() {
+                // Only the chosen season's teams are visible and submittable.
+                $('.teams-checkboxes').each(function() {
+                    var on = $(this).attr('data-season') === String(seasonYear);
+                    $(this).toggle(on);
+                    if (!on) { $(this).find('input').prop('disabled', true).prop('checked', false); }
+                });
+
+                $('.teams-checkboxes[data-season="' + seasonYear + '"] .team-option').each(function() {
                     var $opt = $(this);
                     var gender = $opt.attr('data-gender');
                     var rule = $opt.attr('data-age-rule');
@@ -844,7 +862,7 @@ class TeamOversight_Trials {
             wp_send_json_error(array('message' => 'Applications for the ' . $season . ' season are closed.'));
         }
         $database = new TeamOversight_Database();
-        $teams_config = $database->get_teams_config();
+        $teams_config = $database->get_teams_config($season);
         $interested_teams = isset($_POST['interested_teams']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['interested_teams']), array_keys($teams_config))) : array();
         $preferred_positions = isset($_POST['preferred_positions']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['preferred_positions']), array_keys(self::get_position_options()))) : array();
 

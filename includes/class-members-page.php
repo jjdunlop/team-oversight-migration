@@ -179,7 +179,7 @@ class TeamOversight_Members_Page {
                             <option value="">All Teams</option>
                             <?php
                             $database = new TeamOversight_Database();
-                            foreach ($database->get_teams() as $code => $name): ?>
+                            foreach ($database->get_teams($season) as $code => $name): ?>
                                 <option value="<?php echo esc_attr($code); ?>"><?php echo esc_html($code); ?></option>
                             <?php endforeach; ?>
                         </select>

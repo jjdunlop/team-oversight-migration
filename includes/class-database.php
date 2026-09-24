@@ -330,8 +330,28 @@ class TeamOversight_Database {
             ");
             add_option('team_oversight_ledger_backfilled', 1, '', 'no');
         }
+
+        // 1.48.0: teams became per-season. Give every season that has (or
+        // is about to have) data its own copy of the global team list, so
+        // editing 2027's teams never touches 2026's. One-time; the bare
+        // list stays behind as the fallback for seasons never seeded.
+        if (!get_option('team_oversight_teams_seasoned')) {
+            $seasons = array_merge(
+                (array) $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}team_assignments"),
+                (array) $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}trial_applications"),
+                (array) $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}team_invoices"),
+                (array) get_option('team_oversight_created_seasons', array()),
+                array(date('Y'), strval(intval(date('Y')) + 1))
+            );
+            foreach (array_unique(array_map('strval', $seasons)) as $season) {
+                if (preg_match('/^\d{4}$/', $season)) {
+                    self::seed_season_teams($season);
+                }
+            }
+            add_option('team_oversight_teams_seasoned', 1, '', 'no');
+        }
     }
-    
+
     public function create_tables() {
         global $wpdb;
         
@@ -572,18 +592,116 @@ class TeamOversight_Database {
         return null;
     }
 
-    public function get_teams() {
-        // Get teams from WordPress options (dynamic teams)
-        $custom_teams = get_option('team_oversight_teams', array());
+    // ------------------------------------------------------------------
+    // Teams are configured PER SEASON (1.48.0+). The registry options
+    // (team_oversight_teams / team_oversight_team_meta) are keyed by
+    // "CODE-YYYY", so SL2M-2027 and SL2M-2026 are separate entries that
+    // can be renamed, re-ruled or deleted independently. Assignment,
+    // application and selection rows keep the bare code plus their own
+    // season column — that pair IS the seasoned identity, so no data row
+    // ever needs rewriting and "returning to SL2M" still reads naturally.
+    // Bare (un-suffixed) keys are the pre-1.48 global list and remain as
+    // the fallback for any season with no entries of its own.
+    // ------------------------------------------------------------------
 
-        // Seed defaults (names + meta) if no teams are configured yet.
-        if (empty($custom_teams)) {
+    /** "SL2M" + "2027" -> "SL2M-2027". */
+    public static function season_team_key($code, $season) {
+        return trim($code) . '-' . intval($season);
+    }
+
+    /** "SL2M-2027" -> array('SL2M', '2027'); "SL2M" -> array('SL2M', null). */
+    public static function split_team_key($key) {
+        if (preg_match('/^(.*)-(\d{4})$/', trim((string) $key), $m)) {
+            return array($m[1], $m[2]);
+        }
+        return array(trim((string) $key), null);
+    }
+
+    /**
+     * The season a team list is wanted for when the caller has none in
+     * hand: the admin's remembered season, else the current year.
+     */
+    public static function default_team_season() {
+        $remembered = get_option('team_oversight_selected_season');
+        return preg_match('/^\d{4}$/', (string) $remembered) ? strval($remembered) : date('Y');
+    }
+
+    /**
+     * Raw registry entries for one season, keyed by BARE code. Falls back
+     * to the un-suffixed global list when the season has none of its own.
+     * $registry is the option array (names or meta).
+     */
+    private static function entries_for_season($registry, $season) {
+        $seasoned = array();
+        $bare = array();
+        foreach ((array) $registry as $key => $value) {
+            list($code, $key_season) = self::split_team_key($key);
+            if ($key_season === null) {
+                $bare[$code] = $value;
+            } elseif ($key_season === strval(intval($season))) {
+                $seasoned[$code] = $value;
+            }
+        }
+        return !empty($seasoned) ? $seasoned : $bare;
+    }
+
+    /** Does the registry hold any entries suffixed for this season? */
+    public static function season_has_teams($season) {
+        foreach ((array) get_option('team_oversight_teams', array()) as $key => $name) {
+            list(, $key_season) = self::split_team_key($key);
+            if ($key_season === strval(intval($season))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Give a season its own team entries, copied from another season (or
+     * from the bare global list). No-op when the season already has any,
+     * so re-running is safe. Returns how many teams were copied.
+     */
+    public static function seed_season_teams($season, $from_season = null) {
+        if (self::season_has_teams($season)) {
+            return 0;
+        }
+
+        $names = get_option('team_oversight_teams', array());
+        $meta = get_option('team_oversight_team_meta', array());
+        $source_names = $from_season !== null ? self::entries_for_season($names, $from_season) : self::entries_for_season($names, 0);
+        $source_meta = $from_season !== null ? self::entries_for_season($meta, $from_season) : self::entries_for_season($meta, 0);
+
+        if (empty($source_names)) {
+            return 0;
+        }
+        foreach ($source_names as $code => $name) {
+            $key = self::season_team_key($code, $season);
+            $names[$key] = $name;
+            if (isset($source_meta[$code])) {
+                $meta[$key] = $source_meta[$code];
+            }
+        }
+        update_option('team_oversight_teams', $names);
+        update_option('team_oversight_team_meta', $meta);
+        return count($source_names);
+    }
+
+    /**
+     * Team names for a season, keyed by bare code. Seeds the club's default
+     * list (into the season) the first time nothing is configured at all.
+     */
+    public function get_teams($season = null) {
+        $season = $season === null ? self::default_team_season() : $season;
+        $all = get_option('team_oversight_teams', array());
+
+        if (empty($all)) {
             $defaults = self::get_default_teams();
             $names = array();
             $meta = array();
             foreach ($defaults as $code => $team) {
-                $names[$code] = $team['name'];
-                $meta[$code] = array(
+                $key = self::season_team_key($code, $season);
+                $names[$key] = $team['name'];
+                $meta[$key] = array(
                     'gender' => $team['gender'],
                     'age_rule' => $team['age_rule'],
                     'shirts' => isset($team['shirts']) ? $team['shirts'] : 1,
@@ -591,21 +709,22 @@ class TeamOversight_Database {
             }
             update_option('team_oversight_teams', $names);
             update_option('team_oversight_team_meta', $meta);
-            return $names;
+            $all = $names;
         }
 
-        return $custom_teams;
+        return self::entries_for_season($all, $season);
     }
 
     /**
-     * Teams with their gender and age-rule metadata:
+     * Teams for a season with their gender and age-rule metadata:
      * code => array(name, gender: mens|womens|mixed, age_rule: ''|u19|u17|u15).
      * Gender falls back to a guess from the team code, and legacy max_age
      * metadata maps onto the matching rule.
      */
-    public function get_teams_config() {
-        $names = $this->get_teams();
-        $meta = get_option('team_oversight_team_meta', array());
+    public function get_teams_config($season = null) {
+        $season = $season === null ? self::default_team_season() : $season;
+        $names = $this->get_teams($season);
+        $meta = self::entries_for_season(get_option('team_oversight_team_meta', array()), $season);
 
         $config = array();
         foreach ($names as $code => $name) {

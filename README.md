@@ -92,12 +92,15 @@ The **VV Report** tab produces the VV return: age band (10-year bands, age at th
 
 ### Teams (Configuration page)
 
-Teams are configured with a **code** (stable internal ID — never shown to players), **name** (what players see), **gender** (men's/women's/mixed), **age eligibility rule** and **playing-shirt count**:
+Teams are configured **per season** (1.48.0+) with a **code** (stable internal ID — never shown to players), **name** (what players see), **gender** (men's/women's/mixed), **age eligibility rule** and **playing-shirt count**:
 
+- **Per season**: the Configuration page's season selector decides which season's list you are editing. Adding, renaming, re-ruling or deleting a team changes that season only — 2027's SL3M-R and 2026's SL3M-R are separate entries. Internally the registry is keyed `CODE-YYYY`; assignments, applications and selections keep the bare code plus their own season, so nothing historical is rewritten and a code still identifies "the same team" across years.
+- **Deleting** is blocked only by active assignments *in that season*. Removing a team from 2027 while people are still assigned to it in 2026 is fine — that was the bug this replaced.
 - Age rules follow the VVL By-Laws and compute their DOB cutoff from the season year automatically (nothing to update each season): **U19** = no 19th birthday during the season year; **U17**/**U15** (YSL) = 16/14 or younger as of 31 August.
 - Shirts: how many playing shirts a player must pay for on this team (Premier 2, YSL 0 — supplied, default 1).
-- "Load default club team list" resets to the current club teams.
-- **Create season** (button beside the Configuration season selector): registers the next season (highest known + 1, e.g. 2028) so it appears in every season selector before any data exists — ready for season dates, fee matrix, and trial opening.
+- "Load default club team list" resets the *selected season's* list to the club defaults; other seasons are untouched.
+- **Create season** (button beside the Configuration season selector): registers the next season (highest known + 1, e.g. 2028) so it appears in every season selector before any data exists, and **copies the previous season's team list** into it as a starting point — ready for season dates, fee matrix, and trial opening.
+- Upgrading from a pre-1.48 global list is automatic: every season with data (plus this year and next) receives its own copy of the old list, and the old list stays behind as the fallback for any season never seeded. The trial form shows each open season its own teams and switches lists when the applicant changes season.
 
 ### Trials
 
@@ -121,6 +124,7 @@ Front-end form via `[team_trial_form]` (login required; prompts to log in / crea
 - Applicant pools are **competition-wide** (all men's or women's applicants, not just those who picked the team — players get redirected between trials and VV grants age exemptions), sectioned: *awaiting your verdict* first, then *verdict recorded*, then *other applicants*. Search + only-my-verdicts filter.
 - **Shared notes** on applications (author + date, visible to all coaches and admins).
 - **Registration-status chip** on every applicant and selection-roster card, derived automatically at submission: **New** (first VVL season), **Returning** (Renegades history, no other club since), **FA: [club]** (free agent — skipped a season or more, no transfer needed), **⇄ [club]** (club transfer required — played elsewhere as recently as last season), **ITC** (registered with an overseas federation *and* trialling for a Premier League 1 team — ITC only applies at P1). Colour-coded, truncated for long club names, full explanation on hover. The "season last played" input is a structured dropdown so the Free Agent / Transfer split is computed reliably.
+- **Same team chip** (`↩ Same team`) on any card — roster, selection board or applicant — for someone who played for *this* team last season. Deliberately separate from the VV **Returning** chip, which is about the club: a Renegades player moving from SL3M to SL2M is Returning but not Same team. One query per page, matched by account or email.
 - **Emergency contacts dropdown** on every player and applicant card — both profile contacts when recorded (primary + the second-contact fields), each with name, relationship and a tap-to-call number (AU numbers normalised, stripped leading zeros restored) — and a nudge when a member has none recorded.
 - **Roster CSV export** (with positions and selection status).
 - Coaches never trigger fees: converting Selected/Training-Only verdicts into real assignments + invoices is the admin **"Finalise Coach Selections"** button on Trial Applications (idempotent; Training Only finalises as the `training_only` role and rate).

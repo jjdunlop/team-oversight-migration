@@ -219,7 +219,7 @@ class TeamOversight_Readiness {
         }
 
         $database = new TeamOversight_Database();
-        $teams_config = $database->get_teams_config();
+        $teams_config = $database->get_teams_config($season);
 
         // Highest shirt requirement across their teams.
         $shirts_required = 0;
@@ -428,7 +428,7 @@ class TeamOversight_Readiness {
 
     private function render_panel($season, $checklist) {
         $database = new TeamOversight_Database();
-        $teams_config = $database->get_teams_config();
+        $teams_config = $database->get_teams_config($season);
         $team_names = array_map(function ($code) use ($teams_config) {
             return isset($teams_config[$code]) ? $teams_config[$code]['name'] : $code;
         }, $checklist['teams']);

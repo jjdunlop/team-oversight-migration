@@ -151,10 +151,11 @@ class TeamOversight_Coach_Portal {
         }
 
         $database = new TeamOversight_Database();
-        $teams_config = $database->get_teams_config();
+        $teams_config = $database->get_teams_config($season);
         $active_config = isset($teams_config[$active_team]) ? $teams_config[$active_team] : array('name' => $active_team, 'gender' => 'mixed', 'age_rule' => '');
         $roster = $this->get_roster($active_team, $season);
         $selection_roster = $this->get_selection_roster($active_team, $season, $roster);
+        $last_season_members = $this->get_last_season_team_members($active_team, $season);
         $applicants = $this->get_applicants_by_gender($active_config['gender'], $season, $active_team, $my_team_codes);
 
         $base_url = remove_query_arg(array('coach_team', 'coach_season'));
@@ -242,6 +243,9 @@ class TeamOversight_Coach_Portal {
                                     <?php if ($app_ctx): ?>
                                         <?php echo $this->render_reg_chip($app_ctx['reg_type'], $app_ctx['transfer_club']); ?>
                                     <?php endif; ?>
+                                    <?php if ($this->was_on_team_last_season($last_season_members, isset($member->user_id) ? $member->user_id : 0, $member->email)): ?>
+                                        <?php echo $this->render_same_team_chip($active_team, $season); ?>
+                                    <?php endif; ?>
                                     <span class="verdict-chip verdict-chip-confirmed">Confirmed<?php echo $member->role === 'training_only' ? ' — Training Only' : ''; ?></span>
                                 </span>
                             </div>
@@ -270,6 +274,9 @@ class TeamOversight_Coach_Portal {
                                 <span class="cac-name"><?php echo esc_html($member->name); ?></span>
                                 <span class="cac-chips">
                                     <?php echo $this->render_reg_chip($member->reg_type, $member->transfer_club); ?>
+                                    <?php if ($this->was_on_team_last_season($last_season_members, $member->user_id, $member->email)): ?>
+                                        <?php echo $this->render_same_team_chip($active_team, $season); ?>
+                                    <?php endif; ?>
                                     <?php if ($member->status === 'selected'): ?>
                                         <span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>
                                     <?php elseif ($member->status === 'training_only'): ?>
@@ -374,6 +381,9 @@ class TeamOversight_Coach_Portal {
                                     <span class="cac-name"><?php echo esc_html($a['name']); ?></span>
                                     <span class="cac-chips">
                                         <?php echo $this->render_reg_chip($a['reg_type'], $a['transfer_club']); ?>
+                                        <?php if ($this->was_on_team_last_season($last_season_members, $a['user_id'], $a['email'])): ?>
+                                            <?php echo $this->render_same_team_chip($active_team, $season); ?>
+                                        <?php endif; ?>
                                         <?php echo $this->render_verdict_chips($a['selections']); ?>
                                     </span>
                                 </div>
@@ -612,6 +622,12 @@ class TeamOversight_Coach_Portal {
             background: #f0f0f1;
             color: #50575e;
             border: 1px solid #c3c4c7;
+        }
+
+        .chip-sameteam {
+            background: #e8f1fb;
+            color: #1d4f8a;
+            border: 1px solid #9ec1e6;
         }
 
         .coach-app-details summary {
@@ -1157,6 +1173,49 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
+     * Who played for this team LAST season, so a card can say they're
+     * back on the same team. This is a different question from the VV
+     * "Returning" chip, which is about the club: a Renegades player moving
+     * from SL3M to SL2M is Returning but not Same team. One query per
+     * page; keyed 'u<id>' and by lowercased email.
+     */
+    private function get_last_season_team_members($team_code, $season) {
+        global $wpdb;
+
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT user_id, email FROM {$wpdb->prefix}team_assignments
+            WHERE team = %s AND season = %s AND is_active = 1
+                AND role IN ('playing_member', 'training_only')
+        ", $team_code, strval(intval($season) - 1)));
+
+        $members = array();
+        foreach ($rows as $row) {
+            if (intval($row->user_id)) {
+                $members['u' . intval($row->user_id)] = true;
+            }
+            if ($row->email) {
+                $members[strtolower($row->email)] = true;
+            }
+        }
+        return $members;
+    }
+
+    private function was_on_team_last_season($members, $user_id, $email) {
+        if (empty($members)) {
+            return false;
+        }
+        if (intval($user_id) && isset($members['u' . intval($user_id)])) {
+            return true;
+        }
+        return $email !== '' && $email !== null && isset($members[strtolower($email)]);
+    }
+
+    private function render_same_team_chip($team_code, $season) {
+        $last = intval($season) - 1;
+        return '<span class="verdict-chip chip-sameteam" title="Played for ' . esc_attr($team_code) . ' in ' . $last . ' — back on the same team, not just returning to the club.">↩ Same team</span>';
+    }
+
+    /**
      * VV registration-status chip — every applicant gets one:
      * New / Returning / Free Agent / Transfer / ITC. Empty string only
      * for legacy applications with no derivable status.
@@ -1334,7 +1393,7 @@ class TeamOversight_Coach_Portal {
         // Carry the over-age flag into the team list so a tentatively
         // selected over-age player stays visibly exemption-dependent.
         $database = new TeamOversight_Database();
-        $teams_config = $database->get_teams_config();
+        $teams_config = $database->get_teams_config($season);
         $age_rule = isset($teams_config[$team_code]) ? $teams_config[$team_code]['age_rule'] : '';
         $cutoff = $age_rule ? TeamOversight_Database::get_dob_cutoff($age_rule, $season) : null;
 
@@ -1399,7 +1458,7 @@ class TeamOversight_Coach_Portal {
 
         $positions = TeamOversight_Trials::get_position_options();
         $database = new TeamOversight_Database();
-        $teams_config = $database->get_teams_config();
+        $teams_config = $database->get_teams_config($season);
 
         // The active team's DOB cutoff, so over-age applicants are flagged
         // (they can still be selected — VV can grant exemptions).
@@ -1484,6 +1543,7 @@ class TeamOversight_Coach_Portal {
 
             $applicants[] = array(
                 'id' => intval($row->id),
+                'user_id' => intval($row->user_id),
                 'trial_number' => intval($row->trial_number),
                 'is_transfer' => intval($row->is_transfer_player) === 1,
                 'transfer_club' => isset($form_data['Transfer: Previous Club']) ? $form_data['Transfer: Previous Club'] : '',

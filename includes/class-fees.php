@@ -524,7 +524,10 @@ class TeamOversight_Fees {
                 $next_season = strval(max($known) + 1); // one past the highest known season
                 $created[] = $next_season;
                 update_option('team_oversight_created_seasons', array_values(array_unique(array_map('strval', $created))));
-                echo '<div class="notice notice-success"><p>Season <strong>' . esc_html($next_season) . '</strong> created — it now appears in all season selectors. Set its season dates and fee matrix here when ready, and open its trial applications from the Trial Applications settings.</p></div>';
+                // The new season starts with the previous season's teams,
+                // then evolves independently.
+                $copied = TeamOversight_Database::seed_season_teams($next_season, strval(max($known)));
+                echo '<div class="notice notice-success"><p>Season <strong>' . esc_html($next_season) . '</strong> created — it now appears in all season selectors' . ($copied ? ', starting with the ' . esc_html(max($known)) . ' team list (' . intval($copied) . ' teams) which you can now edit for ' . esc_html($next_season) . ' alone' : '') . '. Set its season dates and fee matrix here when ready, and open its trial applications from the Trial Applications settings.</p></div>';
             } else {
                 echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
             }
@@ -725,7 +728,7 @@ class TeamOversight_Fees {
                     <h2>Team Management</h2>
                     
                     <div class="team-management-section">
-                        <p style="margin-bottom: 15px; color: #666;">Manage team names, codes, and configuration for the <?php echo esc_html($selected_season); ?> season.</p>
+                        <p style="margin-bottom: 15px; color: #666;">Manage team names, codes, and configuration for the <?php echo esc_html($selected_season); ?> season. Teams are configured <strong>per season</strong>: adding, renaming or deleting here changes <?php echo esc_html($selected_season); ?> only, and creating a new season copies the previous season's list forward.</p>
                         
                         <!-- Add New Team Form -->
                         <div style="background: #f9f9f9; padding: 15px; border: 1px solid #ddd; margin-bottom: 20px;">
@@ -793,7 +796,7 @@ class TeamOversight_Fees {
                                 <tbody id="teams-tbody">
                                     <?php
                                     $database = new TeamOversight_Database();
-                                    $teams_config = $database->get_teams_config();
+                                    $teams_config = $database->get_teams_config($selected_season);
                                     $gender_labels = array('mens' => "Men's", 'womens' => "Women's", 'mixed' => 'Mixed');
                                     // Listed by code, naturally (SL2M before SL10M), so a
                                     // team is found by where its code sits, not by when
@@ -839,7 +842,7 @@ class TeamOversight_Fees {
                             </table>
                             <p style="margin-top: 15px;">
                                 <button type="button" class="button" onclick="resetDefaultTeams()">Load default club team list</button>
-                                <span class="description">Replaces all teams above with the plugin's current default list (with gender + age limits). Existing team assignments keep their old codes.</span>
+                                <span class="description">Replaces the <?php echo esc_html($selected_season); ?> team list with the plugin's default club list (with gender + age limits). Other seasons are untouched; existing team assignments keep their codes.</span>
                             </p>
                         </div>
                     </div>
@@ -850,7 +853,9 @@ class TeamOversight_Fees {
         
         <script>
         let hasChanges = false;
-        
+        // Every team action on this page is scoped to the season being viewed.
+        const murvcTeamSeason = '<?php echo esc_js($selected_season); ?>';
+
         function markChanged() {
             hasChanges = true;
             document.getElementById('save-fees').style.background = '#dc3232';
@@ -902,6 +907,7 @@ class TeamOversight_Fees {
 
             const formData = new FormData();
             formData.append('action', 'save_team');
+            formData.append('season', murvcTeamSeason);
             formData.append('team_code', teamCode);
             formData.append('team_name', teamName);
             formData.append('team_gender', teamGender);
@@ -1017,6 +1023,7 @@ class TeamOversight_Fees {
 
             const formData = new FormData();
             formData.append('action', 'update_team');
+            formData.append('season', murvcTeamSeason);
             formData.append('team_code', teamCode);
             formData.append('team_name', newName);
             formData.append('team_gender', newGender);
@@ -1047,12 +1054,13 @@ class TeamOversight_Fees {
         }
 
         function resetDefaultTeams() {
-            if (!confirm('Replace ALL configured teams with the default club team list (including gender and age limits)?\n\nExisting team assignments are not changed, but any assignment using an old team code will show that code without a matching team entry.')) {
+            if (!confirm('Replace the ' + murvcTeamSeason + ' team list with the default club team list (including gender and age limits)?\n\nOther seasons are not affected. Existing team assignments are not changed, but any assignment using an old team code will show that code without a matching team entry.')) {
                 return;
             }
 
             const formData = new FormData();
             formData.append('action', 'reset_default_teams');
+            formData.append('season', murvcTeamSeason);
             formData.append('team_nonce', '<?php echo wp_create_nonce('reset_default_teams'); ?>');
 
             fetch(ajaxurl, {
@@ -1073,12 +1081,13 @@ class TeamOversight_Fees {
         }
         
         function deleteTeam(teamCode) {
-            if (!confirm('Are you sure you want to delete this team? This action cannot be undone.\\n\\nTeam Code: ' + teamCode)) {
+            if (!confirm('Delete this team from the ' + murvcTeamSeason + ' season? Other seasons keep it. This action cannot be undone.\n\nTeam Code: ' + teamCode)) {
                 return;
             }
-            
+
             const formData = new FormData();
             formData.append('action', 'delete_team');
+            formData.append('season', murvcTeamSeason);
             formData.append('team_code', teamCode);
             formData.append('team_nonce', '<?php echo wp_create_nonce('delete_team'); ?>');
             
@@ -1467,117 +1476,135 @@ class TeamOversight_Fees {
         return $season . '-MBRFEE-' . sprintf('%04d', $next_number);
     }
     
+    /**
+     * The season a team action applies to. Every team edit is scoped to
+     * one season (1.48.0+); a request without one is refused rather than
+     * guessed, so nothing can silently change another season's list.
+     */
+    private function posted_team_season() {
+        $season = isset($_POST['season']) ? sanitize_text_field(wp_unslash($_POST['season'])) : '';
+        if (!preg_match('/^\d{4}$/', $season)) {
+            wp_send_json_error('Season is required');
+        }
+        // A season still showing the pre-1.48 global list gets its own
+        // copy before it is edited, so the edit lands on that season only.
+        TeamOversight_Database::seed_season_teams($season);
+        return $season;
+    }
+
     public function save_team() {
         if (!wp_verify_nonce($_POST['team_nonce'], 'save_team')) {
             wp_die('Security check failed');
         }
-        
+
         if (!current_user_can('manage_options')) {
             wp_die('Insufficient permissions');
         }
-        
+
+        $season = $this->posted_team_season();
         $team_code = sanitize_text_field($_POST['team_code']);
         $team_name = sanitize_text_field($_POST['team_name']);
-        
+
         if (empty($team_code) || empty($team_name)) {
             wp_send_json_error('Team code and name are required');
         }
-        
-        // For now, we'll store teams in WordPress options
-        // This is a simplified approach - in production you might want a dedicated table
-        $teams = get_option('team_oversight_teams', array());
-        
-        // Check if team code already exists
-        if (isset($teams[$team_code])) {
-            wp_send_json_error('Team code already exists');
+        if (preg_match('/-\d{4}$/', $team_code)) {
+            wp_send_json_error('Team codes must not end in a year — the season is attached automatically');
         }
-        
-        $teams[$team_code] = $team_name;
+
+        $key = TeamOversight_Database::season_team_key($team_code, $season);
+        $teams = get_option('team_oversight_teams', array());
+        if (isset($teams[$key])) {
+            wp_send_json_error('Team code already exists for the ' . $season . ' season');
+        }
+
+        $teams[$key] = $team_name;
         update_option('team_oversight_teams', $teams);
 
         $meta = get_option('team_oversight_team_meta', array());
-        $meta[$team_code] = $this->get_posted_team_meta();
+        $meta[$key] = $this->get_posted_team_meta();
         update_option('team_oversight_team_meta', $meta);
 
-        wp_send_json_success('Team added successfully');
+        wp_send_json_success('Team added to the ' . $season . ' season');
     }
-    
+
     public function update_team() {
         if (!wp_verify_nonce($_POST['team_nonce'], 'update_team')) {
             wp_die('Security check failed');
         }
-        
+
         if (!current_user_can('manage_options')) {
             wp_die('Insufficient permissions');
         }
-        
+
+        $season = $this->posted_team_season();
         $team_code = sanitize_text_field($_POST['team_code']);
         $team_name = sanitize_text_field($_POST['team_name']);
-        
+
         if (empty($team_code) || empty($team_name)) {
             wp_send_json_error('Team code and name are required');
         }
-        
+
+        $key = TeamOversight_Database::season_team_key($team_code, $season);
         $teams = get_option('team_oversight_teams', array());
-        
-        // Check if team code exists
-        if (!isset($teams[$team_code])) {
-            wp_send_json_error('Team code not found');
+        if (!isset($teams[$key])) {
+            wp_send_json_error('Team code not found in the ' . $season . ' season');
         }
-        
-        $teams[$team_code] = $team_name;
+
+        $teams[$key] = $team_name;
         update_option('team_oversight_teams', $teams);
 
         $meta = get_option('team_oversight_team_meta', array());
-        $meta[$team_code] = $this->get_posted_team_meta();
+        $meta[$key] = $this->get_posted_team_meta();
         update_option('team_oversight_team_meta', $meta);
 
-        wp_send_json_success('Team updated successfully');
+        wp_send_json_success('Team updated for the ' . $season . ' season');
     }
-    
+
     public function delete_team() {
         if (!wp_verify_nonce($_POST['team_nonce'], 'delete_team')) {
             wp_die('Security check failed');
         }
-        
+
         if (!current_user_can('manage_options')) {
             wp_die('Insufficient permissions');
         }
-        
+
+        $season = $this->posted_team_season();
         $team_code = sanitize_text_field($_POST['team_code']);
-        
+
         if (empty($team_code)) {
             wp_send_json_error('Team code is required');
         }
-        
+
+        $key = TeamOversight_Database::season_team_key($team_code, $season);
         $teams = get_option('team_oversight_teams', array());
-        
-        // Check if team code exists
-        if (!isset($teams[$team_code])) {
-            wp_send_json_error('Team code not found');
+        if (!isset($teams[$key])) {
+            wp_send_json_error('Team code not found in the ' . $season . ' season');
         }
-        
-        // Check if team is currently being used in assignments
+
+        // Only THIS season's assignments block the delete — the same code
+        // in another season is a different team entry.
         global $wpdb;
         $usage_count = $wpdb->get_var($wpdb->prepare("
-            SELECT COUNT(*) FROM {$wpdb->prefix}team_assignments 
-            WHERE team = %s AND is_active = 1
-        ", $team_code));
-        
+            SELECT COUNT(*) FROM {$wpdb->prefix}team_assignments
+            WHERE team = %s AND season = %s AND is_active = 1
+        ", $team_code, $season));
+
         if ($usage_count > 0) {
-            wp_send_json_error('Cannot delete team: ' . $usage_count . ' active assignments exist for this team');
+            wp_send_json_error('Cannot delete team: ' . $usage_count . ' active ' . $season . ' assignment' . ($usage_count == 1 ? '' : 's') . ' exist for this team. Remove them in Team Assignments first.');
         }
-        
-        unset($teams[$team_code]);
+
+        unset($teams[$key]);
         update_option('team_oversight_teams', $teams);
 
         $meta = get_option('team_oversight_team_meta', array());
-        if (isset($meta[$team_code])) {
-            unset($meta[$team_code]);
+        if (isset($meta[$key])) {
+            unset($meta[$key]);
             update_option('team_oversight_team_meta', $meta);
         }
 
-        wp_send_json_success('Team deleted successfully');
+        wp_send_json_success('Team deleted from the ' . $season . ' season');
     }
 
     public function reset_default_teams() {
@@ -1589,12 +1616,21 @@ class TeamOversight_Fees {
             wp_die('Insufficient permissions');
         }
 
-        $defaults = TeamOversight_Database::get_default_teams();
-        $names = array();
-        $meta = array();
-        foreach ($defaults as $code => $team) {
-            $names[$code] = $team['name'];
-            $meta[$code] = array(
+        $season = $this->posted_team_season();
+        $names = get_option('team_oversight_teams', array());
+        $meta = get_option('team_oversight_team_meta', array());
+
+        // Drop only this season's entries, then lay the defaults in.
+        foreach (array_keys((array) $names) as $key) {
+            list(, $key_season) = TeamOversight_Database::split_team_key($key);
+            if ($key_season === $season) {
+                unset($names[$key], $meta[$key]);
+            }
+        }
+        foreach (TeamOversight_Database::get_default_teams() as $code => $team) {
+            $key = TeamOversight_Database::season_team_key($code, $season);
+            $names[$key] = $team['name'];
+            $meta[$key] = array(
                 'gender' => $team['gender'],
                 'age_rule' => $team['age_rule'],
                 'shirts' => isset($team['shirts']) ? $team['shirts'] : 1,
@@ -1603,6 +1639,6 @@ class TeamOversight_Fees {
         update_option('team_oversight_teams', $names);
         update_option('team_oversight_team_meta', $meta);
 
-        wp_send_json_success('Default team list loaded');
+        wp_send_json_success('Default team list loaded for the ' . $season . ' season');
     }
 }

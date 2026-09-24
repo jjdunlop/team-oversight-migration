@@ -985,7 +985,7 @@ class TeamOversight_Admin {
         global $wpdb;
         
         $database = new TeamOversight_Database();
-        $teams = $database->get_teams();
+        $teams = $database->get_teams($season);
         
         $team_stats = array();
         
@@ -1076,7 +1076,7 @@ class TeamOversight_Admin {
         global $wpdb;
         
         $database = new TeamOversight_Database();
-        $teams = $database->get_teams();
+        $teams = $database->get_teams($season);
         
         ?>
         <div>
@@ -1345,7 +1345,7 @@ class TeamOversight_Admin {
                                 <option value="">Select Team</option>
                                 <?php 
                                 $database = new TeamOversight_Database();
-                                $teams = $database->get_teams();
+                                $teams = $database->get_teams($season);
                                 foreach ($teams as $code => $name): 
                                 ?>
                                     <option value="<?php echo esc_attr($code); ?>"><?php echo esc_html($code); ?></option>
@@ -1446,7 +1446,7 @@ class TeamOversight_Admin {
                                                 <option value="">Select Team</option>
                                                 <?php 
                                                 $database = new TeamOversight_Database();
-                                                $teams = $database->get_teams();
+                                                $teams = $database->get_teams($season);
                                                 foreach ($teams as $code => $name): 
                                                 ?>
                                                     <option value="<?php echo esc_attr($code); ?>" title="<?php echo esc_attr($name); ?>"><?php echo esc_html($code); ?></option>
@@ -1814,7 +1814,7 @@ class TeamOversight_Admin {
         ", $season));
         
         $database = new TeamOversight_Database();
-        $teams = $database->get_teams();
+        $teams = $database->get_teams($season);
         
         // Payments ledger for this season's invoices, keyed by invoice.
         $payments_by_invoice = array();
@@ -2230,7 +2230,7 @@ class TeamOversight_Admin {
                                     <option value="">Select Team</option>
                                     <?php 
                                     $database = new TeamOversight_Database();
-                                    $teams = $database->get_teams();
+                                    $teams = $database->get_teams($season);
                                     foreach ($teams as $code => $name): 
                                     ?>
                                         <option value="<?php echo esc_attr($code); ?>"><?php echo esc_html($code); ?></option>
