@@ -718,7 +718,7 @@ class TeamOversight_Admin {
                                 <input type="email" name="email_replyto" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION)); ?>" placeholder="treasurer@renegades.com.au" style="width: 100%;">
                             </label>
                         </p>
-                        <p class="description">From must be an address this server may send as — the safest choice is the same address WooCommerce order emails use (<?php echo esc_html(get_option('woocommerce_email_from_address', get_option('admin_email'))); ?>). Reply-To can be any real mailbox (that's where member replies land). Leave From blank for the WordPress default.</p>
+                        <p class="description">From must be an address this server may send as — the safest choice is the same address WooCommerce order emails use (<?php echo esc_html(get_option('woocommerce_email_from_address', get_option('admin_email'))); ?>). Reply-To can be any real mailbox (that's where member replies land). Leave From blank for the WordPress default. The From name and address are shared with the trial application emails below; those have their own Reply-To.</p>
                         <p>
                             <label><strong>Subject</strong><br>
                                 <input type="text" name="email_subject" value="<?php echo esc_attr($subject); ?>" style="width: 100%;">

@@ -167,7 +167,7 @@ One append-only activity log, two windows onto it (filter by event type, search 
 
 ### Trial applicant emails
 
-VVL Oversight → Emails → *Trial application emails*: one card per email with an on/off switch, subject, body and live preview, sharing the page's From / Reply-To. All on by default — each is transactional (a response to something the applicant just did), never a broadcast:
+VVL Oversight → Emails → *Trial application emails*: one card per email with an on/off switch, subject, body and live preview. They share the page's **From** (it must be an address the server may send as), but have **their own Reply-To** — `vvldelegate@renegades.com.au` by default, editable — so applicants' questions reach whoever runs trials rather than the treasurer's inbox the fee reminders reply to. Blank means "use the reminders' Reply-To"; an invalid address is flagged on save and falls back the same way. All on by default — each is transactional (a response to something the applicant just did), never a broadcast:
 
 | Email | Sent when |
 |---|---|

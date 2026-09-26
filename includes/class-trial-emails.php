@@ -19,6 +19,47 @@ class TeamOversight_Trial_Emails {
     const OPTION = 'team_oversight_trial_emails';
 
     /**
+     * Trial emails have their own Reply-To, separate from the fee
+     * reminders': applicants' questions belong with whoever runs trials,
+     * not the treasurer. The From address stays shared (it must be one the
+     * server is allowed to send as).
+     */
+    const REPLYTO_OPTION = 'team_oversight_trial_email_replyto';
+    const DEFAULT_REPLYTO = 'vvldelegate@renegades.com.au';
+
+    /**
+     * Where applicant replies go. Never saved -> the VVL delegate. Saved
+     * blank -> '' , meaning "use the fee reminders' Reply-To" (see
+     * get_headers()), so the admin can opt back into one shared inbox.
+     */
+    public static function get_reply_to() {
+        $saved = get_option(self::REPLYTO_OPTION, null);
+        if ($saved === null) {
+            return self::DEFAULT_REPLYTO;
+        }
+        return sanitize_email((string) $saved);
+    }
+
+    /** The shared From, with the trial-specific Reply-To in place. */
+    public static function get_headers() {
+        $headers = array();
+        foreach (TeamOversight_Payments::get_email_headers() as $header) {
+            if (stripos($header, 'Reply-To:') !== 0) {
+                $headers[] = $header;
+            }
+        }
+
+        $reply_to = self::get_reply_to();
+        if ($reply_to === '') {
+            $reply_to = sanitize_email((string) get_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION));
+        }
+        if ($reply_to !== '') {
+            $headers[] = 'Reply-To: ' . $reply_to;
+        }
+        return $headers;
+    }
+
+    /**
      * The emails, with their default wording. Placeholders:
      * {first_name} {name} {season} {trial_number} {teams} {positions}
      * {fee} {link}.
@@ -188,7 +229,7 @@ class TeamOversight_Trial_Emails {
 
         $vars = self::get_vars($application);
         list($subject, $body) = self::render($event, $vars);
-        $sent = wp_mail($to, $subject, $body, TeamOversight_Payments::get_email_headers());
+        $sent = wp_mail($to, $subject, $body, self::get_headers());
 
         TeamOversight_Log::add(
             'email_trial',
@@ -248,7 +289,7 @@ class TeamOversight_Trial_Emails {
         <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; margin-top: 20px;">
             <h2 style="margin-top: 0;">Trial application emails</h2>
             <p class="description" style="max-width: 900px;">
-                One email per thing the applicant did — never more — sent from the From / Reply-To above.
+                One email per thing the applicant did — never more — sent from the From address above, with their own Reply-To below.
                 <strong>Selection outcomes (accepted, not selected, team offers) are never emailed from here</strong>; the club communicates those personally.
                 Placeholders: <code>{first_name}</code> <code>{name}</code> <code>{season}</code> <code>{trial_number}</code>
                 <code>{teams}</code> <code>{positions}</code> <code>{fee}</code> <code>{link}</code>
@@ -257,6 +298,12 @@ class TeamOversight_Trial_Emails {
             </p>
 
             <form method="post">
+                <p>
+                    <label><strong>Reply-To for trial emails</strong><br>
+                        <input type="email" name="trial_email_replyto" value="<?php echo esc_attr(get_option(self::REPLYTO_OPTION, self::DEFAULT_REPLYTO)); ?>" style="width: 320px;">
+                    </label>
+                    <span class="description" style="display: block; margin-top: 4px;">Where applicants' replies land — separate from the fee reminders' Reply-To, so trial questions reach whoever runs trials. Leave blank to use the reminders' Reply-To instead.</span>
+                </p>
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 15px;">
                     <?php foreach ($events as $key => $event): $s = $settings[$key]; list($p_subject, $p_body) = self::render($key, $sample); ?>
                         <div style="border: 1px solid #dcdcde; border-radius: 4px; padding: 12px 14px; <?php echo $s['enabled'] ? '' : 'background: #f6f7f7;'; ?>">
@@ -318,6 +365,14 @@ class TeamOversight_Trial_Emails {
             );
         }
         update_option(self::OPTION, $saved);
+
+        $reply_raw = isset($_POST['trial_email_replyto']) ? trim(wp_unslash($_POST['trial_email_replyto'])) : '';
+        $reply_to = sanitize_email($reply_raw);
+        update_option(self::REPLYTO_OPTION, $reply_to);
+        if ($reply_raw !== '' && $reply_to === '') {
+            echo '<div class="notice notice-warning"><p>"' . esc_html($reply_raw) . '" isn\'t a valid email address, so trial emails will use the fee reminders\' Reply-To until it\'s fixed.</p></div>';
+        }
+
         echo '<div class="notice notice-success"><p>Trial email settings saved.</p></div>';
     }
 
@@ -345,7 +400,7 @@ class TeamOversight_Trial_Emails {
                 continue;
             }
             list($subject, $body) = self::render($key, $sample);
-            if (wp_mail($admin->user_email, '[TEST] ' . $subject, $body, TeamOversight_Payments::get_email_headers())) {
+            if (wp_mail($admin->user_email, '[TEST] ' . $subject, $body, self::get_headers())) {
                 $sent++;
             } else {
                 $failed++;
