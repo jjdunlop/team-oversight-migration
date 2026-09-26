@@ -350,6 +350,16 @@ class TeamOversight_Database {
             }
             add_option('team_oversight_teams_seasoned', 1, '', 'no');
         }
+
+        // 1.54.0: applicants can edit their application after submitting.
+        // updated_date records the latest edit, so the 7-day unpaid expiry
+        // counts from when the fee became due rather than from first
+        // submission (otherwise an edit that makes the fee payable, or a
+        // resubmitted expired application, would re-expire at once).
+        $updated_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}trial_applications LIKE 'updated_date'");
+        if (empty($updated_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications ADD COLUMN updated_date datetime DEFAULT NULL");
+        }
     }
 
     public function create_tables() {

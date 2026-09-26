@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), and casual program attendance (Club Programs).
- * Version: 1.53.0
+ * Version: 1.54.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.53.0');
+define('TEAM_OVERSIGHT_VERSION', '1.54.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -213,6 +213,7 @@ function team_oversight_create_tables() {
                 assigned_team varchar(255) DEFAULT NULL,
                 order_id bigint(20) unsigned DEFAULT NULL,
                 created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                updated_date datetime DEFAULT NULL,
                 PRIMARY KEY (id),
                 KEY user_id (user_id),
                 KEY email (email),

@@ -111,6 +111,113 @@ class TeamOversight_Trials {
         );
     }
     
+    /**
+     * Rebuild the form's raw input values from a stored application, so
+     * revisiting the page opens the form pre-filled for editing.
+     *
+     * Applications store human-readable answers (the form_data snapshot)
+     * rather than raw inputs, so this maps labels back to their option
+     * keys. Working from the snapshot means every application ever
+     * submitted is editable with no data migration. If an option's label
+     * has since been renamed, that one field simply comes back unselected
+     * and the applicant re-picks it — nothing is lost from the stored copy.
+     */
+    public static function get_form_input($application) {
+        $data = $application->form_data ? json_decode($application->form_data, true) : array();
+        $data = is_array($data) ? $data : array();
+        $get = function ($key) use ($data) {
+            return isset($data[$key]) ? (string) $data[$key] : '';
+        };
+
+        // Stored label -> option key, with "Other: x" unpacked.
+        $level_key = function ($stored, &$other) {
+            $other = '';
+            if ($stored === '') {
+                return '';
+            }
+            if (strpos($stored, 'Other: ') === 0) {
+                $other = substr($stored, strlen('Other: '));
+                return 'other';
+            }
+            $key = array_search($stored, self::get_level_options(), true);
+            return $key === false ? '' : $key;
+        };
+
+        $history = array_search($get('VVL History'), self::get_history_options(), true);
+
+        $last_level_other = '';
+        $transfer_level_other = '';
+        $input = array(
+            'season' => (string) $application->season,
+            'vvl_history' => $history === false ? '' : $history,
+            'last_level' => $level_key($get('Last Level Played'), $last_level_other),
+            'last_level_other' => $last_level_other,
+            'transfer_season' => '',
+            'transfer_club' => '',
+            'transfer_club_other' => '',
+            'transfer_level' => $level_key($get('Transfer: Level Played'), $transfer_level_other),
+            'transfer_level_other' => $transfer_level_other,
+            'international' => $get('International Player') === 'Yes' ? 'yes' : 'no',
+            'country_origin' => $get('Country of Origin'),
+            'registered_abroad' => 'no',
+            'registered_country' => '',
+            'gender_trialling' => '',
+            'interested_teams' => json_decode($application->interested_teams, true) ?: array(),
+            'preferred_positions' => json_decode($application->preferred_positions, true) ?: array(),
+            'unavailable_dates' => $get('Unavailable Trial Dates'),
+            'venues' => array(),
+            'two_sessions' => strtolower($get('Can Attend 2 Sessions/Week')),
+            'absence_periods' => $get('Absence Periods (Apr-Sep)'),
+            'experience' => $get('Volleyball Experience'),
+        );
+
+        $season_key = array_search($get('Transfer: Last VVL Season'), self::get_transfer_season_options(), true);
+        $input['transfer_season'] = $season_key === false ? '' : (string) $season_key;
+
+        // Club: a listed club verbatim, or "Other/Interstate/International: name".
+        $club = $get('Transfer: Previous Club');
+        $specials = array('Other' => '__other', 'Interstate' => '__interstate', 'International' => '__international');
+        if ($club !== '') {
+            $matched = false;
+            foreach ($specials as $prefix => $value) {
+                if (strpos($club, $prefix . ': ') === 0) {
+                    $input['transfer_club'] = $value;
+                    $input['transfer_club_other'] = substr($club, strlen($prefix . ': '));
+                    $matched = true;
+                    break;
+                }
+            }
+            if (!$matched && in_array($club, self::get_transfer_clubs(), true)) {
+                $input['transfer_club'] = $club;
+            }
+        }
+
+        $registered = $get('Registered Player In Another Country');
+        if (strpos($registered, 'Yes') === 0) {
+            $input['registered_abroad'] = 'yes';
+            $dash = strpos($registered, ' — ');
+            $input['registered_country'] = $dash !== false ? substr($registered, $dash + strlen(' — ')) : '';
+        }
+
+        // Only meaningful when the form had to ask (profile gender unset).
+        $trialling = $get('Trialling For');
+        if (stripos($trialling, 'wom') === 0) {
+            $input['gender_trialling'] = 'womens';
+        } elseif (stripos($trialling, 'men') === 0) {
+            $input['gender_trialling'] = 'mens';
+        }
+
+        $venue_labels = array_filter(array_map('trim', explode(',', $get('Venues Unable To Attend'))));
+        foreach ($venue_labels as $label) {
+            $key = array_search($label, self::get_venue_options(), true);
+            if ($key !== false) {
+                $input['venues'][] = $key;
+            }
+        }
+
+        return $input;
+    }
+
     public function render_trial_form($atts = array()) {
         if (!is_user_logged_in()) {
             $login_url = function_exists('um_get_core_page')
@@ -155,10 +262,19 @@ class TeamOversight_Trials {
         $fee_rules = self::get_trial_fee_rules();
         $unpaid = ($my_application && $my_application->application_status === 'awaiting_payment');
 
+        // Coming back to the page reopens the application for editing, while
+        // its season is still taking applications and until a team has been
+        // assigned — after that, changes go through the club.
+        $editing = $my_application
+            && in_array($my_application->application_status, array('pending', 'awaiting_payment'), true)
+            && self::applications_open($my_application->season);
+        $locked = ($my_application && $my_application->application_status === 'accepted');
+        $form_input = $editing ? self::get_form_input($my_application) : null;
+
         ob_start();
         ?>
         <div id="trial-application-form">
-            <h3>Trial Application Form</h3>
+            <h3><?php echo $editing ? 'Edit your trial application' : 'Trial Application Form'; ?></h3>
 
             <?php if ($my_application): ?>
                 <div class="trial-status-panel<?php echo $unpaid ? ' trial-status-unpaid' : ''; ?>">
@@ -185,9 +301,20 @@ class TeamOversight_Trials {
                             <p><strong>Congratulations — you've been assigned to <?php echo esc_html($assigned_name); ?> for <?php echo esc_html($my_application->season); ?>.</strong></p>
                         <?php else: ?>
                             <p><strong>Your <?php echo esc_html($my_application->season); ?> trial application is confirmed.</strong> When trials are busy, a coach may ask you for your trial number to speed things up — many players write it on their hand or arm on the day.</p>
+                            <?php if ($editing): ?>
+                                <p class="trial-edit-note">Need to change something? Your answers are below — update them and save until applications close. Your trial number stays the same.</p>
+                            <?php endif; ?>
                         <?php endif; ?>
                     </div>
                 </div>
+            <?php endif; ?>
+
+            <?php if ($locked): ?>
+                <div class="trial-closed-notice" style="border: 2px solid #e0e0e0; background: #f9f9f9; border-radius: 8px; padding: 16px 20px;">
+                    <p style="margin: 0;">Your application can no longer be changed here now that you've been assigned to a team. If something needs updating, please contact the club.</p>
+                </div>
+        </div>
+                <?php return ob_get_clean(); ?>
             <?php endif; ?>
 
             <?php if (!self::applications_open()): ?>
@@ -279,9 +406,14 @@ class TeamOversight_Trials {
                         <th><label for="season">Season</label></th>
                         <td>
                             <select name="season" id="season" required>
-                                <?php foreach (self::get_open_seasons() as $i => $open_season): ?>
-                                    <option value="<?php echo esc_attr($open_season); ?>" <?php selected($i, 0); ?>><?php echo esc_html($open_season); ?></option>
-                                <?php endforeach; ?>
+                                <?php if ($editing): ?>
+                                    <?php // An application belongs to one season; editing never moves it. ?>
+                                    <option value="<?php echo esc_attr($my_application->season); ?>" selected><?php echo esc_html($my_application->season); ?></option>
+                                <?php else: ?>
+                                    <?php foreach (self::get_open_seasons() as $i => $open_season): ?>
+                                        <option value="<?php echo esc_attr($open_season); ?>" <?php selected($i, 0); ?>><?php echo esc_html($open_season); ?></option>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
                             </select>
                         </td>
                     </tr>
@@ -482,7 +614,7 @@ class TeamOversight_Trials {
                 </table>
 
                 <p>
-                    <input type="submit" id="submit-trial-btn" class="button button-primary" value="Submit Trial Application" <?php echo !$profile_validation['is_complete'] ? 'disabled' : ''; ?>>
+                    <input type="submit" id="submit-trial-btn" class="button button-primary" value="<?php echo $editing ? 'Save changes' : 'Submit Trial Application'; ?>" <?php echo !$profile_validation['is_complete'] ? 'disabled' : ''; ?>>
                     <input type="hidden" name="action" value="submit_trial_application">
                     <?php wp_nonce_field('trial_application', 'trial_nonce'); ?>
                 </p>
@@ -597,6 +729,52 @@ class TeamOversight_Trials {
                 var v = $(this).val();
                 $('input[name="transfer_club_other"]').toggle(v === '__other' || v === '__interstate' || v === '__international');
             });
+
+            // Editing: re-open the saved answers. Values go in first, then
+            // change events fire so conditional sections and team
+            // eligibility come up exactly as they were submitted.
+            var murvcSaved = <?php echo $form_input ? wp_json_encode($form_input, JSON_HEX_TAG | JSON_HEX_AMP) : 'null'; ?>;
+            if (murvcSaved) {
+                var $f = $('#trial-form');
+                var setRadio = function (name, value) {
+                    if (value) { $f.find('input[name="' + name + '"][value="' + value + '"]').prop('checked', true).trigger('change'); }
+                };
+                var setField = function (name, value) {
+                    if (value !== '' && value !== null && value !== undefined) { $f.find('[name="' + name + '"]').val(value).trigger('change'); }
+                };
+                var setChecks = function (name, values) {
+                    $.each(values || [], function (i, v) {
+                        $f.find('input[name="' + name + '[]"][value="' + v + '"]').prop('checked', true);
+                    });
+                };
+
+                setRadio('gender_trialling', murvcSaved.gender_trialling);
+                setRadio('vvl_history', murvcSaved.vvl_history);
+                setField('last_level', murvcSaved.last_level);
+                setField('last_level_other', murvcSaved.last_level_other);
+                setField('transfer_season', murvcSaved.transfer_season);
+                setField('transfer_club', murvcSaved.transfer_club);
+                setField('transfer_club_other', murvcSaved.transfer_club_other);
+                setField('transfer_level', murvcSaved.transfer_level);
+                setField('transfer_level_other', murvcSaved.transfer_level_other);
+                setRadio('international', murvcSaved.international);
+                setField('country_origin', murvcSaved.country_origin);
+                setRadio('registered_abroad', murvcSaved.registered_abroad);
+                setField('registered_country', murvcSaved.registered_country);
+                setRadio('two_sessions', murvcSaved.two_sessions);
+                setField('unavailable_dates', murvcSaved.unavailable_dates);
+                setField('absence_periods', murvcSaved.absence_periods);
+                setField('experience', murvcSaved.experience);
+                setChecks('preferred_positions', murvcSaved.preferred_positions);
+                setChecks('venues', murvcSaved.venues);
+
+                // Teams last: tick them inside their season's block, then let
+                // the eligibility pass re-order the list around the ticks.
+                $.each(murvcSaved.interested_teams || [], function (i, code) {
+                    $f.find('.teams-checkboxes[data-season="' + murvcSaved.season + '"] input[value="' + code + '"]').prop('checked', true);
+                });
+                updateTeamEligibility();
+            }
 
             // Handle form submission
             $('#trial-form').on('submit', function(e) {
@@ -1073,13 +1251,20 @@ class TeamOversight_Trials {
 
         global $wpdb;
 
-        $existing_application = $wpdb->get_var($wpdb->prepare("
-            SELECT id FROM {$wpdb->prefix}trial_applications
-            WHERE user_id = %d AND season = %s AND application_status = 'pending'
+        // One application per person per season: submitting again edits it.
+        // Once a team has been assigned (accepted) it's locked, which also
+        // stops a second submission minting a duplicate with a new trial
+        // number — the old guard only looked at pending applications.
+        $existing = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}trial_applications
+            WHERE user_id = %d AND season = %s
+                AND application_status IN ('accepted', 'pending', 'awaiting_payment', 'expired')
+            ORDER BY FIELD(application_status, 'accepted', 'pending', 'awaiting_payment', 'expired'), id DESC
+            LIMIT 1
         ", $user->ID, $season));
 
-        if ($existing_application) {
-            wp_send_json_error(array('message' => 'You already have a pending application for this season.'));
+        if ($existing && $existing->application_status === 'accepted') {
+            wp_send_json_error(array('message' => 'You have already been assigned to a team for ' . $season . ', so your application can no longer be changed here. Please contact the club if something needs updating.'));
         }
 
         // Fee rules: returning Renegades players and juniors trial free by
@@ -1087,7 +1272,32 @@ class TeamOversight_Trials {
         $fee_product = $this->get_trial_fee_product();
         $fee_decision = self::trial_fee_decision($history, $prefill['birth_date'], $interested_teams, $season);
         $charge_fee = $fee_product && $fee_decision['payable'];
-        $form_data['Trial Fee'] = $charge_fee ? 'Payable' : 'Waived — ' . ($fee_decision['reason'] ?: 'no fee product configured');
+
+        // Editing a live (pending) application: it was either paid for or
+        // waived. Paid stays paid — an edit never charges twice. Waived is
+        // re-assessed, so editing into a paying category (switching to a
+        // club transfer, a junior adding a senior team) makes the fee due,
+        // closing the "apply free, then edit" gap. A pending application
+        // marked Payable can only have got there by being paid (online or
+        // Mark as Paid), so that's the test.
+        $is_edit = ($existing && $existing->application_status === 'pending');
+        $already_paid = false;
+        if ($is_edit) {
+            $previous = json_decode((string) $existing->form_data, true);
+            $previous_fee = (is_array($previous) && isset($previous['Trial Fee'])) ? $previous['Trial Fee'] : '';
+            $already_paid = intval($existing->order_id) > 0 || $previous_fee === 'Payable';
+        }
+
+        if ($already_paid) {
+            $charge_fee = false;
+            $form_data['Trial Fee'] = 'Payable';
+        } else {
+            $form_data['Trial Fee'] = $charge_fee ? 'Payable' : 'Waived — ' . ($fee_decision['reason'] ?: 'no fee product configured');
+        }
+        if ($is_edit) {
+            // Coaches may already have looked, so say when it last changed.
+            $form_data['Last Edited'] = wp_date('j M Y, g:ia');
+        }
 
         $application_data = array(
             'user_id' => $user->ID,
@@ -1102,25 +1312,27 @@ class TeamOversight_Trials {
         );
         $application_formats = array('%d', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s');
 
-        // Reuse an abandoned unpaid application for this season instead of
-        // stacking duplicates when someone retries after leaving checkout.
-        $awaiting_id = $wpdb->get_var($wpdb->prepare("
-            SELECT id FROM {$wpdb->prefix}trial_applications
-            WHERE user_id = %d AND season = %s AND application_status IN ('awaiting_payment', 'expired')
-        ", $user->ID, $season));
-
-        if ($awaiting_id) {
+        if ($existing) {
+            // Edit (pending) or retry (unpaid / expired): the same row, so the
+            // trial number, coach verdicts and notes all carry over.
             $updated = $wpdb->update(
                 $wpdb->prefix . 'trial_applications',
                 $application_data,
-                array('id' => $awaiting_id),
+                array('id' => $existing->id),
                 $application_formats,
                 array('%d')
             );
-            $application_id = ($updated !== false) ? intval($awaiting_id) : 0;
-            $trial_number = intval($wpdb->get_var($wpdb->prepare("
-                SELECT trial_number FROM {$wpdb->prefix}trial_applications WHERE id = %d
-            ", $awaiting_id)));
+            $application_id = ($updated !== false) ? intval($existing->id) : 0;
+            $trial_number = intval($existing->trial_number);
+
+            // Restart the unpaid-expiry clock from this save. Stamped with
+            // the database's NOW() to match created_date's clock, which is
+            // what expire_stale_awaiting() compares against.
+            if ($application_id) {
+                $wpdb->query($wpdb->prepare("
+                    UPDATE {$wpdb->prefix}trial_applications SET updated_date = NOW() WHERE id = %d
+                ", $application_id));
+            }
         } else {
             // Assign the next per-season trial number at submission time.
             $trial_number = intval($wpdb->get_var($wpdb->prepare("
@@ -1138,6 +1350,9 @@ class TeamOversight_Trials {
         }
 
         if (!$charge_fee) {
+            if ($is_edit) {
+                wp_send_json_success(array('message' => 'Your changes have been saved. Your trial number is still <strong>#' . $trial_number . '</strong>, and you can come back to this page to make further changes until applications close.'));
+            }
             wp_send_json_success(array('message' => 'Your trial application has been submitted successfully! Your trial number is <strong>#' . $trial_number . '</strong> — a coach may ask you for it at trials, so make a note of it (it is also shown whenever you revisit this page). You will be contacted regarding team assignments.'));
         }
 
@@ -1148,7 +1363,9 @@ class TeamOversight_Trials {
         }
 
         wp_send_json_success(array(
-            'message' => 'Application saved — your trial number is <strong>#' . $trial_number . '</strong>. Taking you to the checkout to pay the trial fee&hellip;',
+            'message' => $is_edit
+                ? 'Your changes have been saved, but they mean the trial fee now applies. Your trial number is still <strong>#' . $trial_number . '</strong>. Taking you to the checkout&hellip;'
+                : 'Application saved — your trial number is <strong>#' . $trial_number . '</strong>. Taking you to the checkout to pay the trial fee&hellip;',
             'redirect' => $checkout_url
         ));
     }
@@ -1300,7 +1517,8 @@ class TeamOversight_Trials {
     /**
      * Applications left unpaid for 7+ days are marked expired so the review
      * list stays clean. Resubmitting the form (or a late payment coming
-     * through) revives them.
+     * through) revives them. The clock runs from the latest edit, since an
+     * edit is what (re)starts the payment being due.
      */
     public static function expire_stale_awaiting() {
         global $wpdb;
@@ -1309,7 +1527,7 @@ class TeamOversight_Trials {
             UPDATE {$wpdb->prefix}trial_applications
             SET application_status = 'expired'
             WHERE application_status = 'awaiting_payment'
-                AND created_date < DATE_SUB(NOW(), INTERVAL 7 DAY)
+                AND COALESCE(updated_date, created_date) < DATE_SUB(NOW(), INTERVAL 7 DAY)
         ");
     }
     
