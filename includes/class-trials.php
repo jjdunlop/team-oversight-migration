@@ -287,7 +287,15 @@ class TeamOversight_Trials {
 
             <?php if ($flash !== false): ?>
                 <div class="trial-flash" id="trial-flash"><p><strong><?php echo esc_html($flash); ?></strong></p></div>
-                <script>document.getElementById('trial-flash').scrollIntoView({block: 'center'});</script>
+                <script>
+                    // Arrived here from a save: start at the top of the page,
+                    // then hand scroll behaviour back to the browser.
+                    window.scrollTo(0, 0);
+                    window.addEventListener('load', function () {
+                        window.scrollTo(0, 0);
+                        if ('scrollRestoration' in history) { history.scrollRestoration = 'auto'; }
+                    });
+                </script>
             <?php endif; ?>
 
             <?php if ($my_application): ?>
@@ -816,6 +824,11 @@ class TeamOversight_Trials {
                                 // Reload the rego page: the green panel and the
                                 // saved-answers form, with a notice on top.
                                 $('#submit-trial-btn').prop('disabled', true).val('Saved — reloading…');
+                                // Land at the top of the page, not back down by
+                                // the Save button: a reload normally restores
+                                // the old scroll position.
+                                if ('scrollRestoration' in history) { history.scrollRestoration = 'manual'; }
+                                window.scrollTo(0, 0);
                                 window.location.reload();
                             } else {
                                 $('#trial-application-form').html('<div class="notice notice-success"><p>' + response.data.message + '</p></div>');
