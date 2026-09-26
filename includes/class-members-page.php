@@ -393,7 +393,7 @@ class TeamOversight_Members_Page {
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT m.user_id, u.display_name, u.user_email,
                 MAX(bd.meta_value) AS birth_date,
-                MAX(COALESCE(NULLIF(g.meta_value, ''), gd.meta_value)) AS gender,
+                MAX(COALESCE(NULLIF(gd.meta_value, ''), g.meta_value)) AS gender, -- current key (gender_dropdown) first
                 MAX(mus.meta_value) AS mus_category,
                 GROUP_CONCAT(CONCAT(m.tier, '|', m.start_date, '|', m.end_date, '|', m.source) ORDER BY m.start_date SEPARATOR ',') AS grants
             FROM {$wpdb->prefix}team_memberships m
@@ -1310,7 +1310,7 @@ class TeamOversight_Members_Page {
                 caps.meta_value AS caps,
                 bd.meta_value AS birth_date,
                 mob.meta_value AS mobile,
-                COALESCE(NULLIF(g.meta_value, ''), gd.meta_value) AS gender,
+                COALESCE(NULLIF(gd.meta_value, ''), g.meta_value) AS gender, -- current key (gender_dropdown) first
                 mus.meta_value AS mus_category,
                 pcy.meta_value AS confirmed_year,
                 mem.grants AS grants,

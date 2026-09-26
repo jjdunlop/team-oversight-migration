@@ -325,13 +325,7 @@ class TeamOversight_Member_Lookup {
             return isset($meta[$key][0]) ? $meta[$key][0] : '';
         };
 
-        $gender = maybe_unserialize($get('gender'));
-        if (is_array($gender)) {
-            $gender = reset($gender);
-        }
-        if (!$gender) {
-            $gender = $get('gender_dropdown');
-        }
+        $gender = TeamOversight_Database::get_member_gender($user->ID);
 
         $tier = $this->get_active_tiers(array($user->ID));
         $tier = isset($tier[$user->ID]) ? $tier[$user->ID] : '';

@@ -82,12 +82,8 @@ class TeamOversight_Trials {
      * competitions and the choice is then the player's to make.
      */
     public static function get_competition_from_profile($user_id) {
-        $gender = get_user_meta($user_id, 'gender', true);
-        $gender = maybe_unserialize($gender);
-        if (is_array($gender)) {
-            $gender = reset($gender);
-        }
-        $gender = is_string($gender) ? trim($gender) : '';
+        // Both UM gender keys, current one first (see get_member_gender).
+        $gender = TeamOversight_Database::get_member_gender($user_id);
 
         $map = array('male' => 'mens', 'female' => 'womens');
         $key = strtolower($gender);
@@ -1957,7 +1953,12 @@ class TeamOversight_Trials {
         $is_complete = true;
         
         foreach ($required_fields as $field => $label) {
-            $value = get_user_meta($user_id, $field, true);
+            // Gender lives under two UM keys; the profile form writes
+            // gender_dropdown, so checking only `gender` told members who
+            // had filled it in that it was missing.
+            $value = ($field === 'gender')
+                ? TeamOversight_Database::get_member_gender($user_id)
+                : get_user_meta($user_id, $field, true);
             if (empty($value)) {
                 $missing_fields[] = $label;
                 $is_complete = false;

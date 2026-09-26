@@ -614,6 +614,28 @@ class TeamOversight_Database {
     // the fallback for any season with no entries of its own.
     // ------------------------------------------------------------------
 
+    /**
+     * A member's gender, as a plain string ('' when unset).
+     *
+     * UM holds it under two keys. `gender_dropdown` is what the Member
+     * Profile and rego forms write today (plain string); `gender` is the
+     * older key (serialized array) left on earlier accounts. The current
+     * key wins, so a member who changes their gender on the profile form
+     * is never overridden by a stale older value; `gender` is only the
+     * fallback. Every gender read should come through here.
+     */
+    public static function get_member_gender($user_id) {
+        $current = trim((string) get_user_meta($user_id, 'gender_dropdown', true));
+        if ($current !== '') {
+            return $current;
+        }
+        $older = maybe_unserialize(get_user_meta($user_id, 'gender', true));
+        if (is_array($older)) {
+            $older = reset($older);
+        }
+        return is_string($older) ? trim($older) : '';
+    }
+
     /** "SL2M" + "2027" -> "SL2M-2027". */
     public static function season_team_key($code, $season) {
         return trim($code) . '-' . intval($season);
