@@ -315,6 +315,24 @@ class TeamOversight_Admin {
             ORDER BY s.application_id, s.team
         ", $season));
 
+        // Coaches can select applicants who haven't paid their trial fee yet
+        // (so late applicants can trial). Those stay out of finalisation
+        // until paid — but say so, rather than skipping them silently.
+        $unpaid_selected = $wpdb->get_col($wpdb->prepare("
+            SELECT DISTINCT CONCAT('#', a.trial_number, ' ', a.name)
+            FROM {$wpdb->prefix}team_trial_selections s
+            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+            WHERE s.status IN ('selected', 'training_only')
+                AND a.season = %s
+                AND a.application_status IN ('awaiting_payment', 'expired')
+            ORDER BY a.trial_number
+        ", $season));
+        if (!empty($unpaid_selected)) {
+            echo '<div class="notice notice-warning"><p><strong>' . count($unpaid_selected) . ' selected player' . (count($unpaid_selected) === 1 ? ' has' : 's have') . ' not paid the trial fee and ' . (count($unpaid_selected) === 1 ? 'was' : 'were') . ' not finalised:</strong> '
+                . esc_html(implode(', ', $unpaid_selected))
+                . '. They\'ll finalise on the next run once paid — or use <em>Mark as Paid</em> below if they paid another way.</p></div>';
+        }
+
         if (empty($selected)) {
             echo '<div class="notice notice-info"><p>No confirmed coach selections to finalise for ' . esc_html($season) . '.</p></div>';
             return;
@@ -612,6 +630,12 @@ class TeamOversight_Admin {
         if (isset($_POST['action']) && in_array($_POST['action'], array('preview_overdue_reminders', 'send_overdue_reminders'), true)) {
             $this->run_overdue_reminders($_POST['action'] === 'preview_overdue_reminders');
         }
+        if (isset($_POST['action']) && $_POST['action'] === 'save_trial_email_settings') {
+            TeamOversight_Trial_Emails::save_admin_settings();
+        }
+        if (isset($_POST['action']) && $_POST['action'] === 'send_test_trial_emails') {
+            TeamOversight_Trial_Emails::send_test_emails();
+        }
 
         $subject = get_option(TeamOversight_Payments::EMAIL_SUBJECT_OPTION);
         if (!is_string($subject) || trim($subject) === '') {
@@ -628,7 +652,7 @@ class TeamOversight_Admin {
         ?>
         <div class="wrap">
             <h1>Emails</h1>
-            <p class="description">Club emails sent by the plugin. Currently: the overdue-fees reminder. Placeholders available in the subject and body: <code>{first_name}</code>, <code>{name}</code>, <code>{overdue}</code>, <code>{outstanding}</code>, <code>{time_overdue}</code> ("a week", "3 weeks"), <code>{days_overdue}</code>, <code>{link}</code> (the fees/checklist page from Player Readiness settings).</p>
+            <p class="description">Club emails sent by the plugin: the overdue-fees reminder (below), and the trial application emails (further down). Reminder placeholders: <code>{first_name}</code>, <code>{name}</code>, <code>{overdue}</code>, <code>{outstanding}</code>, <code>{time_overdue}</code> ("a week", "3 weeks"), <code>{days_overdue}</code>, <code>{link}</code> (the fees/checklist page from Player Readiness settings).</p>
 
             <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start;">
                 <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; min-width: 420px; flex: 1; max-width: 620px;">
@@ -736,6 +760,8 @@ class TeamOversight_Admin {
                     <p class="description">Saved changes show here immediately. "Send test email to me" delivers this exact preview to your own address.</p>
                 </div>
             </div>
+
+            <?php TeamOversight_Trial_Emails::render_admin_section(); ?>
         </div>
         <?php
     }
@@ -2656,11 +2682,15 @@ class TeamOversight_Admin {
 
         } elseif ($action === 'mark_trial_paid') {
             // Manual override for payments made outside the site (cash, EFT).
-            $wpdb->query($wpdb->prepare("
+            $marked = $wpdb->query($wpdb->prepare("
                 UPDATE {$wpdb->prefix}trial_applications
                 SET application_status = 'pending'
                 WHERE id = %d AND application_status IN ('awaiting_payment', 'expired')
             ", $trial_id));
+            // Only when it actually changed, so a double-click can't email twice.
+            if ($marked) {
+                TeamOversight_Trial_Emails::send_for_id('paid', $trial_id);
+            }
 
             echo '<div class="notice notice-success"><p>Application marked as paid and moved to the review queue.</p></div>';
 

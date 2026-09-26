@@ -276,6 +276,9 @@ class TeamOversight_Coach_Portal {
                                 <span class="cac-name"><?php echo esc_html($member->name); ?></span>
                                 <span class="cac-chips">
                                     <?php echo $this->render_reg_chip($member->reg_type, $member->transfer_club); ?>
+                                    <?php if (isset($member->application_status) && $member->application_status === 'awaiting_payment'): ?>
+                                        <?php echo self::render_payment_pending_chip(); ?>
+                                    <?php endif; ?>
                                     <?php if ($this->was_on_team_last_season($last_season_members, $member->user_id, $member->email)): ?>
                                         <?php echo $this->render_same_team_chip($active_team, $season); ?>
                                     <?php endif; ?>
@@ -341,7 +344,7 @@ class TeamOversight_Coach_Portal {
 
             <div class="coach-team-section">
                 <h3>Trial Applicants — <?php echo $active_config['gender'] === 'womens' ? "Women's" : ($active_config['gender'] === 'mens' ? "Men's" : 'All'); ?> (<?php echo count($applicants); ?>)</h3>
-                <p class="coach-portal-hint">Every applicant in this competition is shown — including players outside your age group or who selected other teams, since players get redirected between trials and VV can grant age exemptions. Your verdicts apply to <strong><?php echo esc_html($active_config['name']); ?></strong> only; a player can be Selected by multiple teams (e.g. YSL and JPL) and every coach sees every team's verdicts. Selected players become official (team assignment + fees) when the club finalises selections.</p>
+                <p class="coach-portal-hint">Every applicant in this competition is shown — including players outside your age group or who selected other teams, since players get redirected between trials and VV can grant age exemptions. Your verdicts apply to <strong><?php echo esc_html($active_config['name']); ?></strong> only; a player can be Selected by multiple teams (e.g. YSL and JPL) and every coach sees every team's verdicts. Selected players become official (team assignment + fees) when the club finalises selections. Applicants marked <strong>Payment pending</strong> haven't paid their trial fee yet — trial and assess them as normal, but they won't be finalised onto a team until it's paid.</p>
 
                 <p>
                     <label for="coach-search">Search:</label>
@@ -394,6 +397,9 @@ class TeamOversight_Coach_Portal {
                                     <span class="cac-name"><?php echo esc_html($a['name']); ?></span>
                                     <span class="cac-chips">
                                         <?php echo $this->render_reg_chip($a['reg_type'], $a['transfer_club']); ?>
+                                        <?php if (!empty($a['payment_pending'])): ?>
+                                            <?php echo self::render_payment_pending_chip(); ?>
+                                        <?php endif; ?>
                                         <?php if ($this->was_on_team_last_season($last_season_members, $a['user_id'], $a['email'])): ?>
                                             <?php echo $this->render_same_team_chip($active_team, $season); ?>
                                         <?php endif; ?>
@@ -641,6 +647,13 @@ class TeamOversight_Coach_Portal {
             background: #e8f1fb;
             color: #1d4f8a;
             border: 1px solid #9ec1e6;
+        }
+
+        .chip-paypending {
+            background: #fdf0f0;
+            color: #a00;
+            border: 1px solid #e6a0a0;
+            font-weight: 600;
         }
 
         .coach-app-details summary {
@@ -901,9 +914,11 @@ class TeamOversight_Coach_Portal {
         $application_id = intval($_POST['application_id']);
 
         // The application must exist, be actionable, and match the season.
+        // Unpaid applicants are actionable too, so late applicants can be
+        // assessed at trials before their fee lands.
         $application = $wpdb->get_row($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}trial_applications
-            WHERE id = %d AND season = %s AND application_status IN ('pending', 'accepted')
+            WHERE id = %d AND season = %s AND application_status IN ('pending', 'accepted', 'awaiting_payment')
         ", $application_id, $season));
 
         if (!$application) {
@@ -1201,7 +1216,7 @@ class TeamOversight_Coach_Portal {
         <?php foreach ($applicants as $a): ?>
             <tr>
                 <td><?php echo intval($a['trial_number']); ?></td>
-                <td><?php echo esc_html($a['name']); ?></td>
+                <td><?php echo esc_html($a['name']); ?><?php if (!empty($a['payment_pending'])): ?> <strong style="color: #a00;">(unpaid)</strong><?php endif; ?></td>
                 <td><?php echo esc_html($a['age']); ?></td>
                 <td><?php echo esc_html($a['positions']); ?></td>
                 <td><?php echo esc_html($a['teams_selected']); ?></td>
@@ -1235,6 +1250,9 @@ class TeamOversight_Coach_Portal {
             <?php endif; ?>
             <?php if (!empty($a['age_flag'])): ?>
                 <span class="chip chip-flag">Over <?php echo esc_html($a['age_rule_label']); ?></span>
+            <?php endif; ?>
+            <?php if (!empty($a['payment_pending'])): ?>
+                <span class="chip chip-flag">Payment pending</span>
             <?php endif; ?>
         </div>
 
@@ -1481,6 +1499,15 @@ class TeamOversight_Coach_Portal {
         return $email !== '' && $email !== null && isset($members[strtolower($email)]);
     }
 
+    /**
+     * Applied but hasn't paid the trial fee. They can be trialled and
+     * given verdicts; the club's Finalise step holds them back until the
+     * fee is paid (or marked paid).
+     */
+    public static function render_payment_pending_chip() {
+        return '<span class="verdict-chip chip-paypending" title="Trial fee not paid yet. They can trial and receive verdicts, but won\'t be finalised onto a team until it\'s paid.">Payment pending</span>';
+    }
+
     private function render_same_team_chip($team_code, $season) {
         $last = intval($season) - 1;
         return '<span class="verdict-chip chip-sameteam" title="Played for ' . esc_attr($team_code) . ' in ' . $last . ' — back on the same team, not just returning to the club.">↩ Same team</span>';
@@ -1637,14 +1664,14 @@ class TeamOversight_Coach_Portal {
 
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT s.status, s.application_id, a.name, a.email, a.trial_number, a.user_id, a.preferred_positions,
-                a.is_transfer_player, a.form_data,
+                a.is_transfer_player, a.form_data, a.application_status,
                 um_mobile.meta_value AS mobile
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
             LEFT JOIN {$wpdb->usermeta} um_mobile ON a.user_id = um_mobile.user_id AND um_mobile.meta_key = 'mobile_number'
             WHERE s.team = %s AND s.season = %s
                 AND s.status IN ('selected', 'training_only', 'tentative')
-                AND a.application_status IN ('pending', 'accepted')
+                AND a.application_status IN ('pending', 'accepted', 'awaiting_payment')
             ORDER BY FIELD(s.status, 'selected', 'training_only', 'tentative'), a.trial_number
         ", $team_code, $season));
 
@@ -1699,10 +1726,12 @@ class TeamOversight_Coach_Portal {
     private function get_applicants_by_gender($gender, $season, $active_team, $my_team_codes) {
         global $wpdb;
 
+        // Unpaid applicants are included (flagged Payment pending) so late
+        // applicants can be trialled; expired ones (unpaid 7+ days) are not.
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}trial_applications
             WHERE season = %s
-                AND application_status IN ('pending', 'accepted')
+                AND application_status IN ('pending', 'accepted', 'awaiting_payment')
             ORDER BY trial_number
         ", $season));
 
@@ -1815,6 +1844,7 @@ class TeamOversight_Coach_Portal {
             $applicants[] = array(
                 'id' => intval($row->id),
                 'user_id' => intval($row->user_id),
+                'payment_pending' => $row->application_status === 'awaiting_payment',
                 'trial_number' => intval($row->trial_number),
                 'is_transfer' => intval($row->is_transfer_player) === 1,
                 'transfer_club' => isset($form_data['Transfer: Previous Club']) ? $form_data['Transfer: Previous Club'] : '',

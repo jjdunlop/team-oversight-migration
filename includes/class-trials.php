@@ -1349,6 +1349,18 @@ class TeamOversight_Trials {
             wp_send_json_error(array('message' => 'There was an error submitting your application. Please try again.'));
         }
 
+        // Exactly one email per save, describing where the application now
+        // stands: fee due, a confirmed application changed, or confirmed
+        // (a new application, or an unpaid one that no longer owes).
+        if ($charge_fee) {
+            $email_event = 'payment_needed';
+        } elseif ($is_edit) {
+            $email_event = 'edited';
+        } else {
+            $email_event = 'submitted';
+        }
+        TeamOversight_Trial_Emails::send_for_id($email_event, $application_id);
+
         if (!$charge_fee) {
             if ($is_edit) {
                 wp_send_json_success(array('message' => 'Your changes have been saved. Your trial number is still <strong>#' . $trial_number . '</strong>, and you can come back to this page to make further changes until applications close.'));
@@ -1506,11 +1518,16 @@ class TeamOversight_Trials {
                 continue;
             }
 
-            $wpdb->query($wpdb->prepare("
+            $paid = $wpdb->query($wpdb->prepare("
                 UPDATE {$wpdb->prefix}trial_applications
                 SET application_status = 'pending', order_id = %d
                 WHERE id = %d AND application_status IN ('awaiting_payment', 'expired')
             ", $order_id, $application_id));
+            // This runs for both processing and completed; only the first
+            // actually flips the row, so the receipt goes out once.
+            if ($paid) {
+                TeamOversight_Trial_Emails::send_for_id('paid', $application_id);
+            }
         }
     }
 

@@ -31,6 +31,7 @@ class TeamOversight_Log {
                 'payment_online' => 'Online payment',
                 'payment_manual' => 'Manual payment',
                 'email_reminder' => 'Reminder email',
+                'email_trial' => 'Trial email',
                 'fee_edit' => 'Fee edited',
             ),
             'membership' => array(

@@ -128,6 +128,7 @@ Front-end form via `[team_trial_form]` (login required; prompts to log in / crea
 - Applicant pools are **competition-wide** (all men's or women's applicants, not just those who picked the team — players get redirected between trials and VV grants age exemptions), sectioned: *awaiting your verdict* first, then *verdict recorded*, then *other applicants*. Search + only-my-verdicts filter.
 - **Shared notes** on applications (author + date, visible to all coaches and admins).
 - **Registration-status chip** on every applicant and selection-roster card, derived automatically at submission: **New** (first VVL season), **Returning** (Renegades history, no other club since), **FA: [club]** (free agent — skipped a season or more, no transfer needed), **⇄ [club]** (club transfer required — played elsewhere as recently as last season), **ITC** (registered with an overseas federation *and* trialling for a Premier League 1 team — ITC only applies at P1). Colour-coded, truncated for long club names, full explanation on hover. The "season last played" input is a structured dropdown so the Free Agent / Transfer split is computed reliably.
+- **Payment pending** — applicants who haven't paid their trial fee yet still appear (with a red chip on their card, on the selection board, and "(unpaid)" in the trial book), so last-minute applicants can be trialled and given verdicts and notes. Their trial number is reserved at submission regardless. Unpaid applications expire after 7 days and then drop out of the portal. **Finalise Coach Selections holds unpaid players back** — it finalises everyone else and names the unpaid ones in a warning, pointing at Mark as Paid for cash/EFT — so nobody reaches a team without the fee being settled.
 - **Same team chip** (`↩ Same team`) on any card — roster, selection board or applicant — for someone who played for *this* team last season. Deliberately separate from the VV **Returning** chip, which is about the club: a Renegades player moving from SL3M to SL2M is Returning but not Same team. One query per page, matched by account or email.
 - **Emergency contacts dropdown** on every player and applicant card — both profile contacts when recorded (primary + the second-contact fields), each with name, relationship and a tap-to-call number (AU numbers normalised, stripped leading zeros restored) — and a nudge when a member has none recorded.
 - **Roster CSV export** (with positions and selection status).
@@ -162,7 +163,20 @@ Admin: VVL Oversight → **Player Readiness** — every selected player's VV/shi
 
 One append-only activity log, two windows onto it (filter by event type, search by name/email/message; entries kept two years; each row stamped with when, who it was about, and which admin — or "System" for cron — did it):
 
-- **VVL Oversight → Logs**: online and manual payments (amounts, notes, order refs), reminder emails sent, fee edits (old → new amount). Bulk reconciliation backfills deliberately stay out.
+- **VVL Oversight → Logs**: online and manual payments (amounts, notes, order refs), reminder emails sent, trial applicant emails (including any that failed to deliver), fee edits (old → new amount). Bulk reconciliation backfills deliberately stay out.
+
+### Trial applicant emails
+
+VVL Oversight → Emails → *Trial application emails*: one card per email with an on/off switch, subject, body and live preview, sharing the page's From / Reply-To. All on by default — each is transactional (a response to something the applicant just did), never a broadcast:
+
+| Email | Sent when |
+|---|---|
+| Application received | submitted with no fee due, or an unpaid application becomes confirmed |
+| Payment needed | saved with the fee due — first submission, or an edit that makes it apply |
+| Payment received | paid online (sent once even though WooCommerce fires both *processing* and *completed*), or Mark as Paid |
+| Changes saved | a confirmed application is edited, with no new payment (includes "didn't make this change? reply") |
+
+Exactly **one email per action** — an edit that makes the fee due sends *Payment needed*, not both. **Selection outcomes are never emailed** — accepting, rejecting and Finalise send nothing; the club communicates those personally. Placeholders: `{first_name}` `{name}` `{season}` `{trial_number}` `{teams}` (team names) `{positions}` `{fee}` `{link}`. `{link}` is the page carrying `[team_trial_form]`, found automatically — deliberately the page rather than a one-click pay link, because a signed link would expire within a day while the page always shows the current status and, if unpaid, the Pay button. Wording left identical to the default is stored as "default", so later improvements to the built-in text still reach it; clearing a field restores the default. A mail failure never fails the submission or payment it describes — it's logged as "NOT delivered" instead. "Send test" delivers each switched-on email to you with sample data.
 - **Club Membership → Logs**: the membership lifecycle — **Granted** (first membership, or one that doesn't change current status), **Extended** (same tier, new end date), **Upgraded** (e.g. Associate → Full, message shows the transition), **Expired** (logged once by the daily role sync when the last grant lapses), **Revoked** (admin action, shows the tier held). Past-dated grants from seeding log as "recorded".
 
 ---
