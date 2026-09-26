@@ -5,7 +5,10 @@ if (!defined('ABSPATH')) {
 }
 
 class TeamOversight_Trials {
-    
+
+    /** One-off "saved" notice shown on the rego page after a save (per user). */
+    const FLASH_PREFIX = 'murvc_trial_flash_';
+
     public function __construct() {
         add_action('init', array($this, 'init'));
         add_shortcode('team_trial_form', array($this, 'render_trial_form'));
@@ -271,10 +274,21 @@ class TeamOversight_Trials {
         $locked = ($my_application && $my_application->application_status === 'accepted');
         $form_input = $editing ? self::get_form_input($my_application) : null;
 
+        // One-off notice from the save that brought them back here.
+        $flash = get_transient(self::FLASH_PREFIX . $user->ID);
+        if ($flash !== false) {
+            delete_transient(self::FLASH_PREFIX . $user->ID);
+        }
+
         ob_start();
         ?>
         <div id="trial-application-form">
             <h3><?php echo $editing ? 'Edit your trial application' : 'Trial Application Form'; ?></h3>
+
+            <?php if ($flash !== false): ?>
+                <div class="trial-flash" id="trial-flash"><p><strong><?php echo esc_html($flash); ?></strong></p></div>
+                <script>document.getElementById('trial-flash').scrollIntoView({block: 'center'});</script>
+            <?php endif; ?>
 
             <?php if ($my_application): ?>
                 <div class="trial-status-panel<?php echo $unpaid ? ' trial-status-unpaid' : ''; ?>">
@@ -794,9 +808,17 @@ class TeamOversight_Trials {
                     data: formData,
                     success: function(response) {
                         if (response.success) {
-                            $('#trial-application-form').html('<div class="notice notice-success"><p>' + response.data.message + '</p></div>');
                             if (response.data.redirect) {
+                                // Fee due: straight to checkout.
+                                $('#trial-application-form').html('<div class="notice notice-success"><p>' + response.data.message + '</p></div>');
                                 window.location.href = response.data.redirect;
+                            } else if (response.data.reload) {
+                                // Reload the rego page: the green panel and the
+                                // saved-answers form, with a notice on top.
+                                $('#submit-trial-btn').prop('disabled', true).val('Saved — reloading…');
+                                window.location.reload();
+                            } else {
+                                $('#trial-application-form').html('<div class="notice notice-success"><p>' + response.data.message + '</p></div>');
                             }
                         } else {
                             alert('Error: ' + response.data.message);
@@ -940,6 +962,18 @@ class TeamOversight_Trials {
         }
 
         .trial-training-notice p {
+            margin: 0;
+        }
+
+        .trial-flash {
+            background: #46b450;
+            color: #fff;
+            border-radius: 8px;
+            padding: 10px 16px;
+            margin-bottom: 12px;
+        }
+
+        .trial-flash p {
             margin: 0;
         }
 
@@ -1362,10 +1396,14 @@ class TeamOversight_Trials {
         TeamOversight_Trial_Emails::send_for_id($email_event, $application_id);
 
         if (!$charge_fee) {
-            if ($is_edit) {
-                wp_send_json_success(array('message' => 'Your changes have been saved. Your trial number is still <strong>#' . $trial_number . '</strong>, and you can come back to this page to make further changes until applications close.'));
-            }
-            wp_send_json_success(array('message' => 'Your trial application has been submitted successfully! Your trial number is <strong>#' . $trial_number . '</strong> — a coach may ask you for it at trials, so make a note of it (it is also shown whenever you revisit this page). You will be contacted regarding team assignments.'));
+            // Back to the rego page itself, where the green panel shows the
+            // trial number and status and the form is ready for more edits.
+            // A one-off notice above it confirms what just happened.
+            $flash = $is_edit
+                ? 'Your changes have been saved.'
+                : 'Thanks — your application has been submitted. Your trial number is below.';
+            set_transient(self::FLASH_PREFIX . $user->ID, $flash, 5 * MINUTE_IN_SECONDS);
+            wp_send_json_success(array('message' => $flash, 'reload' => true));
         }
 
         $checkout_url = $this->add_fee_to_cart($fee_product, $application_id);
