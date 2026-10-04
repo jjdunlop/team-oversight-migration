@@ -346,12 +346,7 @@ class TeamOversight_Coach_Portal {
                 <h3>Trial Applicants — <?php echo $active_config['gender'] === 'womens' ? "Women's" : ($active_config['gender'] === 'mens' ? "Men's" : 'All'); ?> (<?php echo count($applicants); ?>)</h3>
                 <p class="coach-portal-hint">Every applicant in this competition is shown — including players outside your age group or who selected other teams, since players get redirected between trials and VV can grant age exemptions. Your verdicts apply to <strong><?php echo esc_html($active_config['name']); ?></strong> only; a player can be Selected by multiple teams (e.g. YSL and JPL) and every coach sees every team's verdicts. Selected players become official (team assignment + fees) when the club finalises selections. Applicants marked <strong>Payment pending</strong> haven't paid their trial fee yet — trial and assess them as normal, but they won't be finalised onto a team until it's paid.</p>
 
-                <p>
-                    <label for="coach-search">Search:</label>
-                    <input type="text" id="coach-search" placeholder="Name, email, position, team..." style="width: 240px;">
-                    <label style="margin-left: 12px;"><input type="checkbox" id="coach-filter-mine"> Only my verdicts</label>
-                </p>
-
+                <?php // Trial book first, so the search sits directly above the list it filters (matters on a phone). ?>
                 <?php if (!empty($applicants)): ?>
                     <form method="post" target="_blank" class="coach-export-form">
                         <input type="hidden" name="coach_action" value="export_applicants">
@@ -362,6 +357,12 @@ class TeamOversight_Coach_Portal {
                         <span class="coach-portal-hint">Every applicant with their application, emergency contacts, notes and verdicts — opens ready to print. Save it as a PDF before trials so you have it when the gym has no reception.</span>
                     </form>
                 <?php endif; ?>
+
+                <p>
+                    <label for="coach-search">Search:</label>
+                    <input type="text" id="coach-search" placeholder="Name, email, position, team..." style="width: 240px;">
+                    <label style="margin-left: 12px;"><input type="checkbox" id="coach-filter-mine"> Only my verdicts</label>
+                </p>
 
                 <?php if (!empty($applicants)): ?>
                     <?php
