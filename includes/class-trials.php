@@ -9,6 +9,39 @@ class TeamOversight_Trials {
     /** One-off "saved" notice shown on the rego page after a save (per user). */
     const FLASH_PREFIX = 'murvc_trial_flash_';
 
+    /**
+     * Database-wide name for the per-season submission lock. Includes the
+     * table prefix so two sites sharing a database server never contend.
+     * MySQL caps lock names at 64 characters.
+     */
+    public static function submission_lock_name($season) {
+        global $wpdb;
+        return substr('murvc_trial_' . $wpdb->prefix . intval($season), 0, 64);
+    }
+
+    /**
+     * Take the lock, waiting up to 10 seconds (a save takes milliseconds,
+     * so a real wait is rare). Returns true when held, false on a genuine
+     * timeout, or null when the database doesn't support named locks — in
+     * which case the save goes ahead unlocked rather than failing every
+     * applicant (the form's own one-submission-at-a-time guard still helps).
+     */
+    private static function acquire_submission_lock($lock) {
+        global $wpdb;
+        $got = $wpdb->get_var($wpdb->prepare("SELECT GET_LOCK(%s, 10)", $lock));
+        if ($got === null) {
+            return null;
+        }
+        return intval($got) === 1;
+    }
+
+    private static function release_submission_lock($lock, $locked) {
+        global $wpdb;
+        if ($locked === true) {
+            $wpdb->query($wpdb->prepare("SELECT RELEASE_LOCK(%s)", $lock));
+        }
+    }
+
     public function __construct() {
         add_action('init', array($this, 'init'));
         add_shortcode('team_trial_form', array($this, 'render_trial_form'));
@@ -253,9 +286,11 @@ class TeamOversight_Trials {
             SELECT * FROM {$wpdb->prefix}trial_applications
             WHERE user_id = %d AND season = %s
                 AND application_status IN ('awaiting_payment', 'pending', 'accepted')
-            ORDER BY created_date DESC
+            ORDER BY FIELD(application_status, 'accepted', 'pending', 'awaiting_payment'), id DESC
             LIMIT 1
         ", $user->ID, $trial_season));
+        // ^ Same pick as the save handler, so the page always shows (and
+        // edits) the application a save would update.
 
         $fee_product = $this->get_trial_fee_product();
         $fee_rules = self::get_trial_fee_rules();
@@ -797,15 +832,33 @@ class TeamOversight_Trials {
             // Handle form submission
             $('#trial-form').on('submit', function(e) {
                 e.preventDefault();
-                
+
+                // One submission at a time: a second tap while the first is
+                // still sending (easy on a slow phone) is ignored. The flag
+                // lives on the form element, so it holds even if this handler
+                // were ever bound twice.
+                var $form = $(this);
+                if ($form.data('submitting')) {
+                    return;
+                }
+
                 // Check if submit button is disabled (profile incomplete)
                 if ($('#submit-trial-btn').prop('disabled')) {
                     alert('Please complete your profile information before submitting your trial application.');
                     return;
                 }
-                
-                var formData = $(this).serialize();
-                
+
+                var formData = $form.serialize();
+                var $btn = $('#submit-trial-btn');
+                var btnLabel = $btn.val();
+                $form.data('submitting', true);
+                $btn.prop('disabled', true).val('Sending…');
+                // Let the player try again after a failure.
+                var unlock = function () {
+                    $form.data('submitting', false);
+                    $btn.prop('disabled', false).val(btnLabel);
+                };
+
                 $.ajax({
                     url: '<?php echo admin_url('admin-ajax.php'); ?>',
                     type: 'POST',
@@ -830,10 +883,12 @@ class TeamOversight_Trials {
                                 $('#trial-application-form').html('<div class="notice notice-success"><p>' + response.data.message + '</p></div>');
                             }
                         } else {
+                            unlock();
                             alert('Error: ' + response.data.message);
                         }
                     },
                     error: function() {
+                        unlock();
                         alert('There was an error submitting your application. Please try again.');
                     }
                 });
@@ -1294,6 +1349,17 @@ class TeamOversight_Trials {
 
         global $wpdb;
 
+        // Serialise saves for this season. Without this, two requests landing
+        // together (a double-tap on a slow phone) both see "no application
+        // yet" and both insert — a duplicate with two trial numbers. The
+        // same lock covers the MAX(trial_number)+1 below, so two different
+        // players can't be handed the same number either.
+        $lock = self::submission_lock_name($season);
+        $locked = self::acquire_submission_lock($lock);
+        if ($locked === false) {
+            wp_send_json_error(array('message' => 'Lots of people are applying right now — please wait a moment and press the button again.'));
+        }
+
         // One application per person per season: submitting again edits it.
         // Once a team has been assigned (accepted) it's locked, which also
         // stops a second submission minting a duplicate with a new trial
@@ -1307,6 +1373,7 @@ class TeamOversight_Trials {
         ", $user->ID, $season));
 
         if ($existing && $existing->application_status === 'accepted') {
+            self::release_submission_lock($lock, $locked);
             wp_send_json_error(array('message' => 'You have already been assigned to a team for ' . $season . ', so your application can no longer be changed here. Please contact the club if something needs updating.'));
         }
 
@@ -1387,6 +1454,9 @@ class TeamOversight_Trials {
             $inserted = $wpdb->insert($wpdb->prefix . 'trial_applications', $application_data, $application_formats);
             $application_id = $inserted ? intval($wpdb->insert_id) : 0;
         }
+
+        // The row is written; the next request may now look.
+        self::release_submission_lock($lock, $locked);
 
         if (!$application_id) {
             wp_send_json_error(array('message' => 'There was an error submitting your application. Please try again.'));
