@@ -10,6 +10,14 @@ class TeamOversight_Trials {
     const FLASH_PREFIX = 'murvc_trial_flash_';
 
     /**
+     * Start of the Trial Fee record when an admin waives the fee (Trial
+     * Applications → Waive fee). Distinct from rule-based waivers so the
+     * submission handler can tell a club decision apart and never re-charge
+     * it when the player edits their application.
+     */
+    const CLUB_WAIVER_PREFIX = 'Waived by club — ';
+
+    /**
      * Database-wide name for the per-season submission lock. Includes the
      * table prefix so two sites sharing a database server never contend.
      * MySQL caps lock names at 64 characters.
@@ -68,7 +76,9 @@ class TeamOversight_Trials {
     public static function get_history_options() {
         return array(
             'renegades_last_season' => 'I played VVL for Renegades last season (no transfer needed)',
-            'renegades_previously' => 'I\'ve played VVL for Renegades before, and haven\'t played VVL for any other club since (no transfer needed)',
+            // "but not last season" keeps this from also describing last
+            // season's players, who then picked it and were charged.
+            'renegades_previously' => 'I\'ve played VVL for Renegades before, but not last season, and haven\'t played VVL for any other club since (no transfer needed)',
             'transfer' => 'The last club I played VVL for was a different club (club transfer required)',
             'never_played' => 'I\'ve never played VVL — this will be my first Volleyball Victoria League season',
         );
@@ -176,6 +186,13 @@ class TeamOversight_Trials {
         };
 
         $history = array_search($get('VVL History'), self::get_history_options(), true);
+        if ($history === false) {
+            // Applications saved under an earlier wording of an option.
+            $legacy = array(
+                'I\'ve played VVL for Renegades before, and haven\'t played VVL for any other club since (no transfer needed)' => 'renegades_previously',
+            );
+            $history = isset($legacy[$get('VVL History')]) ? $legacy[$get('VVL History')] : false;
+        }
 
         $last_level_other = '';
         $transfer_level_other = '';
@@ -1392,15 +1409,23 @@ class TeamOversight_Trials {
         // Mark as Paid), so that's the test.
         $is_edit = ($existing && $existing->application_status === 'pending');
         $already_paid = false;
+        $club_waived = false;
+        $previous_fee = '';
         if ($is_edit) {
             $previous = json_decode((string) $existing->form_data, true);
-            $previous_fee = (is_array($previous) && isset($previous['Trial Fee'])) ? $previous['Trial Fee'] : '';
+            $previous_fee = (is_array($previous) && isset($previous['Trial Fee'])) ? (string) $previous['Trial Fee'] : '';
             $already_paid = intval($existing->order_id) > 0 || $previous_fee === 'Payable';
+            // An admin's "Waive fee" is a club decision: it stands whatever
+            // the player changes afterwards.
+            $club_waived = strpos($previous_fee, self::CLUB_WAIVER_PREFIX) === 0;
         }
 
         if ($already_paid) {
             $charge_fee = false;
             $form_data['Trial Fee'] = 'Payable';
+        } elseif ($club_waived) {
+            $charge_fee = false;
+            $form_data['Trial Fee'] = $previous_fee;
         } else {
             $form_data['Trial Fee'] = $charge_fee ? 'Payable' : 'Waived — ' . ($fee_decision['reason'] ?: 'no fee product configured');
         }

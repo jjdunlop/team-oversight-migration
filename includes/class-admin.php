@@ -278,7 +278,7 @@ class TeamOversight_Admin {
             $this->finalise_selections();
         }
 
-        if (isset($_POST['action']) && in_array($_POST['action'], array('accept_trial', 'reject_trial', 'undo_trial', 'mark_trial_paid', 'delete_trial'), true)) {
+        if (isset($_POST['action']) && in_array($_POST['action'], array('accept_trial', 'reject_trial', 'undo_trial', 'mark_trial_paid', 'waive_trial_fee', 'delete_trial'), true)) {
             $this->process_trial_action();
         }
 
@@ -1458,6 +1458,13 @@ class TeamOversight_Admin {
                                             <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
                                             <input type="hidden" name="action" value="mark_trial_paid">
                                             <input type="submit" class="button" value="Mark as Paid" onclick="return confirm('Mark this application as paid (payment received outside the site)? It will move to the review queue.')">
+                                            <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
+                                        </form>
+                                        <form method="post" class="waive-fee-form" style="display: inline-block; margin: 4px 0;">
+                                            <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
+                                            <input type="hidden" name="action" value="waive_trial_fee">
+                                            <input type="text" name="waive_reason" placeholder="Reason, e.g. played last season" required maxlength="120" style="width: 190px; font-size: 12px;">
+                                            <input type="submit" class="button" value="Waive fee">
                                             <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
                                         </form>
                                         <form method="post" style="display: inline;">
@@ -2693,6 +2700,48 @@ class TeamOversight_Admin {
             }
 
             echo '<div class="notice notice-success"><p>Application marked as paid and moved to the review queue.</p></div>';
+
+        } elseif ($action === 'waive_trial_fee') {
+            // The club decides this applicant shouldn't pay (e.g. they played
+            // last season but ticked the wrong history option). Recorded with
+            // who, why and when; the "Waived by club" prefix makes it stick
+            // through any later edit by the player (see the submission
+            // handler), and it is never recorded as a payment.
+            $reason = isset($_POST['waive_reason']) ? sanitize_text_field(wp_unslash($_POST['waive_reason'])) : '';
+            if ($reason === '') {
+                echo '<div class="notice notice-error"><p>Please give a reason for waiving the fee.</p></div>';
+                return;
+            }
+
+            $trial = $wpdb->get_row($wpdb->prepare("
+                SELECT * FROM {$wpdb->prefix}trial_applications
+                WHERE id = %d AND application_status IN ('awaiting_payment', 'expired')
+            ", $trial_id));
+            if (!$trial) {
+                echo '<div class="notice notice-warning"><p>That application no longer owes a trial fee — nothing to waive.</p></div>';
+                return;
+            }
+
+            $form_data = $trial->form_data ? json_decode($trial->form_data, true) : array();
+            $form_data = is_array($form_data) ? $form_data : array();
+            $admin = wp_get_current_user();
+            $form_data['Trial Fee'] = TeamOversight_Trials::CLUB_WAIVER_PREFIX . $reason . ' (' . $admin->display_name . ', ' . wp_date('j M Y') . ')';
+
+            // Conditional on the status still being unpaid, so a payment
+            // landing at the same moment wins and a double-click is a no-op.
+            $waived = $wpdb->query($wpdb->prepare("
+                UPDATE {$wpdb->prefix}trial_applications
+                SET application_status = 'pending', form_data = %s, updated_date = NOW()
+                WHERE id = %d AND application_status IN ('awaiting_payment', 'expired')
+            ", wp_json_encode($form_data), $trial_id));
+
+            if ($waived) {
+                TeamOversight_Log::add('trial_fee_waived', 'Trial fee waived for ' . $trial->name . ' (trial #' . intval($trial->trial_number) . '): ' . $reason, array('user_id' => intval($trial->user_id)));
+                // Confirm the application to the player — they were last
+                // told it needed paying. (Not the "payment received" email.)
+                TeamOversight_Trial_Emails::send_for_id('submitted', $trial_id);
+                echo '<div class="notice notice-success"><p>Trial fee waived for ' . esc_html($trial->name) . ' (#' . intval($trial->trial_number) . ') — they\'re in the review queue and coaches no longer see Payment pending.</p></div>';
+            }
 
         } elseif ($action === 'undo_trial') {
             // Get trial info

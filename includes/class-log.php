@@ -32,6 +32,7 @@ class TeamOversight_Log {
                 'payment_manual' => 'Manual payment',
                 'email_reminder' => 'Reminder email',
                 'email_trial' => 'Trial email',
+                'trial_fee_waived' => 'Trial fee waived',
                 'fee_edit' => 'Fee edited',
             ),
             'membership' => array(
