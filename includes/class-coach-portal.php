@@ -233,8 +233,27 @@ class TeamOversight_Coach_Portal {
 
                 <h4>Players (<?php echo count($confirmed_players); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?>)</h4>
                 <?php if (!empty($confirmed_players) || !empty($selection_roster)): ?>
-                    <?php foreach ($confirmed_players as $member): ?>
-                        <?php $app_ctx = $this->get_application_context($member->user_id, $member->email, $season); ?>
+                    <?php
+                    // Other teams' verdicts and confirmed places for everyone
+                    // in this section, fetched once for all the cards.
+                    $confirmed_ctx = array();
+                    $claim_apps = array();
+                    $claim_people = array();
+                    foreach ($confirmed_players as $i => $member) {
+                        $confirmed_ctx[$i] = $this->get_application_context($member->user_id, $member->email, $season);
+                        if ($confirmed_ctx[$i]) {
+                            $claim_apps[] = $confirmed_ctx[$i]['id'];
+                        }
+                        $claim_people[] = array(isset($member->user_id) ? $member->user_id : 0, $member->email);
+                    }
+                    foreach ($selection_roster as $member) {
+                        $claim_apps[] = $member->application_id;
+                        $claim_people[] = array($member->user_id, $member->email);
+                    }
+                    $claims = $this->get_other_team_claims($claim_apps, $claim_people, $active_team, $season);
+                    ?>
+                    <?php foreach ($confirmed_players as $i => $member): ?>
+                        <?php $app_ctx = $confirmed_ctx[$i]; ?>
                         <div class="coach-applicant-card">
                             <div class="cac-header">
                                 <?php if ($app_ctx): ?>
@@ -249,6 +268,7 @@ class TeamOversight_Coach_Portal {
                                         <?php echo $this->render_same_team_chip($active_team, $season); ?>
                                     <?php endif; ?>
                                     <span class="verdict-chip verdict-chip-confirmed">Confirmed<?php echo $member->role === 'training_only' ? ' — Training Only' : ''; ?></span>
+                                    <?php echo $this->render_other_team_chips($claims, $app_ctx ? $app_ctx['id'] : 0, isset($member->user_id) ? $member->user_id : 0, $member->email, $teams_config); ?>
                                 </span>
                             </div>
                             <div class="cac-meta">
@@ -289,6 +309,7 @@ class TeamOversight_Coach_Portal {
                                     <?php else: ?>
                                         <span class="verdict-chip verdict-chip-tentative">Tentative</span>
                                     <?php endif; ?>
+                                    <?php echo $this->render_other_team_chips($claims, $member->application_id, $member->user_id, $member->email, $teams_config); ?>
                                 </span>
                             </div>
                             <div class="cac-meta">
@@ -1498,6 +1519,108 @@ class TeamOversight_Coach_Portal {
             return true;
         }
         return $email !== '' && $email !== null && isset($members[strtolower($email)]);
+    }
+
+    /**
+     * What OTHER teams have said about the players in this team's section:
+     * their verdicts, and — once finalised — confirmed places. The
+     * applicant cards already show every team's verdict; without this,
+     * moving a player up into your team hid the fact that, say, PL2M has
+     * selected them too. Two queries for the whole section.
+     * Returns array(verdicts by application id, placements by person key).
+     */
+    private function get_other_team_claims($application_ids, $people, $active_team, $season) {
+        global $wpdb;
+
+        $verdicts = array();
+        $application_ids = array_values(array_filter(array_map('intval', $application_ids)));
+        if ($application_ids) {
+            $ids = implode(',', $application_ids);
+            $rows = $wpdb->get_results($wpdb->prepare("
+                SELECT application_id, team, status FROM {$wpdb->prefix}team_trial_selections
+                WHERE application_id IN ({$ids}) AND team <> %s
+            ", $active_team));
+            foreach ($rows as $row) {
+                $verdicts[intval($row->application_id)][$row->team] = $row->status;
+            }
+        }
+
+        $placements = array();
+        $user_ids = array();
+        $emails = array();
+        foreach ($people as $person) {
+            if (intval($person[0])) {
+                $user_ids[] = intval($person[0]);
+            }
+            if ($person[1] !== '' && $person[1] !== null) {
+                $emails[] = strtolower($person[1]);
+            }
+        }
+        if ($user_ids || $emails) {
+            $where = array();
+            $params = array($season, $active_team);
+            if ($user_ids) {
+                $where[] = 'user_id IN (' . implode(',', array_fill(0, count($user_ids), '%d')) . ')';
+                $params = array_merge($params, $user_ids);
+            }
+            if ($emails) {
+                $where[] = 'LOWER(email) IN (' . implode(',', array_fill(0, count($emails), '%s')) . ')';
+                $params = array_merge($params, $emails);
+            }
+            $rows = $wpdb->get_results($wpdb->prepare("
+                SELECT user_id, email, team, role FROM {$wpdb->prefix}team_assignments
+                WHERE season = %s AND team <> %s AND is_active = 1
+                    AND role IN ('playing_member', 'training_only')
+                    AND (" . implode(' OR ', $where) . ")
+            ", $params));
+            foreach ($rows as $row) {
+                $status = $row->role === 'training_only' ? 'confirmed_training' : 'confirmed';
+                if (intval($row->user_id)) {
+                    $placements['u' . intval($row->user_id)][$row->team] = $status;
+                }
+                if ($row->email) {
+                    $placements[strtolower($row->email)][$row->team] = $status;
+                }
+            }
+        }
+
+        return array($verdicts, $placements);
+    }
+
+    /**
+     * Chips for one card: other teams' verdicts, with a confirmed place on
+     * a team replacing the verdict that led to it.
+     */
+    private function render_other_team_chips($claims, $application_id, $user_id, $email, $teams_config) {
+        list($verdicts, $placements) = $claims;
+        $teams = isset($verdicts[intval($application_id)]) ? $verdicts[intval($application_id)] : array();
+
+        $placed = array();
+        if (intval($user_id) && isset($placements['u' . intval($user_id)])) {
+            $placed = $placements['u' . intval($user_id)];
+        } elseif ($email && isset($placements[strtolower($email)])) {
+            $placed = $placements[strtolower($email)];
+        }
+        foreach ($placed as $team => $status) {
+            $teams[$team] = $status;
+        }
+        if (empty($teams)) {
+            return '';
+        }
+        uksort($teams, 'strnatcasecmp');
+
+        $labels = self::get_verdict_labels();
+        $labels['confirmed'] = 'Confirmed';
+        $labels['confirmed_training'] = 'Confirmed (Training Only)';
+        $html = '';
+        foreach ($teams as $team => $status) {
+            $label = isset($labels[$status]) ? $labels[$status] : ucfirst($status);
+            $class = strpos($status, 'confirmed') === 0 ? 'confirmed' : $status;
+            $name = isset($teams_config[$team]) ? $teams_config[$team]['name'] : $team;
+            $html .= '<span class="verdict-chip verdict-chip-' . esc_attr($class) . '" title="' . esc_attr($name . ' — ' . $label) . '">'
+                . esc_html($team) . ': ' . esc_html($label) . '</span> ';
+        }
+        return $html;
     }
 
     /**
