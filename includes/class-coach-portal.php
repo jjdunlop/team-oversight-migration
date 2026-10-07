@@ -48,6 +48,164 @@ class TeamOversight_Coach_Portal {
         // answered with a redirect, so refreshing never resubmits (which
         // would duplicate notes).
         add_action('template_redirect', array($this, 'maybe_handle_actions'));
+        // Attendance marks save instantly, so a coach can tap through a
+        // session without a page reload per player.
+        add_action('wp_ajax_coach_mark_attendance', array($this, 'ajax_mark_attendance'));
+    }
+
+    // ------------------------------------------------------------------
+    // Attendance
+    // ------------------------------------------------------------------
+
+    /** Season attendance, loaded once per request: person key => rows. */
+    private $attendance_cache = array();
+
+    /** One person across records: their account, else their email. */
+    public static function attendance_person_key($user_id, $email) {
+        return intval($user_id) ? 'u' . intval($user_id) : strtolower(trim((string) $email));
+    }
+
+    /**
+     * Every attendance mark for a season, newest first, grouped by person.
+     * One query per page however many cards ask, since every card shows
+     * its player's full history across all teams.
+     */
+    private function get_season_attendance($season) {
+        global $wpdb;
+        if (!isset($this->attendance_cache[$season])) {
+            $rows = $wpdb->get_results($wpdb->prepare("
+                SELECT a.person_key, a.team, a.session_date, u.display_name AS marked_by_name
+                FROM {$wpdb->prefix}team_attendance a
+                LEFT JOIN {$wpdb->users} u ON u.ID = a.marked_by
+                WHERE a.season = %s
+                ORDER BY a.session_date DESC, a.team
+            ", $season));
+            $by_person = array();
+            foreach ($rows as $row) {
+                $by_person[$row->person_key][] = $row;
+            }
+            $this->attendance_cache[$season] = $by_person;
+        }
+        return $this->attendance_cache[$season];
+    }
+
+    private function get_person_attendance($season, $user_id, $email) {
+        $all = $this->get_season_attendance($season);
+        $key = self::attendance_person_key($user_id, $email);
+        return isset($all[$key]) ? $all[$key] : array();
+    }
+
+    /** The history list shown in a card's Attendance dropdown. */
+    private function render_attendance_list($records) {
+        if (empty($records)) {
+            return '<p class="coach-attendance-empty">No attendance recorded yet.</p>';
+        }
+        $html = '<ul class="coach-attendance-list">';
+        foreach ($records as $record) {
+            $html .= '<li><strong>' . esc_html($record->team) . '</strong> &middot; '
+                . esc_html(date('D j M Y', strtotime($record->session_date)))
+                . ($record->marked_by_name ? ' <small>marked by ' . esc_html($record->marked_by_name) . '</small>' : '')
+                . '</li>';
+        }
+        return $html . '</ul>';
+    }
+
+    /**
+     * The date being marked: from the picker, else today. Never in the
+     * future — you can't have attended a session that hasn't happened.
+     */
+    private function get_attendance_date() {
+        $today = wp_date('Y-m-d');
+        $date = isset($_GET['attendance_date']) ? sanitize_text_field(wp_unslash($_GET['attendance_date'])) : '';
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || $date > $today) {
+            return $today;
+        }
+        return $date;
+    }
+
+    /** "Mark attended" button for one card, showing its state for the date. */
+    private function render_attendance_button($user_id, $email, $active_team, $date, $season) {
+        $marked = false;
+        foreach ($this->get_person_attendance($season, $user_id, $email) as $record) {
+            if ($record->team === $active_team && $record->session_date === $date) {
+                $marked = true;
+            }
+        }
+        return '<button type="button" class="button button-small coach-attend-btn' . ($marked ? ' is-marked' : '') . '"'
+            . ' data-user="' . intval($user_id) . '" data-email="' . esc_attr($email) . '"'
+            . ' data-marked="' . ($marked ? '1' : '0') . '"'
+            . ' title="' . esc_attr($marked ? 'Click to undo' : 'Mark as attended on the chosen date') . '">'
+            . ($marked ? '&#10003; Attended' : 'Mark attended') . '</button>';
+    }
+
+    /**
+     * Mark or unmark one player for one of the coach's own teams on a date.
+     * Coaches can only write to teams they coach; everyone's marks show to
+     * every coach in the history.
+     */
+    public function ajax_mark_attendance() {
+        if (!is_user_logged_in() || !isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'coach_attendance')) {
+            wp_send_json_error(array('message' => 'Your session has expired — please reload the page.'));
+        }
+
+        global $wpdb;
+        $season = isset($_POST['season']) ? sanitize_text_field(wp_unslash($_POST['season'])) : '';
+        $team = isset($_POST['team']) ? sanitize_text_field(wp_unslash($_POST['team'])) : '';
+        $date = isset($_POST['date']) ? sanitize_text_field(wp_unslash($_POST['date'])) : '';
+        $user_id = isset($_POST['user_id']) ? intval($_POST['user_id']) : 0;
+        $email = isset($_POST['email']) ? sanitize_email(wp_unslash($_POST['email'])) : '';
+        $mark = !empty($_POST['mark']);
+
+        $my_teams = $this->get_my_teams($season);
+        if (!isset($my_teams[$team])) {
+            wp_send_json_error(array('message' => 'You can only mark attendance for teams you coach.'));
+        }
+
+        // Sessions that have happened, in this season's trials or training
+        // (trials for a season run late the year before).
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || $date > wp_date('Y-m-d')
+            || intval(substr($date, 0, 4)) < intval($season) - 1 || intval(substr($date, 0, 4)) > intval($season)) {
+            wp_send_json_error(array('message' => 'Pick a date from this season that has already happened.'));
+        }
+
+        // Only people genuinely in this season: an applicant or a rostered player.
+        $in_season = $wpdb->get_var($wpdb->prepare("
+            SELECT 1 FROM {$wpdb->prefix}trial_applications
+            WHERE season = %s AND application_status IN ('pending', 'accepted', 'awaiting_payment')
+                AND ((user_id > 0 AND user_id = %d) OR (email <> '' AND email = %s))
+            UNION
+            SELECT 1 FROM {$wpdb->prefix}team_assignments
+            WHERE season = %s AND is_active = 1
+                AND ((user_id > 0 AND user_id = %d) OR (email <> '' AND email = %s))
+            LIMIT 1
+        ", $season, $user_id, $email, $season, $user_id, $email));
+        if (!$in_season || ($user_id === 0 && $email === '')) {
+            wp_send_json_error(array('message' => 'That player isn\'t part of this season.'));
+        }
+
+        $key = self::attendance_person_key($user_id, $email);
+        if ($mark) {
+            // Marking again is a no-op, and the first marker is kept.
+            $wpdb->query($wpdb->prepare("
+                INSERT INTO {$wpdb->prefix}team_attendance
+                    (person_key, user_id, email, season, team, session_date, marked_by)
+                VALUES (%s, %d, %s, %s, %s, %s, %d)
+                ON DUPLICATE KEY UPDATE id = id
+            ", $key, $user_id, $email, $season, $team, $date, get_current_user_id()));
+        } else {
+            $wpdb->query($wpdb->prepare("
+                DELETE FROM {$wpdb->prefix}team_attendance
+                WHERE person_key = %s AND team = %s AND session_date = %s
+            ", $key, $team, $date));
+        }
+
+        unset($this->attendance_cache[$season]);
+        $records = $this->get_person_attendance($season, $user_id, $email);
+        wp_send_json_success(array(
+            'marked' => $mark,
+            'count' => count($records),
+            'history' => $this->render_attendance_list($records),
+        ));
     }
 
     /**
@@ -197,6 +355,21 @@ class TeamOversight_Coach_Portal {
             <div class="coach-team-section">
                 <h3><?php echo esc_html($active_config['name']); ?> <small>(<?php echo esc_html($season); ?> — you are <?php echo esc_html(str_replace('_', ' ', $my_teams[$active_team])); ?>)</small></h3>
 
+                <?php $attendance_date = $this->get_attendance_date(); ?>
+                <form method="get" class="coach-attendance-bar" id="coach-attendance-bar"
+                      data-season="<?php echo esc_attr($season); ?>"
+                      data-team="<?php echo esc_attr($active_team); ?>"
+                      data-date="<?php echo esc_attr($attendance_date); ?>"
+                      data-nonce="<?php echo esc_attr(wp_create_nonce('coach_attendance')); ?>"
+                      data-ajax="<?php echo esc_url(admin_url('admin-ajax.php')); ?>">
+                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                    <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                    <label><strong>Attendance for</strong>
+                        <input type="date" name="attendance_date" value="<?php echo esc_attr($attendance_date); ?>" max="<?php echo esc_attr(wp_date('Y-m-d')); ?>" onchange="this.form.submit()">
+                    </label>
+                    <span class="coach-portal-hint">Choose the session date, then tap <em>Mark attended</em> on each player who was there.</span>
+                </form>
+
                 <?php
                 // Staff stay a compact table; players render as cards like
                 // the applicant list, so a selection visually "moves" the
@@ -283,8 +456,12 @@ class TeamOversight_Coach_Portal {
                                     $app_ctx ? $app_ctx['form_data'] : array(),
                                     $app_ctx ? $app_ctx['notes'] : array(),
                                     $active_team,
-                                    $season
+                                    $season,
+                                    isset($member->user_id) ? $member->user_id : 0
                                 ); ?></span>
+                                <span class="cac-actions">
+                                    <?php echo $this->render_attendance_button(isset($member->user_id) ? $member->user_id : 0, $member->email, $active_team, $attendance_date, $season); ?>
+                                </span>
                             </div>
                         </div>
                     <?php endforeach; ?>
@@ -327,9 +504,11 @@ class TeamOversight_Coach_Portal {
                                     (is_array($decoded_roster = ($member->form_data ? json_decode($member->form_data, true) : array())) ? $decoded_roster : array()),
                                     $this->get_notes_for_application(intval($member->application_id)),
                                     $active_team,
-                                    $season
+                                    $season,
+                                    $member->user_id
                                 ); ?></span>
                                 <span class="cac-actions">
+                                    <?php echo $this->render_attendance_button($member->user_id, $member->email, $active_team, $attendance_date, $season); ?>
                                     <form method="post">
                                         <input type="hidden" name="coach_action" value="set_selection">
                                         <input type="hidden" name="application_id" value="<?php echo intval($member->application_id); ?>">
@@ -445,9 +624,10 @@ class TeamOversight_Coach_Portal {
 
                                 <div class="cac-footer">
                                     <span class="cac-expanders">
-                                        <?php echo $this->render_card_expanders($a['email'], $a['id'], $a['form_data'], $a['notes'], $active_team, $season); ?>
+                                        <?php echo $this->render_card_expanders($a['email'], $a['id'], $a['form_data'], $a['notes'], $active_team, $season, $a['user_id']); ?>
                                     </span>
                                     <span class="cac-actions">
+                                        <?php echo $this->render_attendance_button($a['user_id'], $a['email'], $active_team, $attendance_date, $season); ?>
                                         <form method="post">
                                             <input type="hidden" name="coach_action" value="set_selection">
                                             <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
@@ -494,7 +674,89 @@ class TeamOversight_Coach_Portal {
             </div>
         </div>
 
+        <script>
+        // Attendance: tap to mark (or tap again to undo) the chosen date for
+        // this team. Saves in the background and refreshes the card's
+        // history without reloading the page.
+        (function () {
+            var bar = document.getElementById('coach-attendance-bar');
+            if (!bar) { return; }
+            document.addEventListener('click', function (event) {
+                var btn = event.target.closest('.coach-attend-btn');
+                if (!btn || btn.disabled) { return; }
+                var mark = btn.getAttribute('data-marked') !== '1';
+                var body = new FormData();
+                body.append('action', 'coach_mark_attendance');
+                body.append('nonce', bar.getAttribute('data-nonce'));
+                body.append('season', bar.getAttribute('data-season'));
+                body.append('team', bar.getAttribute('data-team'));
+                body.append('date', bar.getAttribute('data-date'));
+                body.append('user_id', btn.getAttribute('data-user'));
+                body.append('email', btn.getAttribute('data-email'));
+                body.append('mark', mark ? '1' : '');
+                btn.disabled = true;
+                fetch(bar.getAttribute('data-ajax'), { method: 'POST', credentials: 'same-origin', body: body })
+                    .then(function (r) { return r.json(); })
+                    .then(function (res) {
+                        btn.disabled = false;
+                        if (!res || !res.success) {
+                            alert(res && res.data && res.data.message ? res.data.message : 'Could not save attendance — please try again.');
+                            return;
+                        }
+                        btn.setAttribute('data-marked', res.data.marked ? '1' : '0');
+                        btn.classList.toggle('is-marked', !!res.data.marked);
+                        btn.innerHTML = res.data.marked ? '&#10003; Attended' : 'Mark attended';
+                        btn.title = res.data.marked ? 'Click to undo' : 'Mark as attended on the chosen date';
+                        var card = btn.closest('.coach-applicant-card');
+                        if (card) {
+                            var count = card.querySelector('.coach-attendance-count');
+                            var history = card.querySelector('.coach-attendance-history');
+                            if (count) { count.textContent = res.data.count; }
+                            if (history) { history.innerHTML = res.data.history; }
+                        }
+                    })
+                    .catch(function () {
+                        btn.disabled = false;
+                        alert('Could not save attendance — check your connection and try again.');
+                    });
+            });
+        })();
+        </script>
+
         <style>
+        .coach-attendance-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+            background: #f6f7f7;
+            border: 1px solid #dcdcde;
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin: 8px 0 14px;
+        }
+
+        .coach-attendance-bar input[type=date] {
+            margin-left: 6px;
+        }
+
+        .coach-attend-btn.is-marked {
+            background: #edf7ee;
+            border-color: #46b450;
+            color: #1e6b2a;
+            font-weight: 600;
+        }
+
+        .coach-attendance-list {
+            margin: 6px 0 0 18px;
+            padding: 0;
+        }
+
+        .coach-attendance-list small,
+        .coach-attendance-empty {
+            color: #777;
+        }
+
         .coach-portal-notice {
             border: 2px solid #e0e0e0;
             border-radius: 8px;
@@ -1440,7 +1702,7 @@ class TeamOversight_Coach_Portal {
      * application details, and coach notes with the add-note form.
      * Application/Notes only render when an application exists.
      */
-    private function render_card_expanders($email, $application_id, $form_data, $notes, $active_team, $season) {
+    private function render_card_expanders($email, $application_id, $form_data, $notes, $active_team, $season, $user_id = 0) {
         ob_start();
         echo $this->render_emergency_details($email);
 
@@ -1479,6 +1741,16 @@ class TeamOversight_Coach_Portal {
             </details>
             <?php
         }
+
+        // Attendance history across every team, visible to every coach.
+        // Shown for confirmed players too, who may have no application.
+        $attendance = $this->get_person_attendance($season, $user_id, $email);
+        ?>
+        <details class="coach-app-details coach-attendance">
+            <summary>Attendance (<span class="coach-attendance-count"><?php echo count($attendance); ?></span>)</summary>
+            <div class="coach-attendance-history"><?php echo $this->render_attendance_list($attendance); ?></div>
+        </details>
+        <?php
 
         return ob_get_clean();
     }

@@ -247,6 +247,31 @@ class TeamOversight_Database {
             ) $charset_collate;");
         }
 
+        // Coach-portal attendance (added in 1.59.0): one row per player, per
+        // team, per session date. person_key is 'u<user id>' (or the
+        // lowercased email for a legacy email-only roster row), so the
+        // unique key holds without NULLs and two coaches marking the same
+        // player at once can't create a duplicate.
+        $team_attendance_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_attendance'");
+        if (!$team_attendance_exists) {
+            $charset_collate = $wpdb->get_charset_collate();
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta("CREATE TABLE {$wpdb->prefix}team_attendance (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                person_key varchar(191) NOT NULL,
+                user_id bigint(20) unsigned NOT NULL DEFAULT 0,
+                email varchar(255) NOT NULL DEFAULT '',
+                season varchar(10) NOT NULL,
+                team varchar(50) NOT NULL,
+                session_date date NOT NULL,
+                marked_by bigint(20) unsigned DEFAULT NULL,
+                marked_at datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uniq_mark (person_key, team, session_date),
+                KEY season_person (season, person_key)
+            ) $charset_collate;");
+        }
+
         // Activity log table (added in 1.20.0).
         $log_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_activity_log'");
         if (!$log_exists) {
