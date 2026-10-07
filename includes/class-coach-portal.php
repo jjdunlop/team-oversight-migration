@@ -580,6 +580,14 @@ class TeamOversight_Coach_Portal {
                             $others[] = $a;
                         }
                     }
+                    // Verdict recorded: grouped by the verdict, strongest
+                    // first, then by trial number within each verdict.
+                    $verdict_rank = array('selected' => 0, 'tentative' => 1, 'training_only' => 2, 'rejected' => 3);
+                    usort($actioned, function ($x, $y) use ($verdict_rank) {
+                        $rx = isset($verdict_rank[$x['my_status']]) ? $verdict_rank[$x['my_status']] : 9;
+                        $ry = isset($verdict_rank[$y['my_status']]) ? $verdict_rank[$y['my_status']] : 9;
+                        return $rx !== $ry ? $rx - $ry : $x['trial_number'] - $y['trial_number'];
+                    });
                     $sections = array(
                         array('Applied to your team — awaiting your verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and you haven\'t recorded a verdict yet.'),
                         array('Applied to your team — verdict recorded', $actioned, ''),
