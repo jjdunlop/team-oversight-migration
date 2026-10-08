@@ -1990,10 +1990,19 @@ class TeamOversight_Coach_Portal {
         echo $this->render_emergency_details($email);
 
         if (!empty($form_data)) {
+            if (!$user_id && $email) {
+                $by_email = get_user_by('email', $email);
+                $user_id = $by_email ? $by_email->ID : 0;
+            }
+            $lowest_comp = $user_id
+                ? TeamOversight_Database::get_lowest_eligible_competition(get_user_meta($user_id, 'birth_date', true), $season)
+                : '';
             ?>
             <details class="coach-app-details">
                 <summary>Application</summary>
                 <dl class="coach-application-details">
+                    <dt>Lowest eligible competition (<?php echo esc_html($season); ?>)</dt>
+                    <dd><?php echo $lowest_comp !== '' ? esc_html($lowest_comp) : '<em>Unknown — no date of birth on their profile</em>'; ?></dd>
                     <?php foreach ($form_data as $question => $answer): ?>
                         <?php if ($answer !== '' && $answer !== null): ?>
                             <dt><?php echo esc_html($question); ?></dt>

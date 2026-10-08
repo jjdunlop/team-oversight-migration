@@ -634,6 +634,27 @@ class TeamOversight_Database {
         return null;
     }
 
+    /**
+     * The youngest VVL competition a player is still young enough for in a
+     * season, from their date of birth (UM `YYYY/MM/DD` or `YYYY-MM-DD`):
+     * 'U15', 'U17', 'JPL' or 'Senior comps only'. Uses the same cutoffs as
+     * the team age rules, so it rolls over with the season. '' when the
+     * date of birth is missing or unreadable.
+     */
+    public static function get_lowest_eligible_competition($birth_date, $season) {
+        $birth_date = str_replace('/', '-', trim((string) $birth_date));
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $birth_date)) {
+            return '';
+        }
+        $ladder = array('u15' => 'U15', 'u17' => 'U17', 'u19' => 'JPL');
+        foreach ($ladder as $rule => $label) {
+            if ($birth_date >= self::get_dob_cutoff($rule, $season)) {
+                return $label;
+            }
+        }
+        return 'Senior comps only';
+    }
+
     // ------------------------------------------------------------------
     // Teams are configured PER SEASON (1.48.0+). The registry options
     // (team_oversight_teams / team_oversight_team_meta) are keyed by
