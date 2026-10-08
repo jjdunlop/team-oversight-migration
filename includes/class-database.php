@@ -247,6 +247,13 @@ class TeamOversight_Database {
             ) $charset_collate;");
         }
 
+        // 1.60.0: coaches can edit their own notes; updated_date marks a
+        // note as edited so other coaches know it changed after they read it.
+        $note_updated_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_trial_notes LIKE 'updated_date'");
+        if (empty($note_updated_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}team_trial_notes ADD COLUMN updated_date datetime DEFAULT NULL");
+        }
+
         // Coach-portal attendance (added in 1.59.0): one row per player, per
         // team, per session date. person_key is 'u<user id>' (or the
         // lowercased email for a legacy email-only roster row), so the

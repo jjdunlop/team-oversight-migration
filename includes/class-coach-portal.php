@@ -51,6 +51,7 @@ class TeamOversight_Coach_Portal {
         // Attendance marks save instantly, so a coach can tap through a
         // session without a page reload per player.
         add_action('wp_ajax_coach_mark_attendance', array($this, 'ajax_mark_attendance'));
+        add_action('wp_ajax_coach_set_verdict', array($this, 'ajax_set_verdict'));
     }
 
     // ------------------------------------------------------------------
@@ -209,11 +210,76 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
+     * Save a verdict in the background so the coach keeps their place.
+     * Runs the same handle_actions() as the form post (nonce, "coaches this
+     * team", actionable application), then returns the refreshed chips for
+     * the card. The form post stays as the no-JavaScript fallback.
+     */
+    public function ajax_set_verdict() {
+        if (!is_user_logged_in() || !isset($_POST['coach_action']) || $_POST['coach_action'] !== 'set_selection') {
+            wp_send_json_error(array('notice' => '<div class="coach-portal-notice"><p>Your session has expired — please reload the page.</p></div>'));
+        }
+
+        $season = isset($_POST['coach_season']) ? sanitize_text_field(wp_unslash($_POST['coach_season'])) : '';
+        $notice = $this->handle_actions(array_keys($this->get_my_teams($season)), $season);
+        if (strpos($notice, 'coach-portal-success') === false) {
+            wp_send_json_error(array('notice' => $notice !== '' ? $notice : '<div class="coach-portal-notice"><p>That verdict could not be saved.</p></div>'));
+        }
+
+        $status = sanitize_text_field(wp_unslash($_POST['selection_status']));
+        $status = $status === 'clear' ? '' : $status;
+        $board = isset($_POST['card_context']) && $_POST['card_context'] === 'board';
+        $chips = $board
+            ? self::render_board_verdict_chip($status)
+            : $this->render_verdict_chips($this->get_selections_for_application(intval($_POST['application_id']), $season));
+
+        wp_send_json_success(array('notice' => $notice, 'status' => $status, 'chips' => $chips));
+    }
+
+    /** Every team's verdict on one application, shaped for render_verdict_chips(). */
+    private function get_selections_for_application($application_id, $season) {
+        global $wpdb;
+        $database = new TeamOversight_Database();
+        $teams_config = $database->get_teams_config($season);
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT team, status FROM {$wpdb->prefix}team_trial_selections
+            WHERE application_id = %d
+            ORDER BY team
+        ", $application_id));
+        $selections = array();
+        foreach ($rows as $sel) {
+            $selections[] = array(
+                'team' => $sel->team,
+                'team_name' => isset($teams_config[$sel->team]) ? $teams_config[$sel->team]['name'] : $sel->team,
+                'status' => $sel->status,
+            );
+        }
+        return $selections;
+    }
+
+    /** The selection board's own-verdict chip (players awaiting finalisation). */
+    private static function render_board_verdict_chip($status) {
+        if ($status === 'selected') {
+            return '<span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>';
+        }
+        if ($status === 'training_only') {
+            return '<span class="verdict-chip verdict-chip-training_only">Training Only — awaiting finalisation</span>';
+        }
+        if ($status === 'tentative') {
+            return '<span class="verdict-chip verdict-chip-tentative">Tentative</span>';
+        }
+        if ($status === 'rejected') {
+            return '<span class="verdict-chip verdict-chip-rejected">Rejected — leaves the board on reload</span>';
+        }
+        return '<span class="cac-unclaimed">No verdict — leaves the board on reload</span>';
+    }
+
+    /**
      * Process verdict/note submissions before output, stash the result
      * notice for the next render, and redirect back to the page.
      */
     public function maybe_handle_actions() {
-        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'add_note'), true)) {
+        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'add_note', 'edit_note', 'delete_note'), true)) {
             return;
         }
         if (!is_user_logged_in()) {
@@ -324,7 +390,7 @@ class TeamOversight_Coach_Portal {
         ?>
         <div class="coach-portal">
             <h2>Coach Portal</h2>
-            <?php echo $action_notice; ?>
+            <div id="coach-flash"><?php echo $action_notice; ?></div>
 
             <?php if (count($seasons) > 1): ?>
                 <p>
@@ -467,7 +533,7 @@ class TeamOversight_Coach_Portal {
                     <?php endforeach; ?>
 
                     <?php foreach ($selection_roster as $member): ?>
-                        <div class="coach-applicant-card verdict-<?php echo esc_attr($member->status); ?>">
+                        <div class="coach-applicant-card verdict-<?php echo esc_attr($member->status); ?>" data-card-context="board">
                             <div class="cac-header">
                                 <span class="cac-number">#<?php echo intval($member->trial_number); ?></span>
                                 <span class="cac-name"><?php echo esc_html($member->name); ?></span>
@@ -479,13 +545,7 @@ class TeamOversight_Coach_Portal {
                                     <?php if ($this->was_on_team_last_season($last_season_members, $member->user_id, $member->email)): ?>
                                         <?php echo $this->render_same_team_chip($active_team, $season); ?>
                                     <?php endif; ?>
-                                    <?php if ($member->status === 'selected'): ?>
-                                        <span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>
-                                    <?php elseif ($member->status === 'training_only'): ?>
-                                        <span class="verdict-chip verdict-chip-training_only">Training Only — awaiting finalisation</span>
-                                    <?php else: ?>
-                                        <span class="verdict-chip verdict-chip-tentative">Tentative</span>
-                                    <?php endif; ?>
+                                    <span class="cac-verdicts"><?php echo self::render_board_verdict_chip(in_array($member->status, array('selected', 'training_only'), true) ? $member->status : 'tentative'); ?></span>
                                     <?php echo $this->render_other_team_chips($claims, $member->application_id, $member->user_id, $member->email, $teams_config); ?>
                                 </span>
                             </div>
@@ -516,7 +576,7 @@ class TeamOversight_Coach_Portal {
                                         <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
                                         <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
                                         <label class="cac-verdict-label">My verdict:
-                                            <select name="selection_status" onchange="this.form.submit()">
+                                            <select name="selection_status" onchange="if (window.murvcCoachVerdict) { window.murvcCoachVerdict(this); } else { this.form.submit(); }">
                                                 <option value="clear">&mdash; None &mdash;</option>
                                                 <?php foreach (self::get_verdict_labels() as $status_key => $status_label): ?>
                                                     <option value="<?php echo esc_attr($status_key); ?>" <?php selected($member->status, $status_key); ?>><?php echo esc_html($status_label); ?></option>
@@ -612,7 +672,7 @@ class TeamOversight_Coach_Portal {
                                         <?php if ($this->was_on_team_last_season($last_season_members, $a['user_id'], $a['email'])): ?>
                                             <?php echo $this->render_same_team_chip($active_team, $season); ?>
                                         <?php endif; ?>
-                                        <?php echo $this->render_verdict_chips($a['selections']); ?>
+                                        <span class="cac-verdicts"><?php echo $this->render_verdict_chips($a['selections']); ?></span>
                                     </span>
                                 </div>
 
@@ -643,7 +703,7 @@ class TeamOversight_Coach_Portal {
                                             <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
                                             <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
                                             <label class="cac-verdict-label">My verdict:
-                                                <select name="selection_status" onchange="this.form.submit()">
+                                                <select name="selection_status" onchange="if (window.murvcCoachVerdict) { window.murvcCoachVerdict(this); } else { this.form.submit(); }">
                                                     <option value="clear" <?php selected($a['my_status'], ''); ?>>&mdash; None &mdash;</option>
                                                     <?php foreach (self::get_verdict_labels() as $status_key => $status_label): ?>
                                                         <option value="<?php echo esc_attr($status_key); ?>" <?php selected($a['my_status'], $status_key); ?>><?php echo esc_html($status_label); ?></option>
@@ -681,6 +741,119 @@ class TeamOversight_Coach_Portal {
                 <?php endif; ?>
             </div>
         </div>
+
+        <script>
+        // Verdicts save in the background (no reload). Notes save with a
+        // normal form post + reload, so keep the coach's place: remember
+        // scroll position, search and filter (and which Notes panel was in
+        // use) on submit and put them back after the reload. Results show
+        // as a pop-up rather than at the top of the page.
+        (function () {
+            var KEY = 'murvcCoachPlace:' + location.pathname + location.search;
+            var portal = document.querySelector('.coach-portal');
+            if (!portal) { return; }
+
+            var flash = document.getElementById('coach-flash');
+            var flashTimer = null;
+            var showFlash = function (html) {
+                if (!flash) { return; }
+                if (html !== undefined) { flash.innerHTML = html; }
+                if (flash.textContent.trim() === '') { return; }
+                clearTimeout(flashTimer);
+                flash.classList.remove('is-fading');
+                flash.classList.add('coach-flash-toast');
+                flashTimer = setTimeout(function () {
+                    flash.classList.add('is-fading');
+                    flashTimer = setTimeout(function () {
+                        flash.classList.remove('coach-flash-toast', 'is-fading');
+                        flash.innerHTML = '';
+                    }, 600);
+                }, 4000);
+            };
+
+            window.murvcCoachVerdict = function (select) {
+                var form = select.form;
+                var card = select.closest('.coach-applicant-card');
+                var previous = '';
+                Array.prototype.forEach.call(select.options, function (o) { if (o.defaultSelected) { previous = o.value; } });
+                var body = new FormData(form);
+                body.append('action', 'coach_set_verdict');
+                if (card && card.getAttribute('data-card-context') === 'board') { body.append('card_context', 'board'); }
+                select.disabled = true;
+                fetch(<?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>, { method: 'POST', credentials: 'same-origin', body: body })
+                    .then(function (r) { return r.json(); })
+                    .then(function (res) {
+                        select.disabled = false;
+                        if (!res || !res.success) {
+                            select.value = previous;
+                            showFlash(res && res.data && res.data.notice ? res.data.notice : '<div class="coach-portal-notice"><p>That verdict could not be saved — please try again.</p></div>');
+                            return;
+                        }
+                        Array.prototype.forEach.call(select.options, function (o) { o.defaultSelected = (o.value === select.value); });
+                        if (card) {
+                            card.className = card.className.replace(/\bverdict-\S+/g, '').trim();
+                            if (res.data.status) { card.classList.add('verdict-' + res.data.status); }
+                            if (card.hasAttribute('data-has-verdict')) { card.setAttribute('data-has-verdict', res.data.status ? '1' : '0'); }
+                            var chips = card.querySelector('.cac-verdicts');
+                            if (chips) { chips.innerHTML = res.data.chips; }
+                        }
+                        showFlash(res.data.notice);
+                    })
+                    .catch(function () {
+                        // Couldn't reach the server this way — fall back to a
+                        // normal save (keeping the coach's place).
+                        select.disabled = false;
+                        savePlace(form);
+                        form.submit();
+                    });
+            };
+
+            var savePlace = function (form) {
+                if (!form || !form.querySelector('input[name="coach_action"]')) { return; }
+                var search = document.getElementById('coach-search');
+                var mine = document.getElementById('coach-filter-mine');
+                var notesFor = '';
+                if (form.closest('.coach-note-form, .coach-note-delete')) {
+                    var app = form.querySelector('input[name="application_id"]');
+                    notesFor = app ? app.value : '';
+                }
+                try {
+                    sessionStorage.setItem(KEY, JSON.stringify({
+                        y: window.scrollY,
+                        q: search ? search.value : '',
+                        mine: mine ? mine.checked : false,
+                        notes: notesFor,
+                        at: Date.now()
+                    }));
+                } catch (e) {}
+            };
+            portal.addEventListener('submit', function (event) { savePlace(event.target); });
+
+            var saved = null;
+            try {
+                saved = JSON.parse(sessionStorage.getItem(KEY) || 'null');
+                sessionStorage.removeItem(KEY);
+            } catch (e) {}
+            if (!saved || Date.now() - saved.at > 60000) { return; }
+
+            var search = document.getElementById('coach-search');
+            var mine = document.getElementById('coach-filter-mine');
+            if (search && saved.q) { search.value = saved.q; search.dispatchEvent(new Event('input')); }
+            if (mine && saved.mine) { mine.checked = true; mine.dispatchEvent(new Event('change')); }
+            if (saved.notes) {
+                portal.querySelectorAll('.coach-note-form input[name="application_id"]').forEach(function (input) {
+                    if (input.value === saved.notes && !input.closest('.coach-note-edit')) {
+                        var panel = input.closest('details');
+                        if (panel) { panel.open = true; }
+                    }
+                });
+            }
+            var restore = function () { window.scrollTo(0, saved.y); };
+            restore();
+            window.addEventListener('load', restore);
+            showFlash();
+        })();
+        </script>
 
         <script>
         // Attendance: tap to mark (or tap again to undo) the chosen date for
@@ -778,6 +951,27 @@ class TeamOversight_Coach_Portal {
             border-radius: 4px;
             padding: 10px 15px;
             margin-bottom: 15px;
+        }
+
+        /* After a save, the result floats over the spot the coach was at. */
+        .coach-flash-toast {
+            position: fixed;
+            left: 50%;
+            bottom: 16px;
+            transform: translateX(-50%);
+            width: calc(100% - 32px);
+            max-width: 520px;
+            z-index: 9999;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+            transition: opacity 0.6s;
+        }
+
+        .coach-flash-toast > div {
+            margin: 0;
+        }
+
+        .coach-flash-toast.is-fading {
+            opacity: 0;
         }
 
         .coach-team-switcher {
@@ -1010,6 +1204,45 @@ class TeamOversight_Coach_Portal {
             font-size: 13px;
         }
 
+        .coach-note-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            gap: 12px;
+            margin-top: 4px;
+            font-size: 12px;
+        }
+
+        /* "Edit  Delete" on one line; an open editor takes the full width. */
+        .coach-note-edit[open] {
+            flex: 1 1 100%;
+        }
+
+        .coach-note-edit summary,
+        .coach-note-link {
+            display: inline;
+            cursor: pointer;
+            color: #2271b1;
+            text-decoration: underline;
+            background: none;
+            border: 0;
+            padding: 0;
+            font-size: 12px;
+            list-style: none;
+        }
+
+        .coach-note-edit summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .coach-note-delete {
+            margin: 0;
+        }
+
+        .coach-note-delete .coach-note-link {
+            color: #b32d2e;
+        }
+
         .coach-portal-hint {
             color: #666;
             font-size: 13px;
@@ -1189,7 +1422,7 @@ class TeamOversight_Coach_Portal {
     // ------------------------------------------------------------------
 
     private function handle_actions($my_team_codes, $season) {
-        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'add_note'), true)) {
+        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'add_note', 'edit_note', 'delete_note'), true)) {
             return '';
         }
 
@@ -1229,6 +1462,40 @@ class TeamOversight_Coach_Portal {
             ), array('%d', '%d', '%s'));
 
             return '<div class="coach-portal-success"><p>Note added for ' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ').</p></div>';
+        }
+
+        if ($_POST['coach_action'] === 'edit_note' || $_POST['coach_action'] === 'delete_note') {
+            // Only the note's author may change it; hiding the links isn't
+            // enough, so the author is checked here against the stored row.
+            $note_id = isset($_POST['note_id']) ? intval($_POST['note_id']) : 0;
+            $notes_table = $wpdb->prefix . 'team_trial_notes';
+            $existing = $wpdb->get_row($wpdb->prepare(
+                "SELECT id, author_id FROM $notes_table WHERE id = %d AND application_id = %d",
+                $note_id, $application_id
+            ));
+            if (!$existing) {
+                return '<div class="coach-portal-notice"><p>Note not found.</p></div>';
+            }
+            if (intval($existing->author_id) !== get_current_user_id()) {
+                return '<div class="coach-portal-notice"><p>You can only change notes you wrote.</p></div>';
+            }
+
+            if ($_POST['coach_action'] === 'delete_note') {
+                $wpdb->delete($notes_table, array('id' => $note_id), array('%d'));
+                return '<div class="coach-portal-success"><p>Note deleted for ' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ').</p></div>';
+            }
+
+            $note = isset($_POST['coach_note']) ? sanitize_textarea_field($_POST['coach_note']) : '';
+            if ($note === '') {
+                return '<div class="coach-portal-notice"><p>A note can\'t be empty. Use Delete to remove it.</p></div>';
+            }
+            $wpdb->update($notes_table,
+                array('note' => $note, 'updated_date' => current_time('mysql')),
+                array('id' => $note_id),
+                array('%s', '%s'), array('%d')
+            );
+
+            return '<div class="coach-portal-success"><p>Note updated for ' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ').</p></div>';
         }
 
         // set_selection
@@ -1662,13 +1929,21 @@ class TeamOversight_Coach_Portal {
 
         $notes = array();
         foreach ($rows as $note) {
-            $notes[] = array(
-                'author' => $note->author ?: 'Unknown',
-                'date' => date('j M Y', strtotime($note->created_date)),
-                'note' => $note->note,
-            );
+            $notes[] = self::shape_note($note);
         }
         return $notes;
+    }
+
+    /** One note row (with author display_name joined) as the cards use it. */
+    private static function shape_note($row) {
+        return array(
+            'id' => intval($row->id),
+            'author_id' => intval($row->author_id),
+            'author' => $row->author ?: 'Unknown',
+            'date' => date('j M Y', strtotime($row->created_date)),
+            'edited' => !empty($row->updated_date),
+            'note' => $row->note,
+        );
     }
 
     /**
@@ -1735,7 +2010,37 @@ class TeamOversight_Coach_Portal {
             <details class="coach-app-details">
                 <summary>Notes (<?php echo count($notes); ?>)</summary>
                 <?php foreach ($notes as $note): ?>
-                    <p class="coach-note"><strong><?php echo esc_html($note['author']); ?></strong> <small><?php echo esc_html($note['date']); ?></small><br><?php echo nl2br(esc_html($note['note'])); ?></p>
+                    <?php $is_mine = !empty($note['id']) && $note['author_id'] === get_current_user_id(); ?>
+                    <div class="coach-note">
+                        <strong><?php echo esc_html($note['author']); ?></strong> <small><?php echo esc_html($note['date']); ?><?php echo !empty($note['edited']) ? ' (edited)' : ''; ?></small><br><?php echo nl2br(esc_html($note['note'])); ?>
+                        <?php if ($is_mine): ?>
+                            <div class="coach-note-actions">
+                                <details class="coach-note-edit">
+                                    <summary>Edit</summary>
+                                    <form method="post" class="coach-note-form">
+                                        <input type="hidden" name="coach_action" value="edit_note">
+                                        <input type="hidden" name="note_id" value="<?php echo intval($note['id']); ?>">
+                                        <input type="hidden" name="application_id" value="<?php echo intval($application_id); ?>">
+                                        <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                        <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                        <?php wp_nonce_field('coach_portal_action', 'coach_nonce', true, true); ?>
+                                        <textarea name="coach_note" rows="3" required><?php echo esc_textarea($note['note']); ?></textarea>
+                                        <button type="submit" class="button button-small">Save</button>
+                                        <button type="button" class="button button-small" onclick="this.closest('details').open = false;">Cancel</button>
+                                    </form>
+                                </details>
+                                <form method="post" class="coach-note-delete" onsubmit="return confirm('Delete this note? This can\'t be undone.');">
+                                    <input type="hidden" name="coach_action" value="delete_note">
+                                    <input type="hidden" name="note_id" value="<?php echo intval($note['id']); ?>">
+                                    <input type="hidden" name="application_id" value="<?php echo intval($application_id); ?>">
+                                    <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                    <?php wp_nonce_field('coach_portal_action', 'coach_nonce', true, true); ?>
+                                    <button type="submit" class="coach-note-link">Delete</button>
+                                </form>
+                            </div>
+                        <?php endif; ?>
+                    </div>
                 <?php endforeach; ?>
                 <form method="post" class="coach-note-form">
                     <input type="hidden" name="coach_action" value="add_note">
@@ -2180,11 +2485,7 @@ class TeamOversight_Coach_Portal {
 
         $notes_by_app = array();
         foreach ($note_rows as $note) {
-            $notes_by_app[$note->application_id][] = array(
-                'author' => $note->author ?: 'Unknown',
-                'date' => date('j M Y', strtotime($note->created_date)),
-                'note' => $note->note,
-            );
+            $notes_by_app[$note->application_id][] = self::shape_note($note);
         }
 
         $applicants = array();
