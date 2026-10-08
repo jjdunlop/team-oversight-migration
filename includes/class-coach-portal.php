@@ -430,7 +430,7 @@ class TeamOversight_Coach_Portal {
                       data-ajax="<?php echo esc_url(admin_url('admin-ajax.php')); ?>">
                     <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
                     <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
-                    <label><strong>Attendance for</strong>
+                    <label class="coach-field-label">Attendance for
                         <input type="date" name="attendance_date" value="<?php echo esc_attr($attendance_date); ?>" max="<?php echo esc_attr(wp_date('Y-m-d')); ?>" onchange="this.form.submit()">
                     </label>
                     <span class="coach-portal-hint">Choose the session date, then tap <em>Mark attended</em> on each player who was there.</span>
@@ -595,7 +595,7 @@ class TeamOversight_Coach_Portal {
                         <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
                         <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
                         <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                        <button type="submit" class="button">Export team list (CSV)</button>
+                        <button type="submit" class="button coach-btn-secondary">Export team list (CSV)</button>
                     </form>
                 <?php else: ?>
                     <p>No players yet — record verdicts below to build your team.</p>
@@ -613,15 +613,15 @@ class TeamOversight_Coach_Portal {
                         <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
                         <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
                         <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                        <button type="submit" class="button">Trial book (print / save as PDF)</button>
+                        <button type="submit" class="button coach-btn-secondary">Trial book (print / save as PDF)</button>
                         <span class="coach-portal-hint">Every applicant with their application, emergency contacts, notes and verdicts — opens ready to print. Save it as a PDF before trials so you have it when the gym has no reception.</span>
                     </form>
                 <?php endif; ?>
 
-                <p>
-                    <label for="coach-search">Search:</label>
-                    <input type="text" id="coach-search" placeholder="Name, email, position, team..." style="width: 240px;">
-                    <label style="margin-left: 12px;"><input type="checkbox" id="coach-filter-mine"> Only my verdicts</label>
+                <p class="coach-search-bar">
+                    <label for="coach-search">Search</label>
+                    <input type="text" id="coach-search" placeholder="Name, email, position, team...">
+                    <label class="coach-check"><input type="checkbox" id="coach-filter-mine"> Only my verdicts</label>
                 </p>
 
                 <?php if (!empty($applicants)): ?>
@@ -1401,15 +1401,318 @@ class TeamOversight_Coach_Portal {
                 width: 100%;
             }
 
-            .cac-actions .button-small,
-            .coach-note-form .button-small {
-                padding: 8px 12px;
-                font-size: 13px;
-                line-height: 1.2;
+        }
+
+        /* ---- One look for every control --------------------------------
+           The theme styles .button as cyan, square and uppercase, and native
+           selects/date pickers bring the browser's own look; the portal's
+           expanders were navy. Everything interactive in the portal now
+           shares one set: navy filled = the main action, white with a navy
+           outline = everything else; same font, size, height and corners. */
+        .coach-portal {
+            --cp-navy: #1d3d6e;
+            --cp-navy-dark: #142c50;
+            --cp-navy-tint: #eef2f8;
+            --cp-border: #c3c8d0;
+            --cp-text: #3c434a;
+            --cp-muted: #6b7280;
+            --cp-radius: 4px;
+            --cp-control-h: 34px;
+        }
+
+        .coach-portal .button,
+        .coach-portal .coach-app-details > summary,
+        .coach-portal .coach-team-tab {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            box-sizing: border-box;
+            min-height: var(--cp-control-h);
+            margin: 0;
+            padding: 6px 12px;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.2;
+            letter-spacing: normal;
+            text-transform: none;
+            text-decoration: none;
+            border: 1px solid var(--cp-navy);
+            border-radius: var(--cp-radius);
+            box-shadow: none;
+            cursor: pointer;
+            transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+        }
+
+        /* Primary: the main action in a spot (Add note, Save). */
+        .coach-portal .button {
+            background: var(--cp-navy);
+            color: #fff;
+        }
+
+        .coach-portal .button:hover,
+        .coach-portal .button:focus {
+            background: var(--cp-navy-dark);
+            border-color: var(--cp-navy-dark);
+            color: #fff;
+        }
+
+        /* Secondary: expanders, tabs, tools, Mark attended, Cancel. */
+        .coach-portal .coach-btn-secondary,
+        .coach-portal .coach-attend-btn,
+        .coach-portal .coach-app-details > summary,
+        .coach-portal .coach-team-tab {
+            background: #fff;
+            color: var(--cp-navy);
+        }
+
+        .coach-portal .coach-btn-secondary:hover,
+        .coach-portal .coach-btn-secondary:focus,
+        .coach-portal .coach-attend-btn:hover,
+        .coach-portal .coach-attend-btn:focus,
+        .coach-portal .coach-app-details > summary:hover,
+        .coach-portal .coach-team-tab:hover {
+            background: var(--cp-navy-tint);
+            border-color: var(--cp-navy);
+            color: var(--cp-navy);
+        }
+
+        /* Open expander / current team: filled, like a pressed button. */
+        .coach-portal .coach-app-details[open] > summary,
+        .coach-portal .coach-team-tab.active,
+        .coach-portal .coach-team-tab.active:hover {
+            background: var(--cp-navy);
+            border-color: var(--cp-navy);
+            color: #fff;
+        }
+
+        /* Expanders hold mixed inline content ("Attendance (" + count + ")"
+           + arrow), which flex would space apart — lay them out inline,
+           with the height coming from the line box instead. */
+        .coach-portal .coach-app-details > summary {
+            display: inline-block;
+            height: var(--cp-control-h);
+            padding: 0 12px;
+            line-height: calc(var(--cp-control-h) - 2px);
+            white-space: nowrap;
+        }
+
+        .coach-portal .coach-app-details > summary::after {
+            font-size: 10px;
+        }
+
+        .coach-portal .coach-team-tab {
+            font-size: 14px;
+            margin: 0 6px 6px 0;
+        }
+
+        .coach-portal .coach-team-section h3 small {
+            font-size: 0.6em;
+            font-weight: 400;
+            color: var(--cp-muted);
+        }
+
+        /* Attendance: marked = green, so it reads at a glance at the gym. */
+        .coach-portal .coach-attend-btn.is-marked,
+        .coach-portal .coach-attend-btn.is-marked:hover {
+            background: #e8f5ea;
+            border-color: #2e8540;
+            color: #1e6b2a;
+        }
+
+        .coach-portal .button:disabled {
+            opacity: 0.6;
+            cursor: wait;
+        }
+
+        /* Fields: same font, size, border and height as the buttons. */
+        .coach-portal select,
+        .coach-portal input[type=text],
+        .coach-portal input[type=date],
+        .coach-portal textarea {
+            box-sizing: border-box;
+            min-height: var(--cp-control-h);
+            margin: 0;
+            padding: 5px 8px;
+            font-family: inherit;
+            font-size: 14px;
+            font-weight: 400;
+            line-height: 1.3;
+            color: var(--cp-text);
+            background-color: #fff;
+            border: 1px solid var(--cp-border);
+            border-radius: var(--cp-radius);
+            box-shadow: none;
+        }
+
+        .coach-portal select:focus,
+        .coach-portal input[type=text]:focus,
+        .coach-portal input[type=date]:focus,
+        .coach-portal textarea:focus {
+            border-color: var(--cp-navy);
+            outline: 2px solid rgba(29, 61, 110, 0.18);
+            outline-offset: 0;
+        }
+
+        .coach-portal textarea {
+            display: block;
+            width: 100%;
+            min-height: 64px;
+        }
+
+        .coach-portal ::placeholder {
+            color: #8a9099;
+        }
+
+        /* Labels and small text: one size. */
+        .coach-portal label,
+        .coach-portal .cac-verdict-label,
+        .coach-portal .coach-field-label {
+            font-size: 13px;
+            color: var(--cp-text);
+        }
+
+        .coach-portal .cac-verdict-label,
+        .coach-portal .coach-field-label,
+        .coach-portal .coach-search-bar > label[for] {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .coach-portal .coach-attendance-empty,
+        .coach-portal .coach-attendance-list {
+            font-size: 13px;
+        }
+
+        .coach-portal .coach-attendance-empty {
+            margin: 8px 0 0;
+            color: var(--cp-muted);
+        }
+
+        .coach-portal .coach-attendance-bar input[type=date] {
+            margin-left: 0;
+        }
+
+        .coach-search-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px 14px;
+        }
+
+        .coach-search-bar #coach-search {
+            width: 260px;
+            max-width: 100%;
+        }
+
+        .coach-portal .coach-check {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+        }
+
+        .coach-export-form {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px 12px;
+            margin: 0 0 14px;
+        }
+
+        /* Card footer: expanders pack tightly; actions sit together. */
+        .coach-portal .cac-expanders {
+            gap: 6px;
+        }
+
+        .coach-portal .cac-actions {
+            align-items: center;
+            gap: 8px;
+        }
+
+        .coach-portal .coach-note-form .button {
+            margin: 6px 6px 0 0;
+        }
+
+        /* Note Edit/Delete: plain text links, not buttons. */
+        .coach-portal .coach-note-edit > summary,
+        .coach-portal .coach-note-link {
+            display: inline;
+            min-height: 0;
+            padding: 0;
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 400;
+            text-transform: none;
+            letter-spacing: normal;
+            color: var(--cp-navy);
+            background: none;
+            border: 0;
+            box-shadow: none;
+            text-decoration: underline;
+        }
+
+        .coach-portal .coach-note-delete .coach-note-link {
+            color: #b32d2e;
+        }
+
+        /* The Edit link lives inside the Notes expander; keep the
+           expander's hover fill and arrow off it. */
+        .coach-portal .coach-app-details .coach-note-edit > summary:hover,
+        .coach-portal .coach-app-details .coach-note-edit[open] > summary {
+            background: none;
+            color: var(--cp-navy);
+        }
+
+        .coach-portal .coach-app-details .coach-note-edit > summary::after {
+            content: none;
+        }
+
+        @media (max-width: 782px) {
+            /* Bigger tap targets; 16px fields stop iOS zooming on focus. */
+            .coach-portal {
+                --cp-control-h: 40px;
             }
 
-            .coach-note-form textarea {
+            .coach-portal select,
+            .coach-portal input[type=text],
+            .coach-portal input[type=date],
+            .coach-portal textarea {
                 font-size: 16px;
+            }
+
+            .coach-search-bar #coach-search {
+                width: 100%;
+            }
+
+            /* Full-width rows on a phone: a big Mark attended target, then
+               the verdict with room to read the choice. */
+            .coach-portal .cac-actions {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .coach-portal .cac-actions .coach-attend-btn {
+                width: 100%;
+            }
+
+            .coach-portal .cac-actions form {
+                display: flex;
+            }
+
+            .coach-portal .cac-verdict-label {
+                flex: 1 1 auto;
+                white-space: nowrap;
+            }
+
+            .coach-portal .cac-verdict-label select {
+                flex: 1 1 auto;
+                min-width: 0;
+                width: 100%;
             }
         }
         </style>
@@ -2035,7 +2338,7 @@ class TeamOversight_Coach_Portal {
                                         <?php wp_nonce_field('coach_portal_action', 'coach_nonce', true, true); ?>
                                         <textarea name="coach_note" rows="3" required><?php echo esc_textarea($note['note']); ?></textarea>
                                         <button type="submit" class="button button-small">Save</button>
-                                        <button type="button" class="button button-small" onclick="this.closest('details').open = false;">Cancel</button>
+                                        <button type="button" class="button button-small coach-btn-secondary" onclick="this.closest('details').open = false;">Cancel</button>
                                     </form>
                                 </details>
                                 <form method="post" class="coach-note-delete" onsubmit="return confirm('Delete this note? This can\'t be undone.');">
