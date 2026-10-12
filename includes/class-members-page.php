@@ -1142,7 +1142,7 @@ class TeamOversight_Members_Page {
         $email = sanitize_email($_POST['grant_user_email']);
         $tier = sanitize_text_field($_POST['grant_tier']);
         $end_date = sanitize_text_field($_POST['grant_end_date']);
-        $note = sanitize_text_field($_POST['grant_note']);
+        $note = sanitize_text_field(wp_unslash($_POST['grant_note']));
 
         $user = get_user_by('email', $email);
         if (!$user) {

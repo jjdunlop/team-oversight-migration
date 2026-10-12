@@ -1907,7 +1907,7 @@ class TeamOversight_Coach_Portal {
         }
 
         if ($_POST['coach_action'] === 'add_note') {
-            $note = isset($_POST['coach_note']) ? sanitize_textarea_field($_POST['coach_note']) : '';
+            $note = isset($_POST['coach_note']) ? sanitize_textarea_field(wp_unslash($_POST['coach_note'])) : '';
             if ($note === '') {
                 return '';
             }
@@ -1941,7 +1941,7 @@ class TeamOversight_Coach_Portal {
                 return '<div class="coach-portal-success"><p>Note deleted for ' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ').</p></div>';
             }
 
-            $note = isset($_POST['coach_note']) ? sanitize_textarea_field($_POST['coach_note']) : '';
+            $note = isset($_POST['coach_note']) ? sanitize_textarea_field(wp_unslash($_POST['coach_note'])) : '';
             if ($note === '') {
                 return '<div class="coach-portal-notice"><p>A note can\'t be empty. Use Delete to remove it.</p></div>';
             }

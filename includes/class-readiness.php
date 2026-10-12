@@ -875,7 +875,7 @@ class TeamOversight_Readiness {
         }
 
         $qty = max(0, min(5, intval($_POST['credit_qty'])));
-        $note = sanitize_text_field($_POST['credit_note']);
+        $note = sanitize_text_field(wp_unslash($_POST['credit_note']));
 
         if ($qty > 0 || $note !== '') {
             update_user_meta($user_id, 'murvc_shirt_credit', array('qty' => $qty, 'note' => $note));

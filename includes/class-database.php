@@ -254,6 +254,15 @@ class TeamOversight_Database {
             $wpdb->query("ALTER TABLE {$wpdb->prefix}team_trial_notes ADD COLUMN updated_date datetime DEFAULT NULL");
         }
 
+        // 1.62.2: free text was saved without wp_unslash(), so WordPress's
+        // magic-quote slashes were stored too ("I\'ve", \"quoted\"). Undo
+        // them once in what was saved: notes, application answers, team
+        // names, grant and payment notes.
+        if (!get_option('team_oversight_unslash_fixed')) {
+            self::repair_magic_quotes();
+            update_option('team_oversight_unslash_fixed', 1, false);
+        }
+
         // Coach-portal attendance (added in 1.59.0): one row per player, per
         // team, per session date. person_key is 'u<user id>' (or the
         // lowercased email for a legacy email-only roster row), so the
@@ -666,6 +675,78 @@ class TeamOversight_Database {
     // Bare (un-suffixed) keys are the pre-1.48 global list and remain as
     // the fallback for any season with no entries of its own.
     // ------------------------------------------------------------------
+
+    /**
+     * Remove a magic-quote slash — a backslash directly before ' " or \ —
+     * and nothing else, so other backslashes in the text survive.
+     */
+    public static function unslash_text($text) {
+        return is_string($text) ? preg_replace('/\\\\([\'"\\\\])/', '$1', $text) : $text;
+    }
+
+    /**
+     * One-off repair (1.62.2) of free text saved before input was
+     * unslashed: coach notes, application answers, team names, membership
+     * grant notes and shirt-credit notes. Only rows that change are written.
+     */
+    private static function repair_magic_quotes() {
+        global $wpdb;
+
+        $notes = $wpdb->get_results("SELECT id, note FROM {$wpdb->prefix}team_trial_notes WHERE INSTR(note, CHAR(92)) > 0");
+        foreach ($notes as $row) {
+            $fixed = self::unslash_text($row->note);
+            if ($fixed !== $row->note) {
+                $wpdb->update($wpdb->prefix . 'team_trial_notes', array('note' => $fixed), array('id' => $row->id), array('%s'), array('%d'));
+            }
+        }
+
+        $apps = $wpdb->get_results("SELECT id, form_data FROM {$wpdb->prefix}trial_applications WHERE INSTR(form_data, CHAR(92)) > 0");
+        foreach ($apps as $row) {
+            $data = json_decode($row->form_data, true);
+            if (!is_array($data)) {
+                continue;
+            }
+            $changed = false;
+            foreach ($data as $key => $value) {
+                $fixed = self::unslash_text($value);
+                if ($fixed !== $value) {
+                    $data[$key] = $fixed;
+                    $changed = true;
+                }
+            }
+            if ($changed) {
+                $wpdb->update($wpdb->prefix . 'trial_applications', array('form_data' => wp_json_encode($data)), array('id' => $row->id), array('%s'), array('%d'));
+            }
+        }
+
+        $teams = get_option('team_oversight_teams', array());
+        if (is_array($teams)) {
+            $fixed_teams = array_map(array(__CLASS__, 'unslash_text'), $teams);
+            if ($fixed_teams !== $teams) {
+                update_option('team_oversight_teams', $fixed_teams);
+            }
+        }
+
+        $grants = $wpdb->get_results("SELECT id, note FROM {$wpdb->prefix}team_memberships WHERE INSTR(note, CHAR(92)) > 0");
+        foreach ($grants as $row) {
+            $fixed = self::unslash_text($row->note);
+            if ($fixed !== $row->note) {
+                $wpdb->update($wpdb->prefix . 'team_memberships', array('note' => $fixed), array('id' => $row->id), array('%s'), array('%d'));
+            }
+        }
+
+        $credits = $wpdb->get_results("SELECT user_id, meta_value FROM {$wpdb->usermeta} WHERE meta_key = 'murvc_shirt_credit' AND INSTR(meta_value, CHAR(92)) > 0");
+        foreach ($credits as $row) {
+            $credit = maybe_unserialize($row->meta_value);
+            if (is_array($credit) && isset($credit['note'])) {
+                $fixed = self::unslash_text($credit['note']);
+                if ($fixed !== $credit['note']) {
+                    $credit['note'] = $fixed;
+                    update_user_meta($row->user_id, 'murvc_shirt_credit', $credit);
+                }
+            }
+        }
+    }
 
     /**
      * A member's gender, as a plain string ('' when unset).

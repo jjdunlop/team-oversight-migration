@@ -1284,7 +1284,7 @@ class TeamOversight_Trials {
         $resolve_level = function ($field) use ($level_options) {
             $value = isset($_POST[$field]) ? sanitize_text_field($_POST[$field]) : '';
             if ($value === 'other') {
-                $other = isset($_POST[$field . '_other']) ? sanitize_text_field($_POST[$field . '_other']) : '';
+                $other = isset($_POST[$field . '_other']) ? sanitize_text_field(wp_unslash($_POST[$field . '_other'])) : '';
                 return $other !== '' ? 'Other: ' . $other : '';
             }
             return isset($level_options[$value]) ? $level_options[$value] : '';
@@ -1299,9 +1299,11 @@ class TeamOversight_Trials {
             'Venues Unable To Attend' => implode(', ', array_map(function ($v) use ($venue_options) {
                 return $venue_options[$v];
             }, $venues)),
-            'Unavailable Trial Dates' => isset($_POST['unavailable_dates']) ? sanitize_textarea_field($_POST['unavailable_dates']) : '',
-            'Absence Periods (Apr-Sep)' => isset($_POST['absence_periods']) ? sanitize_textarea_field($_POST['absence_periods']) : '',
-            'Volleyball Experience' => isset($_POST['experience']) ? sanitize_textarea_field($_POST['experience']) : '',
+            // wp_unslash: WordPress adds magic-quote slashes to all input,
+            // so "I've" would otherwise be stored as "I\'ve".
+            'Unavailable Trial Dates' => isset($_POST['unavailable_dates']) ? sanitize_textarea_field(wp_unslash($_POST['unavailable_dates'])) : '',
+            'Absence Periods (Apr-Sep)' => isset($_POST['absence_periods']) ? sanitize_textarea_field(wp_unslash($_POST['absence_periods'])) : '',
+            'Volleyball Experience' => isset($_POST['experience']) ? sanitize_textarea_field(wp_unslash($_POST['experience'])) : '',
         );
 
         if ($history === 'renegades_last_season' || $history === 'renegades_previously') {
@@ -1318,7 +1320,7 @@ class TeamOversight_Trials {
             $transfer_season = isset($_POST['transfer_season']) ? sanitize_text_field($_POST['transfer_season']) : '';
             $transfer_club = self::resolve_transfer_club(
                 isset($_POST['transfer_club']) ? sanitize_text_field($_POST['transfer_club']) : '',
-                isset($_POST['transfer_club_other']) ? sanitize_text_field($_POST['transfer_club_other']) : ''
+                isset($_POST['transfer_club_other']) ? sanitize_text_field(wp_unslash($_POST['transfer_club_other'])) : ''
             );
             $transfer_level = $resolve_level('transfer_level');
             if (!isset($season_options[$transfer_season]) || $transfer_club === null || $transfer_level === '') {
@@ -1331,7 +1333,7 @@ class TeamOversight_Trials {
 
         $registered_abroad_flag = false;
         if ($international === 'yes') {
-            $country_origin = isset($_POST['country_origin']) ? sanitize_text_field($_POST['country_origin']) : '';
+            $country_origin = isset($_POST['country_origin']) ? sanitize_text_field(wp_unslash($_POST['country_origin'])) : '';
             $registered_abroad = isset($_POST['registered_abroad']) ? sanitize_text_field($_POST['registered_abroad']) : '';
             if ($country_origin === '' || !in_array($registered_abroad, array('yes', 'no'), true)) {
                 wp_send_json_error(array('message' => 'Please complete the international player details.'));
@@ -1340,7 +1342,7 @@ class TeamOversight_Trials {
             $form_data['Country of Origin'] = $country_origin;
             if ($registered_abroad === 'yes') {
                 $registered_abroad_flag = true;
-                $registered_country = isset($_POST['registered_country']) ? sanitize_text_field($_POST['registered_country']) : '';
+                $registered_country = isset($_POST['registered_country']) ? sanitize_text_field(wp_unslash($_POST['registered_country'])) : '';
                 $form_data['Registered Player In Another Country'] = 'Yes' . ($registered_country !== '' ? ' — ' . $registered_country : '');
             } else {
                 $form_data['Registered Player In Another Country'] = 'No';

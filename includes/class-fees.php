@@ -384,7 +384,7 @@ class TeamOversight_Fees {
         
         global $wpdb;
         
-        $version_name = sanitize_text_field($_POST['version_name']);
+        $version_name = sanitize_text_field(wp_unslash($_POST['version_name']));
         if (empty($version_name)) {
             wp_send_json_error('Version name is required');
         }
@@ -1506,7 +1506,7 @@ class TeamOversight_Fees {
 
         $season = $this->posted_team_season();
         $team_code = sanitize_text_field($_POST['team_code']);
-        $team_name = sanitize_text_field($_POST['team_name']);
+        $team_name = sanitize_text_field(wp_unslash($_POST['team_name']));
 
         if (empty($team_code) || empty($team_name)) {
             wp_send_json_error('Team code and name are required');
@@ -1542,7 +1542,7 @@ class TeamOversight_Fees {
 
         $season = $this->posted_team_season();
         $team_code = sanitize_text_field($_POST['team_code']);
-        $team_name = sanitize_text_field($_POST['team_name']);
+        $team_name = sanitize_text_field(wp_unslash($_POST['team_name']));
 
         if (empty($team_code) || empty($team_name)) {
             wp_send_json_error('Team code and name are required');
