@@ -648,10 +648,17 @@ class TeamOversight_Coach_Portal {
                         $ry = isset($verdict_rank[$y['my_status']]) ? $verdict_rank[$y['my_status']] : 9;
                         return $rx !== $ry ? $rx - $ry : $x['trial_number'] - $y['trial_number'];
                     });
+                    // Other applicants: players this team can field first;
+                    // over-age players (needing a VV exemption) go last.
+                    usort($others, function ($x, $y) {
+                        $fx = empty($x['age_flag']) ? 0 : 1;
+                        $fy = empty($y['age_flag']) ? 0 : 1;
+                        return $fx !== $fy ? $fx - $fy : $x['trial_number'] - $y['trial_number'];
+                    });
                     $sections = array(
                         array('Applied to your team — awaiting your verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and you haven\'t recorded a verdict yet.'),
                         array('Applied to your team — verdict recorded', $actioned, ''),
-                        array('Other applicants', $others, 'Applicants who didn\'t select your team — shown because players get redirected between trials and VV can grant age exemptions.'),
+                        array('Other applicants', $others, 'Applicants who didn\'t select your team — shown because players get redirected between trials and VV can grant age exemptions. Over-age players are listed last.'),
                     );
                     ?>
                     <div id="coach-applicant-list">
