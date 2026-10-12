@@ -61,6 +61,9 @@ class TeamOversight_Coach_Portal {
     /** Season attendance, loaded once per request: person key => rows. */
     private $attendance_cache = array();
 
+    /** True while rendering a team the viewer may see but not change. */
+    private $read_only = false;
+
     /** One person across records: their account, else their email. */
     public static function attendance_person_key($user_id, $email) {
         return intval($user_id) ? 'u' . intval($user_id) : strtolower(trim((string) $email));
@@ -126,6 +129,9 @@ class TeamOversight_Coach_Portal {
 
     /** "Mark attended" button for one card, showing its state for the date. */
     private function render_attendance_button($user_id, $email, $active_team, $date, $season) {
+        if ($this->read_only) {
+            return '';
+        }
         $marked = false;
         foreach ($this->get_person_attendance($season, $user_id, $email) as $record) {
             if ($record->team === $active_team && $record->session_date === $date) {
@@ -157,9 +163,8 @@ class TeamOversight_Coach_Portal {
         $email = isset($_POST['email']) ? sanitize_email(wp_unslash($_POST['email'])) : '';
         $mark = !empty($_POST['mark']);
 
-        $my_teams = $this->get_my_teams($season);
-        if (!isset($my_teams[$team])) {
-            wp_send_json_error(array('message' => 'You can only mark attendance for teams you coach.'));
+        if (!in_array($team, $this->get_editable_team_codes($season), true)) {
+            wp_send_json_error(array('message' => 'You can only mark attendance for teams you coach (or can edit as committee).'));
         }
 
         // Sessions that have happened, in this season's trials or training
@@ -221,7 +226,7 @@ class TeamOversight_Coach_Portal {
         }
 
         $season = isset($_POST['coach_season']) ? sanitize_text_field(wp_unslash($_POST['coach_season'])) : '';
-        $notice = $this->handle_actions(array_keys($this->get_my_teams($season)), $season);
+        $notice = $this->handle_actions($this->get_editable_team_codes($season), $season);
         if (strpos($notice, 'coach-portal-success') === false) {
             wp_send_json_error(array('notice' => $notice !== '' ? $notice : '<div class="coach-portal-notice"><p>That verdict could not be saved.</p></div>'));
         }
@@ -287,9 +292,8 @@ class TeamOversight_Coach_Portal {
         }
 
         $season = isset($_POST['coach_season']) ? sanitize_text_field($_POST['coach_season']) : '';
-        $my_teams = $this->get_my_teams($season);
 
-        $notice = $this->handle_actions(array_keys($my_teams), $season);
+        $notice = $this->handle_actions($this->get_editable_team_codes($season), $season);
         if ($notice !== '') {
             set_transient('murvc_coach_flash_' . get_current_user_id(), $notice, 60);
         }
@@ -332,6 +336,67 @@ class TeamOversight_Coach_Portal {
         return $teams;
     }
 
+    /**
+     * Every team the current user can open in the portal for a season:
+     * code => array('role', 'coach' (bool), 'edit' (bool)). Teams they
+     * coach come first, with full access; committee access adds the rest
+     * of the season's teams, editable only at the 'edit' level.
+     */
+    private function get_portal_teams($season) {
+        if (!is_user_logged_in() || $season === null || $season === '') {
+            return array();
+        }
+        $teams = array();
+        foreach ($this->get_my_teams($season) as $code => $role) {
+            $teams[$code] = array('role' => $role, 'coach' => true, 'edit' => true);
+        }
+        $level = TeamOversight_Committee_Access::get_level(get_current_user_id());
+        if ($level !== '') {
+            $database = new TeamOversight_Database();
+            foreach (array_keys($database->get_teams_config($season)) as $code) {
+                if (!isset($teams[$code])) {
+                    $teams[$code] = array('role' => 'committee', 'coach' => false, 'edit' => $level === 'edit');
+                }
+            }
+        }
+        return $teams;
+    }
+
+    /** Teams the current user may change (verdicts, attendance, notes). */
+    private function get_editable_team_codes($season) {
+        return array_keys(array_filter($this->get_portal_teams($season), function ($team) {
+            return $team['edit'];
+        }));
+    }
+
+    /** May the current user see this team (portal, team list, trial book)? */
+    private function can_view_team($team, $season) {
+        $teams = $this->get_portal_teams($season);
+        return isset($teams[$team]);
+    }
+
+    /**
+     * Seasons the portal offers, newest first: those they coach in, plus —
+     * with committee access — every season with applicants or assignments.
+     */
+    private function get_portal_seasons() {
+        global $wpdb;
+        $seasons = array_map(function ($a) {
+            return (string) $a->season;
+        }, $this->get_coach_assignments(wp_get_current_user()));
+
+        if (TeamOversight_Committee_Access::get_level(get_current_user_id()) !== '') {
+            $seasons = array_merge(
+                $seasons,
+                $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}trial_applications"),
+                $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}team_assignments")
+            );
+        }
+        $seasons = array_values(array_unique(array_map('strval', $seasons)));
+        rsort($seasons);
+        return $seasons;
+    }
+
     // ------------------------------------------------------------------
     // Rendering
     // ------------------------------------------------------------------
@@ -345,28 +410,35 @@ class TeamOversight_Coach_Portal {
                 . '<p><a class="button button-primary" href="' . esc_url($login_url) . '">Log in</a></p></div>';
         }
 
-        $user = wp_get_current_user();
-        $coach_assignments = $this->get_coach_assignments($user);
+        // Seasons and teams this person can open: the teams they coach,
+        // plus every team with committee access.
+        $seasons = $this->get_portal_seasons();
 
-        if (empty($coach_assignments)) {
+        if (empty($seasons)) {
             return '<div class="coach-portal-notice"><p>This page is for team coaches. Your account does not have a coach or assistant coach assignment — if that\'s wrong, please contact the club.</p></div>';
         }
-
-        // Season + active team selection, limited to what they coach.
-        $seasons = array_values(array_unique(array_map(function ($a) {
-            return $a->season;
-        }, $coach_assignments)));
 
         $season = (isset($_GET['coach_season']) && in_array($_GET['coach_season'], $seasons, true))
             ? $_GET['coach_season']
             : $seasons[0];
 
-        $my_teams = $this->get_my_teams($season);
-        $my_team_codes = array_keys($my_teams);
+        $portal_teams = $this->get_portal_teams($season);
+        $my_team_codes = array_keys($portal_teams);
+
+        if (empty($my_team_codes)) {
+            return '<div class="coach-portal-notice"><p>No teams are set up for ' . esc_html($season) . ' yet.</p></div>';
+        }
 
         $active_team = (isset($_GET['coach_team']) && in_array($_GET['coach_team'], $my_team_codes, true))
             ? $_GET['coach_team']
             : $my_team_codes[0];
+
+        // View-only committee access: every edit control is left out (the
+        // handlers refuse edits regardless).
+        $active_access = $portal_teams[$active_team];
+        $this->read_only = !$active_access['edit'];
+        $committee_level = TeamOversight_Committee_Access::get_level(get_current_user_id());
+        $team_word = $active_access['coach'] ? 'your team' : 'this team';
 
         // Action results arrive via a flash notice set before the redirect.
         $action_notice = '';
@@ -405,7 +477,35 @@ class TeamOversight_Coach_Portal {
                 </p>
             <?php endif; ?>
 
-            <?php if (count($my_team_codes) > 1): ?>
+            <?php if ($committee_level !== '' && count($my_team_codes) > 1): ?>
+                <?php // Committee: every team, too many for tabs — one picker, own teams first. ?>
+                <form method="get" class="coach-team-switcher coach-team-picker">
+                    <?php foreach ($_GET as $key => $value): ?>
+                        <?php if (!in_array($key, array('coach_team', 'coach_season', 'attendance_date'), true) && is_string($value)): ?>
+                            <input type="hidden" name="<?php echo esc_attr($key); ?>" value="<?php echo esc_attr(wp_unslash($value)); ?>">
+                        <?php endif; ?>
+                    <?php endforeach; ?>
+                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                    <label class="coach-field-label" for="coach-team-select">Team</label>
+                    <select id="coach-team-select" name="coach_team" onchange="this.form.submit()">
+                        <?php $coached = array_keys(array_filter($portal_teams, function ($t) { return $t['coach']; })); ?>
+                        <?php if (!empty($coached)): ?>
+                            <optgroup label="Teams you coach">
+                                <?php foreach ($coached as $code): ?>
+                                    <option value="<?php echo esc_attr($code); ?>" <?php selected($code, $active_team); ?>><?php echo esc_html(isset($teams_config[$code]) ? $teams_config[$code]['name'] : $code); ?></option>
+                                <?php endforeach; ?>
+                            </optgroup>
+                        <?php endif; ?>
+                        <optgroup label="<?php echo esc_attr($committee_level === 'edit' ? 'All teams (committee)' : 'All teams (committee, view only)'); ?>">
+                            <?php foreach ($my_team_codes as $code): ?>
+                                <?php if (in_array($code, $coached, true)) { continue; } ?>
+                                <option value="<?php echo esc_attr($code); ?>" <?php selected($code, $active_team); ?>><?php echo esc_html(isset($teams_config[$code]) ? $teams_config[$code]['name'] : $code); ?></option>
+                            <?php endforeach; ?>
+                        </optgroup>
+                    </select>
+                    <noscript><button type="submit" class="button coach-btn-secondary">Open</button></noscript>
+                </form>
+            <?php elseif (count($my_team_codes) > 1): ?>
                 <div class="coach-team-switcher">
                     <?php foreach ($my_team_codes as $code): ?>
                         <?php $label = isset($teams_config[$code]) ? $teams_config[$code]['name'] : $code; ?>
@@ -419,9 +519,19 @@ class TeamOversight_Coach_Portal {
             <?php endif; ?>
 
             <div class="coach-team-section">
-                <h3><?php echo esc_html($active_config['name']); ?> <small>(<?php echo esc_html($season); ?> — you are <?php echo esc_html(str_replace('_', ' ', $my_teams[$active_team])); ?>)</small></h3>
+                <?php
+                if ($active_access['coach']) {
+                    $access_label = 'you are ' . str_replace('_', ' ', $active_access['role']);
+                } else {
+                    $access_label = $active_access['edit'] ? 'committee — can edit' : 'committee — view only';
+                }
+                ?>
+                <h3><?php echo esc_html($active_config['name']); ?> <small>(<?php echo esc_html($season); ?> — <?php echo esc_html($access_label); ?>)</small></h3>
 
                 <?php $attendance_date = $this->get_attendance_date(); ?>
+                <?php if ($this->read_only): ?>
+                    <p class="coach-view-only">View only — you can see everything for this team, but verdicts, attendance and notes are left to its coaches.</p>
+                <?php else: ?>
                 <form method="get" class="coach-attendance-bar" id="coach-attendance-bar"
                       data-season="<?php echo esc_attr($season); ?>"
                       data-team="<?php echo esc_attr($active_team); ?>"
@@ -435,6 +545,7 @@ class TeamOversight_Coach_Portal {
                     </label>
                     <span class="coach-portal-hint">Choose the session date, then tap <em>Mark attended</em> on each player who was there.</span>
                 </form>
+                <?php endif; ?>
 
                 <?php
                 // Staff stay a compact table; players render as cards like
@@ -569,13 +680,14 @@ class TeamOversight_Coach_Portal {
                                 ); ?></span>
                                 <span class="cac-actions">
                                     <?php echo $this->render_attendance_button($member->user_id, $member->email, $active_team, $attendance_date, $season); ?>
+                                    <?php if (!$this->read_only): ?>
                                     <form method="post">
                                         <input type="hidden" name="coach_action" value="set_selection">
                                         <input type="hidden" name="application_id" value="<?php echo intval($member->application_id); ?>">
                                         <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
                                         <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
                                         <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                                        <label class="cac-verdict-label">My verdict:
+                                        <label class="cac-verdict-label"><?php echo $active_access['coach'] ? 'My verdict:' : 'Team verdict:'; ?>
                                             <select name="selection_status" onchange="if (window.murvcCoachVerdict) { window.murvcCoachVerdict(this); } else { this.form.submit(); }">
                                                 <option value="clear">&mdash; None &mdash;</option>
                                                 <?php foreach (self::get_verdict_labels() as $status_key => $status_label): ?>
@@ -585,6 +697,7 @@ class TeamOversight_Coach_Portal {
                                         </label>
                                         <noscript><button type="submit" class="button button-small">Save</button></noscript>
                                     </form>
+                                    <?php endif; ?>
                                 </span>
                             </div>
                         </div>
@@ -656,9 +769,11 @@ class TeamOversight_Coach_Portal {
                         return $fx !== $fy ? $fx - $fy : $x['trial_number'] - $y['trial_number'];
                     });
                     $sections = array(
-                        array('Applied to your team — awaiting your verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and you haven\'t recorded a verdict yet.'),
-                        array('Applied to your team — verdict recorded', $actioned, ''),
-                        array('Other applicants', $others, 'Applicants who didn\'t select your team — shown because players get redirected between trials and VV can grant age exemptions. Over-age players are listed last.'),
+                        $active_access['coach']
+                            ? array('Applied to your team — awaiting your verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and you haven\'t recorded a verdict yet.')
+                            : array('Applied to this team — awaiting a verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and the team has no verdict on them yet.'),
+                        array('Applied to ' . $team_word . ' — verdict recorded', $actioned, ''),
+                        array('Other applicants', $others, 'Applicants who didn\'t select ' . $team_word . ' — shown because players get redirected between trials and VV can grant age exemptions. Over-age players are listed last.'),
                     );
                     ?>
                     <div id="coach-applicant-list">
@@ -703,13 +818,14 @@ class TeamOversight_Coach_Portal {
                                     </span>
                                     <span class="cac-actions">
                                         <?php echo $this->render_attendance_button($a['user_id'], $a['email'], $active_team, $attendance_date, $season); ?>
+                                        <?php if (!$this->read_only): ?>
                                         <form method="post">
                                             <input type="hidden" name="coach_action" value="set_selection">
                                             <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
                                             <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
                                             <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
                                             <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                                            <label class="cac-verdict-label">My verdict:
+                                            <label class="cac-verdict-label"><?php echo $active_access['coach'] ? 'My verdict:' : 'Team verdict:'; ?>
                                                 <select name="selection_status" onchange="if (window.murvcCoachVerdict) { window.murvcCoachVerdict(this); } else { this.form.submit(); }">
                                                     <option value="clear" <?php selected($a['my_status'], ''); ?>>&mdash; None &mdash;</option>
                                                     <?php foreach (self::get_verdict_labels() as $status_key => $status_label): ?>
@@ -719,6 +835,7 @@ class TeamOversight_Coach_Portal {
                                             </label>
                                             <noscript><button type="submit" class="button button-small">Save</button></noscript>
                                         </form>
+                                        <?php endif; ?>
                                     </span>
                                 </div>
                             </div>
@@ -1514,6 +1631,30 @@ class TeamOversight_Coach_Portal {
             margin: 0 6px 6px 0;
         }
 
+        /* Committee team picker and the view-only banner. */
+        .coach-team-picker {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .coach-team-picker select {
+            min-width: 240px;
+            max-width: 100%;
+        }
+
+        .coach-view-only {
+            margin: 8px 0 14px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: var(--cp-text);
+            background: var(--cp-navy-tint);
+            border: 1px solid var(--cp-border);
+            border-left: 4px solid var(--cp-navy);
+            border-radius: var(--cp-radius);
+        }
+
         .coach-portal .coach-team-section h3 small {
             font-size: 0.6em;
             font-weight: 400;
@@ -1742,7 +1883,7 @@ class TeamOversight_Coach_Portal {
 
         $team = isset($_POST['coach_team']) ? sanitize_text_field($_POST['coach_team']) : '';
         if (!in_array($team, $my_team_codes, true)) {
-            return '<div class="coach-portal-notice"><p>You can only act for teams you coach.</p></div>';
+            return '<div class="coach-portal-notice"><p>You can only act for teams you coach (or can edit as committee).</p></div>';
         }
 
         global $wpdb;
@@ -1888,8 +2029,7 @@ class TeamOversight_Coach_Portal {
         $season = isset($_POST['coach_season']) ? sanitize_text_field($_POST['coach_season']) : date('Y');
         $team = isset($_POST['coach_team']) ? sanitize_text_field($_POST['coach_team']) : '';
 
-        $my_teams = $this->get_my_teams($season);
-        if (!isset($my_teams[$team])) {
+        if (!$this->can_view_team($team, $season)) {
             return;
         }
 
@@ -1985,9 +2125,9 @@ class TeamOversight_Coach_Portal {
         $season = isset($_POST['coach_season']) ? sanitize_text_field($_POST['coach_season']) : date('Y');
         $team = isset($_POST['coach_team']) ? sanitize_text_field($_POST['coach_team']) : '';
 
-        // Same authority as the portal itself: you must coach this team.
-        $my_teams = $this->get_my_teams($season);
-        if (!isset($my_teams[$team])) {
+        // Same authority as the portal itself: you coach this team, or
+        // have committee access (view is enough — the book is read only).
+        if (!$this->can_view_team($team, $season)) {
             return false;
         }
 
@@ -1995,7 +2135,7 @@ class TeamOversight_Coach_Portal {
     }
 
     private function render_applicant_book($team, $season) {
-        $my_team_codes = array_keys($this->get_my_teams($season));
+        $my_team_codes = array_keys($this->get_portal_teams($season));
 
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config($season);
@@ -2329,7 +2469,7 @@ class TeamOversight_Coach_Portal {
             <details class="coach-app-details">
                 <summary>Notes (<?php echo count($notes); ?>)</summary>
                 <?php foreach ($notes as $note): ?>
-                    <?php $is_mine = !empty($note['id']) && $note['author_id'] === get_current_user_id(); ?>
+                    <?php $is_mine = !$this->read_only && !empty($note['id']) && $note['author_id'] === get_current_user_id(); ?>
                     <div class="coach-note">
                         <strong><?php echo esc_html($note['author']); ?></strong> <small><?php echo esc_html($note['date']); ?><?php echo !empty($note['edited']) ? ' (edited)' : ''; ?></small><br><?php echo nl2br(esc_html($note['note'])); ?>
                         <?php if ($is_mine): ?>
@@ -2361,6 +2501,9 @@ class TeamOversight_Coach_Portal {
                         <?php endif; ?>
                     </div>
                 <?php endforeach; ?>
+                <?php if ($this->read_only): ?>
+                    <?php if (empty($notes)): ?><p class="coach-attendance-empty">No notes yet.</p><?php endif; ?>
+                <?php else: ?>
                 <form method="post" class="coach-note-form">
                     <input type="hidden" name="coach_action" value="add_note">
                     <input type="hidden" name="application_id" value="<?php echo intval($application_id); ?>">
@@ -2370,6 +2513,7 @@ class TeamOversight_Coach_Portal {
                     <textarea name="coach_note" rows="2" placeholder="Add a note visible to all coaches..." required></textarea>
                     <button type="submit" class="button button-small">Add Note</button>
                 </form>
+                <?php endif; ?>
             </details>
             <?php
         }

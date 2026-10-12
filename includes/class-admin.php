@@ -135,6 +135,15 @@ class TeamOversight_Admin {
 
         add_submenu_page(
             'team-oversight',
+            'Committee Access',
+            'Committee Access',
+            'manage_options',
+            'team-oversight-committee',
+            array('TeamOversight_Committee_Access', 'render_admin_page')
+        );
+
+        add_submenu_page(
+            'team-oversight',
             'Emails',
             'Emails',
             'manage_options',

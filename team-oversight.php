@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), and casual program attendance (Club Programs).
- * Version: 1.61.1
+ * Version: 1.62.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.61.1');
+define('TEAM_OVERSIGHT_VERSION', '1.62.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -256,6 +256,7 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-member-lookup.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-stats-page.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-programs.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-committee-access.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coach-portal.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-payments.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-readiness.php';
