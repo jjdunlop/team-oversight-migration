@@ -346,14 +346,19 @@ class TeamOversight_Coach_Portal {
         if (!is_user_logged_in() || $season === null || $season === '') {
             return array();
         }
-        $teams = array();
-        foreach ($this->get_my_teams($season) as $code => $role) {
+        // Each group in team-code order, the same as Configuration and the
+        // rego form (natural, so SL2M sorts before SL10M).
+        $teams = $this->get_my_teams($season);
+        ksort($teams, SORT_NATURAL | SORT_FLAG_CASE);
+        foreach ($teams as $code => $role) {
             $teams[$code] = array('role' => $role, 'coach' => true, 'edit' => true);
         }
         $level = TeamOversight_Committee_Access::get_level(get_current_user_id());
         if ($level !== '') {
             $database = new TeamOversight_Database();
-            foreach (array_keys($database->get_teams_config($season)) as $code) {
+            $all = $database->get_teams_config($season);
+            ksort($all, SORT_NATURAL | SORT_FLAG_CASE);
+            foreach (array_keys($all) as $code) {
                 if (!isset($teams[$code])) {
                     $teams[$code] = array('role' => 'committee', 'coach' => false, 'edit' => $level === 'edit');
                 }
