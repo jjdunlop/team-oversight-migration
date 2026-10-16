@@ -2046,7 +2046,7 @@ class TeamOversight_Admin {
 
                                 $fee_info = "Age: {$age} | {$institution_short} | {$degree_short} | {$status} → {$calculated_fee_class}";
                             }
-                            $breakdown_html = $breakdown_fees->render_fee_breakdown($breakdown_fees->fee_breakdown($invoice->email, $invoice->season), $invoice->invoice_amount);
+                            $breakdown_html = $breakdown_fees->render_fee_breakdown($breakdown_fees->fee_breakdown($invoice->email, $invoice->season), $invoice->invoice_amount, $invoice->season);
                         ?>
                             <tr data-invoice-id="<?php echo $invoice->id; ?>" data-team="<?php echo esc_attr($invoice->team_codes ?: ''); ?>" data-status="<?php echo $payment_status; ?>">
                                 <td><?php echo $invoice->id; ?></td>

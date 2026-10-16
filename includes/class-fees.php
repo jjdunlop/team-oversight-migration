@@ -127,6 +127,39 @@ class TeamOversight_Fees {
         return $result;
     }
 
+    /**
+     * Take back invoices issued for a season whose fees aren't released
+     * yet. Unpaid invoices are deleted (a fresh one is made on release).
+     * Invoices with money on them stay, re-priced to $0, so what was paid
+     * shows as credit; on release they're re-priced to the real fee and
+     * the credit comes off it. Never touches the payments ledger.
+     */
+    public function withdraw_unreleased_invoices($season) {
+        global $wpdb;
+        $result = array('deleted' => 0, 'credited' => 0, 'credit_total' => 0.0);
+        if (self::fees_released($season)) {
+            return $result;
+        }
+        $invoices = $wpdb->get_results($wpdb->prepare("SELECT id, user_id, email, invoice_amount FROM {$wpdb->prefix}team_invoices WHERE season = %s", $season));
+        foreach ($invoices as $invoice) {
+            $has_payments = (bool) $wpdb->get_var($wpdb->prepare("SELECT id FROM {$wpdb->prefix}team_invoice_payments WHERE invoice_id = %d LIMIT 1", $invoice->id));
+            if (!$has_payments) {
+                $wpdb->delete($wpdb->prefix . 'team_invoices', array('id' => $invoice->id), array('%d'));
+                $result['deleted']++;
+                TeamOversight_Log::add('fee_edit', $season . ' fee of $' . number_format($invoice->invoice_amount, 2) . ' removed (fees not released yet)', array('user_id' => intval($invoice->user_id)));
+                continue;
+            }
+            $wpdb->update($wpdb->prefix . 'team_invoices', array('invoice_amount' => 0), array('id' => $invoice->id), array('%f'), array('%d'));
+            TeamOversight_Payments::recompute_invoice($invoice->id);
+            $paid = TeamOversight_Payments::get_ledger_paid($invoice->id);
+            $result['credited']++;
+            $result['credit_total'] += $paid;
+            TeamOversight_Log::add('fee_edit', $season . ' fee of $' . number_format($invoice->invoice_amount, 2) . ' set to $0 until fees are released — $' . number_format($paid, 2) . ' already paid kept as credit', array('user_id' => intval($invoice->user_id)));
+        }
+        $result['credit_total'] = round($result['credit_total'], 2);
+        return $result;
+    }
+
     /** Daily: invoice any season whose release date has arrived and hasn't been applied yet. */
     public static function apply_due_releases() {
         $dates = get_option(self::RELEASE_OPTION, array());
@@ -449,11 +482,14 @@ class TeamOversight_Fees {
      * coaching credit at the bottom, then pro-rata and the total. Flags a
      * difference from the invoiced amount.
      */
-    public function render_fee_breakdown($breakdown, $invoice_amount = null) {
+    public function render_fee_breakdown($breakdown, $invoice_amount = null, $season = null) {
         $money = function ($n) { return '$' . number_format((float) $n, 2); };
         $date = function ($d) { return date('j M Y', strtotime($d)); };
         $stretches = $breakdown['stretches'];
-        $differs = $invoice_amount !== null && abs(floatval($invoice_amount) - $breakdown['total']) >= 0.01;
+        // Before release an invoice is expected not to match (it's $0 or
+        // left over): explain that instead of flagging it.
+        $unreleased = $season !== null && !self::fees_released($season);
+        $differs = !$unreleased && $invoice_amount !== null && abs(floatval($invoice_amount) - $breakdown['total']) >= 0.01;
 
         ob_start();
         ?>
@@ -496,6 +532,9 @@ class TeamOversight_Fees {
                 <?php if (!empty($stretches)): ?>
                     <p class="fee-breakdown-total"><strong>Season fee: <?php echo esc_html($money($breakdown['total'])); ?></strong>
                         <?php if (!$breakdown['has_dates']): ?><span class="description">(no season dates — no pro-rata)</span><?php endif; ?></p>
+                    <?php if ($unreleased): ?>
+                        <p class="description"><?php echo esc_html($season); ?> fees aren't released until <?php echo esc_html($date(self::get_fee_release_date($season))); ?> — this is what they'll be charged then<?php echo $invoice_amount !== null && floatval($invoice_amount) < 0.01 ? ', less anything already paid' : ''; ?>.</p>
+                    <?php endif; ?>
                     <?php if ($differs): ?>
                         <p class="fee-breakdown-warn">The invoice is <?php echo esc_html($money($invoice_amount)); ?>, which doesn't match this calculation. It updates the next time their teams change, or edit the season fee to correct it.</p>
                     <?php endif; ?>
@@ -995,9 +1034,15 @@ class TeamOversight_Fees {
         }
 
         // Fee release: a date, or release now.
-        if (isset($_POST['action']) && in_array($_POST['action'], array('save_fee_release', 'release_fees_now'), true)) {
+        if (isset($_POST['action']) && in_array($_POST['action'], array('save_fee_release', 'release_fees_now', 'withdraw_unreleased_invoices'), true)) {
             if (isset($_POST['fee_release_nonce']) && wp_verify_nonce($_POST['fee_release_nonce'], 'fee_release') && current_user_can('manage_options')) {
-                if ($_POST['action'] === 'release_fees_now') {
+                if ($_POST['action'] === 'withdraw_unreleased_invoices') {
+                    $result = $this->withdraw_unreleased_invoices($selected_season);
+                    echo '<div class="notice notice-success"><p><strong>' . esc_html($selected_season) . ' fees removed until release.</strong> '
+                        . intval($result['deleted']) . ' unpaid invoice(s) deleted'
+                        . ($result['credited'] ? '; ' . intval($result['credited']) . ' with payments set to $0, keeping $' . esc_html(number_format($result['credit_total'], 2)) . ' as credit — it comes off their fee on release' : '')
+                        . '.</p></div>';
+                } elseif ($_POST['action'] === 'release_fees_now') {
                     self::set_fee_release_date($selected_season, current_time('Y-m-d'));
                     $result = $this->apply_fees_for_season($selected_season);
                     TeamOversight_Log::add('fee_edit', sprintf('%s fees released now: %d invoiced, %d already invoiced, %d without a fee', $selected_season, $result['invoiced'], $result['updated'], count($result['missing'])));
@@ -1148,8 +1193,20 @@ class TeamOversight_Fees {
                         <strong>Released</strong> on <?php echo esc_html(date('j M Y', strtotime($release_date))); ?> — <?php echo intval($season_invoices); ?> invoice(s) for <?php echo intval($season_people); ?> people on teams.
                     <?php else: ?>
                         <strong>Not released yet</strong> — fees go out on <?php echo esc_html(date('j M Y', strtotime($release_date))); ?> to the <?php echo intval($season_people); ?> people on <?php echo esc_html($selected_season); ?> teams.
-                        <?php if ($season_invoices > 0): ?>
-                            <br><span style="color: #996800;"><?php echo intval($season_invoices); ?> <?php echo esc_html($selected_season); ?> invoice(s) already exist from before the release date was set. They're kept as they are — check them in Payment Management.</span>
+                        <?php
+                        $season_charged = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s AND invoice_amount > 0", $selected_season));
+                        $season_paid_people = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(DISTINCT i.id) FROM {$wpdb->prefix}team_invoices i JOIN {$wpdb->prefix}team_invoice_payments p ON p.invoice_id = i.id WHERE i.season = %s AND i.invoice_amount > 0", $selected_season));
+                        ?>
+                        <?php if ($season_charged > 0): ?>
+                            <br><span style="color: #996800;"><?php echo intval($season_charged); ?> <?php echo esc_html($selected_season); ?> invoice(s) were issued before the release date was set.</span>
+                            <form method="post" style="display: inline; margin-left: 6px;" onsubmit="return confirm('Remove the <?php echo intval($season_charged); ?> <?php echo esc_js($selected_season); ?> fee(s) until release?\n\nUnpaid invoices are deleted. <?php echo intval($season_paid_people); ?> with payments are set to $0 and what they paid is kept as credit, coming off their fee on release.');">
+                                <?php wp_nonce_field('fee_release', 'fee_release_nonce'); ?>
+                                <input type="hidden" name="action" value="withdraw_unreleased_invoices">
+                                <button type="submit" class="button">Remove <?php echo esc_html($selected_season); ?> fees until release</button>
+                            </form>
+                            <br><span class="description">Unpaid invoices are deleted<?php echo $season_paid_people ? '; ' . intval($season_paid_people) . ' with payments are set to $0 and the money is kept as credit' : ''; ?>. Everyone is invoiced afresh on <?php echo esc_html(date('j M Y', strtotime($release_date))); ?>, with any credit taken off.</span>
+                        <?php elseif ($season_invoices > 0): ?>
+                            <br><span class="description"><?php echo intval($season_invoices); ?> <?php echo esc_html($selected_season); ?> invoice(s) at $0 holding credit — re-priced on release with the credit taken off.</span>
                         <?php endif; ?>
                     <?php endif; ?>
                 </p>
@@ -1839,16 +1896,18 @@ class TeamOversight_Fees {
             WHERE (user_id = %d OR email = %s) AND season = %s
         ", $uid, $email, $season));
 
-        if ($existing_invoice) {
-            // Invoice already exists - update it if needed with new minimum fee calculation
-            return $this->update_existing_invoice($email, $season, $existing_invoice->id);
-        }
-
-        // Fees for this season not released yet: bill nothing, but keep the
-        // fee-role history so the invoice made on release is right.
+        // Fees for this season not released yet: bill nothing — no new
+        // invoice, and no re-pricing of one that exists (e.g. a withdrawn
+        // invoice holding a credit) — but keep the fee-role history so the
+        // invoice made on release is right.
         if (!self::fees_released($season)) {
             $this->checkpoint_fee_role($email, $season);
             return false;
+        }
+
+        if ($existing_invoice) {
+            // Invoice already exists - update it if needed with new minimum fee calculation
+            return $this->update_existing_invoice($email, $season, $existing_invoice->id);
         }
 
         // Get all active assignments for this user and season
