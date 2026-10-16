@@ -2014,8 +2014,8 @@ class TeamOversight_Coach_Portal {
 
     /**
      * The verdict dropdown's options (after "None"). While the trial fee is
-     * unpaid only Rejected can be picked; the others show as "after payment"
-     * and are disabled (handle_actions refuses them too). A verdict given
+     * unpaid only Rejected can be picked; the others show as "(Disabled)"
+     * and can't be chosen (handle_actions refuses them too). A verdict given
      * before this rule stays selected so the card shows the truth.
      */
     private static function render_verdict_options($current, $payment_pending) {
@@ -2023,7 +2023,7 @@ class TeamOversight_Coach_Portal {
         foreach (self::get_verdict_labels() as $key => $label) {
             $locked = $payment_pending && $key !== 'rejected' && $key !== $current;
             $html .= '<option value="' . esc_attr($key) . '"' . selected($current, $key, false) . ($locked ? ' disabled' : '') . '>'
-                . esc_html($label . ($locked ? ' (after payment)' : '')) . '</option>';
+                . esc_html($label . ($locked ? ' (Disabled)' : '')) . '</option>';
         }
         return $html;
     }
