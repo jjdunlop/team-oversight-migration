@@ -1246,11 +1246,13 @@ class TeamOversight_Coach_Portal {
             border: 1px solid #e0a86b;
         }
 
-        /* Free agent: no paperwork needed — calm green. */
+        /* Free agent: no paperwork needed. Soft pink — the one hue no
+           verdict or other chip uses, so it never reads as "Selected"
+           (green) on a card. */
         .chip-freeagent {
-            background: #e6f4ea;
-            color: #1a5c31;
-            border: 1px solid #9fcfae;
+            background: #fbeaf3;
+            color: #8c2361;
+            border: 1px solid #e2a5c7;
         }
 
         /* New to VVL: fresh blue. */
