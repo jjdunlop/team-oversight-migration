@@ -195,12 +195,325 @@ class TeamOversight_Fees {
         return ($end - $join_ts) / ($end - $start);
     }
 
+    // ------------------------------------------------------------------
+    // How a season fee is worked out (1.65.0)
+    //
+    // Every active assignment is a "bucket": team + role + fee class. The
+    // fee class can differ per team — an under-19 is JPL/YSL on a junior-
+    // league team and Junior U/19 (VVL) on any other team.
+    //  1. Pre-discount fee = the HIGHEST player bucket (playing member /
+    //     training only). Two player buckets never add up.
+    //  2. Coaching credit: coach / assistant coach / team manager /
+    //     supporter amounts in the matrix are what that person ends up
+    //     paying. With one or more of those roles, the fee drops to the
+    //     cheapest such rate (only the biggest credit applies); the credit
+    //     is the difference. Someone with no player role pays that rate.
+    //  3. Pro-rata: the fee-segment history records the buckets for each
+    //     stretch of the season; each stretch is charged for its share of
+    //     the season dates, and the stretches add up.
+    // fee_breakdown() is the one place this happens — invoices and the
+    // Payment Management breakdown both come from it.
+    // ------------------------------------------------------------------
+
+    const PLAYER_ROLES = array('playing_member', 'training_only');
+
+    /** Matrix lookups cached for the request (a page computing many breakdowns). */
+    private $rate_cache = null;
+
+    public function enable_rate_cache() {
+        $this->rate_cache = array();
+    }
+
+    private function rate($fee_class, $role, $season) {
+        if ($this->rate_cache === null) {
+            return $this->get_fee($fee_class, $role, $season);
+        }
+        if (!isset($this->rate_cache[$season])) {
+            global $wpdb;
+            $this->rate_cache[$season] = array();
+            foreach ($this->get_fee_matrix_for_season($season) as $row) {
+                $this->rate_cache[$season][$row->fee_class . '|' . $row->team_role] = $row->fee_amount;
+            }
+        }
+        $key = $fee_class . '|' . $role;
+        return isset($this->rate_cache[$season][$key]) ? $this->rate_cache[$season][$key] : null;
+    }
+
+    /** Is this a junior-league (JPL / YSL) team? By its age rule, or its code. */
+    public static function is_junior_league_team($team, $season) {
+        if (strpos($team, 'JPL') === 0 || strpos($team, 'YSL') === 0) {
+            return true;
+        }
+        $database = new TeamOversight_Database();
+        $config = $database->get_teams_config($season);
+        return isset($config[$team]) && $config[$team]['age_rule'] !== '';
+    }
+
     /**
-     * Record the player's current fee role (the cheapest role across their
-     * active assignments) as a dated segment. Called whenever assignments
-     * change: an unchanged role is a no-op; a change closes the open
-     * segment today and opens a new one, so mid-season role changes
-     * (training-only -> playing) charge each period at its own rate.
+     * The person's fee class ignoring teams: under 19 → Junior U/19 (VVL),
+     * then the same alumni / staff / student rules as determine_fee_class().
+     */
+    public function determine_person_fee_class($email, $season = null) {
+        $class = $this->determine_fee_class($email, $season);
+        return $class === 'JPL/YSL' ? 'Junior U/19 (VVL)' : $class;
+    }
+
+    /** Fee class for one team: juniors on a JPL/YSL team pay the JPL/YSL rates. */
+    public function fee_class_for_team($person_class, $team, $season) {
+        if ($person_class === 'Junior U/19 (VVL)' && self::is_junior_league_team($team, $season)) {
+            return 'JPL/YSL';
+        }
+        return $person_class;
+    }
+
+    /** The person's active buckets right now: list of array(team, role, class), sorted. */
+    public function current_buckets($email, $season) {
+        global $wpdb;
+        $uid = self::resolve_user_id($email);
+        $assignments = $wpdb->get_results($wpdb->prepare("
+            SELECT team, role FROM {$wpdb->prefix}team_assignments
+            WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
+        ", $uid, $email, $season));
+        if (empty($assignments)) {
+            return array();
+        }
+        $person_class = $this->determine_person_fee_class($email, $season);
+        $buckets = array();
+        foreach ($assignments as $a) {
+            $key = $a->team . '|' . $a->role;
+            $buckets[$key] = array('team' => $a->team, 'role' => $a->role, 'class' => $this->fee_class_for_team($person_class, $a->team, $season));
+        }
+        ksort($buckets);
+        return array_values($buckets);
+    }
+
+    /**
+     * Price one stretch's buckets: rate per bucket, the highest player
+     * bucket (pre-discount), the coaching credit, and the rate charged.
+     */
+    public function price_buckets($buckets, $season) {
+        $priced = array();
+        $player = null;
+        $staff = null;
+        $missing = false;
+        foreach ($buckets as $b) {
+            $rate = $this->rate($b['class'], $b['role'], $season);
+            $b['rate'] = $rate === null ? null : floatval($rate);
+            $b['player'] = in_array($b['role'], self::PLAYER_ROLES, true);
+            $priced[] = $b;
+            if ($b['rate'] === null) {
+                $missing = true;
+                continue;
+            }
+            if ($b['player'] && ($player === null || $b['rate'] > $player['rate'])) {
+                $player = $b;
+            }
+            if (!$b['player'] && ($staff === null || $b['rate'] < $staff['rate'])) {
+                $staff = $b;
+            }
+        }
+
+        $pre = $player ? $player['rate'] : null;
+        $charge = $pre;
+        $credit = 0.0;
+        if ($staff) {
+            if ($player === null) {
+                $charge = $staff['rate'];
+            } elseif ($staff['rate'] < $player['rate']) {
+                $charge = $staff['rate'];
+                $credit = round($player['rate'] - $staff['rate'], 2);
+            }
+        }
+
+        return array(
+            'buckets' => $priced,
+            'pre' => $pre,
+            'top_player' => $player,
+            'staff' => $staff,
+            'credit' => $credit,
+            'rate' => $charge === null ? 0.0 : $charge,
+            'missing' => $missing,
+        );
+    }
+
+    /**
+     * The full working for a person's season fee: the stretches of the
+     * season (from the fee-segment history, plus where their teams stand
+     * now if that hasn't been recorded yet), each priced, its share of the
+     * season and its amount, and the total. Reads only — never writes.
+     */
+    public function fee_breakdown($email, $season) {
+        global $wpdb;
+
+        $uid = self::resolve_user_id($email);
+        $segments = $wpdb->get_results($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}team_fee_segments
+            WHERE (user_id = %d OR email = %s) AND season = %s
+            ORDER BY start_date, id
+        ", $uid, $email, $season));
+
+        $legacy_class = null;
+        $today = current_time('Y-m-d');
+        $stretches = array();
+        foreach ($segments as $seg) {
+            if ($seg->buckets) {
+                $buckets = json_decode($seg->buckets, true);
+                $legacy = false;
+            } else {
+                // Segments recorded before 1.65.0 hold one fee role, priced
+                // at the person's single fee class, as they were then.
+                if ($legacy_class === null) {
+                    $legacy_class = $this->determine_fee_class($email, $season);
+                }
+                $buckets = array(array('team' => '', 'role' => $seg->fee_role, 'class' => $legacy_class));
+                $legacy = true;
+            }
+            $stretches[] = array('from' => $seg->start_date, 'to' => $seg->end_date, 'buckets' => is_array($buckets) ? $buckets : array(), 'legacy' => $legacy);
+        }
+
+        // Where their teams stand now, if the history hasn't caught up
+        // (shown as the stretch a checkpoint would record today).
+        $current = $this->current_buckets($email, $season);
+        $last = empty($stretches) ? null : $stretches[count($stretches) - 1];
+        $open = ($last && $last['to'] === null) ? $last : null;
+        if ($open && (empty($current) || $open['legacy'] || $open['buckets'] !== $current)) {
+            if ($open['from'] >= $today && !empty($current)) {
+                $stretches[count($stretches) - 1]['buckets'] = $current;
+                $stretches[count($stretches) - 1]['legacy'] = false;
+            } else {
+                $stretches[count($stretches) - 1]['to'] = $today;
+                if (!empty($current)) {
+                    $stretches[] = array('from' => $today, 'to' => null, 'buckets' => $current, 'legacy' => false);
+                }
+            }
+        } elseif (!$open && !empty($current)) {
+            $join = $wpdb->get_var($wpdb->prepare("
+                SELECT MIN(start_date) FROM {$wpdb->prefix}team_assignments
+                WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
+            ", $uid, $email, $season));
+            // Back on a team after their history closed: the new stretch
+            // starts no earlier than the last one ended (never overlaps).
+            $from = empty($stretches) ? ($join ?: $today) : max($today, $last['to']);
+            $stretches[] = array('from' => $from, 'to' => null, 'buckets' => $current, 'legacy' => false);
+        }
+
+        $dates = self::get_season_dates($season);
+        $result = array('has_dates' => (bool) $dates, 'season_start' => $dates ? $dates['start'] : '', 'season_end' => $dates ? $dates['end'] : '',
+            'season_days' => 0, 'stretches' => array(), 'total' => 0.0, 'missing' => false);
+        if (empty($stretches)) {
+            return $result;
+        }
+
+        if (!$dates || strtotime($dates['end']) <= strtotime($dates['start'])) {
+            // No season dates: the latest stretch's full fee (no pro-rata).
+            $s = $stretches[count($stretches) - 1];
+            $p = $this->price_buckets($s['buckets'], $season);
+            $result['stretches'][] = array_merge($s, $p, array('days' => 0, 'share' => 1.0, 'amount' => round($p['rate'], 2)));
+            $result['total'] = round($p['rate'], 2);
+            $result['missing'] = $p['missing'];
+            return $result;
+        }
+
+        $season_start = strtotime($dates['start']);
+        $season_end = strtotime($dates['end']);
+        $result['season_days'] = (int) round(($season_end - $season_start) / DAY_IN_SECONDS);
+        $total = 0.0;
+        foreach ($stretches as $s) {
+            $from = max($season_start, strtotime($s['from']));
+            $to = $s['to'] ? min($season_end, strtotime($s['to'])) : $season_end;
+            if ($to <= $from) {
+                continue; // entirely outside the season (e.g. before it starts)
+            }
+            $p = $this->price_buckets($s['buckets'], $season);
+            $share = ($to - $from) / ($season_end - $season_start);
+            $amount = $p['rate'] * $share;
+            $total += $amount;
+            $result['missing'] = $result['missing'] || $p['missing'];
+            $result['stretches'][] = array_merge($s, $p, array(
+                'from' => date('Y-m-d', $from), 'to' => date('Y-m-d', $to),
+                'days' => (int) round(($to - $from) / DAY_IN_SECONDS), 'share' => $share, 'amount' => round($amount, 2),
+            ));
+        }
+        $result['total'] = round($total, 2);
+        return $result;
+    }
+
+    /** "playing_member" → "Playing member". */
+    public static function role_label($role) {
+        return ucfirst(str_replace('_', ' ', $role));
+    }
+
+    /**
+     * The breakdown as a dropdown for the Payment Management table: each
+     * stretch's buckets with their rates, the highest player fee, the
+     * coaching credit at the bottom, then pro-rata and the total. Flags a
+     * difference from the invoiced amount.
+     */
+    public function render_fee_breakdown($breakdown, $invoice_amount = null) {
+        $money = function ($n) { return '$' . number_format((float) $n, 2); };
+        $date = function ($d) { return date('j M Y', strtotime($d)); };
+        $stretches = $breakdown['stretches'];
+        $differs = $invoice_amount !== null && abs(floatval($invoice_amount) - $breakdown['total']) >= 0.01;
+
+        ob_start();
+        ?>
+        <details class="fee-breakdown">
+            <summary>How it's worked out<?php if ($differs): ?> <span class="fee-breakdown-flag" title="The invoice doesn't match the current calculation">&#9888; <?php echo esc_html($money($breakdown['total'])); ?></span><?php endif; ?></summary>
+            <div class="fee-breakdown-body">
+                <?php if (empty($stretches)): ?>
+                    <p>No team assignments in this season's fee period.</p>
+                <?php endif; ?>
+                <?php foreach ($stretches as $i => $s): ?>
+                    <?php if (count($stretches) > 1 || ($breakdown['has_dates'] && $s['share'] < 0.9999)): ?>
+                        <p class="fee-breakdown-stretch"><strong><?php echo esc_html($date($s['from']) . ' – ' . $date($s['to'])); ?></strong> <span>(<?php echo intval($s['days']); ?> days)</span></p>
+                    <?php endif; ?>
+                    <ul>
+                        <?php foreach ($s['buckets'] as $b): ?>
+                            <li>
+                                <?php echo esc_html(($b['team'] !== '' ? $b['team'] . ' · ' : '') . $b['class'] . ' · ' . self::role_label($b['role'])); ?>
+                                — <?php echo $b['rate'] === null ? '<em>no amount in the fee matrix</em>' : esc_html($money($b['rate'])); ?>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <table class="fee-breakdown-sums">
+                        <?php if ($s['pre'] !== null): ?>
+                            <tr><td>Pre-discount fee (highest player fee<?php echo $s['top_player'] && $s['top_player']['team'] !== '' ? ', ' . esc_html($s['top_player']['team'] . ' ' . strtolower(self::role_label($s['top_player']['role']))) : ''; ?>)</td><td><?php echo esc_html($money($s['pre'])); ?></td></tr>
+                        <?php endif; ?>
+                        <?php if ($s['credit'] > 0): ?>
+                            <tr class="fee-breakdown-credit"><td><?php echo esc_html(self::role_label($s['staff']['role'])); ?> credit<?php echo $s['staff']['team'] !== '' ? ' (' . esc_html($s['staff']['team']) . ')' : ''; ?> — pays the <?php echo esc_html(strtolower(self::role_label($s['staff']['role']))); ?> rate of <?php echo esc_html($money($s['staff']['rate'])); ?></td><td>−<?php echo esc_html($money($s['credit'])); ?></td></tr>
+                        <?php elseif ($s['pre'] === null && $s['staff']): ?>
+                            <tr><td>No player role — pays the <?php echo esc_html(strtolower(self::role_label($s['staff']['role']))); ?> rate</td><td><?php echo esc_html($money($s['staff']['rate'])); ?></td></tr>
+                        <?php endif; ?>
+                        <tr><td>Fee<?php echo count($stretches) > 1 ? ' for this stretch' : ''; ?></td><td><?php echo esc_html($money($s['rate'])); ?></td></tr>
+                        <?php if ($breakdown['has_dates'] && $s['share'] < 0.9999): ?>
+                            <tr><td>Pro-rata: <?php echo intval($s['days']); ?> of <?php echo intval($breakdown['season_days']); ?> season days (<?php echo esc_html(number_format($s['share'] * 100, 1)); ?>%)</td><td><?php echo esc_html($money($s['amount'])); ?></td></tr>
+                        <?php endif; ?>
+                    </table>
+                    <?php if (!empty($s['legacy'])): ?>
+                        <p class="description">Recorded before per-team fee classes — priced at the person's single fee class.</p>
+                    <?php endif; ?>
+                <?php endforeach; ?>
+                <?php if (!empty($stretches)): ?>
+                    <p class="fee-breakdown-total"><strong>Season fee: <?php echo esc_html($money($breakdown['total'])); ?></strong>
+                        <?php if (!$breakdown['has_dates']): ?><span class="description">(no season dates — no pro-rata)</span><?php endif; ?></p>
+                    <?php if ($differs): ?>
+                        <p class="fee-breakdown-warn">The invoice is <?php echo esc_html($money($invoice_amount)); ?>, which doesn't match this calculation. It updates the next time their teams change, or edit the season fee to correct it.</p>
+                    <?php endif; ?>
+                    <?php if ($breakdown['missing']): ?>
+                        <p class="fee-breakdown-warn">Some roles have no amount in the fee matrix and were left out.</p>
+                    <?php endif; ?>
+                <?php endif; ?>
+            </div>
+        </details>
+        <?php
+        return ob_get_clean();
+    }
+
+    /**
+     * Record where the person's teams stand as a dated segment (all active
+     * buckets). Called whenever assignments change: unchanged buckets are a
+     * no-op; a change closes the open segment today and opens a new one, so
+     * mid-season changes charge each stretch at its own rate.
      */
     public function checkpoint_fee_role($email, $season) {
         global $wpdb;
@@ -233,22 +546,28 @@ class TeamOversight_Fees {
             return;
         }
 
-        // Cheapest fee role across their current roles (minimum-fee rule).
-        $fee_class = $this->determine_fee_class($email, $season);
-        $best_role = null;
-        $best_fee = null;
-        foreach (array_unique(wp_list_pluck($assignments, 'role')) as $role) {
-            $fee = $this->get_fee($fee_class, $role, $season);
-            if ($fee !== null && ($best_fee === null || floatval($fee) < floatval($best_fee))) {
-                $best_fee = $fee;
-                $best_role = $role;
-            }
-        }
-        if ($best_role === null) {
-            $best_role = $assignments[0]->role;
+        // Every active bucket, plus (for reports that read fee_role) the
+        // role that sets what they pay.
+        $buckets = $this->current_buckets($email, $season);
+        $signature = wp_json_encode($buckets);
+        $priced = $this->price_buckets($buckets, $season);
+        $best_role = $priced['staff'] && ($priced['top_player'] === null || $priced['credit'] > 0)
+            ? $priced['staff']['role']
+            : ($priced['top_player'] ? $priced['top_player']['role'] : $assignments[0]->role);
+
+        if ($open && $open->buckets === $signature) {
+            return;
         }
 
-        if ($open && $open->fee_role === $best_role) {
+        // Changed again on the day it started: just update that segment.
+        if ($open && $open->start_date >= $today) {
+            $wpdb->update(
+                $wpdb->prefix . 'team_fee_segments',
+                array('buckets' => $signature, 'fee_role' => $best_role),
+                array('id' => $open->id),
+                array('%s', '%s'),
+                array('%d')
+            );
             return;
         }
 
@@ -281,9 +600,10 @@ class TeamOversight_Fees {
                 'email' => $email,
                 'season' => $season,
                 'fee_role' => $best_role,
+                'buckets' => $signature,
                 'start_date' => $start,
             ),
-            array('%d', '%s', '%s', '%s', '%s')
+            array('%d', '%s', '%s', '%s', '%s', '%s')
         );
     }
 
@@ -294,47 +614,18 @@ class TeamOversight_Fees {
      * dates, the latest segment's full rate applies.
      */
     private function compute_segment_fee($email, $season, $fee_class) {
-        global $wpdb;
-
-        $uid = self::resolve_user_id($email);
-        $segments = $wpdb->get_results($wpdb->prepare("
-            SELECT * FROM {$wpdb->prefix}team_fee_segments
-            WHERE (user_id = %d OR email = %s) AND season = %s
-            ORDER BY start_date, id
-        ", $uid, $email, $season));
-
-        if (empty($segments)) {
+        $breakdown = $this->fee_breakdown($email, $season);
+        if (empty($breakdown['stretches'])) {
             return null;
         }
-
-        $dates = self::get_season_dates($season);
-        if (!$dates) {
-            $last = end($segments);
-            $fee = $this->get_fee($fee_class, $last->fee_role, $season);
-            return $fee !== null ? round(floatval($fee), 2) : null;
-        }
-
-        $season_start = strtotime($dates['start']);
-        $season_end = strtotime($dates['end']);
-        if ($season_end <= $season_start) {
-            return null;
-        }
-
-        $total = 0;
-        foreach ($segments as $segment) {
-            $rate = $this->get_fee($fee_class, $segment->fee_role, $season);
-            if ($rate === null) {
-                continue;
+        // Nothing priced at all (no matrix entries for any bucket): no fee.
+        $priced_any = false;
+        foreach ($breakdown['stretches'] as $s) {
+            if ($s['top_player'] || $s['staff']) {
+                $priced_any = true;
             }
-            $from = max($season_start, strtotime($segment->start_date));
-            $to = $segment->end_date ? min($season_end, strtotime($segment->end_date)) : $season_end;
-            if ($to <= $from) {
-                continue;
-            }
-            $total += floatval($rate) * ($to - $from) / ($season_end - $season_start);
         }
-
-        return round($total, 2);
+        return $priced_any ? $breakdown['total'] : null;
     }
 
     /**

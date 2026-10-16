@@ -1878,7 +1878,30 @@ class TeamOversight_Admin {
 
         $season_dates = TeamOversight_Fees::get_season_dates($season);
 
+        // One fees instance with matrix lookups cached: every row works out
+        // its fee breakdown.
+        $breakdown_fees = new TeamOversight_Fees();
+        $breakdown_fees->enable_rate_cache();
+
         ?>
+        <style>
+            #invoices-table .fee-info-cell { font-size: 11px; }
+            #invoices-table thead th:nth-child(5) { width: 320px; }
+            .fee-breakdown { margin-top: 4px; }
+            .fee-breakdown summary { cursor: pointer; color: #2271b1; font-size: 12px; }
+            .fee-breakdown-flag { color: #b32d2e; font-weight: 600; }
+            .fee-breakdown-body { margin-top: 6px; padding: 8px 10px; background: #f6f7f7; border: 1px solid #dcdcde; border-radius: 4px; font-size: 12px; min-width: 300px; }
+            .fee-breakdown-body ul { margin: 2px 0 6px 16px; list-style: disc; }
+            .fee-breakdown-body li { margin: 0; }
+            .fee-breakdown-stretch { margin: 8px 0 2px; }
+            .fee-breakdown-stretch:first-child { margin-top: 0; }
+            .fee-breakdown-sums { width: 100%; border-collapse: collapse; margin-bottom: 4px; }
+            .fee-breakdown-sums td { padding: 2px 0; vertical-align: top; }
+            .fee-breakdown-sums td:last-child { text-align: right; white-space: nowrap; padding-left: 10px; }
+            .fee-breakdown-credit td { color: #1e6b2a; }
+            .fee-breakdown-total { margin: 6px 0 0; padding-top: 6px; border-top: 1px solid #c3c4c7; }
+            .fee-breakdown-warn { margin: 6px 0 0; color: #b32d2e; }
+        </style>
         <div class="wrap">
             <h1>Payment Management</h1>
 
@@ -2017,19 +2040,20 @@ class TeamOversight_Admin {
                                     $status = 'Alumni';
                                 }
                                 
-                                // Calculate fee class using the updated logic
-                                $fees = new TeamOversight_Fees();
-                                $calculated_fee_class = $fees->determine_fee_class($invoice->email, $invoice->season);
-                                
+                                // The person's own class; juniors pay JPL/YSL
+                                // rates on junior-league teams (see breakdown).
+                                $calculated_fee_class = $breakdown_fees->determine_person_fee_class($invoice->email, $invoice->season);
+
                                 $fee_info = "Age: {$age} | {$institution_short} | {$degree_short} | {$status} → {$calculated_fee_class}";
                             }
+                            $breakdown_html = $breakdown_fees->render_fee_breakdown($breakdown_fees->fee_breakdown($invoice->email, $invoice->season), $invoice->invoice_amount);
                         ?>
                             <tr data-invoice-id="<?php echo $invoice->id; ?>" data-team="<?php echo esc_attr($invoice->team_codes ?: ''); ?>" data-status="<?php echo $payment_status; ?>">
                                 <td><?php echo $invoice->id; ?></td>
                                 <td><?php echo esc_html($invoice->name); ?></td>
                                 <td><?php echo esc_html($invoice->email); ?></td>
                                 <td><?php echo esc_html($invoice->team_codes ? str_replace('|', ', ', $invoice->team_codes) : 'N/A'); ?></td>
-                                <td style="font-size: 11px; max-width: 200px;" title="<?php echo esc_attr($fee_info); ?>"><?php echo esc_html($fee_info); ?></td>
+                                <td class="fee-info-cell"><span title="<?php echo esc_attr($fee_info); ?>"><?php echo esc_html($fee_info); ?></span><?php echo $breakdown_html; ?></td>
                                 <td class="editable-invoice-amount" data-field="invoice_amount" data-value="<?php echo esc_attr($invoice->invoice_amount); ?>">
                                     <span class="display-value">$<?php echo number_format($invoice->invoice_amount, 2); ?></span>
                                     <input type="number" class="edit-value" value="<?php echo $invoice->invoice_amount; ?>" step="0.01" min="0" style="display: none; width: 80px;">

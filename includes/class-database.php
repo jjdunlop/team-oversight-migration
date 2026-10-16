@@ -200,6 +200,15 @@ class TeamOversight_Database {
             ) $charset_collate;");
         }
 
+        // 1.65.0: each fee segment also records every active team bucket
+        // (team, role, fee class) as JSON, so the fee — highest player
+        // bucket, then the coaching credit — and its breakdown can be
+        // worked out per stretch. NULL on older segments (single fee_role).
+        $buckets_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_fee_segments LIKE 'buckets'");
+        if (empty($buckets_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}team_fee_segments ADD COLUMN buckets text DEFAULT NULL");
+        }
+
         // Fee payment ledger (added in 1.7.0): every payment applied to an
         // invoice, whether from an online order or recorded manually.
         $payments_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_invoice_payments'");
@@ -504,6 +513,7 @@ class TeamOversight_Database {
                 email varchar(255) NOT NULL,
                 season varchar(10) NOT NULL,
                 fee_role varchar(50) NOT NULL,
+                buckets text DEFAULT NULL,
                 start_date date NOT NULL,
                 end_date date DEFAULT NULL,
                 created_date datetime DEFAULT CURRENT_TIMESTAMP,
