@@ -2932,8 +2932,10 @@ class TeamOversight_Admin {
                 // Generate invoice
                 $fees = new TeamOversight_Fees();
                 $invoice_result = $fees->generate_invoice($trial->email, $trial->season);
-                
-                if (!$invoice_result) {
+
+                // Before the season's fee release date no invoice is
+                // expected — that's not a failure.
+                if (!$invoice_result && TeamOversight_Fees::fees_released($trial->season)) {
                     $errors[] = "Failed to generate invoice for {$trial->name}.";
                     $error_count++;
                     continue;
@@ -3098,6 +3100,8 @@ class TeamOversight_Admin {
                 
                 if ($invoice_result) {
                     echo '<div class="notice notice-success"><p>Team assignment added successfully and invoice generated.</p></div>';
+                } elseif (!TeamOversight_Fees::fees_released($season)) {
+                    echo '<div class="notice notice-success"><p>Team assignment added. ' . esc_html($season) . ' fees are released on ' . esc_html(date('j M Y', strtotime(TeamOversight_Fees::get_fee_release_date($season)))) . ', so they\'ll be invoiced then.</p></div>';
                 } else {
                     echo '<div class="notice notice-warning"><p>Team assignment added successfully but invoice could not be generated. Please check fee matrix configuration.</p></div>';
                 }

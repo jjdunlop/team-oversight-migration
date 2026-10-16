@@ -14,6 +14,8 @@ class TeamOversight_Fees {
         add_action('wp_ajax_update_team', array($this, 'update_team'));
         add_action('wp_ajax_delete_team', array($this, 'delete_team'));
         add_action('wp_ajax_reset_default_teams', array($this, 'reset_default_teams'));
+        // Fee release dates are checked once a day, on the membership cron.
+        add_action(TeamOversight_Memberships::CRON_HOOK, array(__CLASS__, 'apply_due_releases'));
     }
 
     /**
@@ -42,6 +44,102 @@ class TeamOversight_Fees {
             return $all[$season];
         }
         return null;
+    }
+
+    // ------------------------------------------------------------------
+    // Fee release (1.64.0): people can be put on next season's teams before
+    // that season's fees are known. Until the season's release date nobody
+    // is invoiced for it — assignments still record their fee-role history
+    // — and on the release date every assigned person is invoiced at once
+    // (daily cron, or "Release fees now"). Pro-rata still runs from the
+    // season start/end, so anyone added before the season starts pays the
+    // full season. No release date = released (the original behaviour).
+    // ------------------------------------------------------------------
+
+    const RELEASE_OPTION = 'team_oversight_fee_release';
+    const APPLIED_OPTION = 'team_oversight_fees_applied';
+
+    /** The season's fee release date ('YYYY-MM-DD'), or '' when none is set. */
+    public static function get_fee_release_date($season) {
+        $all = get_option(self::RELEASE_OPTION, array());
+        return (is_array($all) && !empty($all[$season])) ? $all[$season] : '';
+    }
+
+    /** Are this season's fees being charged yet? */
+    public static function fees_released($season) {
+        $date = self::get_fee_release_date($season);
+        return $date === '' || current_time('Y-m-d') >= $date;
+    }
+
+    /** Set (or with '' clear) a season's release date. A new date re-arms the release. */
+    public static function set_fee_release_date($season, $date) {
+        $all = get_option(self::RELEASE_OPTION, array());
+        $all = is_array($all) ? $all : array();
+        $applied = get_option(self::APPLIED_OPTION, array());
+        $applied = is_array($applied) ? $applied : array();
+        if ($date === '') {
+            unset($all[$season]);
+        } else {
+            $all[$season] = $date;
+        }
+        unset($applied[$season]);
+        update_option(self::RELEASE_OPTION, $all, false);
+        update_option(self::APPLIED_OPTION, $applied, false);
+    }
+
+    /**
+     * Invoice everyone with an active assignment in the season (an existing
+     * invoice is just re-priced, so running this twice is a no-op). Returns
+     * counts plus the people whose fee couldn't be worked out (missing fee
+     * matrix entries).
+     */
+    public function apply_fees_for_season($season) {
+        global $wpdb;
+        $people = $wpdb->get_results($wpdb->prepare("
+            SELECT MAX(user_id) AS user_id, email FROM {$wpdb->prefix}team_assignments
+            WHERE season = %s AND is_active = 1
+            GROUP BY email
+        ", $season));
+
+        $result = array('invoiced' => 0, 'updated' => 0, 'missing' => array());
+        $seen = array();
+        foreach ($people as $person) {
+            $uid = intval($person->user_id) > 0 ? intval($person->user_id) : self::resolve_user_id($person->email);
+            $key = $uid > 0 ? 'u' . $uid : strtolower($person->email);
+            if (isset($seen[$key])) {
+                continue; // one person, several emails over time
+            }
+            $seen[$key] = true;
+            $had = $wpdb->get_var($wpdb->prepare("
+                SELECT id FROM {$wpdb->prefix}team_invoices WHERE (user_id = %d OR email = %s) AND season = %s
+            ", $uid, $person->email, $season));
+            if ($this->generate_invoice($person->email, $season)) {
+                $result[$had ? 'updated' : 'invoiced']++;
+            } else {
+                $result['missing'][] = $person->email;
+            }
+        }
+
+        $applied = get_option(self::APPLIED_OPTION, array());
+        $applied = is_array($applied) ? $applied : array();
+        $applied[$season] = current_time('Y-m-d');
+        update_option(self::APPLIED_OPTION, $applied, false);
+        return $result;
+    }
+
+    /** Daily: invoice any season whose release date has arrived and hasn't been applied yet. */
+    public static function apply_due_releases() {
+        $dates = get_option(self::RELEASE_OPTION, array());
+        $applied = get_option(self::APPLIED_OPTION, array());
+        if (!is_array($dates)) {
+            return;
+        }
+        foreach ($dates as $season => $date) {
+            if (self::fees_released($season) && empty($applied[$season])) {
+                $result = (new self())->apply_fees_for_season($season);
+                TeamOversight_Log::add('fee_edit', sprintf('%s fees released (%s): %d invoiced, %d already invoiced, %d without a fee', $season, $date, $result['invoiced'], $result['updated'], count($result['missing'])));
+            }
+        }
     }
 
     /**
@@ -355,22 +453,49 @@ class TeamOversight_Fees {
         
         global $wpdb;
         
-        $fees = $_POST['fees'] ?? array();
+        $fees = isset($_POST['fees']) && is_array($_POST['fees']) ? wp_unslash($_POST['fees']) : array();
+        $new_fees = isset($_POST['new_fees']) && is_array($_POST['new_fees']) ? wp_unslash($_POST['new_fees']) : array();
         $season = sanitize_text_field($_POST['season'] ?? date('Y'));
-        
+        $table = $wpdb->prefix . 'fee_matrix';
+
         // Update fees for the specific season only
         foreach ($fees as $fee_id => $fee_amount) {
-            $fee_amount = floatval($fee_amount);
+            if (trim((string) $fee_amount) === '') {
+                continue;
+            }
             $wpdb->update(
-                $wpdb->prefix . 'fee_matrix',
-                array('fee_amount' => $fee_amount),
+                $table,
+                array('fee_amount' => max(0, floatval($fee_amount))),
                 array('id' => intval($fee_id), 'season' => $season, 'is_active' => 1),
                 array('%f'),
                 array('%d', '%s', '%d')
             );
         }
-        
-        wp_send_json_success('Fees updated successfully for ' . $season . ' season');
+
+        // Grid cells that had no amount yet (a new season, or a class/role
+        // combination missing from the matrix). Blank cells stay blank; a
+        // combination that already exists is updated, never duplicated.
+        $inserted = 0;
+        $version = $wpdb->get_var($wpdb->prepare("SELECT version FROM $table WHERE season = %s AND is_active = 1 LIMIT 1", $season));
+        $version = $version ?: 'grid-' . $season . '-' . time();
+        foreach ($new_fees as $cell) {
+            if (!is_array($cell) || !isset($cell['class'], $cell['role'], $cell['amount']) || trim((string) $cell['amount']) === '') {
+                continue;
+            }
+            $class = sanitize_text_field($cell['class']);
+            $role = sanitize_key($cell['role']);
+            $amount = max(0, floatval($cell['amount']));
+            $existing = $wpdb->get_var($wpdb->prepare("SELECT id FROM $table WHERE season = %s AND fee_class = %s AND team_role = %s AND is_active = 1", $season, $class, $role));
+            if ($existing) {
+                $wpdb->update($table, array('fee_amount' => $amount), array('id' => $existing), array('%f'), array('%d'));
+            } else {
+                $wpdb->insert($table, array('version' => $version, 'season' => $season, 'fee_class' => $class, 'team_role' => $role, 'fee_amount' => $amount, 'is_active' => 1),
+                    array('%s', '%s', '%s', '%s', '%f', '%d'));
+                $inserted++;
+            }
+        }
+
+        wp_send_json_success(array('message' => 'Fees updated successfully for ' . $season . ' season', 'inserted' => $inserted));
     }
     
     public function save_version() {
@@ -577,7 +702,52 @@ class TeamOversight_Fees {
                 echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
             }
         }
-        
+
+        // Fee release: a date, or release now.
+        if (isset($_POST['action']) && in_array($_POST['action'], array('save_fee_release', 'release_fees_now'), true)) {
+            if (isset($_POST['fee_release_nonce']) && wp_verify_nonce($_POST['fee_release_nonce'], 'fee_release') && current_user_can('manage_options')) {
+                if ($_POST['action'] === 'release_fees_now') {
+                    self::set_fee_release_date($selected_season, current_time('Y-m-d'));
+                    $result = $this->apply_fees_for_season($selected_season);
+                    TeamOversight_Log::add('fee_edit', sprintf('%s fees released now: %d invoiced, %d already invoiced, %d without a fee', $selected_season, $result['invoiced'], $result['updated'], count($result['missing'])));
+                    echo '<div class="notice notice-success"><p><strong>' . esc_html($selected_season) . ' fees released.</strong> ' . intval($result['invoiced']) . ' new invoice(s), ' . intval($result['updated']) . ' existing invoice(s) re-priced.</p>'
+                        . (!empty($result['missing']) ? '<p>No fee could be worked out for ' . count($result['missing']) . ' person(s) — check every fee class and role has an amount in the matrix, then release again: ' . esc_html(implode(', ', $result['missing'])) . '</p>' : '')
+                        . '</div>';
+                } else {
+                    $date = isset($_POST['fee_release_date']) ? sanitize_text_field(wp_unslash($_POST['fee_release_date'])) : '';
+                    if ($date !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+                        echo '<div class="notice notice-error"><p>Please pick a valid release date.</p></div>';
+                    } else {
+                        self::set_fee_release_date($selected_season, $date);
+                        TeamOversight_Log::add('fee_edit', $date === '' ? $selected_season . ' fee release date cleared (fees charged straight away)' : $selected_season . ' fee release date set to ' . $date);
+                        if ($date === '') {
+                            echo '<div class="notice notice-success"><p>Release date cleared — ' . esc_html($selected_season) . ' fees are charged as people are added to teams.</p></div>';
+                        } elseif (self::fees_released($selected_season)) {
+                            $result = $this->apply_fees_for_season($selected_season);
+                            echo '<div class="notice notice-success"><p>Release date set to ' . esc_html(date('j M Y', strtotime($date))) . ', which has passed, so fees were applied: ' . intval($result['invoiced']) . ' new invoice(s), ' . intval($result['updated']) . ' re-priced.</p></div>';
+                        } else {
+                            echo '<div class="notice notice-success"><p>' . esc_html($selected_season) . ' fees will be released on ' . esc_html(date('j M Y', strtotime($date))) . '. Until then nobody is invoiced for ' . esc_html($selected_season) . '; on that date everyone on a team is invoiced automatically.</p></div>';
+                        }
+                    }
+                }
+            } else {
+                echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            }
+        }
+
+        // Start an empty season's fee matrix from another season's amounts.
+        if (isset($_POST['action']) && $_POST['action'] === 'copy_fee_matrix') {
+            if (isset($_POST['copy_fees_nonce']) && wp_verify_nonce($_POST['copy_fees_nonce'], 'copy_fee_matrix') && current_user_can('manage_options')) {
+                $from = isset($_POST['copy_from']) ? sanitize_text_field(wp_unslash($_POST['copy_from'])) : '';
+                $copied = $this->copy_fee_matrix($from, $selected_season);
+                echo $copied
+                    ? '<div class="notice notice-success"><p>Copied ' . intval($copied) . ' fees from ' . esc_html($from) . ' into ' . esc_html($selected_season) . ' — update any amounts that change and save.</p></div>'
+                    : '<div class="notice notice-error"><p>Nothing copied — ' . esc_html($selected_season) . ' already has fees, or ' . esc_html($from) . ' has none.</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            }
+        }
+
         $fee_matrix = $this->get_fee_matrix_for_season($selected_season);
         
         // Get available seasons for the dropdown
@@ -659,74 +829,121 @@ class TeamOversight_Fees {
                         <span class="description" style="margin-left: 10px; color: #996800;">No dates set — fees are charged in full and nothing shows as overdue.</span>
                     <?php endif; ?>
                 </form>
+
+                <?php
+                $release_date = self::get_fee_release_date($selected_season);
+                $released = self::fees_released($selected_season);
+                global $wpdb;
+                $season_invoices = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s", $selected_season));
+                $season_people = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(DISTINCT email) FROM {$wpdb->prefix}team_assignments WHERE season = %s AND is_active = 1", $selected_season));
+                ?>
+                <h3 style="margin: 18px 0 4px;">Fee release</h3>
+                <p class="description" style="margin-top: 0;">People can be put on <?php echo esc_html($selected_season); ?> teams before the <?php echo esc_html($selected_season); ?> fees are known. Until the release date nobody is invoiced for <?php echo esc_html($selected_season); ?>; on that date everyone on a team is invoiced automatically, and anyone added afterwards is invoiced straight away. Pro-rata still runs from the season start, so people added before then pay the full season.</p>
+                <form method="post" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px;">
+                    <?php wp_nonce_field('fee_release', 'fee_release_nonce'); ?>
+                    <input type="hidden" name="action" value="save_fee_release">
+                    <label>Release fees on
+                        <input type="date" name="fee_release_date" value="<?php echo esc_attr($release_date); ?>">
+                    </label>
+                    <button type="submit" class="button">Save release date</button>
+                    <?php if (!$released): ?>
+                        <button type="submit" class="button button-primary" name="action" value="release_fees_now" onclick="return confirm('Release <?php echo esc_js($selected_season); ?> fees now? Everyone on a <?php echo esc_js($selected_season); ?> team (<?php echo intval($season_people); ?> people) is invoiced straight away.');">Release fees now</button>
+                    <?php endif; ?>
+                </form>
+                <p style="margin: 8px 0 0;">
+                    <?php if ($release_date === ''): ?>
+                        <strong>No release date</strong> — <?php echo esc_html($selected_season); ?> fees are charged as soon as people are added to teams.
+                    <?php elseif ($released): ?>
+                        <strong>Released</strong> on <?php echo esc_html(date('j M Y', strtotime($release_date))); ?> — <?php echo intval($season_invoices); ?> invoice(s) for <?php echo intval($season_people); ?> people on teams.
+                    <?php else: ?>
+                        <strong>Not released yet</strong> — fees go out on <?php echo esc_html(date('j M Y', strtotime($release_date))); ?> to the <?php echo intval($season_people); ?> people on <?php echo esc_html($selected_season); ?> teams.
+                        <?php if ($season_invoices > 0): ?>
+                            <br><span style="color: #996800;"><?php echo intval($season_invoices); ?> <?php echo esc_html($selected_season); ?> invoice(s) already exist from before the release date was set. They're kept as they are — check them in Payment Management.</span>
+                        <?php endif; ?>
+                    <?php endif; ?>
+                </p>
             </div>
 
-            <!-- Configuration Content with Side-by-Side Layout -->
-            <div style="display: flex; gap: 30px; align-items: flex-start;">
-                
-                <!-- Left Column: Fee Matrix -->
-                <div style="flex: 1; min-width: 500px;">
+            <!-- Fee matrix: full width (it's a grid), then teams -->
+            <div style="display: flex; flex-wrap: wrap; gap: 30px; align-items: flex-start;">
+
+                <div style="flex: 1 1 100%;">
                     <h2>Fee Matrix</h2>
-                    
+                    <?php $grid = $this->get_fee_grid($selected_season); ?>
+
                     <?php if (empty($fee_matrix)): ?>
-                        <!-- No fee matrix exists for this season, show import option -->
-                        <div class="notice notice-warning">
-                            <p><strong>No fee matrix found for <?php echo esc_html($selected_season); ?> season.</strong> Import the Price Matrix CSV to create one for this season.</p>
+                        <div class="notice notice-warning inline">
+                            <p><strong>No fees set for <?php echo esc_html($selected_season); ?> yet.</strong> Type the amounts into the grid and save, or start from another season's amounts.</p>
                         </div>
-                        
-                        <form method="post">
-                            <input type="hidden" name="action" value="import_price_matrix">
-                            <input type="hidden" name="season" value="<?php echo esc_attr($selected_season); ?>">
-                            <p>
-                                <input type="submit" class="button button-primary" value="Import Price Matrix for <?php echo esc_html($selected_season); ?>">
-                                <span class="description">Imports from price-matrix.csv in the plugin directory</span>
-                            </p>
-                        </form>
-                        
-                    <?php else: ?>
-                        
-                        <!-- Fee Configuration Editor -->
-                        <form id="fee-matrix-form">
-                            <?php wp_nonce_field('save_fee_matrix', 'fee_nonce'); ?>
-                            <input type="hidden" name="season" value="<?php echo esc_attr($selected_season); ?>">
-                            
-                            <div class="fee-matrix-actions" style="margin-bottom: 20px;">
-                                <button type="button" id="save-fees" class="button button-primary" onclick="saveFees()">Save Changes</button>
-                                <div id="save-status" style="display: inline-block; margin-left: 10px;"></div>
-                            </div>
-                            
-                            <table class="wp-list-table widefat fixed striped">
+                        <?php
+                        $copy_sources = array();
+                        foreach ($available_seasons as $s) {
+                            if ($s !== $selected_season && !empty($this->get_fee_matrix_for_season($s))) {
+                                $copy_sources[] = $s;
+                            }
+                        }
+                        ?>
+                        <?php if (!empty($copy_sources)): ?>
+                            <form method="post" style="margin: 10px 0; display: flex; align-items: center; gap: 8px;">
+                                <?php wp_nonce_field('copy_fee_matrix', 'copy_fees_nonce'); ?>
+                                <input type="hidden" name="action" value="copy_fee_matrix">
+                                <label>Copy amounts from
+                                    <select name="copy_from">
+                                        <?php foreach ($copy_sources as $s): ?>
+                                            <option value="<?php echo esc_attr($s); ?>"><?php echo esc_html($s); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </label>
+                                <button type="submit" class="button">Copy</button>
+                            </form>
+                        <?php endif; ?>
+                    <?php endif; ?>
+
+                    <form id="fee-matrix-form">
+                        <?php wp_nonce_field('save_fee_matrix', 'fee_nonce'); ?>
+                        <input type="hidden" name="season" value="<?php echo esc_attr($selected_season); ?>">
+
+                        <p class="description">Each person pays the amount for their fee class and their <strong>cheapest</strong> role across their teams. A blank cell has no fee set.</p>
+                        <div style="overflow-x: auto;">
+                            <table class="wp-list-table widefat striped fee-grid">
                                 <thead>
                                     <tr>
-                                        <th>Fee Class</th>
-                                        <th>Team Role</th>
-                                        <th>Fee Amount ($)</th>
+                                        <th>Fee class</th>
+                                        <?php foreach ($grid['roles'] as $role): ?>
+                                            <th><?php echo esc_html(ucfirst(str_replace('_', ' ', $role))); ?></th>
+                                        <?php endforeach; ?>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <?php foreach ($fee_matrix as $fee): ?>
+                                    <?php $n = 0; ?>
+                                    <?php foreach ($grid['classes'] as $class): ?>
                                         <tr>
-                                            <td><strong><?php echo esc_html($fee->fee_class); ?></strong></td>
-                                            <td><?php echo esc_html($fee->team_role); ?></td>
-                                            <td>
-                                                $<input type="number" 
-                                                       name="fees[<?php echo $fee->id; ?>]" 
-                                                       value="<?php echo number_format($fee->fee_amount, 2, '.', ''); ?>" 
-                                                       step="0.01" 
-                                                       min="0" 
-                                                       style="width: 80px; text-align: right;"
-                                                       onchange="markChanged()">
-                                            </td>
+                                            <th scope="row"><strong><?php echo esc_html($class); ?></strong></th>
+                                            <?php foreach ($grid['roles'] as $role): ?>
+                                                <?php $cell = isset($grid['cells'][$class][$role]) ? $grid['cells'][$class][$role] : null; ?>
+                                                <td>
+                                                    <span class="fee-cell">$<?php if ($cell): ?><input type="number" name="fees[<?php echo intval($cell->id); ?>]" value="<?php echo esc_attr(number_format($cell->fee_amount, 2, '.', '')); ?>" step="0.01" min="0" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role); ?>"><?php else: ?><input type="hidden" name="new_fees[<?php echo $n; ?>][class]" value="<?php echo esc_attr($class); ?>"><input type="hidden" name="new_fees[<?php echo $n; ?>][role]" value="<?php echo esc_attr($role); ?>"><input type="number" name="new_fees[<?php echo $n; ?>][amount]" value="" step="0.01" min="0" placeholder="—" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role); ?>"><?php $n++; endif; ?></span>
+                                                </td>
+                                            <?php endforeach; ?>
                                         </tr>
                                     <?php endforeach; ?>
                                 </tbody>
                             </table>
-                        </form>
-                        
-                    <?php endif; ?>
+                        </div>
+
+                        <div class="fee-matrix-actions" style="margin-top: 12px;">
+                            <button type="button" id="save-fees" class="button button-primary" onclick="saveFees()">Save Changes</button>
+                            <div id="save-status" style="display: inline-block; margin-left: 10px;"></div>
+                        </div>
+                    </form>
+                    <style>
+                        .fee-grid th, .fee-grid td { white-space: nowrap; vertical-align: middle; }
+                        .fee-grid .fee-cell { display: inline-flex; align-items: center; gap: 2px; }
+                        .fee-grid input[type=number] { width: 84px; text-align: right; }
+                    </style>
                 </div>
-                
-                <!-- Right Column: Team Management -->
+
+                <!-- Team Management -->
                 <div style="flex: 1; min-width: 500px;">
                     <h2>Team Management</h2>
                     
@@ -883,6 +1100,12 @@ class TeamOversight_Fees {
                     statusDiv.style.color = '#0073aa';
                     document.getElementById('save-fees').style.background = '';
                     hasChanges = false;
+                    // Newly filled cells become real matrix rows: reload so
+                    // the next save updates them rather than adding again.
+                    if (data.data && data.data.inserted > 0) {
+                        window.location.reload();
+                        return;
+                    }
                 } else {
                     statusDiv.textContent = '✗ Error: ' + (data.data || 'Unknown error');
                     statusDiv.style.color = '#dc3232';
@@ -1192,6 +1415,64 @@ class TeamOversight_Fees {
         return $filtered_seasons;
     }
 
+    /** Fee classes, most common first — the grid's rows. */
+    public static function standard_fee_classes() {
+        return array('Full Adult', 'Melb Uni Student', 'Other Student', 'Junior U/19 (VVL)', 'JPL/YSL', 'Unknown');
+    }
+
+    /** Team roles, players first — the grid's columns. */
+    public static function standard_fee_roles() {
+        return array('playing_member', 'training_only', 'team_manager', 'coach', 'assistant_coach', 'supporter');
+    }
+
+    /** Preferred order first, then anything else found, alphabetically. */
+    private static function order_like($found, $preferred) {
+        $extra = array_diff($found, $preferred);
+        sort($extra);
+        return array_merge(array_values(array_intersect($preferred, $found)), $extra);
+    }
+
+    /**
+     * The season's fee matrix as a grid: rows = fee classes, columns = team
+     * roles, cell = the matrix row (or null when that combination has no
+     * amount yet). An empty season gets the standard rows and columns.
+     */
+    public function get_fee_grid($season) {
+        $cells = array();
+        foreach ($this->get_fee_matrix_for_season($season) as $fee) {
+            $cells[$fee->fee_class][$fee->team_role] = $fee;
+        }
+        $classes = array_keys($cells);
+        $roles = array();
+        foreach ($cells as $by_role) {
+            $roles = array_merge($roles, array_keys($by_role));
+        }
+        $classes = empty($classes) ? self::standard_fee_classes() : self::order_like($classes, self::standard_fee_classes());
+        $roles = empty($roles) ? self::standard_fee_roles() : self::order_like(array_unique($roles), self::standard_fee_roles());
+        return array('classes' => $classes, 'roles' => $roles, 'cells' => $cells);
+    }
+
+    /** Copy one season's active fees into a season that has none. Returns rows copied. */
+    public function copy_fee_matrix($from, $to) {
+        global $wpdb;
+        if ($from === '' || $from === $to || !empty($this->get_fee_matrix_for_season($to))) {
+            return 0;
+        }
+        $version = 'copied-' . $from . '-' . $to . '-' . time();
+        $n = 0;
+        foreach ($this->get_fee_matrix_for_season($from) as $fee) {
+            $wpdb->insert($wpdb->prefix . 'fee_matrix', array(
+                'version' => $version, 'season' => $to, 'fee_class' => $fee->fee_class,
+                'team_role' => $fee->team_role, 'fee_amount' => $fee->fee_amount, 'is_active' => 1,
+            ), array('%s', '%s', '%s', '%s', '%f', '%d'));
+            $n++;
+        }
+        if ($n) {
+            TeamOversight_Log::add('fee_edit', 'Fee matrix for ' . $to . ' copied from ' . $from . ' (' . $n . ' amounts)');
+        }
+        return $n;
+    }
+
     public function get_fee_matrix_for_season($season) {
         global $wpdb;
         
@@ -1270,6 +1551,13 @@ class TeamOversight_Fees {
         if ($existing_invoice) {
             // Invoice already exists - update it if needed with new minimum fee calculation
             return $this->update_existing_invoice($email, $season, $existing_invoice->id);
+        }
+
+        // Fees for this season not released yet: bill nothing, but keep the
+        // fee-role history so the invoice made on release is right.
+        if (!self::fees_released($season)) {
+            $this->checkpoint_fee_role($email, $season);
+            return false;
         }
 
         // Get all active assignments for this user and season
