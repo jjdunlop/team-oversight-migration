@@ -458,6 +458,11 @@ class TeamOversight_Coach_Portal {
         $active_config = isset($teams_config[$active_team]) ? $teams_config[$active_team] : array('name' => $active_team, 'gender' => 'mixed', 'age_rule' => '');
         $roster = $this->get_roster($active_team, $season);
         $selection_roster = $this->get_selection_roster($active_team, $season, $roster);
+        // Unpaid players to the bottom of the board, keeping its order otherwise.
+        $selection_roster = array_merge(
+            array_values(array_filter($selection_roster, function ($m) { return !isset($m->application_status) || $m->application_status !== 'awaiting_payment'; })),
+            array_values(array_filter($selection_roster, function ($m) { return isset($m->application_status) && $m->application_status === 'awaiting_payment'; }))
+        );
         $last_season_members = $this->get_last_season_team_members($active_team, $season);
         $applicants = $this->get_applicants_by_gender($active_config['gender'], $season, $active_team, $my_team_codes);
 
@@ -695,9 +700,7 @@ class TeamOversight_Coach_Portal {
                                         <label class="cac-verdict-label"><?php echo $active_access['coach'] ? 'My verdict:' : 'Team verdict:'; ?>
                                             <select name="selection_status" onchange="if (window.murvcCoachVerdict) { window.murvcCoachVerdict(this); } else { this.form.submit(); }">
                                                 <option value="clear">&mdash; None &mdash;</option>
-                                                <?php foreach (self::get_verdict_labels() as $status_key => $status_label): ?>
-                                                    <option value="<?php echo esc_attr($status_key); ?>" <?php selected($member->status, $status_key); ?>><?php echo esc_html($status_label); ?></option>
-                                                <?php endforeach; ?>
+                                                <?php echo self::render_verdict_options($member->status, isset($member->application_status) && $member->application_status === 'awaiting_payment'); ?>
                                             </select>
                                         </label>
                                         <noscript><button type="submit" class="button button-small">Save</button></noscript>
@@ -722,7 +725,7 @@ class TeamOversight_Coach_Portal {
 
             <div class="coach-team-section">
                 <h3>Trial Applicants — <?php echo $active_config['gender'] === 'womens' ? "Women's" : ($active_config['gender'] === 'mens' ? "Men's" : 'All'); ?> (<?php echo count($applicants); ?>)</h3>
-                <p class="coach-portal-hint">Every applicant in this competition is shown — including players outside your age group or who selected other teams, since players get redirected between trials and VV can grant age exemptions. Your verdicts apply to <strong><?php echo esc_html($active_config['name']); ?></strong> only; a player can be Selected by multiple teams (e.g. YSL and JPL) and every coach sees every team's verdicts. Selected players become official (team assignment + fees) when the club finalises selections. Applicants marked <strong>Payment pending</strong> haven't paid their trial fee yet — trial and assess them as normal, but they won't be finalised onto a team until it's paid.</p>
+                <p class="coach-portal-hint">Every applicant in this competition is shown — including players outside your age group or who selected other teams, since players get redirected between trials and VV can grant age exemptions. Your verdicts apply to <strong><?php echo esc_html($active_config['name']); ?></strong> only; a player can be Selected by multiple teams (e.g. YSL and JPL) and every coach sees every team's verdicts. Selected players become official (team assignment + fees) when the club finalises selections. Applicants marked <strong>Payment pending</strong> haven't paid their trial fee yet — you can see and assess them and reject them, but Tentative, Selected and Training Only open once it's paid. They're listed at the bottom of each section.</p>
 
                 <?php // Trial book first, so the search sits directly above the list it filters (matters on a phone). ?>
                 <?php if (!empty($applicants)): ?>
@@ -758,20 +761,28 @@ class TeamOversight_Coach_Portal {
                             $others[] = $a;
                         }
                     }
+                    // In every section, unpaid (Payment pending) applicants
+                    // go to the bottom, then each section's own order.
+                    $unpaid_last = function ($x, $y) {
+                        return (empty($x['payment_pending']) ? 0 : 1) - (empty($y['payment_pending']) ? 0 : 1);
+                    };
+                    usort($needs_action, function ($x, $y) use ($unpaid_last) {
+                        return $unpaid_last($x, $y) ?: $x['trial_number'] - $y['trial_number'];
+                    });
                     // Verdict recorded: grouped by the verdict, strongest
                     // first, then by trial number within each verdict.
                     $verdict_rank = array('selected' => 0, 'tentative' => 1, 'training_only' => 2, 'rejected' => 3);
-                    usort($actioned, function ($x, $y) use ($verdict_rank) {
+                    usort($actioned, function ($x, $y) use ($verdict_rank, $unpaid_last) {
                         $rx = isset($verdict_rank[$x['my_status']]) ? $verdict_rank[$x['my_status']] : 9;
                         $ry = isset($verdict_rank[$y['my_status']]) ? $verdict_rank[$y['my_status']] : 9;
-                        return $rx !== $ry ? $rx - $ry : $x['trial_number'] - $y['trial_number'];
+                        return $unpaid_last($x, $y) ?: ($rx !== $ry ? $rx - $ry : $x['trial_number'] - $y['trial_number']);
                     });
                     // Other applicants: players this team can field first;
                     // over-age players (needing a VV exemption) go last.
-                    usort($others, function ($x, $y) {
+                    usort($others, function ($x, $y) use ($unpaid_last) {
                         $fx = empty($x['age_flag']) ? 0 : 1;
                         $fy = empty($y['age_flag']) ? 0 : 1;
-                        return $fx !== $fy ? $fx - $fy : $x['trial_number'] - $y['trial_number'];
+                        return $unpaid_last($x, $y) ?: ($fx !== $fy ? $fx - $fy : $x['trial_number'] - $y['trial_number']);
                     });
                     $sections = array(
                         $active_access['coach']
@@ -833,9 +844,7 @@ class TeamOversight_Coach_Portal {
                                             <label class="cac-verdict-label"><?php echo $active_access['coach'] ? 'My verdict:' : 'Team verdict:'; ?>
                                                 <select name="selection_status" onchange="if (window.murvcCoachVerdict) { window.murvcCoachVerdict(this); } else { this.form.submit(); }">
                                                     <option value="clear" <?php selected($a['my_status'], ''); ?>>&mdash; None &mdash;</option>
-                                                    <?php foreach (self::get_verdict_labels() as $status_key => $status_label): ?>
-                                                        <option value="<?php echo esc_attr($status_key); ?>" <?php selected($a['my_status'], $status_key); ?>><?php echo esc_html($status_label); ?></option>
-                                                    <?php endforeach; ?>
+                                                    <?php echo self::render_verdict_options($a['my_status'], !empty($a['payment_pending'])); ?>
                                                 </select>
                                             </label>
                                             <noscript><button type="submit" class="button button-small">Save</button></noscript>
@@ -1969,6 +1978,12 @@ class TeamOversight_Coach_Portal {
             return '';
         }
 
+        // Unpaid applicants can be assessed and rejected, but not put
+        // forward (Tentative / Selected / Training Only) until they pay.
+        if ($application->application_status === 'awaiting_payment' && $status !== 'rejected') {
+            return '<div class="coach-portal-notice"><p>' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ') hasn\'t paid the trial fee yet. You can reject them now; other verdicts open once the fee is paid.</p></div>';
+        }
+
         $verdict_labels = self::get_verdict_labels();
 
         $existing = $wpdb->get_var($wpdb->prepare("
@@ -1995,6 +2010,22 @@ class TeamOversight_Coach_Portal {
         }
 
         return '<div class="coach-portal-success"><p>' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ') marked <strong>' . esc_html($verdict_labels[$status]) . '</strong> for ' . esc_html($team) . '.</p></div>';
+    }
+
+    /**
+     * The verdict dropdown's options (after "None"). While the trial fee is
+     * unpaid only Rejected can be picked; the others show as "after payment"
+     * and are disabled (handle_actions refuses them too). A verdict given
+     * before this rule stays selected so the card shows the truth.
+     */
+    private static function render_verdict_options($current, $payment_pending) {
+        $html = '';
+        foreach (self::get_verdict_labels() as $key => $label) {
+            $locked = $payment_pending && $key !== 'rejected' && $key !== $current;
+            $html .= '<option value="' . esc_attr($key) . '"' . selected($current, $key, false) . ($locked ? ' disabled' : '') . '>'
+                . esc_html($label . ($locked ? ' (after payment)' : '')) . '</option>';
+        }
+        return $html;
     }
 
     /**
@@ -2903,8 +2934,9 @@ class TeamOversight_Coach_Portal {
     private function get_applicants_by_gender($gender, $season, $active_team, $my_team_codes) {
         global $wpdb;
 
-        // Unpaid applicants are included (flagged Payment pending) so late
-        // applicants can be trialled; expired ones (unpaid 7+ days) are not.
+        // Unpaid applicants are included (flagged Payment pending, sorted
+        // last) however long they've been unpaid, so late applicants can be
+        // trialled; positive verdicts wait for payment (handle_actions).
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}trial_applications
             WHERE season = %s

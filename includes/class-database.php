@@ -263,6 +263,14 @@ class TeamOversight_Database {
             update_option('team_oversight_unslash_fixed', 1, false);
         }
 
+        // 1.63.0: unpaid applications no longer expire after 7 days. Bring
+        // back the ones that did, so coaches see them as Payment pending
+        // (their trial numbers were never released).
+        if (!get_option('team_oversight_expired_revived')) {
+            $wpdb->query("UPDATE {$wpdb->prefix}trial_applications SET application_status = 'awaiting_payment' WHERE application_status = 'expired'");
+            update_option('team_oversight_expired_revived', 1, false);
+        }
+
         // Coach-portal attendance (added in 1.59.0): one row per player, per
         // team, per session date. person_key is 'u<user id>' (or the
         // lowercased email for a legacy email-only roster row), so the

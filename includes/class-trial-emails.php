@@ -87,7 +87,7 @@ class TeamOversight_Trial_Emails {
                 'when' => 'An application is saved but the trial fee is due — on first submission, or when an edit makes the fee apply.',
                 'subject' => 'Action needed: pay your {season} MURVC trial fee',
                 'body' => "Hi {first_name},\n\n"
-                    . "Your {season} MURVC trial application has been saved, but it won't be confirmed until the trial fee ({fee}) is paid. Unpaid applications are removed after 7 days.\n\n"
+                    . "Your {season} MURVC trial application has been saved, but it won't be confirmed until the trial fee ({fee}) is paid. Coaches can see your application, but can't select you for a team until it's paid.\n\n"
                     . "  Trial number: #{trial_number}\n"
                     . "  Teams:        {teams}\n\n"
                     . "You can pay from the trial page — look for the \"Pay the trial fee\" button:\n"

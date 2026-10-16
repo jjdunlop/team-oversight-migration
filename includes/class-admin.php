@@ -1238,8 +1238,8 @@ class TeamOversight_Admin {
 
         $season = $this->get_current_season();
 
-        // Tidy up unpaid applications older than 7 days before listing.
-        TeamOversight_Trials::expire_stale_awaiting();
+        // Unpaid applications are no longer expired after 7 days (1.63.0):
+        // they stay visible to coaches as Payment pending until paid.
 
         $trials = $wpdb->get_results($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}trial_applications
@@ -1290,7 +1290,7 @@ class TeamOversight_Admin {
                         <span style="color: #1a7a2e;">(accepting for <?php echo esc_html(implode(', ', $open_seasons_now)); ?><?php echo $trial_fee_product_id ? ' — fee active' : ' — no fee'; ?>)</span>
                     <?php endif; ?>
                 </summary>
-                <p class="description">When a product is selected, submitting the trial form saves the application as "Awaiting Payment", adds this product to the cart and sends the applicant to checkout. The application only becomes reviewable once the order is paid. Unpaid applications expire after 7 days.</p>
+                <p class="description">When a product is selected, submitting the trial form saves the application as "Awaiting Payment", adds this product to the cart and sends the applicant to checkout. Unpaid applications stay visible to coaches, flagged Payment pending and listed last; coaches can reject them, but can't mark them Tentative, Selected or Training Only until paid.</p>
                 <form method="post">
                     <p style="margin: 0 0 4px 0;"><strong>Accepting trial applications for:</strong>
                         <?php foreach ($this->get_trial_setting_seasons() as $setting_season): ?>

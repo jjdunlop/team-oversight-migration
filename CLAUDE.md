@@ -44,6 +44,7 @@ push as a production deploy: lint and test first (see Workflow below).
 - **Fee segment** = dated span of a member's cheapest fee role in a season (`team_fee_segments`). Season fee = Σ segment rate × share of season. Role changes checkpoint segments; payments are never re-charged.
 - **MUS** = Melbourne University Sport (the club reports member matrices to them). **VV** = Volleyball Victoria. **VVL** = Victorian Volleyball League.
 - **Trial number** = per-season sequential number given at application, players write it on themselves at trials.
+- **Payment pending** = a trial application in `awaiting_payment` (fee unpaid). Since 1.63.0 it never expires: coaches see it, flagged and sorted to the bottom of every section, and can note or reject it, but Tentative / Selected / Training Only are refused until it's paid (`handle_actions`, plus disabled dropdown options). `expired` is a legacy status, revived once by migration.
 
 ## Hard-won gotchas (do not rediscover these)
 

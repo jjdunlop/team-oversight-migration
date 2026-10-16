@@ -354,7 +354,7 @@ class TeamOversight_Trials {
                     </div>
                     <div class="trial-status-text">
                         <?php if ($unpaid): ?>
-                            <p><strong>Your <?php echo esc_html($my_application->season); ?> application has not been paid for yet.</strong> It won't be reviewed, and will be removed, until the trial fee is paid.</p>
+                            <p><strong>Your <?php echo esc_html($my_application->season); ?> application has not been paid for yet.</strong> Coaches can see it, but can't select you for a team until the trial fee is paid.</p>
                             <?php if ($fee_product): ?>
                                 <p class="trial-pay-actions">
                                     <a class="button button-primary" href="<?php echo esc_url(self::resume_payment_url($my_application->id)); ?>">Pay the trial fee<?php echo $fee_product->get_price() !== '' ? ' — ' . esc_html(wp_strip_all_tags(wc_price($fee_product->get_price()))) : ''; ?></a>
@@ -433,7 +433,7 @@ class TeamOversight_Trials {
                 ?>
                 <div class="trial-fee-notice" id="trial-fee-notice">
                     <p><strong>Trial registration fee: <?php echo wp_kses_post($fee_product->get_price_html()); ?></strong><br>
-                    <?php if ($who_text !== ''): ?>The fee applies to players <strong><?php echo esc_html($who_text); ?></strong> — after<?php else: ?>After<?php endif; ?> submitting you'll be taken to the checkout to pay. Your application will be removed if the fee is unpaid.<?php if (empty($fee_rules['charge_returning'])): ?> If you played for Renegades last season you can ignore this message, as your yearly membership covers your cost.<?php endif; ?></p>
+                    <?php if ($who_text !== ''): ?>The fee applies to players <strong><?php echo esc_html($who_text); ?></strong> — after<?php else: ?>After<?php endif; ?> submitting you'll be taken to the checkout to pay. Coaches can't select you for a team until the fee is paid.<?php if (empty($fee_rules['charge_returning'])): ?> If you played for Renegades last season you can ignore this message, as your yearly membership covers your cost.<?php endif; ?></p>
                     <?php if ($viewer_free_by_age): ?>
                         <p><strong>You're under <?php echo intval($fee_rules['free_under']); ?>, so trials are free if you only pick Youth State League teams</strong> (U/17 and U/15). Trialling for Junior Premier League or a senior team means the fee applies as above.</p>
                     <?php endif; ?>
@@ -1462,9 +1462,8 @@ class TeamOversight_Trials {
             $application_id = ($updated !== false) ? intval($existing->id) : 0;
             $trial_number = intval($existing->trial_number);
 
-            // Restart the unpaid-expiry clock from this save. Stamped with
-            // the database's NOW() to match created_date's clock, which is
-            // what expire_stale_awaiting() compares against.
+            // Record when it was last saved. Stamped with the database's
+            // NOW() to match created_date's clock.
             if ($application_id) {
                 $wpdb->query($wpdb->prepare("
                     UPDATE {$wpdb->prefix}trial_applications SET updated_date = NOW() WHERE id = %d
@@ -1675,23 +1674,12 @@ class TeamOversight_Trials {
         }
     }
 
-    /**
-     * Applications left unpaid for 7+ days are marked expired so the review
-     * list stays clean. Resubmitting the form (or a late payment coming
-     * through) revives them. The clock runs from the latest edit, since an
-     * edit is what (re)starts the payment being due.
-     */
-    public static function expire_stale_awaiting() {
-        global $wpdb;
+    // Unpaid applications used to be marked 'expired' after 7 days
+    // (expire_stale_awaiting). Since 1.63.0 they stay 'awaiting_payment'
+    // until paid, so coaches keep seeing them, flagged and sorted last;
+    // 'expired' rows were revived by a one-off migration. 'expired' stays
+    // accepted wherever payment or a resubmission revives an application.
 
-        $wpdb->query("
-            UPDATE {$wpdb->prefix}trial_applications
-            SET application_status = 'expired'
-            WHERE application_status = 'awaiting_payment'
-                AND COALESCE(updated_date, created_date) < DATE_SUB(NOW(), INTERVAL 7 DAY)
-        ");
-    }
-    
     public function get_trial_applications($season = null) {
         global $wpdb;
         
