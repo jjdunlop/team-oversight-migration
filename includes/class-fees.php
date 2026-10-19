@@ -924,15 +924,17 @@ class TeamOversight_Fees {
     }
     
     private function get_current_season() {
-        // Priority: URL parameter -> user memory -> current year
-        if (isset($_GET['season']) && !empty($_GET['season'])) {
-            $season = sanitize_text_field($_GET['season']);
+        // Priority: URL parameter -> user memory -> current year. Seasons
+        // are four-digit years; anything else is ignored (never echoed or
+        // remembered), so a crafted ?season= link can't inject markup.
+        if (isset($_GET['season']) && is_string($_GET['season']) && preg_match('/^\d{4}$/D', $_GET['season'])) {
+            $season = $_GET['season'];
             $this->remember_season($season); // Remember the selection
             return $season;
         }
-        
+
         $remembered_season = $this->get_remembered_season();
-        if (!empty($remembered_season)) {
+        if (is_string($remembered_season) && preg_match('/^\d{4}$/D', $remembered_season)) {
             return $remembered_season;
         }
         
@@ -944,15 +946,6 @@ class TeamOversight_Fees {
         
         // Get selected season using memory system
         $selected_season = $this->get_current_season();
-        
-        // Handle CSV import for current season
-        if (isset($_POST['action']) && $_POST['action'] === 'import_price_matrix') {
-            if ($this->import_price_matrix($selected_season)) {
-                echo '<div class="notice notice-success"><p>Price matrix imported successfully for ' . esc_html($selected_season) . ' season!</p></div>';
-            } else {
-                echo '<div class="notice notice-error"><p>Failed to import price matrix. Please check the file exists.</p></div>';
-            }
-        }
 
         // Create the next season so it appears in every season selector
         // before any data exists for it.
@@ -1083,7 +1076,7 @@ class TeamOversight_Fees {
                 <label for="season-select"><strong>Season:</strong></label>
                 <select id="season-select" onchange="location.href=this.value;">
                     <?php foreach ($available_seasons as $season): ?>
-                        <option value="<?php echo admin_url('admin.php?page=team-oversight-fees&season=' . $season); ?>" <?php selected($selected_season, $season); ?>><?php echo esc_html($season); ?></option>
+                        <option value="<?php echo esc_url(admin_url('admin.php?page=team-oversight-fees&season=' . $season)); ?>" <?php selected($selected_season, $season); ?>><?php echo esc_html($season); ?></option>
                     <?php endforeach; ?>
                 </select>
                 <?php

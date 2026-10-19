@@ -19,11 +19,11 @@ class TeamOversight_Members_Page {
     }
 
     private function get_current_season() {
-        if (isset($_GET['season']) && preg_match('/^\d{4}$/', $_GET['season'])) {
+        if (isset($_GET['season']) && is_string($_GET['season']) && preg_match('/^\d{4}$/D', $_GET['season'])) {
             return $_GET['season'];
         }
         $remembered = get_option('team_oversight_selected_season');
-        return $remembered ? $remembered : date('Y');
+        return (is_scalar($remembered) && preg_match('/^\d{4}$/D', (string) $remembered)) ? strval($remembered) : date('Y');
     }
 
     public function render_page() {
@@ -44,11 +44,11 @@ class TeamOversight_Members_Page {
                 <label for="season-select">Season (VVL teams &amp; fees columns):</label>
                 <select id="season-select" onchange="location.href=this.value;">
                     <?php foreach ($this->get_available_seasons() as $available_season): ?>
-                        <option value="<?php echo admin_url('admin.php?page=club-membership&season=' . $available_season . ($show_all ? '&show_all=1' : '')); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
+                        <option value="<?php echo esc_url(admin_url('admin.php?page=club-membership&season=' . $available_season . ($show_all ? '&show_all=1' : ''))); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
                     <?php endforeach; ?>
                 </select>
                 <label style="margin-left: 15px;">
-                    <input type="checkbox" onchange="location.href='<?php echo admin_url('admin.php?page=club-membership&season=' . $season); ?>' + (this.checked ? '&show_all=1' : '');" <?php checked($show_all); ?>>
+                    <input type="checkbox" onchange="location.href='<?php echo esc_url(admin_url('admin.php?page=club-membership&season=' . $season)); ?>' + (this.checked ? '&show_all=1' : '');" <?php checked($show_all); ?>>
                     Show all accounts (including people with no membership or team)
                 </label>
             </div>
@@ -340,11 +340,28 @@ class TeamOversight_Members_Page {
                 .then(response => response.json())
                 .then(data => {
                     if (data.success && data.data.length > 0) {
-                        suggestions.innerHTML = data.data.map(user =>
-                            `<div class="user-suggestion" onclick="selectGrantUser('${user.email}')" style="padding: 8px; cursor: pointer; border-bottom: 1px solid #eee;">
-                                <strong>${user.name}</strong><br><small>${user.email}</small>
-                            </div>`
-                        ).join('');
+                        // Built as elements, never as an HTML string: display
+                        // names are member-controlled. Names are stored
+                        // entity-encoded (&amp;), so decode them as text (a
+                        // textarea parses its content as text, never as tags).
+                        suggestions.textContent = '';
+                        data.data.forEach(user => {
+                            const decoder = document.createElement('textarea');
+                            decoder.innerHTML = String(user.name);
+                            const email = String(user.email);
+                            const row = document.createElement('div');
+                            row.className = 'user-suggestion';
+                            row.style.cssText = 'padding: 8px; cursor: pointer; border-bottom: 1px solid #eee;';
+                            const nameEl = document.createElement('strong');
+                            nameEl.textContent = decoder.value;
+                            const emailEl = document.createElement('small');
+                            emailEl.textContent = email;
+                            row.appendChild(nameEl);
+                            row.appendChild(document.createElement('br'));
+                            row.appendChild(emailEl);
+                            row.addEventListener('click', () => selectGrantUser(email));
+                            suggestions.appendChild(row);
+                        });
                         suggestions.style.display = 'block';
                     } else {
                         suggestions.style.display = 'none';

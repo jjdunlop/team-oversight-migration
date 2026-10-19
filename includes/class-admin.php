@@ -244,7 +244,7 @@ class TeamOversight_Admin {
                 <label for="season-select">Season:</label>
                 <select id="season-select" onchange="location.href=this.value;">
                     <?php foreach ($seasons as $season): ?>
-                        <option value="<?php echo admin_url('admin.php?page=team-oversight&season=' . $season); ?>" 
+                        <option value="<?php echo esc_url(admin_url('admin.php?page=team-oversight&season=' . $season)); ?>"
                                 <?php selected($current_season, $season); ?>>
                             <?php echo esc_html($season); ?>
                         </option>
@@ -940,18 +940,20 @@ class TeamOversight_Admin {
     }
     
     private function get_current_season() {
-        // Priority: URL parameter -> user memory -> current year
-        if (isset($_GET['season']) && !empty($_GET['season'])) {
-            $season = sanitize_text_field($_GET['season']);
+        // Priority: URL parameter -> user memory -> current year. Seasons
+        // are four-digit years; anything else is ignored (never echoed or
+        // remembered), so a crafted ?season= link can't inject markup.
+        if (isset($_GET['season']) && is_string($_GET['season']) && preg_match('/^\d{4}$/D', $_GET['season'])) {
+            $season = $_GET['season'];
             $this->remember_season($season); // Remember the selection
             return $season;
         }
-        
+
         $remembered_season = $this->get_remembered_season();
-        if (!empty($remembered_season)) {
+        if (is_string($remembered_season) && preg_match('/^\d{4}$/D', $remembered_season)) {
             return $remembered_season;
         }
-        
+
         return date('Y');
     }
 
@@ -1274,7 +1276,7 @@ class TeamOversight_Admin {
                     <?php
                     $available_seasons = $this->get_available_seasons('main');
                     foreach ($available_seasons as $available_season): ?>
-                        <option value="<?php echo admin_url('admin.php?page=team-oversight-trials&season=' . $available_season); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
+                        <option value="<?php echo esc_url(admin_url('admin.php?page=team-oversight-trials&season=' . $available_season)); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -1910,13 +1912,13 @@ class TeamOversight_Admin {
                     <?php
                     $available_seasons = $this->get_available_seasons('main');
                     foreach ($available_seasons as $available_season): ?>
-                        <option value="<?php echo admin_url('admin.php?page=team-oversight-invoices&season=' . $available_season); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
+                        <option value="<?php echo esc_url(admin_url('admin.php?page=team-oversight-invoices&season=' . $available_season)); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
                     <?php endforeach; ?>
                 </select>
                 <?php if ($season_dates): ?>
                     <span class="description" style="margin-left: 15px;">Season runs <?php echo esc_html($season_dates['start']); ?> &ndash; <?php echo esc_html($season_dates['end']); ?>; fees fall due linearly between these dates.</span>
                 <?php else: ?>
-                    <span class="description" style="margin-left: 15px; color: #996800;">No season dates set — nothing shows as overdue and pro-rata is off. Set them in <a href="<?php echo admin_url('admin.php?page=team-oversight-fees&season=' . $season); ?>">Configuration</a>.</span>
+                    <span class="description" style="margin-left: 15px; color: #996800;">No season dates set — nothing shows as overdue and pro-rata is off. Set them in <a href="<?php echo esc_url(admin_url('admin.php?page=team-oversight-fees&season=' . $season)); ?>">Configuration</a>.</span>
                 <?php endif; ?>
             </div>
 
@@ -2265,7 +2267,7 @@ class TeamOversight_Admin {
                     <?php 
                     $available_seasons = $this->get_available_seasons('main');
                     foreach ($available_seasons as $available_season): ?>
-                        <option value="<?php echo admin_url('admin.php?page=team-oversight-assignments&season=' . $available_season); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
+                        <option value="<?php echo esc_url(admin_url('admin.php?page=team-oversight-assignments&season=' . $available_season)); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -2463,11 +2465,7 @@ class TeamOversight_Admin {
                 .then(data => {
                     const suggestions = document.getElementById('name-suggestions');
                     if (data.success && data.data.length > 0) {
-                        suggestions.innerHTML = data.data.map(user => 
-                            `<div class="user-suggestion" onclick="selectUser('${user.email}', '${user.name}', 'name')" style="padding: 8px; cursor: pointer; border-bottom: 1px solid #eee;">
-                                <strong>${user.name}</strong><br><small>${user.email}</small>
-                            </div>`
-                        ).join('');
+                        renderUserSuggestions(suggestions, data.data, 'name');
                         suggestions.style.display = 'block';
                     } else {
                         suggestions.style.display = 'none';
@@ -2492,11 +2490,7 @@ class TeamOversight_Admin {
                 .then(data => {
                     const suggestions = document.getElementById('email-suggestions');
                     if (data.success && data.data.length > 0) {
-                        suggestions.innerHTML = data.data.map(user => 
-                            `<div class="user-suggestion" onclick="selectUser('${user.email}', '${user.name}', 'email')" style="padding: 8px; cursor: pointer; border-bottom: 1px solid #eee;">
-                                <strong>${user.name}</strong><br><small>${user.email}</small>
-                            </div>`
-                        ).join('');
+                        renderUserSuggestions(suggestions, data.data, 'email');
                         suggestions.style.display = 'block';
                     } else {
                         suggestions.style.display = 'none';
@@ -2504,6 +2498,37 @@ class TeamOversight_Admin {
                 });
             });
             
+            // Suggestions are built as elements, never as an HTML string:
+            // display names are member-controlled, so markup in one must not
+            // run, and an apostrophe (O'Brien) must not break the click.
+            // Names are stored entity-encoded (&amp;), so decode them as text
+            // (a textarea parses its content as text, never as tags).
+            function decodeEntities(text) {
+                const area = document.createElement('textarea');
+                area.innerHTML = String(text);
+                return area.value;
+            }
+
+            function renderUserSuggestions(suggestions, users, source) {
+                suggestions.textContent = '';
+                users.forEach(user => {
+                    const name = decodeEntities(user.name);
+                    const email = String(user.email);
+                    const row = document.createElement('div');
+                    row.className = 'user-suggestion';
+                    row.style.cssText = 'padding: 8px; cursor: pointer; border-bottom: 1px solid #eee;';
+                    const nameEl = document.createElement('strong');
+                    nameEl.textContent = name;
+                    const emailEl = document.createElement('small');
+                    emailEl.textContent = email;
+                    row.appendChild(nameEl);
+                    row.appendChild(document.createElement('br'));
+                    row.appendChild(emailEl);
+                    row.addEventListener('click', () => selectUser(email, name, source));
+                    suggestions.appendChild(row);
+                });
+            }
+
             function selectUser(email, name, source) {
                 document.getElementById('user_email').value = email;
                 document.getElementById('user_name').value = name;
