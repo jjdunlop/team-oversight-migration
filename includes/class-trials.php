@@ -73,6 +73,45 @@ class TeamOversight_Trials {
 
     }
 
+    /**
+     * Split a stored assigned_team into its teams. Single and bulk accept
+     * write one bare code; Finalise writes a comma-joined list of bare
+     * codes with " (T/O)" after Training Only teams ("SL2M, JPLM (T/O)").
+     * Returns a list of array('code' => 'JPLM', 'training_only' => true).
+     */
+    public static function parse_assigned_team($assigned_team) {
+        $teams = array();
+        foreach (explode(',', (string) $assigned_team) as $token) {
+            $training_only = (strpos($token, '(T/O)') !== false);
+            $code = trim(str_replace('(T/O)', '', $token));
+            if ($code !== '') {
+                $teams[] = array('code' => $code, 'training_only' => $training_only);
+            }
+        }
+        return $teams;
+    }
+
+    /**
+     * Player-facing wording for an assigned_team value: each team's name
+     * from that season's config (the code only if the team is missing
+     * from it), "(training only)" in words, joined "A, B and C". Empty
+     * string when nothing is assigned.
+     */
+    public static function describe_assigned_team($assigned_team, $season) {
+        $database = new TeamOversight_Database();
+        $config = $database->get_teams_config($season);
+        $names = array();
+        foreach (self::parse_assigned_team($assigned_team) as $team) {
+            $name = isset($config[$team['code']]['name']) ? $config[$team['code']]['name'] : $team['code'];
+            $names[] = $name . ($team['training_only'] ? ' (training only)' : '');
+        }
+        if (count($names) > 1) {
+            $last = array_pop($names);
+            return implode(', ', $names) . ' and ' . $last;
+        }
+        return count($names) === 1 ? $names[0] : '';
+    }
+
     public static function get_history_options() {
         return array(
             'renegades_last_season' => 'I played VVL for Renegades last season (no transfer needed)',
@@ -365,8 +404,12 @@ class TeamOversight_Trials {
                             <?php endif; ?>
                         <?php elseif ($my_application->application_status === 'accepted'): ?>
                             <?php
-                            $assigned_config = $database->get_teams_config($my_application->season);
-                            $assigned_name = isset($assigned_config[$my_application->assigned_team]) ? $assigned_config[$my_application->assigned_team]['name'] : $my_application->assigned_team;
+                            // Finalise stores a list like "SL2M, JPLM (T/O)";
+                            // players see team names, never the codes.
+                            $assigned_name = self::describe_assigned_team($my_application->assigned_team, $my_application->season);
+                            if ($assigned_name === '') {
+                                $assigned_name = 'a team';
+                            }
                             ?>
                             <p><strong>Congratulations — you've been assigned to <?php echo esc_html($assigned_name); ?> for <?php echo esc_html($my_application->season); ?>.</strong></p>
                         <?php else: ?>
@@ -1244,6 +1287,19 @@ class TeamOversight_Trials {
         $two_sessions = isset($_POST['two_sessions']) ? sanitize_text_field($_POST['two_sessions']) : '';
         $venues = isset($_POST['venues']) ? array_values(array_intersect(array_map('sanitize_text_field', (array) $_POST['venues']), array_keys(self::get_venue_options()))) : array();
 
+        // Checkbox groups can't be marked required in the browser, so these
+        // are the gaps that reach here: say which one, not just "required".
+        if (empty($interested_teams)) {
+            wp_send_json_error(array('message' => 'Pick at least one team you are trialling for.'));
+        }
+        if (empty($preferred_positions)) {
+            wp_send_json_error(array('message' => 'Pick at least one position you are trialling for.'));
+        }
+        if (empty($venues)) {
+            $venue_options = self::get_venue_options();
+            wp_send_json_error(array('message' => 'Tick at least one training venue option — choose "' . $venue_options['all'] . '" if none are a problem.'));
+        }
+
         if (empty($season) || empty($interested_teams) || empty($preferred_positions)
             || !array_key_exists($history, self::get_history_options())
             || !in_array($international, array('yes', 'no'), true)
@@ -1626,10 +1682,19 @@ class TeamOversight_Trials {
 
     public function display_application_in_cart($item_data, $cart_item) {
         if (!empty($cart_item['murvc_trial_application_id'])) {
-            $item_data[] = array(
-                'key' => 'Trial application',
-                'value' => '#' . intval($cart_item['murvc_trial_application_id'])
-            );
+            // Show the trial number the player was given (status panel,
+            // emails), not the row id the cart line carries.
+            global $wpdb;
+            $trial_number = intval($wpdb->get_var($wpdb->prepare(
+                "SELECT trial_number FROM {$wpdb->prefix}trial_applications WHERE id = %d",
+                intval($cart_item['murvc_trial_application_id'])
+            )));
+            if ($trial_number > 0) {
+                $item_data[] = array(
+                    'key' => 'Trial number',
+                    'value' => '#' . $trial_number
+                );
+            }
         }
         return $item_data;
     }
