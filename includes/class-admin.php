@@ -314,8 +314,29 @@ class TeamOversight_Admin {
         global $wpdb;
         $season = $this->get_current_season();
 
+        // One Finalise per season at a time: two admins (or a second click
+        // while the first run is still going) must not both pass the
+        // "already on the team?" check and insert a player twice. Same
+        // pattern as trial submissions — if the database can't do named
+        // locks, run unlocked rather than fail.
+        $lock = substr('murvc_finalise_' . $wpdb->prefix . intval($season), 0, 64);
+        $got_lock = $wpdb->get_var($wpdb->prepare("SELECT GET_LOCK(%s, 10)", $lock));
+        if ($got_lock !== null && intval($got_lock) !== 1) {
+            echo '<div class="notice notice-warning"><p>Another Finalise for ' . esc_html($season) . ' is still running. Wait a moment, then reload this page and check before running it again.</p></div>';
+            return;
+        }
+        $this->run_finalise_selections($season);
+        if ($got_lock !== null) {
+            $wpdb->query($wpdb->prepare("SELECT RELEASE_LOCK(%s)", $lock));
+        }
+    }
+
+    /** Finalise's work, run while holding the season's Finalise lock. */
+    private function run_finalise_selections($season) {
+        global $wpdb;
+
         $selected = $wpdb->get_results($wpdb->prepare("
-            SELECT s.application_id, s.team, s.status, a.user_id, a.email
+            SELECT s.application_id, s.team, s.status, a.user_id, a.email, a.trial_number, a.name
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
             WHERE s.status IN ('selected', 'training_only')
@@ -351,6 +372,7 @@ class TeamOversight_Admin {
         foreach ($selected as $row) {
             $by_app[$row->application_id]['user_id'] = intval($row->user_id);
             $by_app[$row->application_id]['email'] = $row->email;
+            $by_app[$row->application_id]['label'] = '#' . intval($row->trial_number) . ' ' . $row->name;
             $by_app[$row->application_id]['teams'][] = array(
                 'team' => $row->team,
                 // Training Only verdicts finalise as training-only members
@@ -360,23 +382,32 @@ class TeamOversight_Admin {
         }
 
         $fees = new TeamOversight_Fees();
+        $released = TeamOversight_Fees::fees_released($season);
         $assignments_created = 0;
+        $invoices_created = 0;
+        $invoices_repriced = 0;
+        $not_invoiced = array();
+        $role_differs = array();
 
         foreach ($by_app as $application_id => $info) {
+            // Match the person by account as well as email, so a playing
+            // row stored under an older email isn't duplicated.
+            $uid = $info['user_id'] > 0 ? $info['user_id'] : TeamOversight_Fees::resolve_user_id($info['email']);
+            $created_for_app = false;
             foreach ($info['teams'] as $team_entry) {
                 // Only a playing assignment blocks creation — someone already
                 // on the team as coach/manager can still be added as a player.
-                $exists = $wpdb->get_var($wpdb->prepare("
-                    SELECT id FROM {$wpdb->prefix}team_assignments
-                    WHERE email = %s AND season = %s AND team = %s AND is_active = 1
+                $existing_roles = $wpdb->get_col($wpdb->prepare("
+                    SELECT role FROM {$wpdb->prefix}team_assignments
+                    WHERE (email = %s OR (user_id > 0 AND user_id = %d)) AND season = %s AND team = %s AND is_active = 1
                         AND role IN ('playing_member', 'training_only')
-                ", $info['email'], $season, $team_entry['team']));
+                ", $info['email'], $uid, $season, $team_entry['team']));
 
-                if (!$exists) {
-                    $wpdb->insert(
+                if (empty($existing_roles)) {
+                    $inserted = $wpdb->insert(
                         $wpdb->prefix . 'team_assignments',
                         array(
-                            'user_id' => $info['user_id'],
+                            'user_id' => $uid > 0 ? $uid : 0,
                             'email' => $info['email'],
                             'season' => $season,
                             'team' => $team_entry['team'],
@@ -387,11 +418,54 @@ class TeamOversight_Admin {
                         ),
                         array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d')
                     );
-                    $assignments_created++;
+                    if ($inserted) {
+                        $assignments_created++;
+                        $created_for_app = true;
+                    }
+                } elseif (!in_array($team_entry['role'], $existing_roles, true)) {
+                    // The verdict changed after an earlier Finalise (or an
+                    // admin changed the role). Never overwrite a role
+                    // silently — name it so an admin can decide.
+                    $role_differs[] = $info['label'] . ' — ' . $team_entry['team'] . ': verdict '
+                        . ($team_entry['role'] === 'training_only' ? 'Training Only' : 'Selected')
+                        . ', assignment ' . TeamOversight_Fees::role_label($existing_roles[0]);
                 }
             }
 
-            $fees->generate_invoice($info['email'], $season);
+            // Invoice only when this run put them on a team, or they have no
+            // invoice yet (e.g. no fee could be worked out last time). Anyone
+            // else is unchanged since the last run, and re-pricing them would
+            // undo a fee an admin set with Edit Fee. The invoice is looked up
+            // under the application's account too (its current email, as
+            // Undo Assignment does), so an application made under an older
+            // email still finds it.
+            $fee_email = $info['email'];
+            $fee_account = $uid > 0 ? get_userdata($uid) : false;
+            if ($fee_account && $fee_account->user_email) {
+                $fee_email = $fee_account->user_email;
+            }
+            $fee_uid = TeamOversight_Fees::resolve_user_id($fee_email);
+            $had_invoice = $wpdb->get_var($wpdb->prepare("
+                SELECT id FROM {$wpdb->prefix}team_invoices
+                WHERE (user_id = %d OR user_id = %d OR email = %s OR email = %s) AND season = %s
+            ", $fee_uid, $uid, $fee_email, $info['email'], $season));
+            if ($created_for_app || !$had_invoice) {
+                // No invoice anywhere: bill under the account's email, which
+                // finds every row of theirs. An existing one is re-priced as
+                // it always was.
+                if ($fees->generate_invoice($had_invoice ? $info['email'] : $fee_email, $season)) {
+                    if ($had_invoice) {
+                        $invoices_repriced++;
+                    } else {
+                        $invoices_created++;
+                    }
+                } elseif ($released && !$had_invoice) {
+                    // Released, on a team, and still no fee: the matrix has
+                    // no amount for their class/role. Before release, false
+                    // is expected — they're invoiced on the release date.
+                    $not_invoiced[] = $info['label'];
+                }
+            }
 
             $wpdb->update(
                 $wpdb->prefix . 'trial_applications',
@@ -407,7 +481,24 @@ class TeamOversight_Admin {
             );
         }
 
-        echo '<div class="notice notice-success"><p>Finalised ' . count($by_app) . ' application(s): ' . $assignments_created . ' new team assignment(s) created, invoices generated, applications marked accepted.</p></div>';
+        if ($released) {
+            $invoice_note = $invoices_created . ' invoice(s) created' . ($invoices_repriced ? ', ' . $invoices_repriced . ' re-priced' : '');
+        } else {
+            $invoice_note = 'no invoices yet (' . esc_html($season) . ' fees are released on ' . esc_html(date('j M Y', strtotime(TeamOversight_Fees::get_fee_release_date($season)))) . ', when everyone on a team is invoiced)';
+        }
+        echo '<div class="notice notice-success"><p>Finalised ' . count($by_app) . ' application(s): ' . $assignments_created . ' new team assignment(s) created, ' . $invoice_note . ', applications marked accepted.</p></div>';
+
+        if (!empty($not_invoiced)) {
+            echo '<div class="notice notice-warning"><p><strong>' . count($not_invoiced) . ' player' . (count($not_invoiced) === 1 ? ' was' : 's were') . ' put on teams but not invoiced</strong> — no ' . esc_html($season) . ' fee could be worked out (no fee matrix amount for their fee class and role): '
+                . esc_html(implode(', ', $not_invoiced))
+                . '. Fill in the ' . esc_html($season) . ' fee matrix on <a href="' . esc_url(admin_url('admin.php?page=team-oversight-fees&season=' . $season)) . '">Configuration</a>, then run Finalise again to invoice them.</p></div>';
+        }
+
+        if (!empty($role_differs)) {
+            echo '<div class="notice notice-warning"><p><strong>' . count($role_differs) . ' coach verdict' . (count($role_differs) === 1 ? ' differs' : 's differ') . ' from the player\'s existing team role</strong> — Finalise never changes an existing role: '
+                . esc_html(implode('; ', $role_differs))
+                . '. If the verdict is right, change the role on <a href="' . esc_url(admin_url('admin.php?page=team-oversight-assignments&season=' . $season)) . '">Team Assignments</a> (the fee is re-priced); otherwise ask the coach to update the verdict.</p></div>';
+        }
     }
 
     private function save_trial_settings() {
@@ -1259,12 +1350,52 @@ class TeamOversight_Admin {
             $selections_by_app[$selection->application_id][] = $selection;
         }
 
+        // Selected / Training Only verdicts awaiting Finalise: any on a
+        // pending application, plus those on accepted applications not yet
+        // reflected in team assignments (no active row of the matching role
+        // on that team for the person, by account or email) — coaches can
+        // still change verdicts after Finalise, or another team can pick
+        // the player. Only verdicts new or changed since the last Finalise
+        // (not in assigned_team as "TEAM" / "TEAM (T/O)"): one it already
+        // placed whose row has since gone (withdrawn on Team Assignments
+        // before those edits synced verdicts) must not prompt a re-run that
+        // puts the player back.
         $awaiting_finalise = intval($wpdb->get_var($wpdb->prepare("
             SELECT COUNT(DISTINCT s.application_id)
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
-            WHERE s.status IN ('selected', 'training_only') AND a.season = %s AND a.application_status = 'pending'
+            WHERE s.status IN ('selected', 'training_only') AND a.season = %s
+                AND (a.application_status = 'pending' OR (a.application_status = 'accepted' AND NOT EXISTS (
+                    SELECT 1 FROM {$wpdb->prefix}team_assignments t
+                    WHERE t.season = a.season AND t.team = s.team AND t.is_active = 1
+                        AND t.role = IF(s.status = 'training_only', 'training_only', 'playing_member')
+                        AND (t.email = a.email OR (a.user_id > 0 AND t.user_id = a.user_id))
+                ) AND FIND_IN_SET(CONCAT(s.team, IF(s.status = 'training_only', ' (T/O)', '')), REPLACE(IFNULL(a.assigned_team, ''), ', ', ',')) = 0))
         ", $season)));
+
+        // Finalised players still on the verdict's team with no invoice
+        // although fees are released (no fee could be worked out when they
+        // were finalised, or the invoice was deleted): Finalise creates one.
+        $finalised_uninvoiced = 0;
+        if (TeamOversight_Fees::fees_released($season)) {
+            $finalised_uninvoiced = intval($wpdb->get_var($wpdb->prepare("
+                SELECT COUNT(DISTINCT a.id)
+                FROM {$wpdb->prefix}team_trial_selections s
+                JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+                WHERE s.status IN ('selected', 'training_only') AND a.season = %s
+                    AND a.application_status = 'accepted'
+                    AND EXISTS (
+                        SELECT 1 FROM {$wpdb->prefix}team_assignments t
+                        WHERE t.season = a.season AND t.team = s.team AND t.is_active = 1
+                            AND t.role IN ('playing_member', 'training_only')
+                            AND (t.email = a.email OR (a.user_id > 0 AND t.user_id = a.user_id))
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM {$wpdb->prefix}team_invoices i
+                        WHERE i.season = a.season AND (i.email = a.email OR (a.user_id > 0 AND i.user_id = a.user_id))
+                    )
+            ", $season)));
+        }
 
         ?>
         <div class="wrap">
@@ -1330,9 +1461,16 @@ class TeamOversight_Admin {
                 </form>
             </details>
 
-            <?php if ($awaiting_finalise): ?>
+            <?php if ($awaiting_finalise || $finalised_uninvoiced): ?>
                 <div class="notice notice-info" style="padding: 10px 15px; display: flex; align-items: center; gap: 15px;">
-                    <span><strong><?php echo $awaiting_finalise; ?> application(s)</strong> have confirmed coach selections awaiting finalisation (team assignment + fee invoice).</span>
+                    <span>
+                        <?php if ($awaiting_finalise): ?>
+                            <strong><?php echo $awaiting_finalise; ?> application(s)</strong> have coach selections awaiting finalisation or not yet reflected in their team assignments (team assignment + fee invoice).
+                        <?php endif; ?>
+                        <?php if ($finalised_uninvoiced): ?>
+                            <strong><?php echo $finalised_uninvoiced; ?> finalised player(s)</strong> on teams have no <?php echo esc_html($season); ?> invoice; Finalise will create one.
+                        <?php endif; ?>
+                    </span>
                     <form method="post" style="margin: 0;" onsubmit="return confirm('Finalise all coach-selected applications for <?php echo esc_attr($season); ?>?\n\nThis creates team assignments for every Selected verdict, generates fee invoices, and marks the applications accepted. Safe to run repeatedly.');">
                         <input type="hidden" name="action" value="finalise_selections">
                         <?php wp_nonce_field('finalise_selections', 'finalise_nonce'); ?>
@@ -1476,6 +1614,7 @@ class TeamOversight_Admin {
                                             <input type="hidden" name="action" value="waive_trial_fee">
                                             <input type="text" name="waive_reason" placeholder="Reason, e.g. played last season" required maxlength="120" style="width: 190px; font-size: 12px;">
                                             <input type="submit" class="button" value="Waive fee">
+                                            <br><span class="description" style="font-size: 11px;">Visible to admins only</span>
                                             <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
                                         </form>
                                         <form method="post" style="display: inline;">
@@ -3377,7 +3516,7 @@ class TeamOversight_Admin {
         }
         
         $before = $wpdb->get_row($wpdb->prepare("
-            SELECT email, season FROM {$wpdb->prefix}team_assignments WHERE id = %d
+            SELECT email, season, team, role, user_id, is_active FROM {$wpdb->prefix}team_assignments WHERE id = %d
         ", $assignment_id));
 
         $result = $wpdb->update(
@@ -3392,6 +3531,16 @@ class TeamOversight_Admin {
             // Role/status changes affect the fee: checkpoint the fee-role
             // history and recalculate the invoice (payments preserved).
             if ($before) {
+                // An active playing row that no longer counts for its team —
+                // set Inactive or end-dated, moved to another team, or turned
+                // into a staff role — is a removal from that team: sync the
+                // trial verdicts as deactivating or deleting does, or the
+                // next Finalise puts the player back on the old team.
+                $playing_roles = array('playing_member', 'training_only');
+                if (in_array($before->role, $playing_roles, true) && intval($before->is_active) === 1
+                    && (empty($update_data['is_active']) || $team !== $before->team || !in_array($role, $playing_roles, true))) {
+                    $this->sync_trial_after_assignment_removal($before->email, $before->season, $before->team, intval($before->user_id));
+                }
                 $fees = new TeamOversight_Fees();
                 $fees->recalculate_after_assignment_change($before->email, $before->season);
             }
