@@ -411,13 +411,22 @@ class TeamOversight_Memberships {
     }
 
     /**
-     * Being on a team makes you a Full Member for that season's calendar
-     * year: everyone with an active assignment (any role — player, training
-     * only, coach, assistant coach, team manager) for the current season or
-     * later gets a full grant running to 31 Dec of the season year.
-     * Deduped by source + end date, so role changes and re-adds never
-     * double-grant; removing someone from a team never claws the
-     * membership back (they were a member while it stood).
+     * The end date of the Full Membership a team assignment grants: 1 April
+     * of the year after the season — so a 2027 VVL player stays a member
+     * until the 2028 teams are finalised just before April 2028.
+     */
+    public static function assignment_grant_end($season) {
+        return (intval($season) + 1) . '-04-01';
+    }
+
+    /**
+     * Being on a team makes you a Full Member for that season and up to
+     * the next season's teams: everyone with an active assignment (any role
+     * — player, training only, coach, assistant coach, team manager) for
+     * the current season or later gets a full grant running to 1 April of
+     * the following year (assignment_grant_end). Deduped by source + end
+     * date, so role changes and re-adds never double-grant; removing
+     * someone from a team never claws the membership back.
      */
     public function sync_assignment_grants() {
         global $wpdb;
@@ -430,7 +439,7 @@ class TeamOversight_Memberships {
             LEFT JOIN {$wpdb->prefix}team_memberships m
                 ON m.user_id = COALESCE(NULLIF(a.user_id, 0), u.ID)
                 AND m.source = 'assignment'
-                AND m.end_date = CONCAT(a.season, '-12-31')
+                AND m.end_date = CONCAT(CAST(a.season AS UNSIGNED) + 1, '-04-01')
             WHERE a.is_active = 1 AND a.season >= %s AND m.id IS NULL
         ", $year));
 
@@ -444,7 +453,7 @@ class TeamOversight_Memberships {
                 'user_id' => $user_id,
                 'tier' => self::TIER_FULL,
                 'start_date' => current_time('Y-m-d'),
-                'end_date' => $row->season . '-12-31',
+                'end_date' => self::assignment_grant_end($row->season),
                 'source' => 'assignment',
                 'note' => 'Team assignment ' . $row->season,
             ));
@@ -457,6 +466,29 @@ class TeamOversight_Memberships {
             $this->sync_user_roles(intval($uid));
         }
         return count($granted);
+    }
+
+    /**
+     * One-off (1.67.0): team grants used to end on 31 Dec of the season
+     * year. Move every still-running one to 1 April of the following year
+     * (the new rule), logged per person. Expired grants are left alone.
+     * Returns how many grants moved.
+     */
+    public static function extend_assignment_grants_to_april() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'team_memberships';
+        $grants = $wpdb->get_results("
+            SELECT id, user_id, end_date FROM $table
+            WHERE source = 'assignment' AND MONTH(end_date) = 12 AND DAY(end_date) = 31 AND end_date >= CURDATE()
+        ");
+        foreach ($grants as $g) {
+            $new_end = self::assignment_grant_end(substr($g->end_date, 0, 4));
+            $wpdb->update($table, array('end_date' => $new_end), array('id' => $g->id), array('%s'), array('%d'));
+            if (class_exists('TeamOversight_Log')) {
+                TeamOversight_Log::add('membership_extended', 'Full Member (team assignment) extended from ' . date('j M Y', strtotime($g->end_date)) . ' to ' . date('j M Y', strtotime($new_end)) . ' — team memberships now run until the next season\'s teams are finalised', array('user_id' => intval($g->user_id)));
+            }
+        }
+        return count($grants);
     }
 
     /**
@@ -547,6 +579,39 @@ class TeamOversight_Memberships {
             return self::TIER_ASSOCIATE;
         }
         return null;
+    }
+
+    /**
+     * For other plugins (e.g. Reds Social League): the last day of the
+     * unbroken run of grants of these tiers covering $date — 'YYYY-MM-DD',
+     * or null when none covers it. Back-to-back grants (one ending the day
+     * before the next starts) count as one run. Read-only.
+     */
+    public static function covered_until($user_id, $tiers, $date = null) {
+        global $wpdb;
+        $tiers = array_values(array_intersect((array) $tiers, array_keys(self::get_tiers())));
+        if (!$user_id || empty($tiers)) {
+            return null;
+        }
+        $date = $date ?: current_time('Y-m-d');
+        $in = implode(',', array_fill(0, count($tiers), '%s'));
+        $grants = $wpdb->get_results($wpdb->prepare("
+            SELECT start_date, end_date FROM {$wpdb->prefix}team_memberships
+            WHERE user_id = %d AND tier IN ($in) AND end_date >= %s
+            ORDER BY start_date
+        ", array_merge(array($user_id), $tiers, array($date))));
+
+        $until = null;
+        foreach ($grants as $g) {
+            if ($until === null) {
+                if ($g->start_date <= $date) {
+                    $until = $g->end_date;
+                }
+            } elseif ($g->start_date <= date('Y-m-d', strtotime($until . ' +1 day'))) {
+                $until = max($until, $g->end_date);
+            }
+        }
+        return $until;
     }
 
     // ------------------------------------------------------------------

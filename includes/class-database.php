@@ -272,6 +272,13 @@ class TeamOversight_Database {
             update_option('team_oversight_unslash_fixed', 1, false);
         }
 
+        // 1.67.0: team-assignment memberships run to 1 April of the next
+        // year (not 31 Dec). Extend the ones already running, once.
+        if (!get_option('team_oversight_assignment_grants_april') && class_exists('TeamOversight_Memberships')) {
+            TeamOversight_Memberships::extend_assignment_grants_to_april();
+            update_option('team_oversight_assignment_grants_april', 1, false);
+        }
+
         // 1.63.0: unpaid applications no longer expire after 7 days. Bring
         // back the ones that did, so coaches see them as Payment pending
         // (their trial numbers were never released).
