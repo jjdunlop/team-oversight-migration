@@ -229,18 +229,17 @@ class TeamOversight_Fees {
     }
 
     // ------------------------------------------------------------------
-    // How a season fee is worked out (1.65.0)
+    // How a season fee is worked out (1.66.0)
     //
     // Every active assignment is a "bucket": team + role + fee class. The
     // fee class can differ per team — an under-19 is JPL/YSL on a junior-
     // league team and Junior U/19 (VVL) on any other team.
-    //  1. Pre-discount fee = the HIGHEST player bucket (playing member /
-    //     training only). Two player buckets never add up.
-    //  2. Coaching credit: coach / assistant coach / team manager /
-    //     supporter amounts in the matrix are what that person ends up
-    //     paying. With one or more of those roles, the fee drops to the
-    //     cheapest such rate (only the biggest credit applies); the credit
-    //     is the difference. Someone with no player role pays that rate.
+    //  1. Each bucket is priced from the matrix: playing member, training
+    //     only and supporter at their own rate; coach and assistant coach
+    //     at the SUPPORTER rate (there's no coaching discount — the club
+    //     handles that elsewhere — so someone who only coaches pays the
+    //     supporter fee); team manager as a PLAYING MEMBER.
+    //  2. The fee is the HIGHEST bucket. Buckets never add up.
     //  3. Pro-rata: the fee-segment history records the buckets for each
     //     stretch of the season; each stretch is charged for its share of
     //     the season dates, and the stretches add up.
@@ -248,7 +247,16 @@ class TeamOversight_Fees {
     // Payment Management breakdown both come from it.
     // ------------------------------------------------------------------
 
-    const PLAYER_ROLES = array('playing_member', 'training_only');
+    /** Roles with their own column in the fee matrix. */
+    const PAYING_ROLES = array('playing_member', 'training_only', 'supporter');
+
+    /** Roles without a matrix column, and the column they're charged at. */
+    const CHARGED_AS = array('coach' => 'supporter', 'assistant_coach' => 'supporter', 'team_manager' => 'playing_member');
+
+    /** The matrix column a role is charged at. */
+    public static function charged_as($role) {
+        return isset(self::CHARGED_AS[$role]) ? self::CHARGED_AS[$role] : $role;
+    }
 
     /** Matrix lookups cached for the request (a page computing many breakdowns). */
     private $rate_cache = null;
@@ -321,50 +329,32 @@ class TeamOversight_Fees {
     }
 
     /**
-     * Price one stretch's buckets: rate per bucket, the highest player
-     * bucket (pre-discount), the coaching credit, and the rate charged.
+     * Price one stretch's buckets: each bucket's rate (coaching roles at
+     * the supporter rate, team manager as a player), the highest bucket,
+     * and so the rate charged.
      */
     public function price_buckets($buckets, $season) {
         $priced = array();
-        $player = null;
-        $staff = null;
+        $top = null;
         $missing = false;
         foreach ($buckets as $b) {
-            $rate = $this->rate($b['class'], $b['role'], $season);
+            $b['charged_as'] = self::charged_as($b['role']);
+            $rate = $this->rate($b['class'], $b['charged_as'], $season);
             $b['rate'] = $rate === null ? null : floatval($rate);
-            $b['player'] = in_array($b['role'], self::PLAYER_ROLES, true);
             $priced[] = $b;
             if ($b['rate'] === null) {
                 $missing = true;
                 continue;
             }
-            if ($b['player'] && ($player === null || $b['rate'] > $player['rate'])) {
-                $player = $b;
-            }
-            if (!$b['player'] && ($staff === null || $b['rate'] < $staff['rate'])) {
-                $staff = $b;
-            }
-        }
-
-        $pre = $player ? $player['rate'] : null;
-        $charge = $pre;
-        $credit = 0.0;
-        if ($staff) {
-            if ($player === null) {
-                $charge = $staff['rate'];
-            } elseif ($staff['rate'] < $player['rate']) {
-                $charge = $staff['rate'];
-                $credit = round($player['rate'] - $staff['rate'], 2);
+            if ($top === null || $b['rate'] > $top['rate']) {
+                $top = $b;
             }
         }
 
         return array(
             'buckets' => $priced,
-            'pre' => $pre,
-            'top_player' => $player,
-            'staff' => $staff,
-            'credit' => $credit,
-            'rate' => $charge === null ? 0.0 : $charge,
+            'top' => $top,
+            'rate' => $top ? $top['rate'] : 0.0,
             'missing' => $missing,
         );
     }
@@ -478,9 +468,9 @@ class TeamOversight_Fees {
 
     /**
      * The breakdown as a dropdown for the Payment Management table: each
-     * stretch's buckets with their rates, the highest player fee, the
-     * coaching credit at the bottom, then pro-rata and the total. Flags a
-     * difference from the invoiced amount.
+     * stretch's buckets with their rates (and what each is charged as),
+     * the highest fee, then pro-rata and the total. Flags a difference
+     * from the invoiced amount.
      */
     public function render_fee_breakdown($breakdown, $invoice_amount = null, $season = null) {
         $money = function ($n) { return '$' . number_format((float) $n, 2); };
@@ -507,20 +497,17 @@ class TeamOversight_Fees {
                         <?php foreach ($s['buckets'] as $b): ?>
                             <li>
                                 <?php echo esc_html(($b['team'] !== '' ? $b['team'] . ' · ' : '') . $b['class'] . ' · ' . self::role_label($b['role'])); ?>
+                                <?php if ($b['charged_as'] !== $b['role']): ?><span class="description">(charged as <?php echo esc_html(strtolower(self::role_label($b['charged_as']))); ?>)</span><?php endif; ?>
                                 — <?php echo $b['rate'] === null ? '<em>no amount in the fee matrix</em>' : esc_html($money($b['rate'])); ?>
                             </li>
                         <?php endforeach; ?>
                     </ul>
                     <table class="fee-breakdown-sums">
-                        <?php if ($s['pre'] !== null): ?>
-                            <tr><td>Pre-discount fee (highest player fee<?php echo $s['top_player'] && $s['top_player']['team'] !== '' ? ', ' . esc_html($s['top_player']['team'] . ' ' . strtolower(self::role_label($s['top_player']['role']))) : ''; ?>)</td><td><?php echo esc_html($money($s['pre'])); ?></td></tr>
+                        <?php if ($s['top']): ?>
+                            <tr><td>Highest fee<?php echo $s['top']['team'] !== '' ? ' (' . esc_html($s['top']['team'] . ' ' . strtolower(self::role_label($s['top']['role']))) . ')' : ''; ?><?php echo count($s['buckets']) > 1 ? ' — fees never add up' : ''; ?></td><td><?php echo esc_html($money($s['top']['rate'])); ?></td></tr>
+                        <?php else: ?>
+                            <tr><td>No amount in the fee matrix for these roles</td><td><?php echo esc_html($money(0)); ?></td></tr>
                         <?php endif; ?>
-                        <?php if ($s['credit'] > 0): ?>
-                            <tr class="fee-breakdown-credit"><td><?php echo esc_html(self::role_label($s['staff']['role'])); ?> credit<?php echo $s['staff']['team'] !== '' ? ' (' . esc_html($s['staff']['team']) . ')' : ''; ?> — pays the <?php echo esc_html(strtolower(self::role_label($s['staff']['role']))); ?> rate of <?php echo esc_html($money($s['staff']['rate'])); ?></td><td>−<?php echo esc_html($money($s['credit'])); ?></td></tr>
-                        <?php elseif ($s['pre'] === null && $s['staff']): ?>
-                            <tr><td>No player role — pays the <?php echo esc_html(strtolower(self::role_label($s['staff']['role']))); ?> rate</td><td><?php echo esc_html($money($s['staff']['rate'])); ?></td></tr>
-                        <?php endif; ?>
-                        <tr><td>Fee<?php echo count($stretches) > 1 ? ' for this stretch' : ''; ?></td><td><?php echo esc_html($money($s['rate'])); ?></td></tr>
                         <?php if ($breakdown['has_dates'] && $s['share'] < 0.9999): ?>
                             <tr><td>Pro-rata: <?php echo intval($s['days']); ?> of <?php echo intval($breakdown['season_days']); ?> season days (<?php echo esc_html(number_format($s['share'] * 100, 1)); ?>%)</td><td><?php echo esc_html($money($s['amount'])); ?></td></tr>
                         <?php endif; ?>
@@ -590,9 +577,7 @@ class TeamOversight_Fees {
         $buckets = $this->current_buckets($email, $season);
         $signature = wp_json_encode($buckets);
         $priced = $this->price_buckets($buckets, $season);
-        $best_role = $priced['staff'] && ($priced['top_player'] === null || $priced['credit'] > 0)
-            ? $priced['staff']['role']
-            : ($priced['top_player'] ? $priced['top_player']['role'] : $assignments[0]->role);
+        $best_role = $priced['top'] ? $priced['top']['charged_as'] : self::charged_as($assignments[0]->role);
 
         if ($open && $open->buckets === $signature) {
             return;
@@ -647,10 +632,10 @@ class TeamOversight_Fees {
     }
 
     /**
-     * Season fee from the segment history: each segment charges its role's
-     * rate for its share of the season window. Null when no segments exist
-     * (caller falls back to flat minimum-fee × pro-rata). Without season
-     * dates, the latest segment's full rate applies.
+     * Season fee from fee_breakdown(): each stretch's highest bucket for its
+     * share of the season. Null when nothing could be priced (no teams, or
+     * no matrix amounts for their roles). Without season dates, the latest
+     * stretch's full rate applies.
      */
     private function compute_segment_fee($email, $season, $fee_class) {
         $breakdown = $this->fee_breakdown($email, $season);
@@ -660,7 +645,7 @@ class TeamOversight_Fees {
         // Nothing priced at all (no matrix entries for any bucket): no fee.
         $priced_any = false;
         foreach ($breakdown['stretches'] as $s) {
-            if ($s['top_player'] || $s['staff']) {
+            if ($s['top']) {
                 $priced_any = true;
             }
         }
@@ -1251,7 +1236,7 @@ class TeamOversight_Fees {
                         <?php wp_nonce_field('save_fee_matrix', 'fee_nonce'); ?>
                         <input type="hidden" name="season" value="<?php echo esc_attr($selected_season); ?>">
 
-                        <p class="description">Each person pays the amount for their fee class and their <strong>cheapest</strong> role across their teams. A blank cell has no fee set.</p>
+                        <p class="description">Each person pays the <strong>highest</strong> amount across their teams (fees never add up). Coaches and assistant coaches are charged the <strong>supporter</strong> amount for their fee class, and team managers the <strong>playing member</strong> amount. A blank cell has no fee set.</p>
                         <div style="overflow-x: auto;">
                             <table class="wp-list-table widefat striped fee-grid">
                                 <thead>
@@ -1770,7 +1755,9 @@ class TeamOversight_Fees {
 
     /** Team roles, players first — the grid's columns. */
     public static function standard_fee_roles() {
-        return array('playing_member', 'training_only', 'team_manager', 'coach', 'assistant_coach', 'supporter');
+        // Coach / assistant coach / team manager have no column: they're
+        // charged at the supporter / playing member rate (CHARGED_AS).
+        return self::PAYING_ROLES;
     }
 
     /** Preferred order first, then anything else found, alphabetically. */
@@ -1796,7 +1783,9 @@ class TeamOversight_Fees {
             $roles = array_merge($roles, array_keys($by_role));
         }
         $classes = empty($classes) ? self::standard_fee_classes() : self::order_like($classes, self::standard_fee_classes());
-        $roles = empty($roles) ? self::standard_fee_roles() : self::order_like(array_unique($roles), self::standard_fee_roles());
+        // Always exactly the paying columns; old coach/manager amounts in the
+        // table are no longer used and aren't shown.
+        $roles = self::standard_fee_roles();
         return array('classes' => $classes, 'roles' => $roles, 'cells' => $cells);
     }
 
@@ -1920,51 +1909,17 @@ class TeamOversight_Fees {
             return false;
         }
         
-        // Determine fee class
+        // The fee comes from the one calculation (fee_breakdown): highest
+        // bucket per stretch, pro-rated. Record where their teams stand first.
         $fee_class = $this->determine_fee_class($email, $season);
-        
-        // Get all applicable fees across ALL assignments
-        $applicable_fees = array();
-        foreach ($assignments as $assignment) {
-            $fee = $this->get_fee($fee_class, $assignment->role, $season);
-            if ($fee !== null) {
-                $applicable_fees[] = $fee;
-            }
-        }
-        
-        if (empty($applicable_fees)) {
-            // No fees found for the user's roles - this might be a configuration issue
-            $assignment_roles = array_map(function($a) { return $a->role; }, $assignments);
-            error_log('Invoice generation failed for ' . $email . ' - Fee Class: ' . $fee_class . ', Roles: ' . implode(', ', $assignment_roles));
-            
-            // Check what fees are available in the fee matrix
-            $available_fees = $wpdb->get_results("
-                SELECT fee_class, team_role FROM {$wpdb->prefix}fee_matrix 
-                WHERE is_active = 1
-                ORDER BY fee_class, team_role
-            ");
-            
-            $fee_combinations = array();
-            foreach ($available_fees as $fee) {
-                $fee_combinations[] = $fee->fee_class . ' + ' . $fee->team_role;
-            }
-            error_log('Available fee combinations: ' . implode(', ', $fee_combinations));
-            
-            return false;
-        }
-        
-        // Apply minimum fee rule - user pays the LOWEST fee across all their roles
-        $minimum_fee = min($applicable_fees);
-
-        // Pro-rata: mid-season joiners owe the remaining fraction of the season.
-        $minimum_fee = round($minimum_fee * self::get_pro_rata_factor($email, $season), 2);
-
-        // Segment history takes precedence: each fee-role period charges its
-        // own rate for its share of the season (role changes mid-season).
         $this->checkpoint_fee_role($email, $season);
-        $segment_fee = $this->compute_segment_fee($email, $season, $fee_class);
-        if ($segment_fee !== null) {
-            $minimum_fee = $segment_fee;
+        $minimum_fee = $this->compute_segment_fee($email, $season, $fee_class);
+
+        if ($minimum_fee === null) {
+            // No amount in the matrix for any of their roles: a configuration gap.
+            $assignment_roles = array_map(function($a) { return $a->role; }, $assignments);
+            error_log('Invoice generation failed for ' . $email . ' - Fee Class: ' . $fee_class . ', Roles: ' . implode(', ', $assignment_roles) . ' (no matching fee matrix amounts for ' . $season . ')');
+            return false;
         }
 
         // Create single invoice for all assignments
@@ -2036,32 +1991,8 @@ class TeamOversight_Fees {
             return true;
         }
 
-        // Fallback (no segment history): flat minimum fee × pro-rata.
-        $uid = self::resolve_user_id($email);
-        $assignments = $wpdb->get_results($wpdb->prepare("
-            SELECT * FROM {$wpdb->prefix}team_assignments
-            WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
-        ", $uid, $email, $season));
-
-        if (empty($assignments)) {
-            return true; // No active assignments, keep existing invoice
-        }
-
-        $applicable_fees = array();
-
-        foreach ($assignments as $assignment) {
-            $fee = $this->get_fee($fee_class, $assignment->role, $season);
-            if ($fee !== null) {
-                $applicable_fees[] = $fee;
-            }
-        }
-
-        if (!empty($applicable_fees)) {
-            $minimum_fee = min($applicable_fees);
-            $minimum_fee = round($minimum_fee * self::get_pro_rata_factor($email, $season), 2);
-            $this->apply_invoice_amount($invoice_id, $minimum_fee);
-        }
-
+        // No priced history (no active teams, or no matrix amounts): keep
+        // the invoice as it is.
         return true;
     }
 

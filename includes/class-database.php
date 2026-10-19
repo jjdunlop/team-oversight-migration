@@ -201,9 +201,9 @@ class TeamOversight_Database {
         }
 
         // 1.65.0: each fee segment also records every active team bucket
-        // (team, role, fee class) as JSON, so the fee — highest player
-        // bucket, then the coaching credit — and its breakdown can be
-        // worked out per stretch. NULL on older segments (single fee_role).
+        // (team, role, fee class) as JSON, so the fee (the highest bucket)
+        // and its breakdown can be worked out per stretch. NULL on older
+        // segments (single fee_role).
         $buckets_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_fee_segments LIKE 'buckets'");
         if (empty($buckets_exists)) {
             $wpdb->query("ALTER TABLE {$wpdb->prefix}team_fee_segments ADD COLUMN buckets text DEFAULT NULL");

@@ -1898,7 +1898,6 @@ class TeamOversight_Admin {
             .fee-breakdown-sums { width: 100%; border-collapse: collapse; margin-bottom: 4px; }
             .fee-breakdown-sums td { padding: 2px 0; vertical-align: top; }
             .fee-breakdown-sums td:last-child { text-align: right; white-space: nowrap; padding-left: 10px; }
-            .fee-breakdown-credit td { color: #1e6b2a; }
             .fee-breakdown-total { margin: 6px 0 0; padding-top: 6px; border-top: 1px solid #c3c4c7; }
             .fee-breakdown-warn { margin: 6px 0 0; color: #b32d2e; }
         </style>
