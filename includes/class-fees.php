@@ -415,8 +415,15 @@ class TeamOversight_Fees {
                 WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
             ", $uid, $email, $season));
             // Back on a team after their history closed: the new stretch
-            // starts no earlier than the last one ended (never overlaps).
-            $from = empty($stretches) ? ($join ?: $today) : max($today, $last['to']);
+            // starts no earlier than the last one ended (never overlaps) —
+            // the same rule the checkpoint uses.
+            $last_end = null;
+            foreach ($stretches as $s) {
+                if ($s['to'] !== null && ($last_end === null || $s['to'] > $last_end)) {
+                    $last_end = $s['to'];
+                }
+            }
+            $from = self::next_segment_start($join, $last_end, $today);
             $stretches[] = array('from' => $from, 'to' => null, 'buckets' => $current, 'legacy' => false);
         }
 
@@ -536,6 +543,27 @@ class TeamOversight_Fees {
     }
 
     /**
+     * Where a new stretch starts when no segment is open ('YYYY-MM-DD').
+     * No history yet: their join date (earliest active assignment start).
+     * Back on a team after their history closed: never before the last
+     * segment ended — that time is already charged, and the gap they were
+     * off isn't owed — so today (or that end date, if later), unless the
+     * join date itself falls after it (re-added with a deliberate later
+     * start date), which then counts from the join date. Used for the real
+     * checkpoint and fee_breakdown()'s not-yet-recorded stretch alike, so
+     * the two can't diverge and a reactivation never overlaps.
+     */
+    private static function next_segment_start($join, $last_end, $today) {
+        if ($last_end === null || $last_end === '') {
+            return $join ? $join : $today;
+        }
+        if ($join && $join > $last_end) {
+            return $join;
+        }
+        return max($today, $last_end);
+    }
+
+    /**
      * Record where the person's teams stand as a dated segment (all active
      * buckets). Called whenever assignments change: unchanged buckets are a
      * no-op; a change closes the open segment today and opens a new one, so
@@ -606,15 +634,19 @@ class TeamOversight_Fees {
         }
 
         // First-ever segment starts at their join date; later ones today.
+        // Back on a team after their history closed, it never starts before
+        // the last segment ended (next_segment_start()).
         $start = $today;
         if (!$open) {
             $join = $wpdb->get_var($wpdb->prepare("
                 SELECT MIN(start_date) FROM {$wpdb->prefix}team_assignments
                 WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
             ", $uid, $email, $season));
-            if ($join) {
-                $start = $join;
-            }
+            $last_end = $wpdb->get_var($wpdb->prepare("
+                SELECT MAX(end_date) FROM {$wpdb->prefix}team_fee_segments
+                WHERE (user_id = %d OR email = %s) AND season = %s AND end_date IS NOT NULL
+            ", $uid, $email, $season));
+            $start = self::next_segment_start($join, $last_end, $today);
         }
 
         $wpdb->insert(
@@ -1984,9 +2016,79 @@ class TeamOversight_Fees {
             return true;
         }
 
-        // No priced history (no active teams, or no matrix amounts): keep
-        // the invoice as it is.
+        // Left every team before the season started: nothing accrued, so
+        // the fee is $0 — anything already paid shows as credit (the
+        // ledger is never touched).
+        if ($this->left_before_season($email, $season, $invoice_id)) {
+            $before = $wpdb->get_row($wpdb->prepare("
+                SELECT invoice_amount, user_id FROM {$wpdb->prefix}team_invoices WHERE id = %d
+            ", $invoice_id));
+            if ($before && abs(floatval($before->invoice_amount)) >= 0.005) {
+                $this->apply_invoice_amount($invoice_id, 0.0);
+                TeamOversight_Log::add(
+                    'fee_edit',
+                    $season . ' season fee changed from $' . number_format($before->invoice_amount, 2) . ' to $0.00 — left every team before the season started',
+                    array('user_id' => intval($before->user_id), 'amount' => 0)
+                );
+            }
+            return true;
+        }
+
+        // No priced history otherwise (no segment history, or no matrix
+        // amounts for their roles): keep the invoice as it is.
         return true;
+    }
+
+    /**
+     * Has the person left every team with none of their fee history inside
+     * the season (they left before it started)? The season has dates, they
+     * have recorded segments but no active teams, and every stretch falls
+     * outside the season window — so their accrued fee is $0, whatever the
+     * fee matrix says. Invoices with no segment history (pre-1.9) are not
+     * this and keep their amount, as do matrix gaps mid-season (stretches
+     * inside the season that can't be priced).
+     *
+     * Judged under the invoice owner's account as well as $email: the
+     * re-price can run under an older email that no longer resolves to them
+     * (its last assignment row was just deleted), and someone still on a
+     * team under their current email must never drop to $0 — an email
+     * change never splits a person.
+     */
+    private function left_before_season($email, $season, $invoice_id) {
+        global $wpdb;
+        $dates = self::get_season_dates($season);
+        if (!$dates || strtotime($dates['end']) <= strtotime($dates['start'])) {
+            return false;
+        }
+        $identities = array($email);
+        $owner = intval($wpdb->get_var($wpdb->prepare("
+            SELECT user_id FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice_id)));
+        if ($owner > 0 && self::resolve_user_id($email) !== $owner) {
+            $account = get_userdata($owner);
+            if (!$account || !$account->user_email) {
+                return false;
+            }
+            $identities[] = $account->user_email;
+        }
+        $has_segments = false;
+        foreach ($identities as $who) {
+            if (!empty($this->current_buckets($who, $season))) {
+                return false;
+            }
+            $uid = self::resolve_user_id($who);
+            if ($wpdb->get_var($wpdb->prepare("
+                SELECT id FROM {$wpdb->prefix}team_fee_segments
+                WHERE (user_id = %d OR email = %s) AND season = %s LIMIT 1
+            ", $uid, $who, $season))) {
+                $has_segments = true;
+            }
+            $breakdown = $this->fee_breakdown($who, $season);
+            if (!empty($breakdown['stretches'])) {
+                return false;
+            }
+        }
+        return $has_segments;
     }
 
     /**

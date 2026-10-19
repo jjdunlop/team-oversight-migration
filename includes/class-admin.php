@@ -2808,30 +2808,106 @@ class TeamOversight_Admin {
             
             if ($trial && $trial->application_status === 'accepted') {
                 // Remove only the PLAYING assignments the acceptance created
-                // — never staff roles (a playing coach keeps coaching).
+                // — never staff roles (a playing coach keeps coaching) —
+                // matched by account or email, the same path as deleting an
+                // assignment on Team Assignments: each team's Selected /
+                // Training Only verdicts drop to Tentative, so the next
+                // Finalise doesn't silently put the player back.
                 // assigned_team may be a multi-team list like "SL2M, JPLM (T/O)".
                 $undo_teams = array_filter(array_map(function ($team_code) {
                     return trim(str_replace('(T/O)', '', $team_code));
                 }, explode(',', (string) $trial->assigned_team)));
+                $trial_uid = intval($trial->user_id);
 
                 foreach ($undo_teams as $undo_team) {
-                    $wpdb->query($wpdb->prepare("
-                        DELETE FROM {$wpdb->prefix}team_assignments
-                        WHERE email = %s AND season = %s AND team = %s
+                    $undo_ids = $wpdb->get_col($wpdb->prepare("
+                        SELECT id FROM {$wpdb->prefix}team_assignments
+                        WHERE season = %s AND team = %s
                             AND role IN ('playing_member', 'training_only')
-                    ", $trial->email, $trial->season, $undo_team));
+                            AND (email = %s OR (user_id > 0 AND user_id = %d))
+                    ", $trial->season, $undo_team, $trial->email, $trial_uid));
+                    foreach ($undo_ids as $undo_id) {
+                        $wpdb->delete($wpdb->prefix . 'team_assignments', array('id' => intval($undo_id)), array('%d'));
+                    }
+                    $this->sync_trial_after_assignment_removal($trial->email, $trial->season, $undo_team, $trial_uid);
                 }
-                
-                // Remove invoice if exists
-                $wpdb->delete(
-                    $wpdb->prefix . 'team_invoices',
-                    array(
-                        'email' => $trial->email,
-                        'season' => $trial->season
-                    ),
-                    array('%s', '%s')
-                );
-                
+
+                // The season invoice is never deleted blindly: payments on it
+                // are real money, and a staff role they still hold is still
+                // charged. Fees-engine identity is the account's current
+                // email when there is one (rows match by its user_id too).
+                $fee_email = $trial->email;
+                $fee_account = $trial_uid > 0 ? get_userdata($trial_uid) : false;
+                if ($fee_account && $fee_account->user_email) {
+                    $fee_email = $fee_account->user_email;
+                }
+                $fee_uid = TeamOversight_Fees::resolve_user_id($fee_email);
+                $invoice = $wpdb->get_row($wpdb->prepare("
+                    SELECT id, invoice_amount FROM {$wpdb->prefix}team_invoices
+                    WHERE (user_id = %d OR email = %s) AND season = %s
+                ", $fee_uid, $fee_email, $trial->season));
+
+                // Checkpoint the fee history and re-price, payments kept: a
+                // staff role still held is charged from today; leaving before
+                // the season starts drops the fee to $0 (paid = credit);
+                // mid-season it freezes at what accrued.
+                $fees = new TeamOversight_Fees();
+                $fees->recalculate_after_assignment_change($fee_email, $trial->season);
+
+                $still_on_team = $wpdb->get_var($wpdb->prepare("
+                    SELECT id FROM {$wpdb->prefix}team_assignments
+                    WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1 LIMIT 1
+                ", $fee_uid, $fee_email, $trial->season));
+                $invoice_removed = false;
+                $accrued = 0.0;
+                $no_dates = false;
+                if ($invoice && !$still_on_team) {
+                    // What their time on teams accrued, pro-rata from the fee
+                    // history — only with season dates, once fees are released.
+                    if (TeamOversight_Fees::fees_released($trial->season)) {
+                        $season_dates = TeamOversight_Fees::get_season_dates($trial->season);
+                        $no_dates = !$season_dates || strtotime($season_dates['end']) <= strtotime($season_dates['start']);
+                        if (!$no_dates) {
+                            $breakdown = $fees->fee_breakdown($fee_email, $trial->season);
+                            $accrued = floatval($breakdown['total']);
+                        }
+                    }
+                    $payment_count = intval($wpdb->get_var($wpdb->prepare("
+                        SELECT COUNT(*) FROM {$wpdb->prefix}team_invoice_payments WHERE invoice_id = %d
+                    ", $invoice->id)));
+                    if ($payment_count === 0 && $accrued < 0.005) {
+                        // Nothing paid, nothing accrued, on no team any more:
+                        // a clean slate. (Accrued mid-season, it stays at that
+                        // amount — the same as deleting the assignment.)
+                        $wpdb->delete($wpdb->prefix . 'team_invoices', array('id' => $invoice->id), array('%d'));
+                        $invoice_removed = true;
+                        TeamOversight_Log::add('fee_edit', $trial->season . ' fee of $' . number_format($invoice->invoice_amount, 2) . ' removed (trial assignment undone, nothing paid)', array('user_id' => $fee_uid > 0 ? $fee_uid : $trial_uid));
+                    }
+                }
+
+                $fee_message = '';
+                if ($invoice_removed) {
+                    $fee_message = ' Their unpaid ' . $trial->season . ' fee of $' . number_format($invoice->invoice_amount, 2) . ' was removed.';
+                } elseif ($invoice) {
+                    $fee_now = $wpdb->get_var($wpdb->prepare("
+                        SELECT invoice_amount FROM {$wpdb->prefix}team_invoices WHERE id = %d
+                    ", $invoice->id));
+                    if ($fee_now !== null) {
+                        $paid = TeamOversight_Payments::get_ledger_paid($invoice->id);
+                        $credit = round($paid - floatval($fee_now), 2);
+                        $fee_message = abs(floatval($fee_now) - floatval($invoice->invoice_amount)) >= 0.005
+                            ? ' Their ' . $trial->season . ' fee was re-priced from $' . number_format($invoice->invoice_amount, 2) . ' to $' . number_format($fee_now, 2)
+                            : ' Their ' . $trial->season . ' fee stays at $' . number_format($fee_now, 2);
+                        if ($accrued >= 0.005) {
+                            $fee_message .= ' (what accrued while they were on a team)';
+                        }
+                        $fee_message .= $paid >= 0.01 ? ', with the $' . number_format($paid, 2) . ' already paid kept on it' . ($credit >= 0.01 ? ' ($' . number_format($credit, 2) . ' is credit)' : '') . '.' : '.';
+                        if ($no_dates && floatval($fee_now) >= 0.005) {
+                            $fee_message .= ' The ' . $trial->season . ' season has no dates, so the fee can\'t be pro-rated and stays at the full amount — use Edit Fee if they shouldn\'t owe it.';
+                        }
+                    }
+                }
+
                 // Reset trial to pending
                 $wpdb->update(
                     $wpdb->prefix . 'trial_applications',
@@ -2844,7 +2920,7 @@ class TeamOversight_Admin {
                     array('%d')
                 );
                 
-                echo '<div class="notice notice-success"><p>Trial assignment undone successfully. Player returned to pending status.</p></div>';
+                echo '<div class="notice notice-success"><p>Trial assignment undone successfully. Player returned to pending status' . (!empty($undo_teams) ? '; any Selected / Training Only verdicts for ' . esc_html(implode(', ', $undo_teams)) . ' are now Tentative' : '') . '.' . esc_html($fee_message) . '</p></div>';
             } elseif ($trial && $trial->application_status === 'rejected') {
                 // Reset rejected trial to pending
                 $wpdb->update(
