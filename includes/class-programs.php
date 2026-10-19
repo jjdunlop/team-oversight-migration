@@ -944,7 +944,8 @@ class TeamOversight_Programs {
                         </div>
                         <div class="cac-footer">
                             <span class="cac-expanders">
-                                <?php echo TeamOversight_Coach_Portal::render_emergency_details($attendee['email']); ?>
+                                <?php // By account only: a guest order's email proves nothing about who placed it. ?>
+                                <?php echo TeamOversight_Coach_Portal::render_emergency_details($attendee['email'], $attendee['user_id'], false); ?>
                             </span>
                             <?php if ($program_key !== ''): ?>
                                 <span class="cac-actions">

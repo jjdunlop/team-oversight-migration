@@ -8,7 +8,8 @@ if (!defined('ABSPATH')) {
  * Front-end portal for coaches: [team_coach_portal]
  *
  * Visible only to logged-in users holding an active coach or assistant
- * coach team assignment. Coaches work one team at a time (switcher for
+ * coach team assignment for a season whose access hasn't ended
+ * (coach_access_open), or committee access. Coaches work one team at a time (switcher for
  * multi-team coaches) and run their selections from here:
  *
  *  - roster for the active team, with CSV export
@@ -222,13 +223,17 @@ class TeamOversight_Coach_Portal {
      */
     public function ajax_set_verdict() {
         if (!is_user_logged_in() || !isset($_POST['coach_action']) || $_POST['coach_action'] !== 'set_selection') {
-            wp_send_json_error(array('notice' => '<div class="coach-portal-notice"><p>Your session has expired — please reload the page.</p></div>'));
+            wp_send_json_error(array('notice' => '<div class="coach-portal-notice"><p>Your session has expired — please reload the page.</p></div>', 'expired' => true));
         }
 
         $season = isset($_POST['coach_season']) ? sanitize_text_field(wp_unslash($_POST['coach_season'])) : '';
         $notice = $this->handle_actions($this->get_editable_team_codes($season), $season);
         if (strpos($notice, 'coach-portal-success') === false) {
-            wp_send_json_error(array('notice' => $notice !== '' ? $notice : '<div class="coach-portal-notice"><p>That verdict could not be saved.</p></div>'));
+            wp_send_json_error(array(
+                'notice' => $notice !== '' ? $notice : '<div class="coach-portal-notice"><p>That verdict could not be saved.</p></div>',
+                // A stale page: the toast stays up, since only a reload helps.
+                'expired' => $notice === self::expired_notice(),
+            ));
         }
 
         $status = sanitize_text_field(wp_unslash($_POST['selection_status']));
@@ -294,6 +299,10 @@ class TeamOversight_Coach_Portal {
         $season = isset($_POST['coach_season']) ? sanitize_text_field($_POST['coach_season']) : '';
 
         $notice = $this->handle_actions($this->get_editable_team_codes($season), $season);
+        if ($notice === self::expired_notice()) {
+            // The redirect below is the reload, so don't ask for another.
+            $notice = self::expired_notice(true);
+        }
         if ($notice !== '') {
             set_transient('murvc_coach_flash_' . get_current_user_id(), $notice, 60);
         }
@@ -309,13 +318,31 @@ class TeamOversight_Coach_Portal {
     private function get_coach_assignments($user) {
         global $wpdb;
 
-        return $wpdb->get_results($wpdb->prepare("
+        $rows = $wpdb->get_results($wpdb->prepare("
             SELECT season, team, role FROM {$wpdb->prefix}team_assignments
             WHERE is_active = 1
                 AND role IN (" . self::COACH_ROLES . ")
                 AND (user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s))
             ORDER BY season DESC, team
         ", $user->ID, $user->user_email));
+
+        // Seasons whose coaching access has run out drop away (committee
+        // access is separate and unaffected).
+        return array_values(array_filter($rows, function ($row) {
+            return self::coach_access_open($row->season);
+        }));
+    }
+
+    /**
+     * Coaching a season opens it in the portal until the team's membership
+     * runs out — 1 April the year after (assignment_grant_end) — so last
+     * season stays reachable while the next teams are picked, then closes:
+     * a former coach doesn't keep seeing old applicants' contact and
+     * emergency details for ever. $today is for tests.
+     */
+    private static function coach_access_open($season, $today = null) {
+        $today = $today !== null ? $today : wp_date('Y-m-d');
+        return $today < TeamOversight_Memberships::assignment_grant_end($season);
     }
 
     /**
@@ -420,7 +447,7 @@ class TeamOversight_Coach_Portal {
         $seasons = $this->get_portal_seasons();
 
         if (empty($seasons)) {
-            return '<div class="coach-portal-notice"><p>This page is for team coaches. Your account does not have a coach or assistant coach assignment — if that\'s wrong, please contact the club.</p></div>';
+            return '<div class="coach-portal-notice"><p>This page is for team coaches. Your account does not have a current coach or assistant coach assignment — if that\'s wrong, please contact the club.</p></div>';
         }
 
         $season = (isset($_GET['coach_season']) && in_array($_GET['coach_season'], $seasons, true))
@@ -893,13 +920,15 @@ class TeamOversight_Coach_Portal {
 
             var flash = document.getElementById('coach-flash');
             var flashTimer = null;
-            var showFlash = function (html) {
+            var showFlash = function (html, sticky) {
                 if (!flash) { return; }
                 if (html !== undefined) { flash.innerHTML = html; }
                 if (flash.textContent.trim() === '') { return; }
                 clearTimeout(flashTimer);
                 flash.classList.remove('is-fading');
                 flash.classList.add('coach-flash-toast');
+                // An expired page stays flagged until it's reloaded (or tapped away).
+                if (sticky) { return; }
                 flashTimer = setTimeout(function () {
                     flash.classList.add('is-fading');
                     flashTimer = setTimeout(function () {
@@ -908,6 +937,14 @@ class TeamOversight_Coach_Portal {
                     }, 600);
                 }, 4000);
             };
+            if (flash) {
+                flash.addEventListener('click', function () {
+                    if (!flash.classList.contains('coach-flash-toast')) { return; }
+                    clearTimeout(flashTimer);
+                    flash.classList.remove('coach-flash-toast', 'is-fading');
+                    flash.innerHTML = '';
+                });
+            }
 
             window.murvcCoachVerdict = function (select) {
                 var form = select.form;
@@ -924,7 +961,13 @@ class TeamOversight_Coach_Portal {
                         select.disabled = false;
                         if (!res || !res.success) {
                             select.value = previous;
-                            showFlash(res && res.data && res.data.notice ? res.data.notice : '<div class="coach-portal-notice"><p>That verdict could not be saved — please try again.</p></div>');
+                            if (!res || typeof res !== 'object') {
+                                // Not the handler's answer: WordPress replies 0 (with a 400)
+                                // once the login has lapsed, so retrying can't help.
+                                showFlash('<div class="coach-portal-notice coach-portal-expired"><p>Your session has expired — reload the page (you may need to log in again).</p></div>', true);
+                                return;
+                            }
+                            showFlash(res.data && res.data.notice ? res.data.notice : '<div class="coach-portal-notice"><p>That verdict could not be saved — please try again.</p></div>', !!(res.data && res.data.expired));
                             return;
                         }
                         Array.prototype.forEach.call(select.options, function (o) { o.defaultSelected = (o.value === select.value); });
@@ -989,7 +1032,8 @@ class TeamOversight_Coach_Portal {
             var restore = function () { window.scrollTo(0, saved.y); };
             restore();
             window.addEventListener('load', restore);
-            showFlash();
+            // An expired-page message stays up like the verdict one does.
+            showFlash(undefined, !!(flash && flash.querySelector('.coach-portal-expired')));
         })();
         </script>
 
@@ -1894,7 +1938,9 @@ class TeamOversight_Coach_Portal {
         }
 
         if (!isset($_POST['coach_nonce']) || !wp_verify_nonce($_POST['coach_nonce'], 'coach_portal_action')) {
-            return '<div class="coach-portal-notice"><p>Security check failed — please try again.</p></div>';
+            // Almost always a page left open past the nonce lifetime (a day
+            // at most), where retrying can never work — only a reload does.
+            return self::expired_notice();
         }
 
         $team = isset($_POST['coach_team']) ? sanitize_text_field($_POST['coach_team']) : '';
@@ -2012,6 +2058,18 @@ class TeamOversight_Coach_Portal {
         }
 
         return '<div class="coach-portal-success"><p>' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ') marked <strong>' . esc_html($verdict_labels[$status]) . '</strong> for ' . esc_html($team) . '.</p></div>';
+    }
+
+    /**
+     * Shown when a verdict or note post carries a stale nonce. $reloaded:
+     * a form post, whose redirect has already brought a fresh page.
+     * coach-portal-expired keeps the pop-up up until it's tapped away.
+     */
+    private static function expired_notice($reloaded = false) {
+        if ($reloaded) {
+            return '<div class="coach-portal-notice coach-portal-expired"><p>The page had expired, so that wasn\'t saved. It has been reloaded now — please re-enter anything you typed.</p></div>';
+        }
+        return '<div class="coach-portal-notice coach-portal-expired"><p>This page has expired — reload it to carry on. Anything you just typed may need re-entering.</p></div>';
     }
 
     /**
@@ -2356,7 +2414,7 @@ class TeamOversight_Coach_Portal {
                 <span class="lbl">Application</span>
                 <?php
                 $bits = array();
-                foreach ($a['form_data'] as $question => $answer) {
+                foreach (self::coach_visible_form_data($a['form_data']) as $question => $answer) {
                     if ($answer === '' || $answer === null) {
                         continue;
                     }
@@ -2469,13 +2527,33 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
+     * Application answers as coaches see them. A club waiver stores the
+     * admin's free-text reason, who and when in 'Trial Fee' (the prefix
+     * is what keeps it through player edits); coaches only need to know
+     * it was waived. The stored answers and admin views are unchanged.
+     */
+    private static function coach_visible_form_data($form_data) {
+        if (is_array($form_data) && isset($form_data['Trial Fee']) && is_string($form_data['Trial Fee'])
+            && strpos($form_data['Trial Fee'], TeamOversight_Trials::CLUB_WAIVER_PREFIX) === 0) {
+            $form_data['Trial Fee'] = 'Waived by club';
+        }
+        return $form_data;
+    }
+
+    /**
      * The one expander row every card shares: emergency contact,
      * application details, and coach notes with the add-note form.
      * Application/Notes only render when an application exists.
      */
     private function render_card_expanders($email, $application_id, $form_data, $notes, $active_team, $season, $user_id = 0) {
         ob_start();
-        echo $this->render_emergency_details($email);
+        // By account: the email here is a snapshot from the application or
+        // assignment, so after an email change it would find nobody, or
+        // whoever holds that address now. Rows with no user_id fall back to it.
+        echo self::render_emergency_details($email, $user_id);
+
+        // Coaches see that a fee was waived, not the admin's reason.
+        $form_data = self::coach_visible_form_data($form_data);
 
         if (!empty($form_data)) {
             if (!$user_id && $email) {
@@ -2824,11 +2902,16 @@ class TeamOversight_Coach_Portal {
      * up to two: the primary (emergency_contact_*) and a second set stored
      * under UM's duplicated-field keys (_37/_38/_39). Rendered as the same
      * details-dropdown pattern as Application/Notes so coaches can reach
-     * them at trainings.
+     * them at trainings. Looked up by account; the email is only used when
+     * there's no user id and $email_fallback allows it (legacy rows).
      */
-    public static function render_emergency_details($email) {
-        $user = get_user_by('email', $email);
-        $contacts = $user ? self::get_emergency_contacts($user->ID) : array();
+    public static function render_emergency_details($email, $user_id = 0, $email_fallback = true) {
+        $user_id = intval($user_id);
+        if (!$user_id && $email_fallback && $email) {
+            $user = get_user_by('email', $email);
+            $user_id = $user ? $user->ID : 0;
+        }
+        $contacts = $user_id ? self::get_emergency_contacts($user_id) : array();
 
         ob_start();
         ?>
