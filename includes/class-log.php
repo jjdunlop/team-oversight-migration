@@ -30,6 +30,7 @@ class TeamOversight_Log {
             'vvl' => array(
                 'payment_online' => 'Online payment',
                 'payment_manual' => 'Manual payment',
+                'payment_unapplied' => 'Unapplied payment',
                 'email_reminder' => 'Reminder email',
                 'email_trial' => 'Trial email',
                 'trial_fee_waived' => 'Trial fee waived',

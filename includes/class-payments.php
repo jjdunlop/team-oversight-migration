@@ -55,6 +55,7 @@ class TeamOversight_Payments {
         add_action('woocommerce_before_calculate_totals', array($this, 'apply_cart_payment_amount'), 20);
         add_filter('woocommerce_get_item_data', array($this, 'display_payment_in_cart'), 10, 2);
         add_action('woocommerce_checkout_create_order_line_item', array($this, 'attach_payment_to_order_item'), 10, 3);
+        add_filter('woocommerce_is_sold_individually', array($this, 'payment_product_sold_individually'), 10, 2);
         add_action('woocommerce_order_status_processing', array($this, 'handle_payment_order'));
         add_action('woocommerce_order_status_completed', array($this, 'handle_payment_order'));
 
@@ -154,6 +155,8 @@ class TeamOversight_Payments {
     /**
      * Record a payment (or negative correction) against an invoice and
      * resync its outstanding. The only way money enters the books.
+     * Returns false when nothing was recorded — including a duplicate
+     * order_item_id, which means another order hook already applied it.
      */
     public static function record_payment($invoice_id, $amount, $source = 'manual', $note = '', $order_id = null, $order_item_id = null) {
         global $wpdb;
@@ -165,7 +168,7 @@ class TeamOversight_Payments {
             return false;
         }
 
-        $wpdb->insert(
+        $inserted = $wpdb->insert(
             $wpdb->prefix . 'team_invoice_payments',
             array(
                 'invoice_id' => intval($invoice_id),
@@ -178,6 +181,11 @@ class TeamOversight_Payments {
             ),
             array('%d', '%d', '%d', '%d', '%f', '%s', '%s')
         );
+        if ($inserted === false) {
+            error_log('TeamOversight_Payments::record_payment: nothing recorded for invoice ' . intval($invoice_id)
+                . ($order_item_id ? ' (order item ' . intval($order_item_id) . ')' : '') . ': ' . $wpdb->last_error);
+            return false;
+        }
 
         self::recompute_invoice($invoice_id);
 
@@ -972,9 +980,26 @@ class TeamOversight_Payments {
         }
     }
 
+    /** The payment product is one line of the chosen amount: quantity 2 would charge it twice. */
+    public function payment_product_sold_individually($sold_individually, $product) {
+        $payment_product_id = intval(get_option(self::PAYMENT_PRODUCT_OPTION));
+        if ($payment_product_id && is_object($product)
+            && in_array($payment_product_id, array(intval($product->get_id()), intval($product->get_parent_id())), true)) {
+            return true;
+        }
+        return $sold_individually;
+    }
+
     /**
      * Paid order containing a fee payment: reduce the member's outstanding
      * balances (oldest season first) and record it in the ledger.
+     *
+     * The ledger's UNIQUE order_item_id allows one row per order item, so
+     * only the first part of a split carries the item id — that insert is
+     * the claim, and a hook that loses it writes nothing. Later parts
+     * carry the order id with a note naming the item. Anything paid above
+     * the balance goes on the newest invoice, where it shows as credit.
+     * Money that can't go in the ledger is logged as an unapplied payment.
      */
     public function handle_payment_order($order_id) {
         if (!function_exists('wc_get_order')) {
@@ -994,11 +1019,12 @@ class TeamOversight_Payments {
                 continue;
             }
 
-            // Dedupe: each order item is applied once.
+            // Dedupe: each order item is applied once (or flagged once as
+            // unapplied, below — the treasurer takes it from there).
             $already = $wpdb->get_var($wpdb->prepare("
                 SELECT id FROM {$wpdb->prefix}team_invoice_payments WHERE order_item_id = %d
             ", $item_id));
-            if ($already) {
+            if ($already || $item->get_meta('_murvc_fee_payment_unapplied')) {
                 continue;
             }
 
@@ -1008,12 +1034,11 @@ class TeamOversight_Payments {
             }
 
             $payer = get_userdata($payer_id);
-            if (!$payer) {
-                continue;
-            }
+            $invoices = $payer ? array_reverse(self::get_user_invoices($payer)) : array(); // oldest season first
 
+            // Work out every part before writing any.
             $remaining = $amount;
-            $invoices = array_reverse(self::get_user_invoices($payer)); // oldest season first
+            $parts = array();
             foreach ($invoices as $invoice) {
                 if ($remaining <= 0) {
                     break;
@@ -1024,8 +1049,68 @@ class TeamOversight_Payments {
                 }
 
                 $applied = min($remaining, $outstanding);
-                self::record_payment($invoice->id, $applied, 'online', '', $order_id, $item_id);
+                $parts[] = array('invoice_id' => $invoice->id, 'amount' => $applied, 'over' => false);
                 $remaining = round($remaining - $applied, 2);
+            }
+            // Paid more than is owed (e.g. a cart left over from before a
+            // cash payment or fee change): keep it on the newest invoice,
+            // as credit for the treasurer to offset or refund.
+            if ($remaining >= 0.005 && !empty($invoices)) {
+                $newest = end($invoices);
+                $parts[] = array('invoice_id' => $newest->id, 'amount' => $remaining, 'over' => true);
+            }
+
+            if (empty($parts)) {
+                // No invoice to hold it at all: flag it once per item.
+                if (class_exists('TeamOversight_Log') && wc_add_order_item_meta($item_id, '_murvc_fee_payment_unapplied', current_time('mysql'), true)) {
+                    TeamOversight_Log::add(
+                        'payment_unapplied',
+                        'Online fee payment (order #' . intval($order_id) . ') not applied — '
+                            . ($payer ? 'no fee invoice on record' : 'the member account no longer exists')
+                            . '; offset or refund it',
+                        array('user_id' => $payer_id, 'amount' => $amount)
+                    );
+                }
+                continue;
+            }
+
+            $count = count($parts);
+            foreach ($parts as $n => $part) {
+                $label = ($count > 1 ? 'part ' . ($n + 1) . ' of ' . $count . ' of ' : '') . 'order item #' . intval($item_id);
+                if ($part['over']) {
+                    $note = 'Overpayment, ' . $label;
+                } else {
+                    $note = $count > 1 ? ucfirst($label) : '';
+                }
+                $recorded = self::record_payment($part['invoice_id'], $part['amount'], 'online', $note, $order_id, $n === 0 ? $item_id : null);
+                if ($recorded) {
+                    continue;
+                }
+                if ($n === 0) {
+                    $claimed = $wpdb->get_var($wpdb->prepare("
+                        SELECT id FROM {$wpdb->prefix}team_invoice_payments WHERE order_item_id = %d
+                    ", $item_id));
+                    // No claim either (its invoice went, or a DB error):
+                    // flag it once so no later hook applies it behind the
+                    // treasurer's back, and tell the treasurer.
+                    if (!$claimed && class_exists('TeamOversight_Log') && wc_add_order_item_meta($item_id, '_murvc_fee_payment_unapplied', current_time('mysql'), true)) {
+                        TeamOversight_Log::add(
+                            'payment_unapplied',
+                            'Online fee payment (order #' . intval($order_id) . ') could not be recorded — record it with Record Payment',
+                            array('user_id' => $payer_id, 'amount' => $amount)
+                        );
+                    }
+                    break; // otherwise another hook claimed this item first
+                }
+                // A later part failed (its invoice went, or a DB error). The
+                // claim is in, so no hook retries it: the treasurer must.
+                if (class_exists('TeamOversight_Log')) {
+                    TeamOversight_Log::add(
+                        'payment_unapplied',
+                        'Online fee payment (order #' . intval($order_id) . '): ' . $label . ' could not be recorded — record it with Record Payment',
+                        array('user_id' => $payer_id, 'amount' => $part['amount'])
+                    );
+                }
             }
         }
     }
