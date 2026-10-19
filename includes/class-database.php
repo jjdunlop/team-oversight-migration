@@ -32,8 +32,13 @@ class TeamOversight_Database {
             $wpdb->query("ALTER TABLE {$wpdb->prefix}team_accreditations ADD COLUMN payment_date date DEFAULT NULL AFTER payment_status");
         }
         
-        // Expand version column if needed
-        $wpdb->query("ALTER TABLE {$wpdb->prefix}fee_matrix MODIFY COLUMN version varchar(50) NOT NULL");
+        // Expand version column if needed. Only when it isn't already
+        // varchar(50) NOT NULL: this runs on every request, and even a
+        // no-op MODIFY takes an exclusive lock on the table.
+        $version_column = $wpdb->get_row("SHOW COLUMNS FROM {$wpdb->prefix}fee_matrix LIKE 'version'");
+        if ($version_column && (strtolower($version_column->Type) !== 'varchar(50)' || $version_column->Null !== 'NO')) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}fee_matrix MODIFY COLUMN version varchar(50) NOT NULL");
+        }
         
         // Create fee_matrix_versions table if it doesn't exist
         $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}fee_matrix_versions'");
@@ -233,7 +238,12 @@ class TeamOversight_Database {
         }
 
         // Widen assigned_team so multi-team finalisation fits (added in 1.6.0).
-        $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications MODIFY COLUMN assigned_team varchar(255) DEFAULT NULL");
+        // Only when it isn't already a nullable varchar(255): a no-op MODIFY
+        // still locks trial_applications, queueing page loads behind it.
+        $assigned_column = $wpdb->get_row("SHOW COLUMNS FROM {$wpdb->prefix}trial_applications LIKE 'assigned_team'");
+        if ($assigned_column && (strtolower($assigned_column->Type) !== 'varchar(255)' || $assigned_column->Null !== 'YES')) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications MODIFY COLUMN assigned_team varchar(255) DEFAULT NULL");
+        }
 
         // Club program attendance ticks (added in 1.35.0). One row per
         // booking per session; absence means "not marked".
