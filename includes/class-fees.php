@@ -47,6 +47,64 @@ class TeamOversight_Fees {
     }
 
     // ------------------------------------------------------------------
+    // Fee timeline (1.70, from the 2027 season). Each team place will have
+    // a real start and stop date, the fee will follow those dates, and each
+    // player's fee will fall due across their own part of a payment window
+    // the club sets: "Fees due from" to "Paid in full by", each falling
+    // back to the season dates when blank. 1.70.0 lays the groundwork only:
+    // these helpers read, and nothing prices, schedules or validates with
+    // them yet, so every season still charges and falls due as before.
+    // ------------------------------------------------------------------
+
+    /** First season on the fee timeline. Earlier seasons keep the fee-segment engine and the season-long schedule. */
+    const FEE_TIMELINE_FROM = 2027;
+
+    /**
+     * The payment window per season: season => array(due_from, paid_by,
+     * raised_at, saved_at, saved_by). Saved non-autoloaded, like
+     * RELEASE_OPTION, and kept out of team_oversight_season_dates so that
+     * option's shape and get_season_dates() never change. Nothing saves it
+     * yet; it is read lazily, with fallbacks, so it needs no migration.
+     */
+    const PAYMENT_WINDOW_OPTION = 'team_oversight_payment_window';
+
+    /** Is this season on the fee timeline? A four-digit season from FEE_TIMELINE_FROM on. */
+    public static function timeline_applies($season) {
+        return is_scalar($season) && preg_match('/^\d{4}$/D', (string) $season) === 1 && intval($season) >= self::FEE_TIMELINE_FROM;
+    }
+
+    /**
+     * The season's payment window: array(from, to, from_set, to_set,
+     * raised_at). A blank or unsaved date falls back to the season start
+     * (from) or end (to); from_set / to_set say whether it was saved.
+     * raised_at is when a configuration save last moved the window earlier
+     * (null if never). Null when the season has no dates.
+     */
+    public static function get_payment_window($season) {
+        $dates = self::get_season_dates($season);
+        if (!$dates) {
+            return null;
+        }
+        $all = get_option(self::PAYMENT_WINDOW_OPTION, array());
+        $saved = (is_array($all) && isset($all[$season]) && is_array($all[$season])) ? $all[$season] : array();
+        $from_set = !empty($saved['due_from']) && is_string($saved['due_from']) && preg_match('/^\d{4}-\d{2}-\d{2}$/D', $saved['due_from']) === 1;
+        $to_set = !empty($saved['paid_by']) && is_string($saved['paid_by']) && preg_match('/^\d{4}-\d{2}-\d{2}$/D', $saved['paid_by']) === 1;
+        return array(
+            'from' => $from_set ? $saved['due_from'] : $dates['start'],
+            'to' => $to_set ? $saved['paid_by'] : $dates['end'],
+            'from_set' => $from_set,
+            'to_set' => $to_set,
+            'raised_at' => !empty($saved['raised_at']) ? (string) $saved['raised_at'] : null,
+        );
+    }
+
+    /** The late-join cutoff: the effective "Paid in full by" date ('YYYY-MM-DD'), or null when the season has no dates. */
+    public static function latest_start_date($season) {
+        $window = self::get_payment_window($season);
+        return $window ? $window['to'] : null;
+    }
+
+    // ------------------------------------------------------------------
     // Fee release (1.64.0): people can be put on next season's teams before
     // that season's fees are known. Until the season's release date nobody
     // is invoiced for it — assignments still record their fee-role history
@@ -292,11 +350,6 @@ class TeamOversight_Fees {
     }
 
     /**
-     * Pro-rata factor for a player's season fee: joined on/before the season
-     * start owes the full amount; joined later owes the fraction of the
-     * season remaining from their join date. 1.0 when no dates are set.
-     */
-    /**
      * Resolve the WP user behind an identity email: the account with that
      * email, else the user_id on any assignment row carrying it as a
      * snapshot (covers accounts whose email changed after rows were
@@ -316,32 +369,6 @@ class TeamOversight_Fees {
             WHERE email = %s AND user_id > 0 ORDER BY id DESC LIMIT 1
         ", $email)));
         return $uid > 0 ? $uid : -1;
-    }
-
-    public static function get_pro_rata_factor($email, $season) {
-        $dates = self::get_season_dates($season);
-        if (!$dates) {
-            return 1.0;
-        }
-
-        global $wpdb;
-        $uid = self::resolve_user_id($email);
-        $join = $wpdb->get_var($wpdb->prepare("
-            SELECT MIN(start_date) FROM {$wpdb->prefix}team_assignments
-            WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1
-        ", $uid, $email, $season));
-
-        $join_ts = $join ? strtotime($join) : current_time('timestamp');
-        $start = strtotime($dates['start']);
-        $end = strtotime($dates['end']);
-
-        if ($end <= $start || $join_ts <= $start) {
-            return 1.0;
-        }
-        if ($join_ts >= $end) {
-            return 0.0;
-        }
-        return ($end - $join_ts) / ($end - $start);
     }
 
     // ------------------------------------------------------------------
@@ -554,6 +581,20 @@ class TeamOversight_Fees {
             $stretches[] = array('from' => $from, 'to' => null, 'buckets' => $current, 'legacy' => false);
         }
 
+        return $this->price_stretches($stretches, $season);
+    }
+
+    /**
+     * Price a season's stretches, the second half of fee_breakdown(): each
+     * stretch is array(from, to (null = still open), buckets, legacy). With
+     * no season dates the latest stretch's full rate applies (no
+     * pro-rata); otherwise each stretch is clamped to the season dates,
+     * priced at its highest bucket for its share of the season, and the
+     * amounts add up, rounded once at the end. Returns fee_breakdown()'s
+     * array. Reads only. Public so the fee timeline (1.70.1) prices its
+     * stretches through exactly the same calculation.
+     */
+    public function price_stretches(array $stretches, $season) {
         $dates = self::get_season_dates($season);
         $result = array('has_dates' => (bool) $dates, 'season_start' => $dates ? $dates['start'] : '', 'season_end' => $dates ? $dates['end'] : '',
             'season_days' => 0, 'stretches' => array(), 'total' => 0.0, 'missing' => false);
@@ -847,6 +888,77 @@ class TeamOversight_Fees {
         } else {
             $this->checkpoint_fee_role($email, $season);
         }
+    }
+
+    /**
+     * Delete a season invoice that is a clean slate, once the person's
+     * playing rows are gone and the fee has been re-priced (call
+     * recalculate_after_assignment_change() first). It goes only when they
+     * hold no active team place that season, nothing was paid on it, it
+     * isn't a fee set with Edit Fee, and nothing accrued (pro-rata from the
+     * fee history, worked out only once fees are released and only with
+     * season dates). Otherwise it stays, with every payment on it. This is
+     * Undo Assignment's rule, moved here unchanged in 1.70.0 so the fee
+     * timeline's Remove can share it.
+     * $email is the account's current email, the identity the re-price ran
+     * under. $log: 'amount' (the fee before the re-price, for the log line;
+     * defaults to the invoice's amount now), 'reason' (shown in brackets on
+     * the log line) and 'user_id' (logged against when $email resolves to
+     * no account).
+     * Returns array(still_on_team, removed, accrued, no_dates, manual).
+     */
+    public function delete_invoice_if_empty($email, $season, $invoice_id, $log = array()) {
+        global $wpdb;
+
+        $invoice = $wpdb->get_row($wpdb->prepare("
+            SELECT id, invoice_amount FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice_id));
+        $uid = self::resolve_user_id($email);
+        $still_on_team = $wpdb->get_var($wpdb->prepare("
+            SELECT id FROM {$wpdb->prefix}team_assignments
+            WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1 LIMIT 1
+        ", $uid, $email, $season));
+        $invoice_removed = false;
+        $accrued = 0.0;
+        $no_dates = false;
+        // A fee set with Edit Fee is never changed or removed by this:
+        // it stays, and Payment Management flags it while they're on
+        // no team, for the treasurer to decide.
+        $invoice_manual = $invoice && self::fee_is_manual($invoice->id);
+        if ($invoice && !$still_on_team && !$invoice_manual) {
+            // What their time on teams accrued, pro-rata from the fee
+            // history — only with season dates, once fees are released.
+            if (self::fees_released($season)) {
+                $season_dates = self::get_season_dates($season);
+                $no_dates = !$season_dates || strtotime($season_dates['end']) <= strtotime($season_dates['start']);
+                if (!$no_dates) {
+                    $breakdown = $this->fee_breakdown($email, $season);
+                    $accrued = floatval($breakdown['total']);
+                }
+            }
+            $payment_count = intval($wpdb->get_var($wpdb->prepare("
+                SELECT COUNT(*) FROM {$wpdb->prefix}team_invoice_payments WHERE invoice_id = %d
+            ", $invoice->id)));
+            if ($payment_count === 0 && $accrued < 0.005) {
+                // Nothing paid, nothing accrued, on no team any more:
+                // a clean slate. (Accrued mid-season, it stays at that
+                // amount — the same as deleting the assignment.)
+                $amount = isset($log['amount']) ? $log['amount'] : $invoice->invoice_amount;
+                $reason = isset($log['reason']) ? $log['reason'] : 'on no team any more, nothing paid';
+                $fallback_uid = isset($log['user_id']) ? intval($log['user_id']) : 0;
+                $wpdb->delete($wpdb->prefix . 'team_invoices', array('id' => $invoice->id), array('%d'));
+                $invoice_removed = true;
+                TeamOversight_Log::add('fee_edit', $season . ' fee of $' . number_format($amount, 2) . ' removed (' . $reason . ')', array('user_id' => $uid > 0 ? $uid : $fallback_uid));
+            }
+        }
+
+        return array(
+            'still_on_team' => (bool) $still_on_team,
+            'removed' => $invoice_removed,
+            'accrued' => $accrued,
+            'no_dates' => $no_dates,
+            'manual' => $invoice_manual,
+        );
     }
 
     public function import_price_matrix($season = null) {
@@ -1176,8 +1288,12 @@ class TeamOversight_Fees {
                 $end = (isset($_POST['season_end']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_POST['season_end'])) ? $_POST['season_end'] : '';
 
                 if ($start && $end && $start < $end) {
+                    // Merge into the season's entry rather than replace it,
+                    // so any other key saved on it survives a date change.
                     $all_dates = get_option('team_oversight_season_dates', array());
-                    $all_dates[$selected_season] = array('start' => $start, 'end' => $end);
+                    $all_dates = is_array($all_dates) ? $all_dates : array();
+                    $entry = (isset($all_dates[$selected_season]) && is_array($all_dates[$selected_season])) ? $all_dates[$selected_season] : array();
+                    $all_dates[$selected_season] = array_merge($entry, array('start' => $start, 'end' => $end));
                     update_option('team_oversight_season_dates', $all_dates);
                     echo '<div class="notice notice-success"><p>Season dates saved for ' . esc_html($selected_season) . ': ' . esc_html($start) . ' &ndash; ' . esc_html($end) . '. Pro-rata fees and the payment schedule now use these dates.</p></div>';
                 } else {
@@ -1435,6 +1551,12 @@ class TeamOversight_Fees {
                     <?php endif; ?>
                 </p>
             </div>
+
+            <?php
+            if (self::timeline_applies($selected_season)) {
+                $this->render_timeline_readiness($selected_season);
+            }
+            ?>
 
             <!-- Fee matrix: full width (it's a grid), then teams -->
             <div style="display: flex; flex-wrap: wrap; gap: 30px; align-items: flex-start;">
@@ -1950,10 +2072,125 @@ class TeamOversight_Fees {
             return div.innerHTML;
         }
         </script>
-        
+
         <?php
     }
-    
+
+    /**
+     * Configuration, 2027+ seasons (1.70.0): read-only counts for planning
+     * the fee timeline upgrade. How many of the season's team places,
+     * fee segments and invoices exist already (made before the timeline
+     * prices the season, so they may have blank dates to fill), whether
+     * its fee release date is set and applied, and the database version
+     * and storage engines the timeline relies on. Numbers and engine
+     * names only, never a person. Admins only; writes nothing.
+     */
+    private function render_timeline_readiness($season) {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        global $wpdb;
+        $p = $wpdb->prefix;
+
+        // A zero date (0000-00-00, from a blank saved without strict mode)
+        // is as blank as NULL, so it counts as no date too.
+        $places = $wpdb->get_row($wpdb->prepare("
+            SELECT COUNT(*) AS total,
+                COALESCE(SUM(is_active = 1), 0) AS active,
+                COALESCE(SUM(start_date IS NULL OR start_date < '1000-01-01'), 0) AS no_start,
+                COALESCE(SUM(COALESCE(is_active, 0) <> 1 AND (end_date IS NULL OR end_date < '1000-01-01')), 0) AS inactive_no_stop
+            FROM {$p}team_assignments WHERE season = %s
+        ", $season));
+        $segments = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$p}team_fee_segments WHERE season = %s", $season));
+        $invoices = $wpdb->get_row($wpdb->prepare("
+            SELECT COUNT(*) AS total, COALESCE(SUM(fee_overridden = 1), 0) AS manual
+            FROM {$p}team_invoices WHERE season = %s
+        ", $season));
+
+        $release_date = self::get_fee_release_date($season);
+        $applied = get_option(self::APPLIED_OPTION, array());
+        $release_applied = is_array($applied) && !empty($applied[$season]);
+        if ($release_date === '') {
+            $release_text = 'Not set (fees are charged as people are added to teams)';
+        } else {
+            $release_text = date('j M Y', strtotime($release_date)) . ($release_applied ? ', applied' : ', not applied yet');
+        }
+
+        // The version number and whether it's MariaDB or MySQL; nothing else
+        // the server reports about itself.
+        $version_raw = (string) $wpdb->get_var('SELECT VERSION()');
+        $version = preg_match('/^(\d+(?:\.\d+){0,2})/', $version_raw, $m) ? $m[1] : 'unknown';
+        $flavour = stripos($version_raw, 'mariadb') !== false ? 'MariaDB' : 'MySQL';
+
+        $engine_tables = array('team_assignments', 'team_invoices', 'team_activity_log', 'team_assignment_changes');
+        $full_names = array();
+        foreach ($engine_tables as $t) {
+            $full_names[] = $p . $t;
+        }
+        $engine_rows = $wpdb->get_results($wpdb->prepare("
+            SELECT TABLE_NAME AS table_name, ENGINE AS engine FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (" . implode(',', array_fill(0, count($full_names), '%s')) . ")
+        ", $full_names));
+        $engines = array();
+        foreach ((array) $engine_rows as $row) {
+            $engines[substr($row->table_name, strlen($p))] = (string) $row->engine;
+        }
+        ?>
+        <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; margin-bottom: 20px;">
+            <h2 style="margin-top: 0;">Fee timeline readiness (for the 1.70 upgrade)</h2>
+            <p class="description">Read-only. From <?php echo intval(self::FEE_TIMELINE_FROM); ?> each team place's own start and stop dates will set the fee, and each player's fee will fall due across their own part of a payment window. That isn't switched on yet: <?php echo esc_html($season); ?> still charges and falls due as before. These counts show what already exists for <?php echo esc_html($season); ?>, made before the timeline, which may have blank dates to fill when it starts. Nothing here changes any data.</p>
+            <table class="widefat striped" style="max-width: 720px;">
+                <tbody>
+                    <tr>
+                        <td style="width: 45%;">Team places (assignment rows)</td>
+                        <td><?php echo intval($places->total); ?> (<?php echo intval($places->active); ?> active)</td>
+                    </tr>
+                    <tr>
+                        <td>Team places with no start date</td>
+                        <td><?php echo intval($places->no_start); ?></td>
+                    </tr>
+                    <tr>
+                        <td>Inactive team places with no stop date</td>
+                        <td><?php echo intval($places->inactive_no_stop); ?></td>
+                    </tr>
+                    <tr>
+                        <td>Fee segment rows</td>
+                        <td><?php echo intval($segments); ?></td>
+                    </tr>
+                    <tr>
+                        <td>Invoices</td>
+                        <td><?php echo intval($invoices->total); ?> (<?php echo intval($invoices->manual); ?> set with Edit Fee)</td>
+                    </tr>
+                    <tr>
+                        <td>Fee release date</td>
+                        <td><?php echo esc_html($release_text); ?></td>
+                    </tr>
+                    <tr>
+                        <td>Database</td>
+                        <td><?php echo esc_html($flavour . ' ' . $version); ?></td>
+                    </tr>
+                    <tr>
+                        <td>Storage engines</td>
+                        <td>
+                            <?php foreach ($engine_tables as $i => $t): ?>
+                                <?php $engine = isset($engines[$t]) ? $engines[$t] : ''; ?>
+                                <?php echo $i ? '<br>' : ''; ?><code><?php echo esc_html($t); ?></code>:
+                                <?php if ($engine === ''): ?>
+                                    <span style="color: #996800;">not found</span>
+                                <?php elseif (strcasecmp($engine, 'InnoDB') !== 0): ?>
+                                    <span style="color: #996800;"><?php echo esc_html($engine); ?> (not InnoDB)</span>
+                                <?php else: ?>
+                                    <?php echo esc_html($engine); ?>
+                                <?php endif; ?>
+                            <?php endforeach; ?>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
     public function get_available_seasons() {
         global $wpdb;
         

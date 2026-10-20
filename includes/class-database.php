@@ -484,6 +484,57 @@ class TeamOversight_Database {
         if (empty($fee_raised_exists)) {
             $wpdb->query("ALTER TABLE {$wpdb->prefix}team_invoices ADD COLUMN fee_raised_at datetime DEFAULT NULL");
         }
+
+        // 1.70.0: the fee timeline's change history (see
+        // assignment_changes_table_sql()). Nothing writes to it yet.
+        $changes_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_assignment_changes'");
+        if (!$changes_exists) {
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta(self::assignment_changes_table_sql());
+        }
+    }
+
+    /**
+     * The fee timeline's change history (1.70.0, used from the 2027
+     * season): one row per change to a team place's dates, team or role,
+     * with who made it, when, and the fee and amount due before and after.
+     * It is the only record of a removed row, of who changed which date,
+     * and of when a change put more money due (the behind clock's floor),
+     * so it is NEVER pruned, unlike team_activity_log. Explicitly InnoDB.
+     * One definition for migrate_database(), create_tables() and
+     * team_oversight_create_tables().
+     */
+    public static function assignment_changes_table_sql() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+        return "CREATE TABLE {$wpdb->prefix}team_assignment_changes (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                assignment_id int(11) DEFAULT NULL,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                email varchar(255) NOT NULL,
+                season varchar(10) NOT NULL,
+                team varchar(50) NOT NULL DEFAULT '',
+                role varchar(50) NOT NULL DEFAULT '',
+                action varchar(20) NOT NULL,
+                source varchar(20) NOT NULL DEFAULT '',
+                old_start date DEFAULT NULL,
+                new_start date DEFAULT NULL,
+                old_end date DEFAULT NULL,
+                new_end date DEFAULT NULL,
+                old_class varchar(100) DEFAULT NULL,
+                new_class varchar(100) DEFAULT NULL,
+                fee_before decimal(10,2) DEFAULT NULL,
+                fee_after decimal(10,2) DEFAULT NULL,
+                due_before decimal(10,2) DEFAULT NULL,
+                due_after decimal(10,2) DEFAULT NULL,
+                note varchar(255) DEFAULT NULL,
+                recorded_at datetime NOT NULL,
+                recorded_by bigint(20) unsigned DEFAULT NULL,
+                PRIMARY KEY (id),
+                KEY season_user (season, user_id),
+                KEY email_season (email(191), season),
+                KEY assignment_id (assignment_id)
+            ) ENGINE=InnoDB $charset_collate;";
     }
 
     public function create_tables() {
@@ -666,9 +717,10 @@ class TeamOversight_Database {
                     KEY season (season),
                     KEY application_status (application_status)
                 ) $charset_collate;
-            "
+            ",
+            'team_assignment_changes' => self::assignment_changes_table_sql(),
         );
-        
+
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         
         foreach ($tables as $table_name => $sql) {

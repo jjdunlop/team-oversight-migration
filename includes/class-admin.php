@@ -659,7 +659,7 @@ class TeamOversight_Admin {
     }
     
     public function assignments_page() {
-        if (isset($_POST['action']) && ($_POST['action'] === 'add_assignment' || $_POST['action'] === 'deactivate_assignment')) {
+        if (isset($_POST['action']) && $_POST['action'] === 'add_assignment') {
             $this->save_team_assignment();
         }
         
@@ -3383,39 +3383,27 @@ class TeamOversight_Admin {
                 $fees = new TeamOversight_Fees();
                 $fees->recalculate_after_assignment_change($fee_email, $trial->season);
 
-                $still_on_team = $wpdb->get_var($wpdb->prepare("
-                    SELECT id FROM {$wpdb->prefix}team_assignments
-                    WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1 LIMIT 1
-                ", $fee_uid, $fee_email, $trial->season));
+                // Then the invoice goes only if it's a clean slate: on no
+                // team, nothing paid, not a manual fee (one set with Edit Fee
+                // is never changed or removed; Payment Management flags it
+                // while they're on no team), and nothing accrued. The rule
+                // lives in TeamOversight_Fees::delete_invoice_if_empty().
+                $still_on_team = false;
                 $invoice_removed = false;
                 $accrued = 0.0;
                 $no_dates = false;
-                // A fee set with Edit Fee is never changed or removed by this:
-                // it stays, and Payment Management flags it while they're on
-                // no team, for the treasurer to decide.
-                $invoice_manual = $invoice && TeamOversight_Fees::fee_is_manual($invoice->id);
-                if ($invoice && !$still_on_team && !$invoice_manual) {
-                    // What their time on teams accrued, pro-rata from the fee
-                    // history — only with season dates, once fees are released.
-                    if (TeamOversight_Fees::fees_released($trial->season)) {
-                        $season_dates = TeamOversight_Fees::get_season_dates($trial->season);
-                        $no_dates = !$season_dates || strtotime($season_dates['end']) <= strtotime($season_dates['start']);
-                        if (!$no_dates) {
-                            $breakdown = $fees->fee_breakdown($fee_email, $trial->season);
-                            $accrued = floatval($breakdown['total']);
-                        }
-                    }
-                    $payment_count = intval($wpdb->get_var($wpdb->prepare("
-                        SELECT COUNT(*) FROM {$wpdb->prefix}team_invoice_payments WHERE invoice_id = %d
-                    ", $invoice->id)));
-                    if ($payment_count === 0 && $accrued < 0.005) {
-                        // Nothing paid, nothing accrued, on no team any more:
-                        // a clean slate. (Accrued mid-season, it stays at that
-                        // amount — the same as deleting the assignment.)
-                        $wpdb->delete($wpdb->prefix . 'team_invoices', array('id' => $invoice->id), array('%d'));
-                        $invoice_removed = true;
-                        TeamOversight_Log::add('fee_edit', $trial->season . ' fee of $' . number_format($invoice->invoice_amount, 2) . ' removed (trial assignment undone, nothing paid)', array('user_id' => $fee_uid > 0 ? $fee_uid : $trial_uid));
-                    }
+                $invoice_manual = false;
+                if ($invoice) {
+                    $guard = $fees->delete_invoice_if_empty($fee_email, $trial->season, $invoice->id, array(
+                        'amount' => $invoice->invoice_amount,
+                        'reason' => 'trial assignment undone, nothing paid',
+                        'user_id' => $trial_uid,
+                    ));
+                    $still_on_team = $guard['still_on_team'];
+                    $invoice_removed = $guard['removed'];
+                    $accrued = $guard['accrued'];
+                    $no_dates = $guard['no_dates'];
+                    $invoice_manual = $guard['manual'];
                 }
 
                 $fee_message = '';
@@ -3773,37 +3761,6 @@ class TeamOversight_Admin {
             } else {
                 echo '<div class="notice notice-error"><p>Failed to add team assignment.</p></div>';
             }
-            
-        } elseif ($_POST['action'] === 'deactivate_assignment') {
-            $assignment_id = intval($_POST['assignment_id']);
-
-            $deactivating = $wpdb->get_row($wpdb->prepare("
-                SELECT email, season, team, role, user_id FROM {$wpdb->prefix}team_assignments WHERE id = %d
-            ", $assignment_id));
-
-            $result = $wpdb->update(
-                $wpdb->prefix . 'team_assignments',
-                array(
-                    'is_active' => 0,
-                    'end_date' => current_time('Y-m-d')
-                ),
-                array('id' => $assignment_id),
-                array('%d', '%s'),
-                array('%d')
-            );
-
-            if ($result) {
-                if ($deactivating) {
-                    if (in_array($deactivating->role, array('playing_member', 'training_only'), true)) {
-                        $this->sync_trial_after_assignment_removal($deactivating->email, $deactivating->season, $deactivating->team, intval($deactivating->user_id));
-                    }
-                    $fees = new TeamOversight_Fees();
-                    $fees->recalculate_after_assignment_change($deactivating->email, $deactivating->season);
-                }
-                echo '<div class="notice notice-success"><p>Assignment deactivated successfully.</p></div>';
-            } else {
-                echo '<div class="notice notice-error"><p>Failed to deactivate assignment.</p></div>';
-            }
         }
     }
     
@@ -3936,7 +3893,7 @@ class TeamOversight_Admin {
                 // An active playing row that no longer counts for its team —
                 // set Inactive or end-dated, moved to another team, or turned
                 // into a staff role — is a removal from that team: sync the
-                // trial verdicts as deactivating or deleting does, or the
+                // trial verdicts as deleting does, or the
                 // next Finalise puts the player back on the old team.
                 $playing_roles = array('playing_member', 'training_only');
                 if (in_array($before->role, $playing_roles, true) && intval($before->is_active) === 1
@@ -4011,9 +3968,10 @@ class TeamOversight_Admin {
      * and downgrade the coach verdict for that team to Tentative — the
      * player stays visible on the coach's board as flagged, but the next
      * finalisation run won't silently recreate the assignment (it only
-     * processes Selected / Training Only verdicts).
+     * processes Selected / Training Only verdicts). Public static (1.70.0)
+     * so the fee timeline can call it too; $this-> calls still work.
      */
-    private function sync_trial_after_assignment_removal($email, $season, $team, $user_id = 0) {
+    public static function sync_trial_after_assignment_removal($email, $season, $team, $user_id = 0) {
         global $wpdb;
 
         // Match the person's application by user_id or email, whatever its

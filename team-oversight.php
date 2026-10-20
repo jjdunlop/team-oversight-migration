@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), and casual program attendance (Club Programs).
- * Version: 1.69.0
+ * Version: 1.70.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.69.0');
+define('TEAM_OVERSIGHT_VERSION', '1.70.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -229,8 +229,14 @@ function team_oversight_create_tables() {
         "
     );
     
+    // 1.70.0: the fee timeline's change history. One definition, shared
+    // with migrate_database() and create_tables(); activation runs before
+    // the classes are loaded, so load the one that holds it.
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-database.php';
+    $tables['team_assignment_changes'] = TeamOversight_Database::assignment_changes_table_sql();
+
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
-    
+
     foreach ($tables as $table_name => $sql) {
         dbDelta($sql);
     }

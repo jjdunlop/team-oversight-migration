@@ -22,45 +22,7 @@ jQuery(document).ready(function($) {
             }
         });
     });
-    
-    // Trial application processing
-    $('.process-trial-btn').on('click', function() {
-        var applicationId = $(this).data('id');
-        var action = $(this).data('action');
-        var assignedTeam = '';
-        
-        if (action === 'accept') {
-            assignedTeam = prompt('Enter team assignment (e.g., SLD1B-M):');
-            if (!assignedTeam) {
-                return;
-            }
-        }
-        
-        if (confirm('Are you sure you want to ' + action + ' this application?')) {
-            $.ajax({
-                url: ajaxurl,
-                type: 'POST',
-                data: {
-                    action: 'process_trial_application',
-                    application_id: applicationId,
-                    trial_action: action,
-                    assigned_team: assignedTeam,
-                    nonce: $('#trial_nonce').val()
-                },
-                success: function(response) {
-                    if (response.success) {
-                        location.reload();
-                    } else {
-                        alert('Error: ' + response.data);
-                    }
-                },
-                error: function() {
-                    alert('There was an error processing the application.');
-                }
-            });
-        }
-    });
-    
+
     // Fee matrix editing
     $('.fee-matrix-table input').on('change', function() {
         var row = $(this).closest('tr');

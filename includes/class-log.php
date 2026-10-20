@@ -40,6 +40,10 @@ class TeamOversight_Log {
                 'fee_manual_kept' => 'Manual fee kept',
                 'payment_arrangement' => 'Payment arrangement',
                 'committee_access' => 'Committee access',
+                // Fee timeline (2027+). Registered in 1.70.0, ahead of
+                // 1.70.1, which is the first to write them.
+                'team_dates' => 'Team dates changed',
+                'season_config' => 'Season dates / payment window',
             ),
             'membership' => array(
                 'membership_granted' => 'Granted',

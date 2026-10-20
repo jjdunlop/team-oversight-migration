@@ -1969,65 +1969,7 @@ class TeamOversight_Trials {
             return $wpdb->get_results($query);
         }
     }
-    
-    public function process_trial_application($application_id, $action, $assigned_team = null) {
-        global $wpdb;
-        
-        $application = $wpdb->get_row($wpdb->prepare("
-            SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d
-        ", $application_id));
-        
-        if (!$application) {
-            return false;
-        }
-        
-        if ($action === 'accept' && $assigned_team) {
-            $wpdb->update(
-                $wpdb->prefix . 'trial_applications',
-                array(
-                    'application_status' => 'accepted',
-                    'assigned_team' => $assigned_team
-                ),
-                array('id' => $application_id),
-                array('%s', '%s'),
-                array('%d')
-            );
-            
-            $wpdb->insert(
-                $wpdb->prefix . 'team_assignments',
-                array(
-                    'user_id' => intval($application->user_id),
-                    'email' => $application->email,
-                    'season' => $application->season,
-                    'team' => $assigned_team,
-                    'role' => 'playing_member',
-                    'registration_status' => 'active',
-                    'start_date' => date('Y-m-d'),
-                    'is_active' => 1
-                ),
-                array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d')
-            );
-            
-            $fees = new TeamOversight_Fees();
-            $fees->generate_invoice($application->email, $application->season);
-            
-            return true;
-            
-        } elseif ($action === 'reject') {
-            $wpdb->update(
-                $wpdb->prefix . 'trial_applications',
-                array('application_status' => 'rejected'),
-                array('id' => $application_id),
-                array('%s'),
-                array('%d')
-            );
-            
-            return true;
-        }
-        
-        return false;
-    }
-    
+
     /**
      * VVL clubs a transferring player can be coming from. Editable on the
      * Configuration page (one club per line); this hardcoded list is the
