@@ -9,6 +9,22 @@ class TeamOversight_Exports {
     public function __construct() {
     }
     
+    /**
+     * Spreadsheet-safe text cell for fputcsv: a value starting with
+     * = + - @ tab or CR gets a leading single quote, so Excel / Sheets show
+     * it as text instead of running it as a formula (display names are
+     * member-controlled). Use on free-text cells only (names, emails,
+     * profile text) — never on money (credits are negative) or on phone or
+     * date columns.
+     */
+    public static function csv_cell($value) {
+        $value = (string) $value;
+        if ($value !== '' && strpos("=+-@\t\r", $value[0]) !== false) {
+            return "'" . $value;
+        }
+        return $value;
+    }
+
     public function get_available_seasons() {
         global $wpdb;
         

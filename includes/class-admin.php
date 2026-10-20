@@ -1352,7 +1352,7 @@ class TeamOversight_Admin {
                         <tbody>
                             <?php foreach ($team_members as $member): 
                                 $fees = new TeamOversight_Fees();
-                                $mus_category = $fees->determine_fee_class($member->email);
+                                $mus_category = $fees->determine_fee_class($member->email, $season);
                                 
                                 $payment_status = 'N/A';
                                 $outstanding = 0;
@@ -2263,11 +2263,22 @@ class TeamOversight_Admin {
                                 $degree1_type = get_user_meta($user->ID, 'degree1type', true);
                                 $degree1_enddate = get_user_meta($user->ID, 'degree1enddate', true);
                                 
+                                // From 2027 the class follows VV's U19 cutoff for
+                                // the season and judges alumni at the person's
+                                // first fee record, so show those, not age today.
+                                $season_rules = intval($invoice->season) >= TeamOversight_Fees::SEASON_CLASS_RULES_FROM;
                                 $age = 'N/A';
-                                if ($birth_date) {
+                                $age_text = '';
+                                $dob = str_replace('/', '-', trim((string) $birth_date));
+                                if ($season_rules && preg_match('/^\d{4}-\d{2}-\d{2}$/', $dob)) {
+                                    $age_text = ($dob >= TeamOversight_Database::get_dob_cutoff('u19', $invoice->season) ? 'U19' : 'not U19') . ' in ' . $invoice->season;
+                                } elseif ($birth_date) {
                                     $today = new DateTime();
                                     $birthdate_obj = new DateTime($birth_date);
                                     $age = $today->diff($birthdate_obj)->y;
+                                }
+                                if ($age_text === '') {
+                                    $age_text = "Age: {$age}";
                                 }
                                 
                                 $institution_short = '';
@@ -2289,7 +2300,8 @@ class TeamOversight_Admin {
                                 }
                                 
                                 $status = 'Current';
-                                if ($degree1_enddate && strtotime($degree1_enddate) < time()) {
+                                $as_at = $season_rules ? strtotime(TeamOversight_Fees::fee_class_reference_time($invoice->email, $invoice->season)) : time();
+                                if ($degree1_enddate && strtotime($degree1_enddate) < $as_at) {
                                     $status = 'Alumni';
                                 }
                                 
@@ -2297,7 +2309,7 @@ class TeamOversight_Admin {
                                 // rates on junior-league teams (see breakdown).
                                 $calculated_fee_class = $breakdown_fees->determine_person_fee_class($invoice->email, $invoice->season);
 
-                                $fee_info = "Age: {$age} | {$institution_short} | {$degree_short} | {$status} → {$calculated_fee_class}";
+                                $fee_info = "{$age_text} | {$institution_short} | {$degree_short} | {$status} → {$calculated_fee_class}";
                             }
                             $breakdown_html = $breakdown_fees->render_fee_breakdown($breakdown_fees->fee_breakdown($invoice->email, $invoice->season), $invoice->invoice_amount, $invoice->season);
                         ?>

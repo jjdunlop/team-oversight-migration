@@ -59,6 +59,9 @@ class TeamOversight_Fees {
     const RELEASE_OPTION = 'team_oversight_fee_release';
     const APPLIED_OPTION = 'team_oversight_fees_applied';
 
+    /** What is re-pricing invoices right now, for each re-price's log line ('' = their teams changed). */
+    private $reprice_context = '';
+
     /** The season's fee release date ('YYYY-MM-DD'), or '' when none is set. */
     public static function get_fee_release_date($season) {
         $all = get_option(self::RELEASE_OPTION, array());
@@ -91,9 +94,15 @@ class TeamOversight_Fees {
      * Invoice everyone with an active assignment in the season (an existing
      * invoice is just re-priced, so running this twice is a no-op). Returns
      * counts plus the people whose fee couldn't be worked out (missing fee
-     * matrix entries).
+     * matrix entries), the people invoiced only partly priced (a role with
+     * no matrix amount, so charged the highest role that has one), and the
+     * people whose existing invoice was left as it was because none of
+     * their roles has a matrix amount ('unpriced', not counted as updated).
+     * $new_only (a season already being charged): invoice only people with
+     * no invoice yet and leave every existing invoice as it is, so a fee
+     * set with Edit Fee is never reverted.
      */
-    public function apply_fees_for_season($season) {
+    public function apply_fees_for_season($season, $new_only = false) {
         global $wpdb;
         $people = $wpdb->get_results($wpdb->prepare("
             SELECT MAX(user_id) AS user_id, email FROM {$wpdb->prefix}team_assignments
@@ -101,8 +110,9 @@ class TeamOversight_Fees {
             GROUP BY email
         ", $season));
 
-        $result = array('invoiced' => 0, 'updated' => 0, 'missing' => array());
+        $result = array('invoiced' => 0, 'updated' => 0, 'missing' => array(), 'partial' => array(), 'unpriced' => array(), 'kept' => 0);
         $seen = array();
+        $this->reprice_context = 'fee release';
         foreach ($people as $person) {
             $uid = intval($person->user_id) > 0 ? intval($person->user_id) : self::resolve_user_id($person->email);
             $key = $uid > 0 ? 'u' . $uid : strtolower($person->email);
@@ -113,18 +123,95 @@ class TeamOversight_Fees {
             $had = $wpdb->get_var($wpdb->prepare("
                 SELECT id FROM {$wpdb->prefix}team_invoices WHERE (user_id = %d OR email = %s) AND season = %s
             ", $uid, $person->email, $season));
+            if ($had && $new_only) {
+                $result['kept']++;
+                continue;
+            }
             if ($this->generate_invoice($person->email, $season)) {
+                // A role with no matrix amount: say so (fee_breakdown() is
+                // the calculation the invoice came from). Some role priced
+                // = partly priced; none = an existing invoice was kept as
+                // it was, so it wasn't re-priced at all.
+                $breakdown = $this->fee_breakdown($person->email, $season);
+                $priced_any = false;
+                foreach ($breakdown['stretches'] as $s) {
+                    if ($s['top']) {
+                        $priced_any = true;
+                        break;
+                    }
+                }
+                if ($breakdown['missing'] && !$priced_any && $had) {
+                    $result['unpriced'][] = $person->email;
+                    continue;
+                }
                 $result[$had ? 'updated' : 'invoiced']++;
+                if ($breakdown['missing'] && $priced_any) {
+                    $result['partial'][] = $person->email;
+                }
             } else {
                 $result['missing'][] = $person->email;
             }
         }
+        $this->reprice_context = '';
 
         $applied = get_option(self::APPLIED_OPTION, array());
         $applied = is_array($applied) ? $applied : array();
         $applied[$season] = current_time('Y-m-d');
         update_option(self::APPLIED_OPTION, $applied, false);
         return $result;
+    }
+
+    /**
+     * The people a release couldn't fully price, for its admin notice: no
+     * fee at all (not invoiced), partly priced (a role with no matrix
+     * amount, charged the highest of their roles that has one), and not
+     * priced (an existing invoice kept as it was: none of their roles has
+     * a matrix amount). Admin-only HTML; the activity log gets counts
+     * (release_gaps_note()).
+     */
+    private static function release_gaps_html($result) {
+        $html = '';
+        if (!empty($result['missing'])) {
+            $html .= '<p>No fee could be worked out for ' . count($result['missing']) . ' person(s) — check every fee class and role has an amount in the matrix, then save a release date that has passed (today will do) to invoice them; invoices already out stay as they are: ' . esc_html(implode(', ', $result['missing'])) . '</p>';
+        }
+        if (!empty($result['partial'])) {
+            $html .= '<p><strong>Partly priced:</strong> ' . count($result['partial']) . ' person(s) hold a role with no amount in the fee matrix, so they were charged the highest of their roles that has one, which may be too low. Fill in the blank cells, then correct their fee with Edit Fee on Payment Management (it flags the difference): ' . esc_html(implode(', ', $result['partial'])) . '</p>';
+        }
+        if (!empty($result['unpriced'])) {
+            $html .= '<p><strong>Not priced:</strong> ' . count($result['unpriced']) . ' person(s) already had an invoice, but none of their roles has an amount in the fee matrix, so it was left as it was (a $0 invoice stays $0). Fill in the blank cells, then set their fee with Edit Fee on Payment Management: ' . esc_html(implode(', ', $result['unpriced'])) . '</p>';
+        }
+        return $html;
+    }
+
+    /** ", N partly priced, M not priced (invoice kept as it was)" for a release's log line ('' when nobody was). */
+    private static function release_gaps_note($result) {
+        $note = empty($result['partial']) ? '' : ', ' . count($result['partial']) . ' partly priced';
+        if (!empty($result['unpriced'])) {
+            $note .= ', ' . count($result['unpriced']) . ' not priced (invoice kept as it was)';
+        }
+        return $note;
+    }
+
+    /**
+     * Are a season's invoices still out from when it was being charged:
+     * some at a real amount, and none taken back to $0 holding credit by
+     * Remove fees until release? Then a season moved to a future release
+     * date (by mistake, say) and put back is still being charged, and
+     * putting a passed date back, or clearing it, must re-price nothing.
+     * Withdrawn credit means a real release is due, which re-prices.
+     */
+    private static function invoices_still_out($season) {
+        global $wpdb;
+        $charged = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s AND invoice_amount > 0", $season));
+        if ($charged === 0) {
+            return false;
+        }
+        $credit = $wpdb->get_var($wpdb->prepare("
+            SELECT i.id FROM {$wpdb->prefix}team_invoices i
+            JOIN {$wpdb->prefix}team_invoice_payments p ON p.invoice_id = i.id
+            WHERE i.season = %s AND i.invoice_amount <= 0 LIMIT 1
+        ", $season));
+        return !$credit;
     }
 
     /**
@@ -170,7 +257,7 @@ class TeamOversight_Fees {
         foreach ($dates as $season => $date) {
             if (self::fees_released($season) && empty($applied[$season])) {
                 $result = (new self())->apply_fees_for_season($season);
-                TeamOversight_Log::add('fee_edit', sprintf('%s fees released (%s): %d invoiced, %d already invoiced, %d without a fee', $season, $date, $result['invoiced'], $result['updated'], count($result['missing'])));
+                TeamOversight_Log::add('fee_edit', sprintf('%s fees released (%s): %d invoiced, %d already invoiced, %d without a fee', $season, $date, $result['invoiced'], $result['updated'], count($result['missing'])) . self::release_gaps_note($result));
             }
         }
     }
@@ -253,6 +340,16 @@ class TeamOversight_Fees {
     /** Roles without a matrix column, and the column they're charged at. */
     const CHARGED_AS = array('coach' => 'supporter', 'assistant_coach' => 'supporter', 'team_manager' => 'playing_member');
 
+    /**
+     * First season whose fee class doesn't depend on the day it's worked
+     * out (club decision): junior follows VV's U19 date-of-birth cutoff for
+     * the season being priced, and alumni is judged as at the day their fee
+     * was first recorded for it. Earlier seasons keep the original rules
+     * (age and degree end on the day the fee is worked out), so they price
+     * exactly as they always have.
+     */
+    const SEASON_CLASS_RULES_FROM = 2027;
+
     /** The matrix column a role is charged at. */
     public static function charged_as($role) {
         return isset(self::CHARGED_AS[$role]) ? self::CHARGED_AS[$role] : $role;
@@ -291,8 +388,9 @@ class TeamOversight_Fees {
     }
 
     /**
-     * The person's fee class ignoring teams: under 19 → Junior U/19 (VVL),
-     * then the same alumni / staff / student rules as determine_fee_class().
+     * The person's fee class ignoring teams: a junior (under 19; from 2027,
+     * VV's U19 cutoff for the season) → Junior U/19 (VVL), then the same
+     * alumni / staff / student rules as determine_fee_class().
      */
     public function determine_person_fee_class($email, $season = null) {
         $class = $this->determine_fee_class($email, $season);
@@ -487,11 +585,20 @@ class TeamOversight_Fees {
         // left over): explain that instead of flagging it.
         $unreleased = $season !== null && !self::fees_released($season);
         $differs = !$unreleased && $invoice_amount !== null && abs(floatval($invoice_amount) - $breakdown['total']) >= 0.01;
+        // A role with no matrix amount is left out of the highest-fee pick,
+        // so the fee can be lower than it should be: flag it on the summary
+        // line, not only inside the dropdown.
+        $priced_any = false;
+        foreach ($stretches as $s) {
+            if ($s['top']) {
+                $priced_any = true;
+            }
+        }
 
         ob_start();
         ?>
         <details class="fee-breakdown">
-            <summary>How it's worked out<?php if ($differs): ?> <span class="fee-breakdown-flag" title="The invoice doesn't match the current calculation">&#9888; <?php echo esc_html($money($breakdown['total'])); ?></span><?php endif; ?></summary>
+            <summary>How it's worked out<?php if ($differs): ?> <span class="fee-breakdown-flag" title="The invoice doesn't match the current calculation">&#9888; <?php echo esc_html($money($breakdown['total'])); ?></span><?php endif; ?><?php if ($breakdown['missing']): ?> <span class="fee-breakdown-flag" title="Some roles have no amount in the fee matrix">&#9888; <?php echo $priced_any ? 'partly priced' : 'no matrix amount'; ?></span><?php endif; ?></summary>
             <div class="fee-breakdown-body">
                 <?php if (empty($stretches)): ?>
                     <p>No team assignments in this season's fee period.</p>
@@ -532,8 +639,10 @@ class TeamOversight_Fees {
                     <?php if ($differs): ?>
                         <p class="fee-breakdown-warn">The invoice is <?php echo esc_html($money($invoice_amount)); ?>, which doesn't match this calculation. It updates the next time their teams change, or edit the season fee to correct it.</p>
                     <?php endif; ?>
-                    <?php if ($breakdown['missing']): ?>
-                        <p class="fee-breakdown-warn">Some roles have no amount in the fee matrix and were left out.</p>
+                    <?php if ($breakdown['missing'] && $priced_any): ?>
+                        <p class="fee-breakdown-warn">Some roles have no amount in the fee matrix and were left out, so this is the highest of the roles that do have one — it may be lower than it should be. Fill in the blank cells on Configuration, then edit the season fee to correct it.</p>
+                    <?php elseif ($breakdown['missing']): ?>
+                        <p class="fee-breakdown-warn">None of these roles has an amount in the fee matrix, so no fee could be worked out from it. Fill in the blank cells on Configuration.</p>
                     <?php endif; ?>
                 <?php endif; ?>
             </div>
@@ -649,6 +758,9 @@ class TeamOversight_Fees {
             $start = self::next_segment_start($join, $last_end, $today);
         }
 
+        // created_date in site time (the column default is the database
+        // clock): a person's first segment is when a 2027+ alumni class is
+        // judged (fee_class_reference_time()).
         $wpdb->insert(
             $wpdb->prefix . 'team_fee_segments',
             array(
@@ -658,8 +770,9 @@ class TeamOversight_Fees {
                 'fee_role' => $best_role,
                 'buckets' => $signature,
                 'start_date' => $start,
+                'created_date' => current_time('mysql'),
             ),
-            array('%d', '%s', '%s', '%s', '%s', '%s')
+            array('%d', '%s', '%s', '%s', '%s', '%s', '%s')
         );
     }
 
@@ -1055,9 +1168,9 @@ class TeamOversight_Fees {
                 } elseif ($_POST['action'] === 'release_fees_now') {
                     self::set_fee_release_date($selected_season, current_time('Y-m-d'));
                     $result = $this->apply_fees_for_season($selected_season);
-                    TeamOversight_Log::add('fee_edit', sprintf('%s fees released now: %d invoiced, %d already invoiced, %d without a fee', $selected_season, $result['invoiced'], $result['updated'], count($result['missing'])));
+                    TeamOversight_Log::add('fee_edit', sprintf('%s fees released now: %d invoiced, %d already invoiced, %d without a fee', $selected_season, $result['invoiced'], $result['updated'], count($result['missing'])) . self::release_gaps_note($result));
                     echo '<div class="notice notice-success"><p><strong>' . esc_html($selected_season) . ' fees released.</strong> ' . intval($result['invoiced']) . ' new invoice(s), ' . intval($result['updated']) . ' existing invoice(s) re-priced.</p>'
-                        . (!empty($result['missing']) ? '<p>No fee could be worked out for ' . count($result['missing']) . ' person(s) — check every fee class and role has an amount in the matrix, then release again: ' . esc_html(implode(', ', $result['missing'])) . '</p>' : '')
+                        . self::release_gaps_html($result)
                         . '</div>';
                 } else {
                     $date = isset($_POST['fee_release_date']) ? sanitize_text_field(wp_unslash($_POST['fee_release_date'])) : '';
@@ -1067,30 +1180,69 @@ class TeamOversight_Fees {
                         // Clearing a date that hadn't been applied yet releases
                         // the season now, so invoice everyone already on a team
                         // (nothing else would: the daily check only looks at
-                        // seasons with a date). Clearing an applied date — or
-                        // none — just clears it, with no re-pricing.
+                        // seasons with a date; a season already being charged,
+                        // below, only gets its new people invoiced). Clearing
+                        // an applied date — or none — just clears it, with no
+                        // re-pricing.
                         $previous_date = self::get_fee_release_date($selected_season);
                         $applied_before = get_option(self::APPLIED_OPTION, array());
                         $release_on_clear = $date === '' && $previous_date !== ''
                             && (!is_array($applied_before) || empty($applied_before[$selected_season]));
+                        // Already being charged before this save: its release
+                        // was applied, or it had no release date (charged as
+                        // people were added), or it was moved to a future
+                        // date (by mistake, say) with its invoices still out
+                        // (invoices_still_out()). A passed date, or clearing
+                        // the date, then releases nothing again — existing
+                        // invoices keep their amounts (a fee set with Edit
+                        // Fee is never reverted) and only people with no
+                        // invoice yet are invoiced.
+                        $was_charging = $previous_date === ''
+                            || ($previous_date <= current_time('Y-m-d') && is_array($applied_before) && !empty($applied_before[$selected_season]))
+                            || self::invoices_still_out($selected_season);
                         self::set_fee_release_date($selected_season, $date);
-                        if ($release_on_clear) {
+                        if ($release_on_clear && $was_charging) {
+                            $result = $this->apply_fees_for_season($selected_season, true);
+                            TeamOversight_Log::add('fee_edit', sprintf('%s fee release date cleared (fees were already being charged, so no invoice was re-priced): %d invoiced, %d kept as they were, %d without a fee', $selected_season, $result['invoiced'], $result['kept'], count($result['missing'])) . self::release_gaps_note($result));
+                            echo '<div class="notice notice-success"><p><strong>Release date cleared.</strong> ' . esc_html($selected_season) . ' fees were already being charged, so no existing invoice was re-priced (a fee set with Edit Fee stays as it is)'
+                                . ($result['invoiced'] ? '; ' . intval($result['invoiced']) . ' person(s) on a team with no invoice yet were invoiced' : '') . '. Anyone added to a team from now on is invoiced straight away.</p>'
+                                . self::release_gaps_html($result)
+                                . '</div>';
+                        } elseif ($release_on_clear) {
                             $result = $this->apply_fees_for_season($selected_season);
-                            TeamOversight_Log::add('fee_edit', sprintf('%s fee release date cleared, fees released now: %d invoiced, %d already invoiced, %d without a fee', $selected_season, $result['invoiced'], $result['updated'], count($result['missing'])));
+                            TeamOversight_Log::add('fee_edit', sprintf('%s fee release date cleared, fees released now: %d invoiced, %d already invoiced, %d without a fee', $selected_season, $result['invoiced'], $result['updated'], count($result['missing'])) . self::release_gaps_note($result));
                             echo '<div class="notice notice-success"><p><strong>Release date cleared, so ' . esc_html($selected_season) . ' fees are released now.</strong> ' . intval($result['invoiced']) . ' new invoice(s), ' . intval($result['updated']) . ' existing invoice(s) re-priced. Anyone added to a team from now on is invoiced straight away.</p>'
-                                . (!empty($result['missing']) ? '<p>No fee could be worked out for ' . count($result['missing']) . ' person(s) — check every fee class and role has an amount in the matrix, then release again: ' . esc_html(implode(', ', $result['missing'])) . '</p>' : '')
+                                . self::release_gaps_html($result)
                                 . '</div>';
                         } elseif ($date === '') {
                             TeamOversight_Log::add('fee_edit', $selected_season . ' fee release date cleared (fees charged straight away)');
                             echo '<div class="notice notice-success"><p>Release date cleared — ' . esc_html($selected_season) . ' fees are charged as people are added to teams.</p></div>';
+                        } elseif (self::fees_released($selected_season) && $was_charging) {
+                            $result = $this->apply_fees_for_season($selected_season, true);
+                            TeamOversight_Log::add('fee_edit', sprintf('%s fee release date set to %s (passed; fees were already being charged, so no invoice was re-priced): %d invoiced, %d kept as they were, %d without a fee', $selected_season, $date, $result['invoiced'], $result['kept'], count($result['missing'])) . self::release_gaps_note($result));
+                            echo '<div class="notice notice-success"><p>Release date set to ' . esc_html(date('j M Y', strtotime($date))) . ', which has passed. ' . esc_html($selected_season) . ' fees were already being charged, so no existing invoice was re-priced (a fee set with Edit Fee stays as it is)'
+                                . ($result['invoiced'] ? '; ' . intval($result['invoiced']) . ' person(s) on a team with no invoice yet were invoiced' : '') . '.</p>'
+                                . self::release_gaps_html($result)
+                                . '</div>';
+                        } elseif (self::fees_released($selected_season)) {
+                            $result = $this->apply_fees_for_season($selected_season);
+                            TeamOversight_Log::add('fee_edit', sprintf('%s fee release date set to %s (passed, so fees released): %d invoiced, %d already invoiced, %d without a fee', $selected_season, $date, $result['invoiced'], $result['updated'], count($result['missing'])) . self::release_gaps_note($result));
+                            echo '<div class="notice notice-success"><p>Release date set to ' . esc_html(date('j M Y', strtotime($date))) . ', which has passed, so fees were applied: ' . intval($result['invoiced']) . ' new invoice(s), ' . intval($result['updated']) . ' re-priced.</p>'
+                                . self::release_gaps_html($result)
+                                . '</div>';
                         } else {
                             TeamOversight_Log::add('fee_edit', $selected_season . ' fee release date set to ' . $date);
-                            if (self::fees_released($selected_season)) {
-                                $result = $this->apply_fees_for_season($selected_season);
-                                echo '<div class="notice notice-success"><p>Release date set to ' . esc_html(date('j M Y', strtotime($date))) . ', which has passed, so fees were applied: ' . intval($result['invoiced']) . ' new invoice(s), ' . intval($result['updated']) . ' re-priced.</p></div>';
-                            } else {
-                                echo '<div class="notice notice-success"><p>' . esc_html($selected_season) . ' fees will be released on ' . esc_html(date('j M Y', strtotime($date))) . '. Until then nobody is invoiced for ' . esc_html($selected_season) . '; on that date everyone on a team is invoiced automatically.</p></div>';
-                            }
+                            // Moving a season that was already charged back to
+                            // a future date re-arms the release: say what that
+                            // date (and anything else that releases it) will
+                            // do to the invoices already out.
+                            $existing_invoices = $was_charging ? (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s", $selected_season)) : 0;
+                            $what_releases = self::invoices_still_out($selected_season)
+                                ? ' on that date (or by Release fees now), so a fee set with Edit Fee would need setting again (each change is logged). Saving a date that has passed, or clearing the date, keeps them as they are.'
+                                : ' on that date, or straight away if you save a date that has passed, clear the date or use Release fees now, so a fee set with Edit Fee would need setting again (each change is logged).';
+                            echo '<div class="notice notice-success"><p>' . esc_html($selected_season) . ' fees will be released on ' . esc_html(date('j M Y', strtotime($date))) . '. Until then nobody is invoiced for ' . esc_html($selected_season) . '; on that date everyone on a team is invoiced automatically.'
+                                . ($existing_invoices ? ' The ' . intval($existing_invoices) . ' ' . esc_html($selected_season) . ' invoice(s) already issued are re-priced from the fee matrix' . $what_releases : '')
+                                . '</p></div>';
                         }
                     }
                 }
@@ -1277,6 +1429,28 @@ class TeamOversight_Fees {
                                 <button type="submit" class="button">Copy</button>
                             </form>
                         <?php endif; ?>
+                    <?php endif; ?>
+
+                    <?php
+                    // Blank cells someone can actually land in (every class
+                    // but Unknown): a person holding several roles is then
+                    // charged the highest role that HAS an amount, and someone
+                    // with no priced role isn't invoiced at all.
+                    $blank_cells = array();
+                    if (!empty($fee_matrix)) {
+                        foreach (array_diff(self::standard_fee_classes(), array('Unknown')) as $class) {
+                            foreach ($grid['roles'] as $role) {
+                                if (empty($grid['cells'][$class][$role])) {
+                                    $blank_cells[] = $class . ' · ' . strtolower(self::role_label($role));
+                                }
+                            }
+                        }
+                    }
+                    ?>
+                    <?php if (!empty($blank_cells)): ?>
+                        <div class="notice notice-warning inline">
+                            <p><strong>Blank cells in the <?php echo esc_html($selected_season); ?> fee matrix:</strong> <?php echo esc_html(implode(', ', $blank_cells)); ?>. Anyone in one of these is charged the highest of their other roles that has an amount (a player who also coaches would pay only the supporter amount), or isn't invoiced if none has one. Fill them in before fees are released or selections are finalised — enter 0 where a role is meant to be free.</p>
+                        </div>
                     <?php endif; ?>
 
                     <form id="fee-matrix-form">
@@ -1817,7 +1991,8 @@ class TeamOversight_Fees {
     /**
      * The season's fee matrix as a grid: rows = fee classes, columns = team
      * roles, cell = the matrix row (or null when that combination has no
-     * amount yet). An empty season gets the standard rows and columns.
+     * amount yet). Every season shows the standard rows and columns, so a
+     * class missing from the matrix can still be filled in.
      */
     public function get_fee_grid($season) {
         $cells = array();
@@ -1829,7 +2004,9 @@ class TeamOversight_Fees {
         foreach ($cells as $by_role) {
             $roles = array_merge($roles, array_keys($by_role));
         }
-        $classes = empty($classes) ? self::standard_fee_classes() : self::order_like($classes, self::standard_fee_classes());
+        // Every standard class always has a row (blank cells can be filled
+        // in), then any other class found in the matrix.
+        $classes = self::order_like(array_values(array_unique(array_merge($classes, self::standard_fee_classes()))), self::standard_fee_classes());
         // Always exactly the paying columns; old coach/manager amounts in the
         // table are no longer used and aren't shown.
         $roles = self::standard_fee_roles();
@@ -1874,35 +2051,52 @@ class TeamOversight_Fees {
         if (!$user) return 'Full Adult';
         
         // Default to current year if no season provided
+        $season_given = (bool) $season;
         if (!$season) {
             $season = date('Y');
         }
-        
+
         $birth_date = get_user_meta($user->ID, 'birth_date', true);
         $degree1_type = get_user_meta($user->ID, 'degree1type', true);
         $institution1 = get_user_meta($user->ID, 'institution1', true);
         $degree1_enddate = get_user_meta($user->ID, 'degree1enddate', true);
-        
-        // Calculate age
-        if ($birth_date) {
+
+        // 2027 on (SEASON_CLASS_RULES_FROM) the class is judged at a fixed
+        // point for the season, so the day it's worked out never matters:
+        // junior = born on or after VV's U19 cutoff for the season (no 19th
+        // birthday during it), and alumni = degree ended before their fee
+        // was first recorded for the season (fee_class_reference_time()).
+        // The profile is still read each time, so a later edit to it
+        // (institution, staff, degree end date) changes the class from the
+        // next re-price — corrected data, not the date passing. 2026 and
+        // earlier, and callers that give no season (a display), keep the
+        // original rule: age and degree end as at today.
+        $season_rules = $season_given && intval($season) >= self::SEASON_CLASS_RULES_FROM;
+        $is_junior = false;
+        if ($season_rules) {
+            $dob = str_replace('/', '-', trim((string) $birth_date));
+            $is_junior = preg_match('/^\d{4}-\d{2}-\d{2}$/', $dob) && $dob >= TeamOversight_Database::get_dob_cutoff('u19', $season);
+        } elseif ($birth_date) {
+            // Calculate age
             $today = new DateTime();
             $birthdate_obj = new DateTime($birth_date);
             $age = $today->diff($birthdate_obj)->y;
-            
-            if ($age < 19) {
-                // Check if they're in junior leagues - use correct season
-                $assigned_teams = $this->get_user_teams($email, $season);
-                foreach ($assigned_teams as $team) {
-                    if (strpos($team, 'JPL') === 0 || strpos($team, 'YSL') === 0) {
-                        return 'JPL/YSL';
-                    }
-                }
-                return 'Junior U/19 (VVL)';
-            }
+            $is_junior = $age < 19;
         }
-        
+
+        if ($is_junior) {
+            // Check if they're in junior leagues - use correct season
+            $assigned_teams = $this->get_user_teams($email, $season);
+            foreach ($assigned_teams as $team) {
+                if (strpos($team, 'JPL') === 0 || strpos($team, 'YSL') === 0) {
+                    return 'JPL/YSL';
+                }
+            }
+            return 'Junior U/19 (VVL)';
+        }
+
         // Check if alumni (graduated) - this is critical for correct billing
-        if ($degree1_enddate && strtotime($degree1_enddate) < time()) {
+        if ($degree1_enddate && strtotime($degree1_enddate) < ($season_rules ? strtotime(self::fee_class_reference_time($email, $season)) : time())) {
             return 'Full Adult'; // Alumni get adult rates regardless of institution
         }
         
@@ -1921,7 +2115,27 @@ class TeamOversight_Fees {
         // Default to Full Adult for 'Other' institution or no institution data
         return 'Full Adult';
     }
-    
+
+    /**
+     * When a person's date-based fee class (alumni: degree ended or not) is
+     * judged for a season from 2027 on: the moment their fee was first
+     * recorded for that season — their earliest fee segment, written by the
+     * first checkpoint (Finalise, accept or add to a team) — so that moment
+     * is kept with the history and time passing never moves them (an edit
+     * to their profile still does, from the next re-price). Now, when
+     * nothing is recorded yet (the checkpoint about to run records it).
+     * Site time, 'Y-m-d H:i:s'.
+     */
+    public static function fee_class_reference_time($email, $season) {
+        global $wpdb;
+        $uid = self::resolve_user_id($email);
+        $first = $wpdb->get_var($wpdb->prepare("
+            SELECT MIN(created_date) FROM {$wpdb->prefix}team_fee_segments
+            WHERE (user_id = %d OR email = %s) AND season = %s
+        ", $uid, $email, $season));
+        return $first ? $first : current_time('mysql');
+    }
+
     public function generate_invoice($email, $season) {
         global $wpdb;
         
@@ -2043,7 +2257,7 @@ class TeamOversight_Fees {
         $this->checkpoint_fee_role($email, $season);
         $segment_fee = $this->compute_segment_fee($email, $season, $fee_class);
         if ($segment_fee !== null) {
-            $this->apply_invoice_amount($invoice_id, $segment_fee);
+            $this->apply_invoice_amount($invoice_id, $segment_fee, 'worked out again from their teams and the fee matrix' . ($this->reprice_context !== '' ? ' (' . $this->reprice_context . ')' : ''));
             return true;
         }
 
@@ -2124,14 +2338,17 @@ class TeamOversight_Fees {
 
     /**
      * Set an invoice to a new fee amount, preserving payments already made
-     * (outstanding = new fee minus paid, never below zero).
+     * (outstanding = new fee minus paid, never below zero). With a $reason
+     * the change is logged with the old and new amounts, so a re-price that
+     * replaces a fee set with Edit Fee can always be seen and put back.
      */
-    private function apply_invoice_amount($invoice_id, $new_fee) {
+    private function apply_invoice_amount($invoice_id, $new_fee, $reason = '') {
         global $wpdb;
 
-        $current_fee = $wpdb->get_var($wpdb->prepare("
-            SELECT invoice_amount FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        $invoice = $wpdb->get_row($wpdb->prepare("
+            SELECT invoice_amount, season, user_id FROM {$wpdb->prefix}team_invoices WHERE id = %d
         ", $invoice_id));
+        $current_fee = $invoice ? $invoice->invoice_amount : null;
 
         if ($current_fee === null || floatval($current_fee) == floatval($new_fee)) {
             return;
@@ -2147,8 +2364,15 @@ class TeamOversight_Fees {
             array('%d')
         );
         TeamOversight_Payments::recompute_invoice($invoice_id);
+        if ($reason !== '' && abs(floatval($current_fee) - floatval($new_fee)) >= 0.005) {
+            TeamOversight_Log::add(
+                'fee_edit',
+                $invoice->season . ' season fee re-priced from $' . number_format($current_fee, 2) . ' to $' . number_format($new_fee, 2) . ' — ' . $reason,
+                array('user_id' => intval($invoice->user_id), 'amount' => $new_fee)
+            );
+        }
     }
-    
+
     private function generate_invoice_reference($season) {
         global $wpdb;
         
