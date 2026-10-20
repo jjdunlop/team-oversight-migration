@@ -2473,13 +2473,17 @@ class TeamOversight_Coach_Portal {
         fwrite($output, "\xEF\xBB\xBF");
         fputcsv($output, array('Name', 'Role', 'Positions', 'Status', 'Email', 'Mobile'));
 
+        // Names, positions and emails are member-controlled, so they go
+        // through the shared TeamOversight_Exports::csv_cell() (a name like
+        // =HYPERLINK(...) would otherwise be live when a coach opens the
+        // list). Never the mobile column: international numbers start with +.
         foreach ($roster as $member) {
             fputcsv($output, array(
-                $member->name ?: $member->email,
+                TeamOversight_Exports::csv_cell($member->name ?: $member->email),
                 str_replace('_', ' ', ucwords($member->role, '_')),
-                $this->format_positions($member->preferred_positions),
+                TeamOversight_Exports::csv_cell($this->format_positions($member->preferred_positions)),
                 'Confirmed',
-                $member->email,
+                TeamOversight_Exports::csv_cell($member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
             ));
         }
@@ -2497,11 +2501,11 @@ class TeamOversight_Coach_Portal {
                     . ($offer ? ' · accepted (awaiting finalisation)' : ' · offer out');
             }
             fputcsv($output, array(
-                $member->name,
+                TeamOversight_Exports::csv_cell($member->name),
                 $member->status === 'training_only' ? 'Training Only' : 'Playing Member',
-                $this->format_positions($member->preferred_positions),
+                TeamOversight_Exports::csv_cell($this->format_positions($member->preferred_positions)),
                 isset($status_labels[$member->status]) ? $status_labels[$member->status] : ucfirst($member->status),
-                $member->email,
+                TeamOversight_Exports::csv_cell($member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
             ));
         }

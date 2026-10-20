@@ -426,7 +426,9 @@ class TeamOversight_Admin {
                             'team' => $team_entry['team'],
                             'role' => $team_entry['role'],
                             'registration_status' => 'active',
-                            'start_date' => date('Y-m-d'),
+                            // The site's date, not the server's UTC one
+                            // (yesterday until late morning in Melbourne).
+                            'start_date' => current_time('Y-m-d'),
                             'is_active' => 1
                         ),
                         array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d')
@@ -2571,7 +2573,7 @@ class TeamOversight_Admin {
                         </tr>
                         <tr>
                             <th><label for="start_date">Start Date</label></th>
-                            <td><input type="date" name="start_date" value="<?php echo date('Y-m-d'); ?>" required></td>
+                            <td><input type="date" name="start_date" value="<?php echo esc_attr(current_time('Y-m-d')); ?>" required></td>
                         </tr>
                     </table>
                     
@@ -2672,7 +2674,7 @@ class TeamOversight_Admin {
                                         $status_display = ucfirst($assignment->registration_status);
                                         $status_icon = $assignment->registration_status === 'active' ? '🟢' : '🔴';
                                         $end_date_indicator = '';
-                                        if ($assignment->end_date && $assignment->end_date < date('Y-m-d')) {
+                                        if ($assignment->end_date && $assignment->end_date < current_time('Y-m-d')) {
                                             $end_date_indicator = ' (End: ' . $assignment->end_date . ')';
                                         }
                                         echo $status_icon . ' ' . $status_display . $end_date_indicator;
@@ -2819,10 +2821,13 @@ class TeamOversight_Admin {
                 });
             }
             
-            document.getElementById('search-assignments').addEventListener('input', filterTable);
-            document.getElementById('filter-team').addEventListener('change', filterTable);
-            document.getElementById('filter-role').addEventListener('change', filterTable);
-            document.getElementById('filter-status').addEventListener('change', filterTable);
+            // The filters only exist when the season has assignments.
+            if (document.getElementById('search-assignments')) {
+                document.getElementById('search-assignments').addEventListener('input', filterTable);
+                document.getElementById('filter-team').addEventListener('change', filterTable);
+                document.getElementById('filter-role').addEventListener('change', filterTable);
+                document.getElementById('filter-status').addEventListener('change', filterTable);
+            }
             
             // Inline editing
             function editAssignment(button) {
@@ -2971,7 +2976,7 @@ class TeamOversight_Admin {
                         'team' => $assigned_team,
                         'role' => 'playing_member',
                         'registration_status' => 'active',
-                        'start_date' => date('Y-m-d'),
+                        'start_date' => current_time('Y-m-d'),
                         'is_active' => 1
                     ),
                     array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d')
@@ -3291,7 +3296,7 @@ class TeamOversight_Admin {
                         'team' => $assigned_team,
                         'role' => 'playing_member',
                         'registration_status' => 'active',
-                        'start_date' => date('Y-m-d'),
+                        'start_date' => current_time('Y-m-d'),
                         'is_active' => 1
                     ),
                     array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d')
@@ -3494,7 +3499,7 @@ class TeamOversight_Admin {
                 $wpdb->prefix . 'team_assignments',
                 array(
                     'is_active' => 0,
-                    'end_date' => date('Y-m-d')
+                    'end_date' => current_time('Y-m-d')
                 ),
                 array('id' => $assignment_id),
                 array('%d', '%s'),
@@ -3593,7 +3598,7 @@ class TeamOversight_Admin {
                 $update_format[] = '%s';
                 
                 // Auto-set status to inactive if end date is in the past
-                if ($end_date < date('Y-m-d')) {
+                if ($end_date < current_time('Y-m-d')) {
                     $update_data['registration_status'] = 'inactive';
                     $update_data['is_active'] = 0;
                     $update_format[] = '%d';
@@ -3618,7 +3623,7 @@ class TeamOversight_Admin {
                 ));
                 
                 if (!$current_assignment->end_date) {
-                    $update_data['end_date'] = date('Y-m-d');
+                    $update_data['end_date'] = current_time('Y-m-d');
                     $update_format[] = '%s';
                 }
             }
@@ -3679,6 +3684,21 @@ class TeamOversight_Admin {
             SELECT * FROM {$wpdb->prefix}team_assignments WHERE id = %d
         ", $assignment_id));
 
+        // Re-price the person, not the deleted row's email snapshot: their
+        // account's current email (worked out while the row still exists),
+        // so every remaining row of theirs counts under (user_id OR email).
+        // Under an older email their other teams can be missed, and someone
+        // still on a team would be under-priced.
+        $fee_email = '';
+        if ($assignment) {
+            $fee_email = $assignment->email;
+            $fee_uid = intval($assignment->user_id) > 0 ? intval($assignment->user_id) : TeamOversight_Fees::resolve_user_id($assignment->email);
+            $fee_account = $fee_uid > 0 ? get_userdata($fee_uid) : false;
+            if ($fee_account && $fee_account->user_email) {
+                $fee_email = $fee_account->user_email;
+            }
+        }
+
         $result = $wpdb->delete(
             $wpdb->prefix . 'team_assignments',
             array('id' => $assignment_id),
@@ -3691,7 +3711,7 @@ class TeamOversight_Admin {
             }
             if ($assignment) {
                 $fees = new TeamOversight_Fees();
-                $fees->recalculate_after_assignment_change($assignment->email, $assignment->season);
+                $fees->recalculate_after_assignment_change($fee_email, $assignment->season);
             }
             wp_send_json_success('Assignment deleted successfully');
         } else {
@@ -3830,17 +3850,28 @@ class TeamOversight_Admin {
 
         $invoice_id = intval($_POST['invoice_id']);
         $amount = round(floatval($_POST['amount']), 2);
-        $note = sanitize_text_field(isset($_POST['note']) ? $_POST['note'] : '');
+        $note = sanitize_text_field(isset($_POST['note']) ? wp_unslash($_POST['note']) : '');
 
         if (abs($amount) < 0.01) {
             wp_send_json_error('Amount must not be zero');
+        }
+
+        // record_payment() returns false for a missing invoice and for a
+        // save that failed; say which, so a failed save isn't mistaken for
+        // a deleted invoice (or retried as if nothing could have happened).
+        global $wpdb;
+        $exists = $invoice_id > 0 ? $wpdb->get_var($wpdb->prepare("
+            SELECT id FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice_id)) : null;
+        if (!$exists) {
+            wp_send_json_error('Invoice not found — it may have been deleted. Reload the page.');
         }
 
         $note = trim('Recorded by ' . wp_get_current_user()->display_name . ($note !== '' ? ' — ' . $note : ''));
         if (TeamOversight_Payments::record_payment($invoice_id, $amount, 'manual', $note)) {
             wp_send_json_success('Payment recorded');
         } else {
-            wp_send_json_error('Invoice not found');
+            wp_send_json_error('The payment could not be saved, so nothing was recorded. Reload the page to check the invoice, then try again.');
         }
     }
     
