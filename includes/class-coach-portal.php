@@ -57,7 +57,7 @@ class TeamOversight_Coach_Portal {
 
     /**
      * A verdict's offer state for display: true (accepted), false (offer
-     * out), or null when there is no offer to accept (an earlier season,
+     * pending), or null when there is no offer to accept (an earlier season,
      * or a Tentative / Rejected verdict).
      */
     public static function offer_state($season, $status, $offer_accepted) {
@@ -67,12 +67,12 @@ class TeamOversight_Coach_Portal {
         return intval($offer_accepted) === 1;
     }
 
-    /** ' · accepted' / ' · offer out' after a verdict label, '' when no offer applies. */
+    /** ' · accepted' / ' · offer pending' after a verdict label, '' when no offer applies. */
     public static function offer_suffix($state) {
         if ($state === null) {
             return '';
         }
-        return $state ? ' · accepted' : ' · offer out';
+        return $state ? ' · accepted' : ' · offer pending';
     }
 
     public function __construct() {
@@ -300,7 +300,7 @@ class TeamOversight_Coach_Portal {
 
     /**
      * After a verdict or acceptance save: the card's verdict, its chips and
-     * its Player accepted control, read back from what was stored.
+     * its Offer accepted control, read back from what was stored.
      */
     private function card_refresh($season) {
         global $wpdb;
@@ -349,7 +349,7 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
-     * The "Mark player accepted" toggle for one card's offer on the active
+     * The "Mark offer accepted" toggle for one card's offer on the active
      * team — editors only, and only while there's an offer to accept (2027
      * on, Selected / Training Only, trial fee paid). Viewers see the state
      * on the verdict chips instead. $state: offer_state().
@@ -370,9 +370,9 @@ class TeamOversight_Coach_Portal {
             <input type="hidden" name="offer_accepted" value="<?php echo $state ? '0' : '1'; ?>">
             <?php wp_nonce_field('coach_portal_action', 'coach_nonce', false, true); ?>
             <?php if ($state): ?>
-                <button type="submit" class="button coach-btn-secondary coach-offer-btn is-accepted" title="<?php echo esc_attr('The player has accepted the ' . $labels[$status] . ' offer. Tap to undo.'); ?>">&#10003; Player accepted</button>
+                <button type="submit" class="button coach-btn-secondary coach-offer-btn is-accepted" title="<?php echo esc_attr('The player has accepted the ' . $labels[$status] . ' offer. Tap to undo.'); ?>">&#10003; Offer accepted</button>
             <?php else: ?>
-                <button type="submit" class="button coach-btn-secondary coach-offer-btn" title="<?php echo esc_attr('Tap once the player has said yes to the ' . $labels[$status] . ' offer. The club only finalises accepted offers.'); ?>">Mark player accepted</button>
+                <button type="submit" class="button coach-btn-secondary coach-offer-btn" title="<?php echo esc_attr('Tap once the player has said yes to the ' . $labels[$status] . ' offer. The club only finalises accepted offers.'); ?>">Mark offer accepted</button>
             <?php endif; ?>
         </form>
         <?php
@@ -382,7 +382,7 @@ class TeamOversight_Coach_Portal {
     /**
      * The selection board's own-verdict chip (players awaiting
      * finalisation). $state: offer_state() — from 2027 it says whether
-     * the offer is still out or the player has accepted.
+     * the offer is still pending or the player has accepted.
      */
     private static function render_board_verdict_chip($status, $state = null) {
         if ($status === 'selected' || $status === 'training_only') {
@@ -390,7 +390,7 @@ class TeamOversight_Coach_Portal {
             if ($state === null) {
                 $text = $label . ' — awaiting finalisation';
             } else {
-                $text = $label . ($state ? ' · accepted — awaiting finalisation' : ' · offer out');
+                $text = $label . ($state ? ' · accepted — awaiting finalisation' : ' · offer pending');
             }
             return '<span class="verdict-chip verdict-chip-' . $status . '">' . esc_html($text) . '</span>';
         }
@@ -738,17 +738,17 @@ class TeamOversight_Coach_Portal {
                 <?php endif; ?>
 
                 <?php
-                // From 2027: how many of this team's offers are still out,
+                // From 2027: how many of this team's offers are still pending,
                 // and how many the players have accepted.
-                $offer_counts = array('out' => 0, 'accepted' => 0);
+                $offer_counts = array('pending' => 0, 'accepted' => 0);
                 foreach ($selection_roster as $member) {
                     $offer = self::offer_state($season, $member->status, $member->offer_accepted);
                     if ($offer !== null) {
-                        $offer_counts[$offer ? 'accepted' : 'out']++;
+                        $offer_counts[$offer ? 'accepted' : 'pending']++;
                     }
                 }
-                $offer_summary = ($offer_counts['out'] || $offer_counts['accepted'])
-                    ? ' — ' . $offer_counts['out'] . ' offer' . ($offer_counts['out'] === 1 ? '' : 's') . ' out, ' . $offer_counts['accepted'] . ' accepted'
+                $offer_summary = ($offer_counts['pending'] || $offer_counts['accepted'])
+                    ? ' — ' . $offer_counts['pending'] . ' offer' . ($offer_counts['pending'] === 1 ? '' : 's') . ' pending, ' . $offer_counts['accepted'] . ' accepted'
                     : '';
                 ?>
                 <h4>Players (<?php echo count($confirmed_players); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?><?php echo esc_html($offer_summary); ?>)</h4>
@@ -886,7 +886,7 @@ class TeamOversight_Coach_Portal {
 
             <div class="coach-team-section">
                 <h3>Trial Applicants — <?php echo $active_config['gender'] === 'womens' ? "Women's" : ($active_config['gender'] === 'mens' ? "Men's" : 'All'); ?> (<?php echo count($applicants); ?>)</h3>
-                <p class="coach-portal-hint">Every applicant in this competition is shown — including players outside your age group or who selected other teams, since players get redirected between trials and VV can grant age exemptions. Your verdicts apply to <strong><?php echo esc_html($active_config['name']); ?></strong> only; a player can be Selected by multiple teams (e.g. YSL and JPL) and every coach sees every team's verdicts. <?php if (self::offer_acceptance_applies($season)): ?>Selected and Training Only are <strong>offers</strong>: once the player says yes, tap <em>Mark player accepted</em> on their card. Only accepted offers become official (team assignment + fees) when the club finalises selections, and changing the verdict clears the acceptance.<?php else: ?>Selected players become official (team assignment + fees) when the club finalises selections.<?php endif; ?> Applicants marked <strong>Payment pending</strong> haven't paid their trial fee yet — you can see and assess them and reject them, but Tentative, Selected and Training Only open once it's paid. They're listed at the bottom of each section.</p>
+                <p class="coach-portal-hint">Every applicant in this competition is shown — including players outside your age group or who selected other teams, since players get redirected between trials and VV can grant age exemptions. Your verdicts apply to <strong><?php echo esc_html($active_config['name']); ?></strong> only; a player can be Selected by multiple teams (e.g. YSL and JPL) and every coach sees every team's verdicts. <?php if (self::offer_acceptance_applies($season)): ?>Selected and Training Only are <strong>offers</strong>: once the player says yes, tap <em>Mark offer accepted</em> on their card. Only accepted offers become official (team assignment + fees) when the club finalises selections, and changing the verdict clears the acceptance.<?php else: ?>Selected players become official (team assignment + fees) when the club finalises selections.<?php endif; ?> Applicants marked <strong>Payment pending</strong> haven't paid their trial fee yet — you can see and assess them and reject them, but Tentative, Selected and Training Only open once it's paid. They're listed at the bottom of each section.</p>
 
                 <?php // Trial book first, so the search sits directly above the list it filters (matters on a phone). ?>
                 <?php if (!empty($applicants)): ?>
@@ -946,7 +946,7 @@ class TeamOversight_Coach_Portal {
                         return $unpaid_last($x, $y) ?: ($fx !== $fy ? $fx - $fy : $x['trial_number'] - $y['trial_number']);
                     });
                     // From 2027 a section with this team's offers in it counts
-                    // them by state: "Selected · offer out: 2 · Selected · accepted: 1".
+                    // them by state: "Selected · offer pending: 2 · Selected · accepted: 1".
                     $offer_tally = function ($items) {
                         $tally = array();
                         foreach ($items as $item) {
@@ -956,7 +956,7 @@ class TeamOversight_Coach_Portal {
                             }
                         }
                         $bits = array();
-                        foreach (array('Selected · offer out', 'Selected · accepted', 'Training Only · offer out', 'Training Only · accepted') as $key) {
+                        foreach (array('Selected · offer pending', 'Selected · accepted', 'Training Only · offer pending', 'Training Only · accepted') as $key) {
                             if (isset($tally[$key])) {
                                 $bits[] = $key . ': ' . $tally[$key];
                             }
@@ -1132,7 +1132,7 @@ class TeamOversight_Coach_Portal {
                             if (card.hasAttribute('data-has-verdict')) { card.setAttribute('data-has-verdict', res.data.status ? '1' : '0'); }
                             var chips = card.querySelector('.cac-verdicts');
                             if (chips) { chips.innerHTML = res.data.chips; }
-                            // The Player accepted control follows the verdict
+                            // The Offer accepted control follows the verdict
                             // (a changed verdict clears the acceptance).
                             var offer = card.querySelector('.cac-offer');
                             if (offer && typeof res.data.offer === 'string') { offer.innerHTML = res.data.offer; }
@@ -1169,7 +1169,7 @@ class TeamOversight_Coach_Portal {
             };
             portal.addEventListener('submit', function (event) { savePlace(event.target); });
 
-            // Mark player accepted / undo: saved in the background like a
+            // Mark offer accepted / undo: saved in the background like a
             // verdict, refreshing the card's chips and the button. Without
             // JavaScript (or if the request can't be sent) it's a normal post.
             portal.addEventListener('submit', function (event) {
@@ -1932,7 +1932,7 @@ class TeamOversight_Coach_Portal {
             color: #1e6b2a;
         }
 
-        /* Player accepted: green like a marked attendance. */
+        /* Offer accepted: green like a marked attendance. */
         .coach-portal .coach-offer-btn.is-accepted,
         .coach-portal .coach-offer-btn.is-accepted:hover,
         .coach-portal .coach-offer-btn.is-accepted:focus {
@@ -2276,7 +2276,7 @@ class TeamOversight_Coach_Portal {
             ", $verdict->id));
             // Finalise never undoes: a player it already put on this team
             // (by account or email) stays on it, fee and all, until the club
-            // removes them — so never tell the coach the offer is "out again".
+            // removes them — so never tell the coach the offer is "pending again".
             $on_team = $wpdb->get_var($wpdb->prepare("
                 SELECT id FROM {$wpdb->prefix}team_assignments
                 WHERE season = %s AND team = %s AND is_active = 1
@@ -2291,9 +2291,9 @@ class TeamOversight_Coach_Portal {
                 return '<div class="coach-portal-success coach-portal-sticky"><p>Acceptance undone for ' . $who . ' — but <strong>they\'re already on ' . esc_html($team) . '</strong>, so nothing was undone there: they stay on the team, and its fee, until the club removes them. If they aren\'t playing, ask the club to take them off ' . esc_html($team) . '.</p></div>';
             }
             if ($changed) {
-                $this->add_offer_note($application_id, 'Player acceptance undone for ' . $team . ' — the ' . $offer . ' offer is out again.');
+                $this->add_offer_note($application_id, 'Player acceptance undone for ' . $team . ' — the ' . $offer . ' offer is pending again.');
             }
-            return '<div class="coach-portal-success"><p>Acceptance undone for ' . $who . ' — the <strong>' . esc_html($offer) . '</strong> offer for ' . esc_html($team) . ' is out again.</p></div>';
+            return '<div class="coach-portal-success"><p>Acceptance undone for ' . $who . ' — the <strong>' . esc_html($offer) . '</strong> offer for ' . esc_html($team) . ' is pending again.</p></div>';
         }
 
         // set_selection
@@ -2369,7 +2369,7 @@ class TeamOversight_Coach_Portal {
 
         $offer_hint = '';
         if (self::offer_state($season, $status, 0) !== null && ($existing === null || $existing->status !== $status || intval($existing->offer_accepted) !== 1)) {
-            $offer_hint = ' Once the player says yes, tap <em>Mark player accepted</em> — the club only finalises accepted offers.';
+            $offer_hint = ' Once the player says yes, tap <em>Mark offer accepted</em> — the club only finalises accepted offers.';
         }
 
         return '<div class="coach-portal-success"><p>' . $who . ' marked <strong>' . esc_html($verdict_labels[$status]) . '</strong> for ' . esc_html($team) . '.' . $cleared . $offer_hint . '</p></div>';
@@ -2494,11 +2494,11 @@ class TeamOversight_Coach_Portal {
                 'training_only' => 'Training Only (awaiting finalisation)',
                 'tentative' => 'Tentative',
             );
-            // From 2027: whether the offer is still out or the player accepted it.
+            // From 2027: whether the offer is still pending or the player accepted it.
             $offer = self::offer_state($season, $member->status, $member->offer_accepted);
             if ($offer !== null) {
                 $status_labels[$member->status] = ($member->status === 'selected' ? 'Selected' : 'Training Only')
-                    . ($offer ? ' · accepted (awaiting finalisation)' : ' · offer out');
+                    . ($offer ? ' · accepted (awaiting finalisation)' : ' · offer pending');
             }
             fputcsv($output, array(
                 TeamOversight_Exports::csv_cell($member->name),
@@ -2679,7 +2679,7 @@ class TeamOversight_Coach_Portal {
 <p class="meta">★ marks <?php echo esc_html($config['name']); ?> in the "applied for" column.</p>
 
 <h2>Applicant details</h2>
-<p class="meta">ICE = emergency contact. Verdicts show every team's call, not just yours.<?php if (self::offer_acceptance_applies($season)): ?> Selected and Training Only are offers: "offer out" until the player accepts, then "accepted" — the club finalises accepted offers only.<?php endif; ?></p>
+<p class="meta">ICE = emergency contact. Verdicts show every team's call, not just yours.<?php if (self::offer_acceptance_applies($season)): ?> Selected and Training Only are offers: "offer pending" until the player accepts, then "accepted" — the club finalises accepted offers only.<?php endif; ?></p>
 <?php foreach ($applicants as $a): ?>
     <div class="applicant">
         <div class="a-head">

@@ -596,7 +596,7 @@ class TeamOversight_Admin {
         if ($waiting) {
             echo '<div class="notice notice-warning"><p><strong>' . $waiting . ' offer' . ($waiting === 1 ? ' is' : 's are') . ' still waiting for the player to accept — not finalised:</strong> '
                 . esc_html(self::offers_by_team_text($offers['waiting']))
-                . '. They finalise on a later run once a coach marks <em>Player accepted</em> in the coach portal.</p></div>';
+                . '. They finalise on a later run once a coach marks <em>Offer accepted</em> in the coach portal.</p></div>';
         }
         if ($withdrawn) {
             echo '<div class="notice notice-warning"><p><strong>' . $withdrawn . ' player' . ($withdrawn === 1 ? ' is' : 's are') . ' already on the team without an accepted offer</strong> (acceptance withdrawn or verdict changed after an earlier Finalise, or placed another way): '
