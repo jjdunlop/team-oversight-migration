@@ -447,6 +447,21 @@ class TeamOversight_Database {
                 ADD COLUMN offer_accepted_at datetime DEFAULT NULL,
                 ADD COLUMN offer_accepted_by bigint(20) unsigned DEFAULT NULL");
         }
+
+        // 1.68.5: a fee set by hand with Edit Fee sticks. fee_overridden
+        // marks it (with when and by whom), so no automatic re-price changes
+        // it; fee_calculated_logged is the calculated amount last logged
+        // while it was kept, so each different amount is logged once.
+        // Existing invoices start as automatic (0). One statement, so the
+        // four columns arrive together.
+        $fee_overridden_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_invoices LIKE 'fee_overridden'");
+        if (empty($fee_overridden_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}team_invoices
+                ADD COLUMN fee_overridden tinyint(1) NOT NULL DEFAULT 0,
+                ADD COLUMN fee_overridden_at datetime DEFAULT NULL,
+                ADD COLUMN fee_overridden_by bigint(20) unsigned DEFAULT NULL,
+                ADD COLUMN fee_calculated_logged decimal(10,2) DEFAULT NULL");
+        }
     }
 
     public function create_tables() {
@@ -478,6 +493,10 @@ class TeamOversight_Database {
                     outstanding_amount decimal(10,2) NOT NULL,
                     invoice_reference varchar(100) NOT NULL,
                     created_date datetime DEFAULT CURRENT_TIMESTAMP,
+                    fee_overridden tinyint(1) NOT NULL DEFAULT 0,
+                    fee_overridden_at datetime DEFAULT NULL,
+                    fee_overridden_by bigint(20) unsigned DEFAULT NULL,
+                    fee_calculated_logged decimal(10,2) DEFAULT NULL,
                     PRIMARY KEY (id),
                     KEY email (email),
                     KEY season (season),

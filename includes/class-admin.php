@@ -14,6 +14,7 @@ class TeamOversight_Admin {
         add_action('wp_ajax_update_assignment', array($this, 'ajax_update_assignment'));
         add_action('wp_ajax_delete_assignment', array($this, 'ajax_delete_assignment'));
         add_action('wp_ajax_update_invoice', array($this, 'ajax_update_invoice'));
+        add_action('wp_ajax_use_calculated_fee', array($this, 'ajax_use_calculated_fee'));
         add_action('wp_ajax_record_invoice_payment', array($this, 'ajax_record_invoice_payment'));
         add_action('wp_ajax_delete_invoice', array($this, 'ajax_delete_invoice'));
         add_action('wp_ajax_bulk_accept_trials', array($this, 'ajax_bulk_accept_trials'));
@@ -399,6 +400,7 @@ class TeamOversight_Admin {
         $assignments_created = 0;
         $invoices_created = 0;
         $invoices_repriced = 0;
+        $manual_kept = 0;
         $not_invoiced = array();
         $role_differs = array();
 
@@ -449,8 +451,9 @@ class TeamOversight_Admin {
 
             // Invoice only when this run put them on a team, or they have no
             // invoice yet (e.g. no fee could be worked out last time). Anyone
-            // else is unchanged since the last run, and re-pricing them would
-            // undo a fee an admin set with Edit Fee. The invoice is looked up
+            // else is unchanged since the last run. A fee an admin set with
+            // Edit Fee is kept even when it is re-priced here (fee_overridden;
+            // the calculated amount is logged). The invoice is looked up
             // under the application's account too (its current email, as
             // Undo Assignment does), so an application made under an older
             // email still finds it.
@@ -469,7 +472,9 @@ class TeamOversight_Admin {
                 // finds every row of theirs. An existing one is re-priced as
                 // it always was.
                 if ($fees->generate_invoice($had_invoice ? $info['email'] : $fee_email, $season)) {
-                    if ($had_invoice) {
+                    if ($had_invoice && $fees->last_kept_manual()) {
+                        $manual_kept++; // set with Edit Fee: kept, the calculation logged
+                    } elseif ($had_invoice) {
                         $invoices_repriced++;
                     } else {
                         $invoices_created++;
@@ -516,7 +521,8 @@ class TeamOversight_Admin {
         }
 
         if ($released) {
-            $invoice_note = $invoices_created . ' invoice(s) created' . ($invoices_repriced ? ', ' . $invoices_repriced . ' re-priced' : '');
+            $invoice_note = $invoices_created . ' invoice(s) created' . ($invoices_repriced ? ', ' . $invoices_repriced . ' re-priced' : '')
+                . ($manual_kept ? ', ' . $manual_kept . ' fee(s) set with Edit Fee kept as they are' : '');
         } else {
             $invoice_note = 'no invoices yet (' . esc_html($season) . ' fees are released on ' . esc_html(date('j M Y', strtotime(TeamOversight_Fees::get_fee_release_date($season)))) . ', when everyone on a team is invoiced)';
         }
@@ -2137,6 +2143,25 @@ class TeamOversight_Admin {
         $breakdown_fees = new TeamOversight_Fees();
         $breakdown_fees->enable_rate_cache();
 
+        // Fees set with Edit Fee whose owner is on no team this season any
+        // more: leaving didn't change the fee (it's manual), so flag them
+        // for the treasurer rather than re-pricing. Matched by account or
+        // email, so an older email snapshot doesn't hide a current team.
+        $manual_off_team = array();
+        foreach ($invoices as $invoice) {
+            if (intval($invoice->fee_overridden) !== 1) {
+                continue;
+            }
+            $owner_uid = intval($invoice->user_id) > 0 ? intval($invoice->user_id) : TeamOversight_Fees::resolve_user_id($invoice->email);
+            $on_team = $wpdb->get_var($wpdb->prepare("
+                SELECT id FROM {$wpdb->prefix}team_assignments
+                WHERE (user_id = %d OR email = %s) AND season = %s AND is_active = 1 LIMIT 1
+            ", $owner_uid, $invoice->email, $invoice->season));
+            if (!$on_team) {
+                $manual_off_team[$invoice->id] = $invoice->name ? $invoice->name : $invoice->email;
+            }
+        }
+
         ?>
         <style>
             #invoices-table .fee-info-cell { font-size: 11px; }
@@ -2154,6 +2179,8 @@ class TeamOversight_Admin {
             .fee-breakdown-sums td:last-child { text-align: right; white-space: nowrap; padding-left: 10px; }
             .fee-breakdown-total { margin: 6px 0 0; padding-top: 6px; border-top: 1px solid #c3c4c7; }
             .fee-breakdown-warn { margin: 6px 0 0; color: #b32d2e; }
+            .fee-manual { color: #8a4b00; font-weight: 600; }
+            .fee-manual-off-team { color: #b32d2e; }
         </style>
         <div class="wrap">
             <h1>Payment Management</h1>
@@ -2200,6 +2227,13 @@ class TeamOversight_Admin {
                 </form>
                 <p class="description" style="margin-top: 10px;">Overdue reminder emails (templates, schedule, preview, send) live in <a href="<?php echo admin_url('admin.php?page=team-oversight-emails'); ?>">VVL Oversight → Emails</a>.</p>
             </details>
+
+            <?php if (!empty($manual_off_team)): ?>
+                <div class="notice notice-warning inline">
+                    <p><strong><?php echo count($manual_off_team); ?> fee(s) set by hand for people on no <?php echo esc_html($season); ?> team any more:</strong> <?php echo esc_html(implode(', ', $manual_off_team)); ?>.
+                    Their fee was set with Edit Fee, so leaving their teams didn't change it. If they shouldn't owe it, use <em>Use calculated fee</em> on their row (it re-prices from their fee history: $0 if they left before the season started, otherwise what accrued while they were on a team), or Edit Fee to set the amount.</p>
+                </div>
+            <?php endif; ?>
 
             <?php if (!empty($invoices)): ?>
                 <div class="invoices-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
@@ -2311,7 +2345,17 @@ class TeamOversight_Admin {
 
                                 $fee_info = "{$age_text} | {$institution_short} | {$degree_short} | {$status} → {$calculated_fee_class}";
                             }
-                            $breakdown_html = $breakdown_fees->render_fee_breakdown($breakdown_fees->fee_breakdown($invoice->email, $invoice->season), $invoice->invoice_amount, $invoice->season);
+                            $fee_manual = intval($invoice->fee_overridden) === 1;
+                            $breakdown = $breakdown_fees->fee_breakdown($invoice->email, $invoice->season);
+                            $breakdown_html = $breakdown_fees->render_fee_breakdown($breakdown, $invoice->invoice_amount, $invoice->season, $fee_manual);
+                            $manual_title = '';
+                            if ($fee_manual) {
+                                $setter = intval($invoice->fee_overridden_by) > 0 ? get_userdata(intval($invoice->fee_overridden_by)) : false;
+                                $manual_title = 'Set by hand with Edit Fee'
+                                    . ($setter ? ' by ' . $setter->display_name : '')
+                                    . ($invoice->fee_overridden_at ? ' on ' . date('j M Y', strtotime($invoice->fee_overridden_at)) : '')
+                                    . '. Team changes, Finalise and fee releases leave it as it is; Use calculated fee re-prices it.';
+                            }
                         ?>
                             <tr data-invoice-id="<?php echo $invoice->id; ?>" data-team="<?php echo esc_attr($invoice->team_codes ?: ''); ?>" data-status="<?php echo $payment_status; ?>">
                                 <td><?php echo $invoice->id; ?></td>
@@ -2322,6 +2366,12 @@ class TeamOversight_Admin {
                                 <td class="editable-invoice-amount" data-field="invoice_amount" data-value="<?php echo esc_attr($invoice->invoice_amount); ?>">
                                     <span class="display-value">$<?php echo number_format($invoice->invoice_amount, 2); ?></span>
                                     <input type="number" class="edit-value" value="<?php echo $invoice->invoice_amount; ?>" step="0.01" min="0" style="display: none; width: 80px;">
+                                    <?php if ($fee_manual): ?>
+                                        <br><small class="fee-manual" title="<?php echo esc_attr($manual_title); ?>">Manual fee &middot; calculated $<?php echo number_format($breakdown['total'], 2); ?></small>
+                                        <?php if (isset($manual_off_team[$invoice->id])): ?>
+                                            <br><small class="fee-manual-off-team">&#9888; On no team now &mdash; fee kept</small>
+                                        <?php endif; ?>
+                                    <?php endif; ?>
                                 </td>
                                 <td>$<?php echo number_format(isset($payments_by_invoice[$invoice->id]) ? $payments_by_invoice[$invoice->id]['total'] : 0, 2); ?></td>
                                 <td class="outstanding-cell">
@@ -2353,6 +2403,9 @@ class TeamOversight_Admin {
                                 <td>
                                     <button type="button" class="button edit-invoice" onclick="editInvoice(this)">Edit Fee</button>
                                     <button type="button" class="button record-payment" onclick="recordPayment(this)">Record Payment</button>
+                                    <?php if ($fee_manual): ?>
+                                        <button type="button" class="button use-calculated-fee" onclick="useCalculatedFee(this)" data-calculated="<?php echo esc_attr('$' . number_format($breakdown['total'], 2)); ?>">Use calculated fee</button>
+                                    <?php endif; ?>
                                     <button type="button" class="button button-primary save-invoice" onclick="saveInvoice(this)" style="display: none;">Save</button>
                                     <button type="button" class="button cancel-edit-invoice" onclick="cancelEditInvoice(this)" style="display: none;">Cancel</button>
                                     <button type="button" class="button button-link-delete delete-invoice" onclick="deleteInvoice(this)" style="display: none; color: #a00;">Delete</button>
@@ -2399,6 +2452,9 @@ class TeamOversight_Admin {
                 row.querySelectorAll('.edit-value').forEach(input => input.style.display = 'inline-block');
                 row.querySelector('.edit-invoice').style.display = 'none';
                 row.querySelector('.record-payment').style.display = 'none';
+                if (row.querySelector('.use-calculated-fee')) {
+                    row.querySelector('.use-calculated-fee').style.display = 'none';
+                }
                 row.querySelector('.save-invoice').style.display = 'inline-block';
                 row.querySelector('.cancel-edit-invoice').style.display = 'inline-block';
                 row.querySelector('.delete-invoice').style.display = 'inline-block';
@@ -2410,6 +2466,9 @@ class TeamOversight_Admin {
                 row.querySelectorAll('.edit-value').forEach(input => input.style.display = 'none');
                 row.querySelector('.edit-invoice').style.display = 'inline-block';
                 row.querySelector('.record-payment').style.display = 'inline-block';
+                if (row.querySelector('.use-calculated-fee')) {
+                    row.querySelector('.use-calculated-fee').style.display = 'inline-block';
+                }
                 row.querySelector('.save-invoice').style.display = 'none';
                 row.querySelector('.cancel-edit-invoice').style.display = 'none';
                 row.querySelector('.delete-invoice').style.display = 'none';
@@ -2433,6 +2492,35 @@ class TeamOversight_Admin {
                 .then(response => response.json())
                 .then(response => {
                     if (response.success) {
+                        location.reload();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+
+            // A fee set with Edit Fee is kept by every re-price; this puts it
+            // back to automatic and re-prices it now (payments untouched).
+            function useCalculatedFee(button) {
+                const row = button.closest('tr');
+                if (!confirm('Set this fee back to the calculated amount (' + button.dataset.calculated + ')? From now on team changes and fee releases re-price it again. Payments stay as they are.')) {
+                    return;
+                }
+                const data = {
+                    action: 'use_calculated_fee',
+                    invoice_id: row.dataset.invoiceId,
+                    nonce: '<?php echo wp_create_nonce('use_calculated_fee'); ?>'
+                };
+
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: Object.keys(data).map(key => key + '=' + encodeURIComponent(data[key])).join('&')
+                })
+                .then(response => response.json())
+                .then(response => {
+                    if (response.success) {
+                        alert(response.data);
                         location.reload();
                     } else {
                         alert('Error: ' + response.data);
@@ -3128,7 +3216,11 @@ class TeamOversight_Admin {
                 $invoice_removed = false;
                 $accrued = 0.0;
                 $no_dates = false;
-                if ($invoice && !$still_on_team) {
+                // A fee set with Edit Fee is never changed or removed by this:
+                // it stays, and Payment Management flags it while they're on
+                // no team, for the treasurer to decide.
+                $invoice_manual = $invoice && TeamOversight_Fees::fee_is_manual($invoice->id);
+                if ($invoice && !$still_on_team && !$invoice_manual) {
                     // What their time on teams accrued, pro-rata from the fee
                     // history — only with season dates, once fees are released.
                     if (TeamOversight_Fees::fees_released($trial->season)) {
@@ -3171,6 +3263,10 @@ class TeamOversight_Admin {
                         $fee_message .= $paid >= 0.01 ? ', with the $' . number_format($paid, 2) . ' already paid kept on it' . ($credit >= 0.01 ? ' ($' . number_format($credit, 2) . ' is credit)' : '') . '.' : '.';
                         if ($no_dates && floatval($fee_now) >= 0.005) {
                             $fee_message .= ' The ' . $trial->season . ' season has no dates, so the fee can\'t be pro-rated and stays at the full amount — use Edit Fee if they shouldn\'t owe it.';
+                        }
+                        if ($invoice_manual) {
+                            $fee_message .= ' It was set by hand with Edit Fee, so it was kept as it is'
+                                . ($still_on_team ? '.' : ' although they are on no ' . $trial->season . ' team now (Payment Management flags it): use Use calculated fee there, or Edit Fee, if they shouldn\'t owe it.');
                         }
                     }
                 }
@@ -3827,15 +3923,24 @@ class TeamOversight_Admin {
 
         // Only the FEE is editable. Paid is the payments ledger and
         // outstanding is always fee minus paid — money moves only through
-        // Record Payment, never through an edit.
+        // Record Payment, never through an edit. A fee set here is manual
+        // (fee_overridden, with when and by whom): no automatic re-price
+        // changes it until Use calculated fee. Saving again keeps it manual
+        // and restarts the logging of calculated amounts.
         $before = $wpdb->get_row($wpdb->prepare("
-            SELECT invoice_amount, season, user_id FROM {$wpdb->prefix}team_invoices WHERE id = %d
+            SELECT invoice_amount, season, user_id, fee_overridden FROM {$wpdb->prefix}team_invoices WHERE id = %d
         ", $invoice_id));
         $result = $wpdb->update(
             $wpdb->prefix . 'team_invoices',
-            array('invoice_amount' => $invoice_amount),
+            array(
+                'invoice_amount' => $invoice_amount,
+                'fee_overridden' => 1,
+                'fee_overridden_at' => current_time('mysql'),
+                'fee_overridden_by' => get_current_user_id(),
+                'fee_calculated_logged' => null,
+            ),
             array('id' => $invoice_id),
-            array('%f'),
+            array('%f', '%d', '%s', '%d', '%f'),
             array('%d')
         );
         $outstanding = TeamOversight_Payments::recompute_invoice($invoice_id);
@@ -3843,7 +3948,13 @@ class TeamOversight_Admin {
         if ($before && floatval($before->invoice_amount) !== $invoice_amount) {
             TeamOversight_Log::add(
                 'fee_edit',
-                $before->season . ' season fee changed from $' . number_format($before->invoice_amount, 2) . ' to $' . number_format($invoice_amount, 2),
+                $before->season . ' season fee changed from $' . number_format($before->invoice_amount, 2) . ' to $' . number_format($invoice_amount, 2) . ' (set by hand: re-pricing keeps it)',
+                array('user_id' => intval($before->user_id), 'amount' => $invoice_amount)
+            );
+        } elseif ($before && intval($before->fee_overridden) !== 1) {
+            TeamOversight_Log::add(
+                'fee_edit',
+                $before->season . ' season fee of $' . number_format($invoice_amount, 2) . ' set by hand (re-pricing keeps it)',
                 array('user_id' => intval($before->user_id), 'amount' => $invoice_amount)
             );
         }
@@ -3853,6 +3964,38 @@ class TeamOversight_Admin {
         } else {
             wp_send_json_error('Failed to update invoice');
         }
+    }
+
+    /**
+     * Payment Management "Use calculated fee": a fee set with Edit Fee goes
+     * back to automatic and is re-priced through the normal path (logged;
+     * payments untouched, outstanding = fee - paid).
+     */
+    public function ajax_use_calculated_fee() {
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'use_calculated_fee')) {
+            wp_send_json_error('Security check failed');
+        }
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        $invoice_id = isset($_POST['invoice_id']) ? intval($_POST['invoice_id']) : 0;
+        $fees = new TeamOversight_Fees();
+        $result = $invoice_id > 0 ? $fees->use_calculated_fee($invoice_id) : null;
+        if ($result === null) {
+            wp_send_json_error('Invoice not found — it may have been deleted. Reload the page.');
+        }
+
+        $money = function ($n) { return '$' . number_format($n, 2); };
+        if (abs($result['after'] - $result['before']) >= 0.005) {
+            $message = 'The fee is automatic again: re-priced from ' . $money($result['before']) . ' to ' . $money($result['after']) . '.';
+        } elseif (!$result['released']) {
+            $message = 'The fee is automatic again. Fees for this season aren\'t released yet, so it stays at ' . $money($result['after']) . ' until a release re-prices it (the release date arriving, or Release fees now; saving a date that has passed does not re-price fees already out).';
+        } else {
+            $message = 'The fee is automatic again and stays at ' . $money($result['after']) . ' (it matches the calculation, or no fee could be worked out from their teams and the fee matrix).';
+        }
+        wp_send_json_success($message);
     }
 
     public function ajax_record_invoice_payment() {

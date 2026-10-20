@@ -62,6 +62,9 @@ class TeamOversight_Fees {
     /** What is re-pricing invoices right now, for each re-price's log line ('' = their teams changed). */
     private $reprice_context = '';
 
+    /** Did the last generate_invoice() keep a fee set with Edit Fee instead of re-pricing it? */
+    private $kept_manual = false;
+
     /** The season's fee release date ('YYYY-MM-DD'), or '' when none is set. */
     public static function get_fee_release_date($season) {
         $all = get_option(self::RELEASE_OPTION, array());
@@ -98,9 +101,10 @@ class TeamOversight_Fees {
      * no matrix amount, so charged the highest role that has one), and the
      * people whose existing invoice was left as it was because none of
      * their roles has a matrix amount ('unpriced', not counted as updated).
+     * A fee set with Edit Fee is never re-priced: those people are listed
+     * as 'manual' (not counted as updated; the calculated amount is logged).
      * $new_only (a season already being charged): invoice only people with
-     * no invoice yet and leave every existing invoice as it is, so a fee
-     * set with Edit Fee is never reverted.
+     * no invoice yet and leave every existing invoice as it is.
      */
     public function apply_fees_for_season($season, $new_only = false) {
         global $wpdb;
@@ -110,7 +114,7 @@ class TeamOversight_Fees {
             GROUP BY email
         ", $season));
 
-        $result = array('invoiced' => 0, 'updated' => 0, 'missing' => array(), 'partial' => array(), 'unpriced' => array(), 'kept' => 0);
+        $result = array('invoiced' => 0, 'updated' => 0, 'missing' => array(), 'partial' => array(), 'unpriced' => array(), 'manual' => array(), 'kept' => 0);
         $seen = array();
         $this->reprice_context = 'fee release';
         foreach ($people as $person) {
@@ -128,6 +132,12 @@ class TeamOversight_Fees {
                 continue;
             }
             if ($this->generate_invoice($person->email, $season)) {
+                // A fee set with Edit Fee was kept, not re-priced (any
+                // difference from the calculation is logged).
+                if ($had && $this->kept_manual) {
+                    $result['manual'][] = $person->email;
+                    continue;
+                }
                 // A role with no matrix amount: say so (fee_breakdown() is
                 // the calculation the invoice came from). Some role priced
                 // = partly priced; none = an existing invoice was kept as
@@ -166,7 +176,8 @@ class TeamOversight_Fees {
      * fee at all (not invoiced), partly priced (a role with no matrix
      * amount, charged the highest of their roles that has one), and not
      * priced (an existing invoice kept as it was: none of their roles has
-     * a matrix amount). Admin-only HTML; the activity log gets counts
+     * a matrix amount). Also the fees set with Edit Fee it kept as they
+     * were. Admin-only HTML; the activity log gets counts
      * (release_gaps_note()).
      */
     private static function release_gaps_html($result) {
@@ -175,19 +186,25 @@ class TeamOversight_Fees {
             $html .= '<p>No fee could be worked out for ' . count($result['missing']) . ' person(s) — check every fee class and role has an amount in the matrix, then save a release date that has passed (today will do) to invoice them; invoices already out stay as they are: ' . esc_html(implode(', ', $result['missing'])) . '</p>';
         }
         if (!empty($result['partial'])) {
-            $html .= '<p><strong>Partly priced:</strong> ' . count($result['partial']) . ' person(s) hold a role with no amount in the fee matrix, so they were charged the highest of their roles that has one, which may be too low. Fill in the blank cells, then correct their fee with Edit Fee on Payment Management (it flags the difference): ' . esc_html(implode(', ', $result['partial'])) . '</p>';
+            $html .= '<p><strong>Partly priced:</strong> ' . count($result['partial']) . ' person(s) hold a role with no amount in the fee matrix, so they were charged the highest of their roles that has one, which may be too low. Fill in the blank cells, then correct their fee on Payment Management (it flags the difference): their next team change re-prices it, or set it with Edit Fee (it then stays as set; Use calculated fee puts it back to automatic): ' . esc_html(implode(', ', $result['partial'])) . '</p>';
         }
         if (!empty($result['unpriced'])) {
-            $html .= '<p><strong>Not priced:</strong> ' . count($result['unpriced']) . ' person(s) already had an invoice, but none of their roles has an amount in the fee matrix, so it was left as it was (a $0 invoice stays $0). Fill in the blank cells, then set their fee with Edit Fee on Payment Management: ' . esc_html(implode(', ', $result['unpriced'])) . '</p>';
+            $html .= '<p><strong>Not priced:</strong> ' . count($result['unpriced']) . ' person(s) already had an invoice, but none of their roles has an amount in the fee matrix, so it was left as it was (a $0 invoice stays $0). Fill in the blank cells, then set their fee with Edit Fee on Payment Management (it then stays as set; Use calculated fee puts it back to automatic): ' . esc_html(implode(', ', $result['unpriced'])) . '</p>';
+        }
+        if (!empty($result['manual'])) {
+            $html .= '<p><strong>Manual fees kept:</strong> ' . count($result['manual']) . ' person(s) have a fee set with Edit Fee, so it was left as it was (a different calculated amount is logged on Logs). To re-price one, use Use calculated fee on Payment Management: ' . esc_html(implode(', ', $result['manual'])) . '</p>';
         }
         return $html;
     }
 
-    /** ", N partly priced, M not priced (invoice kept as it was)" for a release's log line ('' when nobody was). */
+    /** ", N partly priced, M not priced (invoice kept as it was), K manual fee(s) kept" for a release's log line ('' when nobody was). */
     private static function release_gaps_note($result) {
         $note = empty($result['partial']) ? '' : ', ' . count($result['partial']) . ' partly priced';
         if (!empty($result['unpriced'])) {
             $note .= ', ' . count($result['unpriced']) . ' not priced (invoice kept as it was)';
+        }
+        if (!empty($result['manual'])) {
+            $note .= ', ' . count($result['manual']) . ' manual fee(s) kept (set with Edit Fee)';
         }
         return $note;
     }
@@ -199,17 +216,20 @@ class TeamOversight_Fees {
      * date (by mistake, say) and put back is still being charged, and
      * putting a passed date back, or clearing it, must re-price nothing.
      * Withdrawn credit means a real release is due, which re-prices.
+     * Only automatic invoices count, on both sides: a fee set with Edit Fee
+     * stays through Remove fees until release (a manual $0 holding payments
+     * is not taken-back credit), so it says nothing either way.
      */
     private static function invoices_still_out($season) {
         global $wpdb;
-        $charged = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s AND invoice_amount > 0", $season));
+        $charged = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s AND invoice_amount > 0 AND fee_overridden = 0", $season));
         if ($charged === 0) {
             return false;
         }
         $credit = $wpdb->get_var($wpdb->prepare("
             SELECT i.id FROM {$wpdb->prefix}team_invoices i
             JOIN {$wpdb->prefix}team_invoice_payments p ON p.invoice_id = i.id
-            WHERE i.season = %s AND i.invoice_amount <= 0 LIMIT 1
+            WHERE i.season = %s AND i.invoice_amount <= 0 AND i.fee_overridden = 0 LIMIT 1
         ", $season));
         return !$credit;
     }
@@ -219,16 +239,25 @@ class TeamOversight_Fees {
      * yet. Unpaid invoices are deleted (a fresh one is made on release).
      * Invoices with money on them stay, re-priced to $0, so what was paid
      * shows as credit; on release they're re-priced to the real fee and
-     * the credit comes off it. Never touches the payments ledger.
+     * the credit comes off it. Never touches the payments ledger. A fee
+     * set with Edit Fee is kept as it is, like every re-price (counted as
+     * 'manual'; the $0 it would have become is logged once).
      */
     public function withdraw_unreleased_invoices($season) {
         global $wpdb;
-        $result = array('deleted' => 0, 'credited' => 0, 'credit_total' => 0.0);
+        $result = array('deleted' => 0, 'credited' => 0, 'credit_total' => 0.0, 'manual' => 0);
         if (self::fees_released($season)) {
             return $result;
         }
-        $invoices = $wpdb->get_results($wpdb->prepare("SELECT id, user_id, email, invoice_amount FROM {$wpdb->prefix}team_invoices WHERE season = %s", $season));
+        $invoices = $wpdb->get_results($wpdb->prepare("SELECT id, user_id, email, invoice_amount, fee_overridden FROM {$wpdb->prefix}team_invoices WHERE season = %s", $season));
         foreach ($invoices as $invoice) {
+            if (intval($invoice->fee_overridden) === 1) {
+                $this->reprice_context = 'Remove fees until release';
+                $this->note_manual_fee_kept($invoice->id, 0.0);
+                $this->reprice_context = '';
+                $result['manual']++;
+                continue;
+            }
             $has_payments = (bool) $wpdb->get_var($wpdb->prepare("SELECT id FROM {$wpdb->prefix}team_invoice_payments WHERE invoice_id = %d LIMIT 1", $invoice->id));
             if (!$has_payments) {
                 $wpdb->delete($wpdb->prefix . 'team_invoices', array('id' => $invoice->id), array('%d'));
@@ -575,9 +604,10 @@ class TeamOversight_Fees {
      * The breakdown as a dropdown for the Payment Management table: each
      * stretch's buckets with their rates (and what each is charged as),
      * the highest fee, then pro-rata and the total. Flags a difference
-     * from the invoiced amount.
+     * from the invoiced amount ($manual: the fee was set with Edit Fee, so
+     * re-pricing keeps it and only Use calculated fee applies this).
      */
-    public function render_fee_breakdown($breakdown, $invoice_amount = null, $season = null) {
+    public function render_fee_breakdown($breakdown, $invoice_amount = null, $season = null, $manual = false) {
         $money = function ($n) { return '$' . number_format((float) $n, 2); };
         $date = function ($d) { return date('j M Y', strtotime($d)); };
         $stretches = $breakdown['stretches'];
@@ -598,7 +628,7 @@ class TeamOversight_Fees {
         ob_start();
         ?>
         <details class="fee-breakdown">
-            <summary>How it's worked out<?php if ($differs): ?> <span class="fee-breakdown-flag" title="The invoice doesn't match the current calculation">&#9888; <?php echo esc_html($money($breakdown['total'])); ?></span><?php endif; ?><?php if ($breakdown['missing']): ?> <span class="fee-breakdown-flag" title="Some roles have no amount in the fee matrix">&#9888; <?php echo $priced_any ? 'partly priced' : 'no matrix amount'; ?></span><?php endif; ?></summary>
+            <summary>How it's worked out<?php if ($differs): ?> <span class="fee-breakdown-flag" title="<?php echo $manual ? 'The fee was set by hand with Edit Fee and differs from the current calculation' : 'The invoice doesn\'t match the current calculation'; ?>">&#9888; <?php echo esc_html($money($breakdown['total'])); ?></span><?php endif; ?><?php if ($breakdown['missing']): ?> <span class="fee-breakdown-flag" title="Some roles have no amount in the fee matrix">&#9888; <?php echo $priced_any ? 'partly priced' : 'no matrix amount'; ?></span><?php endif; ?></summary>
             <div class="fee-breakdown-body">
                 <?php if (empty($stretches)): ?>
                     <p>No team assignments in this season's fee period.</p>
@@ -636,7 +666,9 @@ class TeamOversight_Fees {
                     <?php if ($unreleased): ?>
                         <p class="description"><?php echo esc_html($season); ?> fees aren't released until <?php echo esc_html($date(self::get_fee_release_date($season))); ?> — this is what they'll be charged then<?php echo $invoice_amount !== null && floatval($invoice_amount) < 0.01 ? ', less anything already paid' : ''; ?>.</p>
                     <?php endif; ?>
-                    <?php if ($differs): ?>
+                    <?php if ($differs && $manual): ?>
+                        <p class="fee-breakdown-warn">The fee was set by hand with Edit Fee (<?php echo esc_html($money($invoice_amount)); ?>), so team changes, Finalise and fee releases leave it as it is. Use calculated fee sets it to this calculation.</p>
+                    <?php elseif ($differs): ?>
                         <p class="fee-breakdown-warn">The invoice is <?php echo esc_html($money($invoice_amount)); ?>, which doesn't match this calculation. It updates the next time their teams change, or edit the season fee to correct it.</p>
                     <?php endif; ?>
                     <?php if ($breakdown['missing'] && $priced_any): ?>
@@ -1164,6 +1196,7 @@ class TeamOversight_Fees {
                     echo '<div class="notice notice-success"><p><strong>' . esc_html($selected_season) . ' fees removed until release.</strong> '
                         . intval($result['deleted']) . ' unpaid invoice(s) deleted'
                         . ($result['credited'] ? '; ' . intval($result['credited']) . ' with payments set to $0, keeping $' . esc_html(number_format($result['credit_total'], 2)) . ' as credit — it comes off their fee on release' : '')
+                        . ($result['manual'] ? '; ' . intval($result['manual']) . ' fee(s) set by hand with Edit Fee kept as they are (to take one back too, use Use calculated fee on it on Payment Management, then remove fees again)' : '')
                         . '.</p></div>';
                 } elseif ($_POST['action'] === 'release_fees_now') {
                     self::set_fee_release_date($selected_season, current_time('Y-m-d'));
@@ -1238,8 +1271,8 @@ class TeamOversight_Fees {
                             // do to the invoices already out.
                             $existing_invoices = $was_charging ? (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s", $selected_season)) : 0;
                             $what_releases = self::invoices_still_out($selected_season)
-                                ? ' on that date (or by Release fees now), so a fee set with Edit Fee would need setting again (each change is logged). Saving a date that has passed, or clearing the date, keeps them as they are.'
-                                : ' on that date, or straight away if you save a date that has passed, clear the date or use Release fees now, so a fee set with Edit Fee would need setting again (each change is logged).';
+                                ? ' on that date (or by Release fees now), except fees set with Edit Fee, which are kept (each change is logged). Saving a date that has passed, or clearing the date, keeps them as they are.'
+                                : ' on that date, or straight away if you save a date that has passed, clear the date or use Release fees now, except fees set with Edit Fee, which are kept (each change is logged).';
                             echo '<div class="notice notice-success"><p>' . esc_html($selected_season) . ' fees will be released on ' . esc_html(date('j M Y', strtotime($date))) . '. Until then nobody is invoiced for ' . esc_html($selected_season) . '; on that date everyone on a team is invoiced automatically.'
                                 . ($existing_invoices ? ' The ' . intval($existing_invoices) . ' ' . esc_html($selected_season) . ' invoice(s) already issued are re-priced from the fee matrix' . $what_releases : '')
                                 . '</p></div>';
@@ -1378,8 +1411,12 @@ class TeamOversight_Fees {
                     <?php else: ?>
                         <strong>Not released yet</strong> — fees go out on <?php echo esc_html(date('j M Y', strtotime($release_date))); ?> to the <?php echo intval($season_people); ?> people on <?php echo esc_html($selected_season); ?> teams.
                         <?php
-                        $season_charged = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s AND invoice_amount > 0", $selected_season));
-                        $season_paid_people = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(DISTINCT i.id) FROM {$wpdb->prefix}team_invoices i JOIN {$wpdb->prefix}team_invoice_payments p ON p.invoice_id = i.id WHERE i.season = %s AND i.invoice_amount > 0", $selected_season));
+                        // Automatic invoices only: Remove fees until release
+                        // keeps a fee set with Edit Fee, so those are counted
+                        // on their own line below.
+                        $season_charged = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s AND invoice_amount > 0 AND fee_overridden = 0", $selected_season));
+                        $season_paid_people = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(DISTINCT i.id) FROM {$wpdb->prefix}team_invoices i JOIN {$wpdb->prefix}team_invoice_payments p ON p.invoice_id = i.id WHERE i.season = %s AND i.invoice_amount > 0 AND i.fee_overridden = 0", $selected_season));
+                        $season_manual = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s AND fee_overridden = 1", $selected_season));
                         ?>
                         <?php if ($season_charged > 0): ?>
                             <br><span style="color: #996800;"><?php echo intval($season_charged); ?> <?php echo esc_html($selected_season); ?> invoice(s) were issued before the release date was set.</span>
@@ -1389,8 +1426,11 @@ class TeamOversight_Fees {
                                 <button type="submit" class="button">Remove <?php echo esc_html($selected_season); ?> fees until release</button>
                             </form>
                             <br><span class="description">Unpaid invoices are deleted<?php echo $season_paid_people ? '; ' . intval($season_paid_people) . ' with payments are set to $0 and the money is kept as credit' : ''; ?>. Everyone is invoiced afresh on <?php echo esc_html(date('j M Y', strtotime($release_date))); ?>, with any credit taken off.</span>
-                        <?php elseif ($season_invoices > 0): ?>
-                            <br><span class="description"><?php echo intval($season_invoices); ?> <?php echo esc_html($selected_season); ?> invoice(s) at $0 holding credit — re-priced on release with the credit taken off.</span>
+                        <?php elseif ($season_invoices - $season_manual > 0): ?>
+                            <br><span class="description"><?php echo intval($season_invoices - $season_manual); ?> <?php echo esc_html($selected_season); ?> invoice(s) at $0 holding credit — re-priced on release with the credit taken off.</span>
+                        <?php endif; ?>
+                        <?php if ($season_manual > 0): ?>
+                            <br><span class="description"><?php echo intval($season_manual); ?> <?php echo esc_html($selected_season); ?> fee(s) set with Edit Fee stay as they are through the release and Remove fees until release (use Use calculated fee on Payment Management to take one back).</span>
                         <?php endif; ?>
                     <?php endif; ?>
                 </p>
@@ -2138,7 +2178,8 @@ class TeamOversight_Fees {
 
     public function generate_invoice($email, $season) {
         global $wpdb;
-        
+        $this->kept_manual = false;
+
         // Check if invoice already exists for this user and season
         $uid = self::resolve_user_id($email);
         $existing_invoice = $wpdb->get_row($wpdb->prepare("
@@ -2256,6 +2297,21 @@ class TeamOversight_Fees {
         // fee at the accrued amount when someone leaves all teams.
         $this->checkpoint_fee_role($email, $season);
         $segment_fee = $this->compute_segment_fee($email, $season, $fee_class);
+
+        // A fee set by hand with Edit Fee sticks (club decision): no
+        // automatic re-price changes it, even when they leave every team.
+        // The history above is still recorded, and what this re-price would
+        // have set is logged, so the treasurer can see the difference and
+        // use Use calculated fee.
+        if (self::fee_is_manual($invoice_id)) {
+            $calculated = $segment_fee;
+            if ($calculated === null && $this->left_before_season($email, $season, $invoice_id)) {
+                $calculated = 0.0;
+            }
+            $this->note_manual_fee_kept($invoice_id, $calculated);
+            return true;
+        }
+
         if ($segment_fee !== null) {
             $this->apply_invoice_amount($invoice_id, $segment_fee, 'worked out again from their teams and the fee matrix' . ($this->reprice_context !== '' ? ' (' . $this->reprice_context . ')' : ''));
             return true;
@@ -2268,8 +2324,7 @@ class TeamOversight_Fees {
             $before = $wpdb->get_row($wpdb->prepare("
                 SELECT invoice_amount, user_id FROM {$wpdb->prefix}team_invoices WHERE id = %d
             ", $invoice_id));
-            if ($before && abs(floatval($before->invoice_amount)) >= 0.005) {
-                $this->apply_invoice_amount($invoice_id, 0.0);
+            if ($before && abs(floatval($before->invoice_amount)) >= 0.005 && $this->apply_invoice_amount($invoice_id, 0.0)) {
                 TeamOversight_Log::add(
                     'fee_edit',
                     $season . ' season fee changed from $' . number_format($before->invoice_amount, 2) . ' to $0.00 — left every team before the season started',
@@ -2339,8 +2394,12 @@ class TeamOversight_Fees {
     /**
      * Set an invoice to a new fee amount, preserving payments already made
      * (outstanding = new fee minus paid, never below zero). With a $reason
-     * the change is logged with the old and new amounts, so a re-price that
-     * replaces a fee set with Edit Fee can always be seen and put back.
+     * the change is logged with the old and new amounts, so every automatic
+     * re-price can always be seen and put back. Never writes over a fee set
+     * with Edit Fee: the update only matches fee_overridden = 0, so a fee
+     * marked manual meanwhile (or by a caller that didn't check) is left as
+     * it is, with nothing recomputed or logged. Returns false when nothing
+     * was set (same amount, no invoice, or a manual fee).
      */
     private function apply_invoice_amount($invoice_id, $new_fee, $reason = '') {
         global $wpdb;
@@ -2351,18 +2410,21 @@ class TeamOversight_Fees {
         $current_fee = $invoice ? $invoice->invoice_amount : null;
 
         if ($current_fee === null || floatval($current_fee) == floatval($new_fee)) {
-            return;
+            return false;
         }
 
         // Set the new fee; outstanding is always fee minus the payments
         // ledger — recorded money is never touched by repricing.
-        $wpdb->update(
+        $updated = $wpdb->update(
             $wpdb->prefix . 'team_invoices',
             array('invoice_amount' => $new_fee),
-            array('id' => $invoice_id),
+            array('id' => $invoice_id, 'fee_overridden' => 0),
             array('%f'),
-            array('%d')
+            array('%d', '%d')
         );
+        if (!$updated && self::fee_is_manual($invoice_id)) {
+            return false; // set with Edit Fee: left as it is, nothing to recompute or log
+        }
         TeamOversight_Payments::recompute_invoice($invoice_id);
         if ($reason !== '' && abs(floatval($current_fee) - floatval($new_fee)) >= 0.005) {
             TeamOversight_Log::add(
@@ -2371,6 +2433,126 @@ class TeamOversight_Fees {
                 array('user_id' => intval($invoice->user_id), 'amount' => $new_fee)
             );
         }
+        return true;
+    }
+
+    /**
+     * Was this invoice's fee set by hand with Edit Fee (fee_overridden)?
+     * Then no automatic re-price changes it — any new re-pricing path must
+     * check this too — until Use calculated fee clears the marker.
+     */
+    public static function fee_is_manual($invoice_id) {
+        global $wpdb;
+        return intval($wpdb->get_var($wpdb->prepare("
+            SELECT fee_overridden FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice_id))) === 1;
+    }
+
+    /** Did the last generate_invoice() keep a fee set with Edit Fee instead of re-pricing it? */
+    public function last_kept_manual() {
+        return $this->kept_manual;
+    }
+
+    /**
+     * A re-price left a fee set with Edit Fee as it was. Log the amount it
+     * would have set ($calculated; null when nothing could be worked out,
+     * which logs nothing), only when that differs from the manual fee and
+     * only once per amount (fee_calculated_logged), so the treasurer sees
+     * the difference without a line for every re-price.
+     */
+    private function note_manual_fee_kept($invoice_id, $calculated) {
+        global $wpdb;
+        $this->kept_manual = true;
+        if ($calculated === null) {
+            return;
+        }
+        $invoice = $wpdb->get_row($wpdb->prepare("
+            SELECT invoice_amount, season, user_id, fee_calculated_logged FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice_id));
+        $calculated = round(floatval($calculated), 2);
+        if (!$invoice) {
+            return;
+        }
+        if (abs(floatval($invoice->invoice_amount) - $calculated) < 0.005) {
+            // The calculation agrees with the manual fee now: forget the last
+            // amount logged, so a later swing back to it is logged again.
+            if ($invoice->fee_calculated_logged !== null) {
+                $wpdb->update(
+                    $wpdb->prefix . 'team_invoices',
+                    array('fee_calculated_logged' => null),
+                    array('id' => $invoice_id),
+                    array('%f'),
+                    array('%d')
+                );
+            }
+            return;
+        }
+        if ($invoice->fee_calculated_logged !== null && abs(floatval($invoice->fee_calculated_logged) - $calculated) < 0.005) {
+            return; // this amount was logged already
+        }
+        $wpdb->update(
+            $wpdb->prefix . 'team_invoices',
+            array('fee_calculated_logged' => $calculated),
+            array('id' => $invoice_id),
+            array('%f'),
+            array('%d')
+        );
+        TeamOversight_Log::add(
+            'fee_manual_kept',
+            $invoice->season . ' season fee kept at $' . number_format($invoice->invoice_amount, 2) . ', set by hand with Edit Fee; re-pricing would have made it $' . number_format($calculated, 2)
+                . ' (' . ($this->reprice_context !== '' ? $this->reprice_context : 'their teams changed') . '). Use calculated fee on Payment Management applies the calculation.',
+            array('user_id' => intval($invoice->user_id), 'amount' => $calculated)
+        );
+    }
+
+    /**
+     * Payment Management's "Use calculated fee": clear the Edit Fee marker
+     * and re-price the invoice through the normal path (generate_invoice:
+     * fee history checkpointed, the change logged, payments untouched),
+     * under the owner's current account email. Before the season's fees
+     * are released nothing is re-priced; the release does it. Returns null
+     * when the invoice doesn't exist, else before / after / released.
+     */
+    public function use_calculated_fee($invoice_id) {
+        global $wpdb;
+        $invoice = $wpdb->get_row($wpdb->prepare("
+            SELECT id, user_id, email, season, invoice_amount FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice_id));
+        if (!$invoice) {
+            return null;
+        }
+        $wpdb->update(
+            $wpdb->prefix . 'team_invoices',
+            array('fee_overridden' => 0, 'fee_overridden_at' => null, 'fee_overridden_by' => null, 'fee_calculated_logged' => null),
+            array('id' => $invoice->id),
+            array('%d', '%s', '%d', '%f'),
+            array('%d')
+        );
+
+        $email = $invoice->email;
+        $account = intval($invoice->user_id) > 0 ? get_userdata(intval($invoice->user_id)) : false;
+        if ($account && $account->user_email) {
+            $email = $account->user_email;
+        }
+        $released = self::fees_released($invoice->season);
+        $this->reprice_context = 'Use calculated fee';
+        $this->generate_invoice($email, $invoice->season);
+        $this->reprice_context = '';
+
+        $after = floatval($wpdb->get_var($wpdb->prepare("
+            SELECT invoice_amount FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", $invoice->id)));
+        // A changed fee was logged by the re-price (old -> new); an unchanged
+        // one still gets a line, so the switch back is on record.
+        if (abs($after - floatval($invoice->invoice_amount)) < 0.005) {
+            TeamOversight_Log::add(
+                'fee_edit',
+                $invoice->season . ' season fee is automatic again (Use calculated fee) and stays at $' . number_format($after, 2)
+                    . ($released ? '' : ' until ' . $invoice->season . ' fees are released'),
+                array('user_id' => intval($invoice->user_id), 'amount' => $after)
+            );
+        }
+        return array('before' => floatval($invoice->invoice_amount), 'after' => $after, 'released' => $released);
     }
 
     private function generate_invoice_reference($season) {
