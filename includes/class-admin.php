@@ -3217,6 +3217,10 @@ class TeamOversight_Admin {
                 return;
             }
 
+            // Its trial number is never handed out again (a printed trial
+            // book may still show it), even if this was the newest one.
+            TeamOversight_Trials::retire_trial_number($trial->season, intval($trial->trial_number));
+
             $wpdb->delete($wpdb->prefix . 'team_trial_selections', array('application_id' => $trial_id), array('%d'));
             $wpdb->delete($wpdb->prefix . 'team_trial_notes', array('application_id' => $trial_id), array('%d'));
             $wpdb->delete($wpdb->prefix . 'trial_applications', array('id' => $trial_id), array('%d'));

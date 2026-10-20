@@ -59,6 +59,14 @@ class TeamOversight_Payments {
         add_action('woocommerce_order_status_processing', array($this, 'handle_payment_order'));
         add_action('woocommerce_order_status_completed', array($this, 'handle_payment_order'));
 
+        // A fee payment refunded or cancelled in WooCommerce never changes
+        // the ledger by itself (a refund is a negative Record Payment): the
+        // treasurer is alerted on Logs and Payment Management instead.
+        add_action('woocommerce_order_refunded', array($this, 'handle_payment_refund'), 10, 2);
+        add_action('woocommerce_order_status_refunded', array($this, 'handle_payment_refund'));
+        add_action('woocommerce_order_status_cancelled', array($this, 'handle_payment_cancelled'));
+        add_action('admin_notices', array($this, 'render_refund_notice'));
+
         // Overdue reminder emails (daily cron; only sends when enabled).
         add_action('init', array($this, 'maybe_schedule_reminder_cron'));
         add_action(self::REMINDER_CRON, array($this, 'run_reminder_cron'));
@@ -1113,5 +1121,171 @@ class TeamOversight_Payments {
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Refunds and cancellations: alert, never reverse
+    // ------------------------------------------------------------------
+
+    /**
+     * The order's fee-payment items that reached the books: the item holds
+     * the ledger claim, or was flagged unapplied (logged for the treasurer
+     * to record). item id => array(item, payer_id). An order that never got
+     * that far (unpaid, then cancelled by the stock-hold timeout) has none,
+     * so it raises no alert.
+     */
+    private function recorded_fee_items($order) {
+        global $wpdb;
+
+        $items = array();
+        foreach ($order->get_items() as $item_id => $item) {
+            $payer_id = intval($item->get_meta('_murvc_fee_payment_user'));
+            if (!$payer_id) {
+                continue;
+            }
+            $claimed = $wpdb->get_var($wpdb->prepare("
+                SELECT id FROM {$wpdb->prefix}team_invoice_payments WHERE order_item_id = %d
+            ", $item_id));
+            if ($claimed || $item->get_meta('_murvc_fee_payment_unapplied')) {
+                $items[$item_id] = array('item' => $item, 'payer_id' => $payer_id);
+            }
+        }
+        return $items;
+    }
+
+    /** What an order put in the ledger, by season: "2026 fees $100.00, 2027 fees $50.00" ('' for nothing). */
+    private static function describe_order_ledger($order_id) {
+        global $wpdb;
+
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT i.season, SUM(p.amount) AS amount
+            FROM {$wpdb->prefix}team_invoice_payments p
+            LEFT JOIN {$wpdb->prefix}team_invoices i ON i.id = p.invoice_id
+            WHERE p.order_id = %d AND p.source = 'online'
+            GROUP BY i.season
+            ORDER BY i.season
+        ", $order_id));
+
+        $parts = array();
+        foreach ($rows as $row) {
+            $parts[] = ($row->season !== null ? $row->season . ' fees ' : '') . '$' . number_format(floatval($row->amount), 2);
+        }
+        return implode(', ', $parts);
+    }
+
+    /**
+     * A fee-payment order refunded in WooCommerce, fully or partly (setting
+     * the status to Refunded creates a refund too). Called with the refund,
+     * or with just the order on the status change, when every refund on it
+     * is checked. Each refund alerts once (order item meta); the ledger is
+     * left alone for the treasurer to put right with Record Payment.
+     */
+    public function handle_payment_refund($order_id, $refund_id = 0) {
+        if (!function_exists('wc_get_order') || !class_exists('TeamOversight_Log')) {
+            return;
+        }
+        $order = wc_get_order($order_id);
+        if (!$order || !is_callable(array($order, 'get_refunds'))) {
+            return;
+        }
+        $fee_items = $this->recorded_fee_items($order);
+        if (empty($fee_items)) {
+            return;
+        }
+
+        $other_products = false;
+        foreach ($order->get_items() as $item) {
+            if (!intval($item->get_meta('_murvc_fee_payment_user'))) {
+                $other_products = true;
+            }
+        }
+        reset($fee_items);
+        $first_id = key($fee_items);
+        $refunds = $refund_id ? array(wc_get_order($refund_id)) : $order->get_refunds();
+
+        foreach ($refunds as $refund) {
+            if (!$refund || !is_callable(array($refund, 'get_amount'))) {
+                continue;
+            }
+
+            // How much of the refund was the fee payment. A refund with no
+            // line items (just an amount typed in) can't say, so all of it
+            // counts, flagged when the order held other products too.
+            $refunded = 0.0;
+            $itemised = false;
+            foreach ($refund->get_items() as $refund_item) {
+                $itemised = true;
+                if (isset($fee_items[intval($refund_item->get_meta('_refunded_item_id'))])) {
+                    $refunded += abs(floatval($refund_item->get_total()) + floatval($refund_item->get_total_tax()));
+                }
+            }
+            if (!$itemised) {
+                $refunded = abs(floatval($refund->get_amount()));
+            }
+            if ($refunded < 0.005) {
+                continue; // it refunded other products only
+            }
+
+            if (!wc_add_order_item_meta($first_id, '_murvc_refund_alerted_' . intval($refund->get_id()), current_time('mysql'), true)) {
+                continue; // already alerted
+            }
+
+            $recorded = self::describe_order_ledger($order_id);
+            $message = 'Order #' . intval($order_id) . ': $' . number_format($refunded, 2) . ' refunded in WooCommerce'
+                . (!$itemised && $other_products ? ' (not itemised, and the order has other products too: check how much was the fee payment)' : '');
+            if ($recorded === '') {
+                $message .= '. Its fee payment was logged as unapplied, so the plugin never recorded it: record only what the club kept, if anything. If you have since recorded it by hand, record a negative payment with Record Payment to match.';
+            } else {
+                $message .= ', but its fee payment still counts as paid (' . $recorded . '). Record a negative payment with Record Payment to match.';
+            }
+            TeamOversight_Log::add('payment_refunded', $message, array('user_id' => $fee_items[$first_id]['payer_id'], 'amount' => $refunded));
+        }
+    }
+
+    /**
+     * A fee-payment order cancelled after its payment reached the books.
+     * Cancelling doesn't return the money by itself, so the treasurer is
+     * asked to check, once per order; the ledger is left alone.
+     */
+    public function handle_payment_cancelled($order_id) {
+        if (!function_exists('wc_get_order') || !class_exists('TeamOversight_Log')) {
+            return;
+        }
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return;
+        }
+        $fee_items = $this->recorded_fee_items($order);
+        if (empty($fee_items)) {
+            return;
+        }
+
+        reset($fee_items);
+        $first_id = key($fee_items);
+        if (!wc_add_order_item_meta($first_id, '_murvc_refund_alerted_cancelled', current_time('mysql'), true)) {
+            return; // already alerted
+        }
+
+        $amount = 0.0;
+        foreach ($fee_items as $fee_item) {
+            $amount += floatval($fee_item['item']->get_total()) + floatval($fee_item['item']->get_total_tax());
+        }
+        $recorded = self::describe_order_ledger($order_id);
+        $message = 'Order #' . intval($order_id) . ' was cancelled in WooCommerce after its $' . number_format($amount, 2) . ' fee payment '
+            . ($recorded === ''
+                ? 'was logged as unapplied, so the plugin never recorded it: record it only if the club kept the money. If you have since recorded it by hand and the money went back, record a negative payment with Record Payment to match.'
+                : 'was recorded (' . $recorded . '). It still counts as paid: if the money went back, record a negative payment with Record Payment.');
+        TeamOversight_Log::add('payment_refunded', $message, array('user_id' => $fee_items[$first_id]['payer_id'], 'amount' => $amount));
+    }
+
+    /** Payment Management: recent refunds and cancellations to put right by hand. */
+    public function render_refund_notice() {
+        if (!class_exists('TeamOversight_Log') || !isset($_GET['page']) || $_GET['page'] !== 'team-oversight-invoices') {
+            return;
+        }
+        TeamOversight_Log::render_alert_notice(
+            array('payment_refunded'),
+            'Fee payments refunded or cancelled in WooCommerce in the last 30 days. The ledger never changes by itself: put each one right with Record Payment (a negative amount), with the order number in the note, for example Refund order #123. That note shows on Logs and Member Lookup, so check there first: an entry stays on this list after it has been put right.'
+        );
     }
 }

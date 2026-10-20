@@ -31,6 +31,8 @@ class TeamOversight_Log {
                 'payment_online' => 'Online payment',
                 'payment_manual' => 'Manual payment',
                 'payment_unapplied' => 'Unapplied payment',
+                'payment_refunded' => 'Payment refunded or cancelled',
+                'trial_fee_refunded' => 'Trial fee refunded or cancelled',
                 'email_reminder' => 'Reminder email',
                 'email_trial' => 'Trial email',
                 'trial_fee_waived' => 'Trial fee waived',
@@ -43,6 +45,7 @@ class TeamOversight_Log {
                 'membership_upgraded' => 'Upgraded',
                 'membership_expired' => 'Expired',
                 'membership_revoked' => 'Revoked',
+                'membership_order_refunded' => 'Order refunded or cancelled',
                 'membership_grant' => 'Granted (pre-1.22)',
             ),
         );
@@ -84,6 +87,50 @@ class TeamOversight_Log {
             "DELETE FROM " . self::table() . " WHERE created_date < DATE_SUB(NOW(), INTERVAL %d DAY)",
             self::KEEP_DAYS
         ));
+    }
+
+    /**
+     * Warning notice listing the last $days of the given event types, for
+     * events someone has to put right by hand (a WooCommerce refund the
+     * books still count as paid), shown on the page where it's fixed.
+     * Admins only; the caller picks the page. Prints nothing when quiet.
+     */
+    public static function render_alert_notice($types, $intro, $days = 30) {
+        global $wpdb;
+
+        $types = array_values((array) $types);
+        if (empty($types) || !current_user_can('manage_options')) {
+            return;
+        }
+
+        $params = $types;
+        $params[] = intval($days);
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT l.created_date, l.message, u.display_name
+            FROM " . self::table() . " l
+            LEFT JOIN {$wpdb->users} u ON u.ID = l.subject_user_id
+            WHERE l.event_type IN (" . implode(',', array_fill(0, count($types), '%s')) . ")
+                AND l.created_date >= DATE_SUB(NOW(), INTERVAL %d DAY)
+            ORDER BY l.id DESC
+            LIMIT 10
+        ", $params));
+        if (empty($rows)) {
+            return;
+        }
+        $membership_types = self::get_types('membership');
+        $log_page = isset($membership_types[$types[0]]) ? 'club-membership-logs' : 'team-oversight-logs';
+
+        ?>
+        <div class="notice notice-warning">
+            <p><strong><?php echo esc_html($intro); ?></strong></p>
+            <ul style="list-style: disc; margin-left: 20px;">
+                <?php foreach ($rows as $row): ?>
+                    <li><?php echo esc_html(date('j M', strtotime($row->created_date))); ?> &mdash; <?php echo esc_html($row->display_name ? $row->display_name : 'No account'); ?>: <?php echo esc_html($row->message); ?></li>
+                <?php endforeach; ?>
+            </ul>
+            <p>Each one stays listed for <?php echo intval($days); ?> days, whether or not it has been dealt with. <a href="<?php echo esc_url(admin_url('admin.php?page=' . $log_page . '&log_type=' . $types[0])); ?>">See them all on Logs</a></p>
+        </div>
+        <?php
     }
 
     // ------------------------------------------------------------------

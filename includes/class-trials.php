@@ -17,6 +17,8 @@ class TeamOversight_Trials {
      */
     const CLUB_WAIVER_PREFIX = 'Waived by club — ';
 
+    private static $refund_hooks_registered = false;
+
     /**
      * Database-wide name for the per-season submission lock. Includes the
      * table prefix so two sites sharing a database server never contend.
@@ -50,6 +52,45 @@ class TeamOversight_Trials {
         }
     }
 
+    /**
+     * Trial numbers are never reused. A per-season high-water mark (a
+     * non-autoloaded option) remembers the highest number ever handed out,
+     * so deleting the newest application doesn't pass its number to the
+     * next applicant. Read and raised inside the submission lock.
+     */
+    private static function trial_number_mark_option($season) {
+        return 'team_oversight_trial_number_mark_' . intval($season);
+    }
+
+    /** The mark, straight from the database: a cached copy could be stale by the time the lock is ours. */
+    private static function get_trial_number_mark($season) {
+        global $wpdb;
+        return intval($wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
+            self::trial_number_mark_option($season)
+        )));
+    }
+
+    /** Raise the mark to $number; it never goes down. The caller holds the lock. */
+    private static function raise_trial_number_mark($season, $number) {
+        $number = intval($number);
+        if ($number > self::get_trial_number_mark($season)) {
+            update_option(self::trial_number_mark_option($season), $number, false);
+        }
+    }
+
+    /**
+     * Keep a trial number from ever being handed out again. For deleting an
+     * application: call it before the delete, so numbers given out before
+     * the mark existed are covered too.
+     */
+    public static function retire_trial_number($season, $number) {
+        $lock = self::submission_lock_name($season);
+        $locked = self::acquire_submission_lock($lock);
+        self::raise_trial_number_mark($season, $number);
+        self::release_submission_lock($lock, $locked);
+    }
+
     public function __construct() {
         add_action('init', array($this, 'init'));
         add_shortcode('team_trial_form', array($this, 'render_trial_form'));
@@ -67,6 +108,18 @@ class TeamOversight_Trials {
         // "Pay the trial fee" on an unpaid application: rebuild the cart
         // line and hand them to checkout, without re-submitting the form.
         add_action('template_redirect', array($this, 'maybe_resume_trial_payment'));
+
+        // A paid trial fee refunded or cancelled in WooCommerce leaves the
+        // application as it is; admins are alerted on Logs and Trial
+        // Applications instead. Registered once: other code instantiates
+        // this class just to read the fee product.
+        if (!self::$refund_hooks_registered) {
+            self::$refund_hooks_registered = true;
+            add_action('woocommerce_order_refunded', array($this, 'handle_trial_refund'), 10, 2);
+            add_action('woocommerce_order_status_refunded', array($this, 'handle_trial_refund'));
+            add_action('woocommerce_order_status_cancelled', array($this, 'handle_trial_cancelled'));
+            add_action('admin_notices', array($this, 'render_refund_notice'));
+        }
     }
     
     public function init() {
@@ -1427,7 +1480,8 @@ class TeamOversight_Trials {
         // Serialise saves for this season. Without this, two requests landing
         // together (a double-tap on a slow phone) both see "no application
         // yet" and both insert — a duplicate with two trial numbers. The
-        // same lock covers the MAX(trial_number)+1 below, so two different
+        // same lock covers the next-number read (MAX(trial_number) and the
+        // high-water mark) and the mark's update below, so two different
         // players can't be handed the same number either.
         $lock = self::submission_lock_name($season);
         $locked = self::acquire_submission_lock($lock);
@@ -1526,15 +1580,23 @@ class TeamOversight_Trials {
                 ", $application_id));
             }
         } else {
-            // Assign the next per-season trial number at submission time.
-            $trial_number = intval($wpdb->get_var($wpdb->prepare("
-                SELECT MAX(trial_number) FROM {$wpdb->prefix}trial_applications WHERE season = %s
-            ", $season))) + 1;
+            // Assign the next per-season trial number at submission time:
+            // one past the highest ever handed out, so a deleted newest
+            // application's number never goes to someone else.
+            $trial_number = max(
+                intval($wpdb->get_var($wpdb->prepare("
+                    SELECT MAX(trial_number) FROM {$wpdb->prefix}trial_applications WHERE season = %s
+                ", $season))),
+                self::get_trial_number_mark($season)
+            ) + 1;
             $application_data['trial_number'] = $trial_number;
             $application_formats[] = '%d';
 
             $inserted = $wpdb->insert($wpdb->prefix . 'trial_applications', $application_data, $application_formats);
             $application_id = $inserted ? intval($wpdb->insert_id) : 0;
+            if ($application_id) {
+                self::raise_trial_number_mark($season, $trial_number);
+            }
         }
 
         // The row is written; the next request may now look.
@@ -1737,6 +1799,140 @@ class TeamOversight_Trials {
                 TeamOversight_Trial_Emails::send_for_id('paid', $application_id);
             }
         }
+    }
+
+    /**
+     * The order's trial-fee items whose application this order paid for:
+     * item id => application. None for an order that never paid (unpaid,
+     * then cancelled by the stock-hold timeout), so that raises no alert.
+     */
+    private function paid_trial_items($order) {
+        global $wpdb;
+
+        $items = array();
+        foreach ($order->get_items() as $item_id => $item) {
+            $application_id = intval($item->get_meta('_murvc_trial_application_id'));
+            if (!$application_id) {
+                continue;
+            }
+            $application = $wpdb->get_row($wpdb->prepare("
+                SELECT id, user_id, season, trial_number FROM {$wpdb->prefix}trial_applications
+                WHERE id = %d AND order_id = %d
+            ", $application_id, $order->get_id()));
+            if ($application) {
+                $items[$item_id] = $application;
+            }
+        }
+        return $items;
+    }
+
+    /**
+     * A trial-fee order refunded in WooCommerce, fully or partly (setting
+     * the status to Refunded creates a refund too). Called with the refund,
+     * or with just the order on the status change, when every refund on it
+     * is checked. The application keeps counting as paid; each refund of
+     * each trial fee is logged once (order item meta) for an admin to
+     * follow up.
+     */
+    public function handle_trial_refund($order_id, $refund_id = 0) {
+        if (!function_exists('wc_get_order') || !class_exists('TeamOversight_Log')) {
+            return;
+        }
+        $order = wc_get_order($order_id);
+        if (!$order || !is_callable(array($order, 'get_refunds'))) {
+            return;
+        }
+        $paid = $this->paid_trial_items($order);
+        if (empty($paid)) {
+            return;
+        }
+
+        $other_products = false;
+        foreach ($order->get_items() as $item) {
+            if (!intval($item->get_meta('_murvc_trial_application_id'))) {
+                $other_products = true;
+            }
+        }
+        $refunds = $refund_id ? array(wc_get_order($refund_id)) : $order->get_refunds();
+
+        foreach ($refunds as $refund) {
+            if (!$refund || !is_callable(array($refund, 'get_amount'))) {
+                continue;
+            }
+
+            // How much of the refund was each trial fee. A refund with no
+            // line items (just an amount typed in) can't say, so it counts
+            // against every trial fee on the order.
+            $amounts = array();
+            $itemised = false;
+            foreach ($refund->get_items() as $refund_item) {
+                $itemised = true;
+                $refunded_id = intval($refund_item->get_meta('_refunded_item_id'));
+                if (isset($paid[$refunded_id])) {
+                    $amounts[$refunded_id] = (isset($amounts[$refunded_id]) ? $amounts[$refunded_id] : 0)
+                        + abs(floatval($refund_item->get_total()) + floatval($refund_item->get_total_tax()));
+                }
+            }
+            if (!$itemised) {
+                foreach (array_keys($paid) as $item_id) {
+                    $amounts[$item_id] = abs(floatval($refund->get_amount()));
+                }
+            }
+
+            foreach ($amounts as $item_id => $amount) {
+                if ($amount < 0.005
+                    || !wc_add_order_item_meta($item_id, '_murvc_refund_alerted_' . intval($refund->get_id()), current_time('mysql'), true)) {
+                    continue; // nothing refunded on it, or already alerted
+                }
+                $application = $paid[$item_id];
+                TeamOversight_Log::add(
+                    'trial_fee_refunded',
+                    'Order #' . intval($order_id) . ': $' . number_format($amount, 2) . ' refunded in WooCommerce'
+                        . (!$itemised && $other_products ? ' (not itemised, and the order has other products too: check it was the trial fee)' : '')
+                        . ' on the trial fee for the ' . $application->season . ' application (trial #' . intval($application->trial_number) . '), which still counts as paid. If they should still pay, follow it up with the player.',
+                    array('user_id' => intval($application->user_id), 'amount' => $amount)
+                );
+            }
+        }
+    }
+
+    /**
+     * A trial-fee order cancelled after it paid for the application.
+     * Cancelling doesn't return the money by itself; the application keeps
+     * counting as paid and an admin is asked to check, once per trial fee.
+     */
+    public function handle_trial_cancelled($order_id) {
+        if (!function_exists('wc_get_order') || !class_exists('TeamOversight_Log')) {
+            return;
+        }
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return;
+        }
+
+        foreach ($this->paid_trial_items($order) as $item_id => $application) {
+            if (!wc_add_order_item_meta($item_id, '_murvc_refund_alerted_cancelled', current_time('mysql'), true)) {
+                continue; // already alerted
+            }
+            $item = $order->get_item($item_id);
+            $amount = $item ? floatval($item->get_total()) + floatval($item->get_total_tax()) : 0.0;
+            TeamOversight_Log::add(
+                'trial_fee_refunded',
+                'Order #' . intval($order_id) . ' was cancelled in WooCommerce after paying the trial fee for the ' . $application->season . ' application (trial #' . intval($application->trial_number) . '), which still counts as paid. If the money went back and they should still pay, follow it up with the player.',
+                array('user_id' => intval($application->user_id), 'amount' => $amount)
+            );
+        }
+    }
+
+    /** Trial Applications: recent trial-fee refunds and cancellations to follow up. */
+    public function render_refund_notice() {
+        if (!class_exists('TeamOversight_Log') || !isset($_GET['page']) || $_GET['page'] !== 'team-oversight-trials') {
+            return;
+        }
+        TeamOversight_Log::render_alert_notice(
+            array('trial_fee_refunded'),
+            'Trial fees refunded or cancelled in WooCommerce in the last 30 days. Those applications still count as paid: follow up anyone who should still pay.'
+        );
     }
 
     // Unpaid applications used to be marked 'expired' after 7 days
