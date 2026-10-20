@@ -24,11 +24,19 @@ if (!defined('ABSPATH')) {
  * actual team assignments + fee invoices is done by the club admin from
  * the Trial Applications page (finalisation), so fees don't fire while
  * coaches are still trading players mid-trials.
+ *
+ * From the 2027 season a Selected / Training Only verdict is an offer:
+ * once the player says yes, an editor of the team marks "Player
+ * accepted" on the card, and Finalise only places accepted offers.
+ * Changing the verdict clears the acceptance. Nothing here sends email.
  */
 class TeamOversight_Coach_Portal {
 
     const COACH_ROLES = "'coach', 'assistant_coach'";
     const SELECTION_STATUSES = array('tentative', 'selected', 'training_only', 'rejected');
+
+    /** First season whose offers need the player's acceptance before Finalise. */
+    const OFFER_ACCEPTANCE_FROM = 2027;
 
     public static function get_verdict_labels() {
         return array(
@@ -37,6 +45,34 @@ class TeamOversight_Coach_Portal {
             'training_only' => 'Training Only',
             'rejected' => 'Rejected',
         );
+    }
+
+    /**
+     * Does this season use the offer -> accepted -> finalised step? Earlier
+     * seasons finalise Selected / Training Only verdicts as they are.
+     */
+    public static function offer_acceptance_applies($season) {
+        return intval($season) >= self::OFFER_ACCEPTANCE_FROM;
+    }
+
+    /**
+     * A verdict's offer state for display: true (accepted), false (offer
+     * out), or null when there is no offer to accept (an earlier season,
+     * or a Tentative / Rejected verdict).
+     */
+    public static function offer_state($season, $status, $offer_accepted) {
+        if (!self::offer_acceptance_applies($season) || !in_array($status, array('selected', 'training_only'), true)) {
+            return null;
+        }
+        return intval($offer_accepted) === 1;
+    }
+
+    /** ' · accepted' / ' · offer out' after a verdict label, '' when no offer applies. */
+    public static function offer_suffix($state) {
+        if ($state === null) {
+            return '';
+        }
+        return $state ? ' · accepted' : ' · offer out';
     }
 
     public function __construct() {
@@ -53,6 +89,7 @@ class TeamOversight_Coach_Portal {
         // session without a page reload per player.
         add_action('wp_ajax_coach_mark_attendance', array($this, 'ajax_mark_attendance'));
         add_action('wp_ajax_coach_set_verdict', array($this, 'ajax_set_verdict'));
+        add_action('wp_ajax_coach_set_offer', array($this, 'ajax_set_offer'));
     }
 
     // ------------------------------------------------------------------
@@ -236,14 +273,57 @@ class TeamOversight_Coach_Portal {
             ));
         }
 
-        $status = sanitize_text_field(wp_unslash($_POST['selection_status']));
-        $status = $status === 'clear' ? '' : $status;
+        wp_send_json_success(array_merge(array('notice' => $notice), $this->card_refresh($season)));
+    }
+
+    /**
+     * Record (or undo) that the player accepted this team's offer, in the
+     * background like a verdict. Same handle_actions() as the form post:
+     * nonce, may edit this team, actionable application, an offer to accept.
+     */
+    public function ajax_set_offer() {
+        if (!is_user_logged_in() || !isset($_POST['coach_action']) || $_POST['coach_action'] !== 'set_offer') {
+            wp_send_json_error(array('notice' => '<div class="coach-portal-notice"><p>Your session has expired — please reload the page.</p></div>', 'expired' => true));
+        }
+
+        $season = isset($_POST['coach_season']) ? sanitize_text_field(wp_unslash($_POST['coach_season'])) : '';
+        $notice = $this->handle_actions($this->get_editable_team_codes($season), $season);
+        if (strpos($notice, 'coach-portal-success') === false) {
+            wp_send_json_error(array(
+                'notice' => $notice !== '' ? $notice : '<div class="coach-portal-notice"><p>That could not be saved.</p></div>',
+                'expired' => $notice === self::expired_notice(),
+            ));
+        }
+
+        wp_send_json_success(array_merge(array('notice' => $notice), $this->card_refresh($season)));
+    }
+
+    /**
+     * After a verdict or acceptance save: the card's verdict, its chips and
+     * its Player accepted control, read back from what was stored.
+     */
+    private function card_refresh($season) {
+        global $wpdb;
+        $application_id = isset($_POST['application_id']) ? intval($_POST['application_id']) : 0;
+        $team = isset($_POST['coach_team']) ? sanitize_text_field(wp_unslash($_POST['coach_team'])) : '';
+        $row = $wpdb->get_row($wpdb->prepare("
+            SELECT s.status, s.offer_accepted, a.application_status
+            FROM {$wpdb->prefix}team_trial_selections s
+            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+            WHERE s.application_id = %d AND s.team = %s
+        ", $application_id, $team));
+        $status = $row ? $row->status : '';
+        $state = $row ? self::offer_state($season, $row->status, $row->offer_accepted) : null;
         $board = isset($_POST['card_context']) && $_POST['card_context'] === 'board';
         $chips = $board
-            ? self::render_board_verdict_chip($status)
-            : $this->render_verdict_chips($this->get_selections_for_application(intval($_POST['application_id']), $season));
+            ? self::render_board_verdict_chip($status, $state)
+            : $this->render_verdict_chips($this->get_selections_for_application($application_id, $season));
 
-        wp_send_json_success(array('notice' => $notice, 'status' => $status, 'chips' => $chips));
+        return array(
+            'status' => $status,
+            'chips' => $chips,
+            'offer' => $this->render_offer_control($application_id, $team, $season, $status, $state, $row && $row->application_status === 'awaiting_payment'),
+        );
     }
 
     /** Every team's verdict on one application, shaped for render_verdict_chips(). */
@@ -252,7 +332,7 @@ class TeamOversight_Coach_Portal {
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config($season);
         $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT team, status FROM {$wpdb->prefix}team_trial_selections
+            SELECT team, status, offer_accepted FROM {$wpdb->prefix}team_trial_selections
             WHERE application_id = %d
             ORDER BY team
         ", $application_id));
@@ -262,18 +342,57 @@ class TeamOversight_Coach_Portal {
                 'team' => $sel->team,
                 'team_name' => isset($teams_config[$sel->team]) ? $teams_config[$sel->team]['name'] : $sel->team,
                 'status' => $sel->status,
+                'accepted' => self::offer_state($season, $sel->status, $sel->offer_accepted),
             );
         }
         return $selections;
     }
 
-    /** The selection board's own-verdict chip (players awaiting finalisation). */
-    private static function render_board_verdict_chip($status) {
-        if ($status === 'selected') {
-            return '<span class="verdict-chip verdict-chip-selected">Selected — awaiting finalisation</span>';
+    /**
+     * The "Mark player accepted" toggle for one card's offer on the active
+     * team — editors only, and only while there's an offer to accept (2027
+     * on, Selected / Training Only, trial fee paid). Viewers see the state
+     * on the verdict chips instead. $state: offer_state().
+     */
+    private function render_offer_control($application_id, $team, $season, $status, $state, $payment_pending) {
+        if ($this->read_only || $state === null || $payment_pending) {
+            return '';
         }
-        if ($status === 'training_only') {
-            return '<span class="verdict-chip verdict-chip-training_only">Training Only — awaiting finalisation</span>';
+        $labels = self::get_verdict_labels();
+        ob_start();
+        ?>
+        <form method="post" class="coach-offer-form">
+            <input type="hidden" name="coach_action" value="set_offer">
+            <input type="hidden" name="application_id" value="<?php echo intval($application_id); ?>">
+            <input type="hidden" name="coach_team" value="<?php echo esc_attr($team); ?>">
+            <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+            <input type="hidden" name="offer_status" value="<?php echo esc_attr($status); ?>">
+            <input type="hidden" name="offer_accepted" value="<?php echo $state ? '0' : '1'; ?>">
+            <?php wp_nonce_field('coach_portal_action', 'coach_nonce', false, true); ?>
+            <?php if ($state): ?>
+                <button type="submit" class="button coach-btn-secondary coach-offer-btn is-accepted" title="<?php echo esc_attr('The player has accepted the ' . $labels[$status] . ' offer. Tap to undo.'); ?>">&#10003; Player accepted</button>
+            <?php else: ?>
+                <button type="submit" class="button coach-btn-secondary coach-offer-btn" title="<?php echo esc_attr('Tap once the player has said yes to the ' . $labels[$status] . ' offer. The club only finalises accepted offers.'); ?>">Mark player accepted</button>
+            <?php endif; ?>
+        </form>
+        <?php
+        return ob_get_clean();
+    }
+
+    /**
+     * The selection board's own-verdict chip (players awaiting
+     * finalisation). $state: offer_state() — from 2027 it says whether
+     * the offer is still out or the player has accepted.
+     */
+    private static function render_board_verdict_chip($status, $state = null) {
+        if ($status === 'selected' || $status === 'training_only') {
+            $label = $status === 'selected' ? 'Selected' : 'Training Only';
+            if ($state === null) {
+                $text = $label . ' — awaiting finalisation';
+            } else {
+                $text = $label . ($state ? ' · accepted — awaiting finalisation' : ' · offer out');
+            }
+            return '<span class="verdict-chip verdict-chip-' . $status . '">' . esc_html($text) . '</span>';
         }
         if ($status === 'tentative') {
             return '<span class="verdict-chip verdict-chip-tentative">Tentative</span>';
@@ -289,7 +408,7 @@ class TeamOversight_Coach_Portal {
      * notice for the next render, and redirect back to the page.
      */
     public function maybe_handle_actions() {
-        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'add_note', 'edit_note', 'delete_note'), true)) {
+        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'set_offer', 'add_note', 'edit_note', 'delete_note'), true)) {
             return;
         }
         if (!is_user_logged_in()) {
@@ -618,7 +737,21 @@ class TeamOversight_Coach_Portal {
                     <p>No coaching staff assigned yet.</p>
                 <?php endif; ?>
 
-                <h4>Players (<?php echo count($confirmed_players); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?>)</h4>
+                <?php
+                // From 2027: how many of this team's offers are still out,
+                // and how many the players have accepted.
+                $offer_counts = array('out' => 0, 'accepted' => 0);
+                foreach ($selection_roster as $member) {
+                    $offer = self::offer_state($season, $member->status, $member->offer_accepted);
+                    if ($offer !== null) {
+                        $offer_counts[$offer ? 'accepted' : 'out']++;
+                    }
+                }
+                $offer_summary = ($offer_counts['out'] || $offer_counts['accepted'])
+                    ? ' — ' . $offer_counts['out'] . ' offer' . ($offer_counts['out'] === 1 ? '' : 's') . ' out, ' . $offer_counts['accepted'] . ' accepted'
+                    : '';
+                ?>
+                <h4>Players (<?php echo count($confirmed_players); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?><?php echo esc_html($offer_summary); ?>)</h4>
                 <?php if (!empty($confirmed_players) || !empty($selection_roster)): ?>
                     <?php
                     // Other teams' verdicts and confirmed places for everyone
@@ -693,7 +826,7 @@ class TeamOversight_Coach_Portal {
                                     <?php if ($this->was_on_team_last_season($last_season_members, $member->user_id, $member->email)): ?>
                                         <?php echo $this->render_same_team_chip($active_team, $season); ?>
                                     <?php endif; ?>
-                                    <span class="cac-verdicts"><?php echo self::render_board_verdict_chip(in_array($member->status, array('selected', 'training_only'), true) ? $member->status : 'tentative'); ?></span>
+                                    <span class="cac-verdicts"><?php echo self::render_board_verdict_chip(in_array($member->status, array('selected', 'training_only'), true) ? $member->status : 'tentative', self::offer_state($season, $member->status, $member->offer_accepted)); ?></span>
                                     <?php echo $this->render_other_team_chips($claims, $member->application_id, $member->user_id, $member->email, $teams_config); ?>
                                 </span>
                             </div>
@@ -732,6 +865,7 @@ class TeamOversight_Coach_Portal {
                                         </label>
                                         <noscript><button type="submit" class="button button-small">Save</button></noscript>
                                     </form>
+                                    <span class="cac-offer"><?php echo $this->render_offer_control($member->application_id, $active_team, $season, $member->status, self::offer_state($season, $member->status, $member->offer_accepted), isset($member->application_status) && $member->application_status === 'awaiting_payment'); ?></span>
                                     <?php endif; ?>
                                 </span>
                             </div>
@@ -752,7 +886,7 @@ class TeamOversight_Coach_Portal {
 
             <div class="coach-team-section">
                 <h3>Trial Applicants — <?php echo $active_config['gender'] === 'womens' ? "Women's" : ($active_config['gender'] === 'mens' ? "Men's" : 'All'); ?> (<?php echo count($applicants); ?>)</h3>
-                <p class="coach-portal-hint">Every applicant in this competition is shown — including players outside your age group or who selected other teams, since players get redirected between trials and VV can grant age exemptions. Your verdicts apply to <strong><?php echo esc_html($active_config['name']); ?></strong> only; a player can be Selected by multiple teams (e.g. YSL and JPL) and every coach sees every team's verdicts. Selected players become official (team assignment + fees) when the club finalises selections. Applicants marked <strong>Payment pending</strong> haven't paid their trial fee yet — you can see and assess them and reject them, but Tentative, Selected and Training Only open once it's paid. They're listed at the bottom of each section.</p>
+                <p class="coach-portal-hint">Every applicant in this competition is shown — including players outside your age group or who selected other teams, since players get redirected between trials and VV can grant age exemptions. Your verdicts apply to <strong><?php echo esc_html($active_config['name']); ?></strong> only; a player can be Selected by multiple teams (e.g. YSL and JPL) and every coach sees every team's verdicts. <?php if (self::offer_acceptance_applies($season)): ?>Selected and Training Only are <strong>offers</strong>: once the player says yes, tap <em>Mark player accepted</em> on their card. Only accepted offers become official (team assignment + fees) when the club finalises selections, and changing the verdict clears the acceptance.<?php else: ?>Selected players become official (team assignment + fees) when the club finalises selections.<?php endif; ?> Applicants marked <strong>Payment pending</strong> haven't paid their trial fee yet — you can see and assess them and reject them, but Tentative, Selected and Training Only open once it's paid. They're listed at the bottom of each section.</p>
 
                 <?php // Trial book first, so the search sits directly above the list it filters (matters on a phone). ?>
                 <?php if (!empty($applicants)): ?>
@@ -811,12 +945,31 @@ class TeamOversight_Coach_Portal {
                         $fy = empty($y['age_flag']) ? 0 : 1;
                         return $unpaid_last($x, $y) ?: ($fx !== $fy ? $fx - $fy : $x['trial_number'] - $y['trial_number']);
                     });
+                    // From 2027 a section with this team's offers in it counts
+                    // them by state: "Selected · offer out: 2 · Selected · accepted: 1".
+                    $offer_tally = function ($items) {
+                        $tally = array();
+                        foreach ($items as $item) {
+                            if ($item['my_accepted'] !== null) {
+                                $key = ($item['my_status'] === 'selected' ? 'Selected' : 'Training Only') . self::offer_suffix($item['my_accepted']);
+                                $tally[$key] = isset($tally[$key]) ? $tally[$key] + 1 : 1;
+                            }
+                        }
+                        $bits = array();
+                        foreach (array('Selected · offer out', 'Selected · accepted', 'Training Only · offer out', 'Training Only · accepted') as $key) {
+                            if (isset($tally[$key])) {
+                                $bits[] = $key . ': ' . $tally[$key];
+                            }
+                        }
+                        return $bits ? implode(' · ', $bits) . '. The club finalises accepted offers only.' : '';
+                    };
+                    $others_offers = $offer_tally($others);
                     $sections = array(
                         $active_access['coach']
                             ? array('Applied to your team — awaiting your verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and you haven\'t recorded a verdict yet.')
                             : array('Applied to this team — awaiting a verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and the team has no verdict on them yet.'),
-                        array('Applied to ' . $team_word . ' — verdict recorded', $actioned, ''),
-                        array('Other applicants', $others, 'Applicants who didn\'t select ' . $team_word . ' — shown because players get redirected between trials and VV can grant age exemptions. Over-age players are listed last.'),
+                        array('Applied to ' . $team_word . ' — verdict recorded', $actioned, $offer_tally($actioned)),
+                        array('Other applicants', $others, 'Applicants who didn\'t select ' . $team_word . ' — shown because players get redirected between trials and VV can grant age exemptions. Over-age players are listed last.' . ($others_offers !== '' ? ' ' . $others_offers : '')),
                     );
                     ?>
                     <div id="coach-applicant-list">
@@ -876,6 +1029,7 @@ class TeamOversight_Coach_Portal {
                                             </label>
                                             <noscript><button type="submit" class="button button-small">Save</button></noscript>
                                         </form>
+                                        <span class="cac-offer"><?php echo $this->render_offer_control($a['id'], $active_team, $season, $a['my_status'], $a['my_accepted'], !empty($a['payment_pending'])); ?></span>
                                         <?php endif; ?>
                                     </span>
                                 </div>
@@ -927,7 +1081,8 @@ class TeamOversight_Coach_Portal {
                 clearTimeout(flashTimer);
                 flash.classList.remove('is-fading');
                 flash.classList.add('coach-flash-toast');
-                // An expired page stays flagged until it's reloaded (or tapped away).
+                // An expired page (or a result the coach must act on) stays
+                // up until it's reloaded or tapped away.
                 if (sticky) { return; }
                 flashTimer = setTimeout(function () {
                     flash.classList.add('is-fading');
@@ -977,6 +1132,10 @@ class TeamOversight_Coach_Portal {
                             if (card.hasAttribute('data-has-verdict')) { card.setAttribute('data-has-verdict', res.data.status ? '1' : '0'); }
                             var chips = card.querySelector('.cac-verdicts');
                             if (chips) { chips.innerHTML = res.data.chips; }
+                            // The Player accepted control follows the verdict
+                            // (a changed verdict clears the acceptance).
+                            var offer = card.querySelector('.cac-offer');
+                            if (offer && typeof res.data.offer === 'string') { offer.innerHTML = res.data.offer; }
                         }
                         showFlash(res.data.notice);
                     })
@@ -1010,6 +1169,49 @@ class TeamOversight_Coach_Portal {
             };
             portal.addEventListener('submit', function (event) { savePlace(event.target); });
 
+            // Mark player accepted / undo: saved in the background like a
+            // verdict, refreshing the card's chips and the button. Without
+            // JavaScript (or if the request can't be sent) it's a normal post.
+            portal.addEventListener('submit', function (event) {
+                var form = event.target;
+                if (!form || !form.classList || !form.classList.contains('coach-offer-form')) { return; }
+                event.preventDefault();
+                try { sessionStorage.removeItem(KEY); } catch (e) {}
+                var card = form.closest('.coach-applicant-card');
+                var button = form.querySelector('button');
+                var body = new FormData(form);
+                body.append('action', 'coach_set_offer');
+                if (card && card.getAttribute('data-card-context') === 'board') { body.append('card_context', 'board'); }
+                if (button) { button.disabled = true; }
+                fetch(<?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>, { method: 'POST', credentials: 'same-origin', body: body })
+                    .then(function (r) { return r.json(); })
+                    .then(function (res) {
+                        if (button) { button.disabled = false; }
+                        if (!res || typeof res !== 'object') {
+                            showFlash('<div class="coach-portal-notice coach-portal-expired"><p>Your session has expired — reload the page (you may need to log in again).</p></div>', true);
+                            return;
+                        }
+                        if (!res.success) {
+                            showFlash(res.data && res.data.notice ? res.data.notice : '<div class="coach-portal-notice"><p>That could not be saved — please try again.</p></div>', !!(res.data && res.data.expired));
+                            return;
+                        }
+                        if (card) {
+                            var chips = card.querySelector('.cac-verdicts');
+                            if (chips) { chips.innerHTML = res.data.chips; }
+                            var offer = card.querySelector('.cac-offer');
+                            if (offer) { offer.innerHTML = res.data.offer; }
+                        }
+                        // A result the coach must act on (undone, but already
+                        // on the team) stays up until tapped away.
+                        showFlash(res.data.notice, String(res.data.notice).indexOf('coach-portal-sticky') !== -1);
+                    })
+                    .catch(function () {
+                        if (button) { button.disabled = false; }
+                        savePlace(form);
+                        form.submit();
+                    });
+            });
+
             var saved = null;
             try {
                 saved = JSON.parse(sessionStorage.getItem(KEY) || 'null');
@@ -1032,8 +1234,9 @@ class TeamOversight_Coach_Portal {
             var restore = function () { window.scrollTo(0, saved.y); };
             restore();
             window.addEventListener('load', restore);
-            // An expired-page message stays up like the verdict one does.
-            showFlash(undefined, !!(flash && flash.querySelector('.coach-portal-expired')));
+            // An expired-page message stays up like the verdict one does, and
+            // so does one the coach must act on (coach-portal-sticky).
+            showFlash(undefined, !!(flash && flash.querySelector('.coach-portal-expired, .coach-portal-sticky')));
         })();
         </script>
 
@@ -1729,6 +1932,19 @@ class TeamOversight_Coach_Portal {
             color: #1e6b2a;
         }
 
+        /* Player accepted: green like a marked attendance. */
+        .coach-portal .coach-offer-btn.is-accepted,
+        .coach-portal .coach-offer-btn.is-accepted:hover,
+        .coach-portal .coach-offer-btn.is-accepted:focus {
+            background: #e8f5ea;
+            border-color: #2e8540;
+            color: #1e6b2a;
+        }
+
+        .coach-portal .cac-offer:empty {
+            display: none;
+        }
+
         .coach-portal .button:disabled {
             opacity: 0.6;
             cursor: wait;
@@ -1904,7 +2120,8 @@ class TeamOversight_Coach_Portal {
                 align-items: stretch;
             }
 
-            .coach-portal .cac-actions .coach-attend-btn {
+            .coach-portal .cac-actions .coach-attend-btn,
+            .coach-portal .cac-actions .coach-offer-btn {
                 width: 100%;
             }
 
@@ -1933,7 +2150,7 @@ class TeamOversight_Coach_Portal {
     // ------------------------------------------------------------------
 
     private function handle_actions($my_team_codes, $season) {
-        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'add_note', 'edit_note', 'delete_note'), true)) {
+        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'set_offer', 'add_note', 'edit_note', 'delete_note'), true)) {
             return '';
         }
 
@@ -2011,15 +2228,100 @@ class TeamOversight_Coach_Portal {
             return '<div class="coach-portal-success"><p>Note updated for ' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ').</p></div>';
         }
 
+        $verdict_labels = self::get_verdict_labels();
+        $who = esc_html($application->name) . ' (#' . intval($application->trial_number) . ')';
+
+        if ($_POST['coach_action'] === 'set_offer') {
+            // The player's yes to this team's offer, as the coach records it
+            // (2027 on). Finalise places only accepted offers; no email.
+            if (!self::offer_acceptance_applies($season)) {
+                return '<div class="coach-portal-notice"><p>Offers only need the player\'s acceptance from the ' . self::OFFER_ACCEPTANCE_FROM . ' season.</p></div>';
+            }
+            if ($application->application_status === 'awaiting_payment') {
+                return '<div class="coach-portal-notice"><p>' . $who . ' hasn\'t paid the trial fee yet, so there\'s no offer to accept.</p></div>';
+            }
+            $verdict = $wpdb->get_row($wpdb->prepare("
+                SELECT id, status, offer_accepted FROM {$wpdb->prefix}team_trial_selections
+                WHERE application_id = %d AND team = %s
+            ", $application_id, $team));
+            if (!$verdict || !in_array($verdict->status, array('selected', 'training_only'), true)) {
+                return '<div class="coach-portal-notice"><p>' . $who . ' has no Selected or Training Only offer for ' . esc_html($team) . ' to accept — reload the page to see the current verdict.</p></div>';
+            }
+            // The page shows the verdict it was rendered with; if a co-coach
+            // has changed it since, the player said yes to something else.
+            $shown = isset($_POST['offer_status']) ? sanitize_key(wp_unslash($_POST['offer_status'])) : '';
+            if ($shown !== '' && $shown !== $verdict->status) {
+                return '<div class="coach-portal-notice"><p>The ' . esc_html($team) . ' verdict for ' . $who . ' is now ' . esc_html($verdict_labels[$verdict->status]) . ' — it changed after this page loaded. Reload and check with the player before recording their answer.</p></div>';
+            }
+
+            $offer = $verdict_labels[$verdict->status];
+            if (isset($_POST['offer_accepted']) && $_POST['offer_accepted'] === '1') {
+                // Marking it again keeps who recorded it first, and when. The
+                // status check stops a verdict changed meanwhile being accepted.
+                $changed = $wpdb->query($wpdb->prepare("
+                    UPDATE {$wpdb->prefix}team_trial_selections
+                    SET offer_accepted = 1, offer_accepted_at = %s, offer_accepted_by = %d
+                    WHERE id = %d AND offer_accepted = 0 AND status = %s
+                ", current_time('mysql'), get_current_user_id(), $verdict->id, $verdict->status));
+                if ($changed) {
+                    $this->add_offer_note($application_id, 'Player accepted the ' . $offer . ' offer for ' . $team . '.');
+                }
+                return '<div class="coach-portal-success"><p>' . $who . ' accepted the <strong>' . esc_html($offer) . '</strong> offer for ' . esc_html($team) . ' — the club finalises it with the next Finalise.</p></div>';
+            }
+
+            $changed = $wpdb->query($wpdb->prepare("
+                UPDATE {$wpdb->prefix}team_trial_selections
+                SET offer_accepted = 0, offer_accepted_at = NULL, offer_accepted_by = NULL
+                WHERE id = %d AND offer_accepted = 1
+            ", $verdict->id));
+            // Finalise never undoes: a player it already put on this team
+            // (by account or email) stays on it, fee and all, until the club
+            // removes them — so never tell the coach the offer is "out again".
+            $on_team = $wpdb->get_var($wpdb->prepare("
+                SELECT id FROM {$wpdb->prefix}team_assignments
+                WHERE season = %s AND team = %s AND is_active = 1
+                    AND role IN ('playing_member', 'training_only')
+                    AND (email = %s OR (user_id > 0 AND user_id = %d))
+                LIMIT 1
+            ", $season, $team, $application->email, intval($application->user_id)));
+            if ($on_team) {
+                if ($changed) {
+                    $this->add_offer_note($application_id, 'Player acceptance undone for ' . $team . ' — already on the team, so nothing was undone there; the club removes them if they aren\'t playing.');
+                }
+                return '<div class="coach-portal-success coach-portal-sticky"><p>Acceptance undone for ' . $who . ' — but <strong>they\'re already on ' . esc_html($team) . '</strong>, so nothing was undone there: they stay on the team, and its fee, until the club removes them. If they aren\'t playing, ask the club to take them off ' . esc_html($team) . '.</p></div>';
+            }
+            if ($changed) {
+                $this->add_offer_note($application_id, 'Player acceptance undone for ' . $team . ' — the ' . $offer . ' offer is out again.');
+            }
+            return '<div class="coach-portal-success"><p>Acceptance undone for ' . $who . ' — the <strong>' . esc_html($offer) . '</strong> offer for ' . esc_html($team) . ' is out again.</p></div>';
+        }
+
         // set_selection
         $status = sanitize_text_field($_POST['selection_status']);
 
+        $existing = $wpdb->get_row($wpdb->prepare("
+            SELECT id, status, offer_accepted FROM {$wpdb->prefix}team_trial_selections
+            WHERE application_id = %d AND team = %s
+        ", $application_id, $team));
+        // A changed verdict is a different offer (or none), so a recorded
+        // acceptance never carries over — say so, and leave a note.
+        $was_accepted = $existing && intval($existing->offer_accepted) === 1;
+        $acceptance_note = function ($new_label) use ($was_accepted, $existing, $verdict_labels, $application_id, $team) {
+            if (!$was_accepted) {
+                return '';
+            }
+            $old = isset($verdict_labels[$existing->status]) ? $verdict_labels[$existing->status] : $existing->status;
+            $this->add_offer_note($application_id, 'Player acceptance of the ' . $old . ' offer for ' . $team . ' cleared — the verdict changed to ' . $new_label . '.');
+            return ' The player\'s acceptance of the ' . esc_html($old) . ' offer was cleared.';
+        };
+
         if ($status === 'clear') {
-            $wpdb->delete($wpdb->prefix . 'team_trial_selections', array(
+            $deleted = $wpdb->delete($wpdb->prefix . 'team_trial_selections', array(
                 'application_id' => $application_id,
                 'team' => $team,
             ), array('%d', '%s'));
-            return '<div class="coach-portal-success"><p>Verdict cleared for ' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ').</p></div>';
+            $cleared = $deleted ? $acceptance_note('none') : '';
+            return '<div class="coach-portal-success"><p>Verdict cleared for ' . $who . '.' . $cleared . '</p></div>';
         }
 
         if (!in_array($status, self::SELECTION_STATUSES, true)) {
@@ -2032,21 +2334,29 @@ class TeamOversight_Coach_Portal {
             return '<div class="coach-portal-notice"><p>' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ') hasn\'t paid the trial fee yet. You can reject them now; other verdicts open once the fee is paid.</p></div>';
         }
 
-        $verdict_labels = self::get_verdict_labels();
-
-        $existing = $wpdb->get_var($wpdb->prepare("
-            SELECT id FROM {$wpdb->prefix}team_trial_selections
-            WHERE application_id = %d AND team = %s
-        ", $application_id, $team));
-
+        $cleared = '';
         if ($existing) {
-            $wpdb->update(
+            $fields = array('status' => $status, 'created_by' => get_current_user_id(), 'updated_date' => current_time('mysql'));
+            $formats = array('%s', '%d', '%s');
+            $changed_verdict = $existing->status !== $status;
+            if ($changed_verdict) {
+                // A different verdict (Selected <-> Training Only included)
+                // is a different offer: the player hasn't accepted it.
+                $fields['offer_accepted'] = 0;
+                $fields['offer_accepted_at'] = null;
+                $fields['offer_accepted_by'] = null;
+                $formats = array_merge($formats, array('%d', '%s', '%d'));
+            }
+            $updated = $wpdb->update(
                 $wpdb->prefix . 'team_trial_selections',
-                array('status' => $status, 'created_by' => get_current_user_id(), 'updated_date' => current_time('mysql')),
-                array('id' => $existing),
-                array('%s', '%d', '%s'),
+                $fields,
+                array('id' => $existing->id),
+                $formats,
                 array('%d')
             );
+            if ($changed_verdict && $updated) {
+                $cleared = $acceptance_note($verdict_labels[$status]);
+            }
         } else {
             $wpdb->insert($wpdb->prefix . 'team_trial_selections', array(
                 'application_id' => $application_id,
@@ -2057,7 +2367,25 @@ class TeamOversight_Coach_Portal {
             ), array('%d', '%s', '%s', '%s', '%d'));
         }
 
-        return '<div class="coach-portal-success"><p>' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ') marked <strong>' . esc_html($verdict_labels[$status]) . '</strong> for ' . esc_html($team) . '.</p></div>';
+        $offer_hint = '';
+        if (self::offer_state($season, $status, 0) !== null && ($existing === null || $existing->status !== $status || intval($existing->offer_accepted) !== 1)) {
+            $offer_hint = ' Once the player says yes, tap <em>Mark player accepted</em> — the club only finalises accepted offers.';
+        }
+
+        return '<div class="coach-portal-success"><p>' . $who . ' marked <strong>' . esc_html($verdict_labels[$status]) . '</strong> for ' . esc_html($team) . '.' . $cleared . $offer_hint . '</p></div>';
+    }
+
+    /**
+     * A shared note recording a change to the player's acceptance, so every
+     * coach (and the trial book) sees who recorded it and when.
+     */
+    private function add_offer_note($application_id, $text) {
+        global $wpdb;
+        $wpdb->insert($wpdb->prefix . 'team_trial_notes', array(
+            'application_id' => intval($application_id),
+            'author_id' => get_current_user_id(),
+            'note' => $text,
+        ), array('%d', '%d', '%s'));
     }
 
     /**
@@ -2099,7 +2427,8 @@ class TeamOversight_Coach_Portal {
         $labels = self::get_verdict_labels();
         $html = '';
         foreach ($selections as $sel) {
-            $label = isset($labels[$sel['status']]) ? $labels[$sel['status']] : ucfirst($sel['status']);
+            $label = (isset($labels[$sel['status']]) ? $labels[$sel['status']] : ucfirst($sel['status']))
+                . self::offer_suffix(isset($sel['accepted']) ? $sel['accepted'] : null);
             $html .= '<span class="verdict-chip verdict-chip-' . esc_attr($sel['status']) . '" title="' . esc_attr($sel['team_name'] . ' — ' . $label) . '">'
                 . esc_html($sel['team']) . ': ' . esc_html($label)
                 . '</span> ';
@@ -2161,6 +2490,12 @@ class TeamOversight_Coach_Portal {
                 'training_only' => 'Training Only (awaiting finalisation)',
                 'tentative' => 'Tentative',
             );
+            // From 2027: whether the offer is still out or the player accepted it.
+            $offer = self::offer_state($season, $member->status, $member->offer_accepted);
+            if ($offer !== null) {
+                $status_labels[$member->status] = ($member->status === 'selected' ? 'Selected' : 'Training Only')
+                    . ($offer ? ' · accepted (awaiting finalisation)' : ' · offer out');
+            }
             fputcsv($output, array(
                 $member->name,
                 $member->status === 'training_only' ? 'Training Only' : 'Playing Member',
@@ -2328,7 +2663,8 @@ class TeamOversight_Coach_Portal {
                 <td><?php
                     $bits = array();
                     foreach ($a['selections'] as $sel) {
-                        $bits[] = $sel['team'] . ': ' . (isset($verdict_labels[$sel['status']]) ? $verdict_labels[$sel['status']] : $sel['status']);
+                        $bits[] = $sel['team'] . ': ' . (isset($verdict_labels[$sel['status']]) ? $verdict_labels[$sel['status']] : $sel['status'])
+                            . self::offer_suffix($sel['accepted']);
                     }
                     echo esc_html($bits ? implode(', ', $bits) : '—');
                 ?></td>
@@ -2339,7 +2675,7 @@ class TeamOversight_Coach_Portal {
 <p class="meta">★ marks <?php echo esc_html($config['name']); ?> in the "applied for" column.</p>
 
 <h2>Applicant details</h2>
-<p class="meta">ICE = emergency contact. Verdicts show every team's call, not just yours.</p>
+<p class="meta">ICE = emergency contact. Verdicts show every team's call, not just yours.<?php if (self::offer_acceptance_applies($season)): ?> Selected and Training Only are offers: "offer out" until the player accepts, then "accepted" — the club finalises accepted offers only.<?php endif; ?></p>
 <?php foreach ($applicants as $a): ?>
     <div class="applicant">
         <div class="a-head">
@@ -2368,7 +2704,8 @@ class TeamOversight_Coach_Portal {
             if (!empty($a['selections'])) {
                 $bits = array();
                 foreach ($a['selections'] as $sel) {
-                    $bits[] = $sel['team'] . ' ' . (isset($verdict_labels[$sel['status']]) ? $verdict_labels[$sel['status']] : $sel['status']);
+                    $bits[] = $sel['team'] . ' ' . (isset($verdict_labels[$sel['status']]) ? $verdict_labels[$sel['status']] : $sel['status'])
+                        . self::offer_suffix($sel['accepted']);
                 }
                 echo esc_html(implode(', ', $bits));
             } else {
@@ -2697,15 +3034,17 @@ class TeamOversight_Coach_Portal {
         global $wpdb;
 
         $verdicts = array();
+        $offers = array();
         $application_ids = array_values(array_filter(array_map('intval', $application_ids)));
         if ($application_ids) {
             $ids = implode(',', $application_ids);
             $rows = $wpdb->get_results($wpdb->prepare("
-                SELECT application_id, team, status FROM {$wpdb->prefix}team_trial_selections
+                SELECT application_id, team, status, offer_accepted FROM {$wpdb->prefix}team_trial_selections
                 WHERE application_id IN ({$ids}) AND team <> %s
             ", $active_team));
             foreach ($rows as $row) {
                 $verdicts[intval($row->application_id)][$row->team] = $row->status;
+                $offers[intval($row->application_id)][$row->team] = self::offer_state($season, $row->status, $row->offer_accepted);
             }
         }
 
@@ -2748,7 +3087,7 @@ class TeamOversight_Coach_Portal {
             }
         }
 
-        return array($verdicts, $placements);
+        return array($verdicts, $placements, $offers);
     }
 
     /**
@@ -2756,8 +3095,9 @@ class TeamOversight_Coach_Portal {
      * a team replacing the verdict that led to it.
      */
     private function render_other_team_chips($claims, $application_id, $user_id, $email, $teams_config) {
-        list($verdicts, $placements) = $claims;
+        list($verdicts, $placements, $offers) = $claims;
         $teams = isset($verdicts[intval($application_id)]) ? $verdicts[intval($application_id)] : array();
+        $offer_states = isset($offers[intval($application_id)]) ? $offers[intval($application_id)] : array();
 
         $placed = array();
         if (intval($user_id) && isset($placements['u' . intval($user_id)])) {
@@ -2779,6 +3119,9 @@ class TeamOversight_Coach_Portal {
         $html = '';
         foreach ($teams as $team => $status) {
             $label = isset($labels[$status]) ? $labels[$status] : ucfirst($status);
+            if (strpos($status, 'confirmed') !== 0 && isset($offer_states[$team])) {
+                $label .= self::offer_suffix($offer_states[$team]);
+            }
             $class = strpos($status, 'confirmed') === 0 ? 'confirmed' : $status;
             $name = isset($teams_config[$team]) ? $teams_config[$team]['name'] : $team;
             $html .= '<span class="verdict-chip verdict-chip-' . esc_attr($class) . '" title="' . esc_attr($name . ' — ' . $label) . '">'
@@ -2956,7 +3299,7 @@ class TeamOversight_Coach_Portal {
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT s.status, s.application_id, a.name, a.email, a.trial_number, a.user_id, a.preferred_positions,
+            SELECT s.status, s.offer_accepted, s.application_id, a.name, a.email, a.trial_number, a.user_id, a.preferred_positions,
                 a.is_transfer_player, a.form_data, a.application_status,
                 um_mobile.meta_value AS mobile
             FROM {$wpdb->prefix}team_trial_selections s
@@ -3065,6 +3408,7 @@ class TeamOversight_Coach_Portal {
                 'team' => $sel->team,
                 'team_name' => isset($teams_config[$sel->team]) ? $teams_config[$sel->team]['name'] : $sel->team,
                 'status' => $sel->status,
+                'accepted' => self::offer_state($season, $sel->status, $sel->offer_accepted),
             );
         }
 
@@ -3125,9 +3469,11 @@ class TeamOversight_Coach_Portal {
 
             $selections = isset($selections_by_app[$row->id]) ? $selections_by_app[$row->id] : array();
             $my_status = '';
+            $my_accepted = null;
             foreach ($selections as $sel) {
                 if ($sel['team'] === $active_team) {
                     $my_status = $sel['status'];
+                    $my_accepted = $sel['accepted'];
                 }
             }
 
@@ -3152,6 +3498,7 @@ class TeamOversight_Coach_Portal {
                 'picked_mine' => $picked_mine,
                 'selections' => $selections,
                 'my_status' => $my_status,
+                'my_accepted' => $my_accepted,
                 'notes' => isset($notes_by_app[$row->id]) ? $notes_by_app[$row->id] : array(),
                 'form_data' => $form_data,
             );

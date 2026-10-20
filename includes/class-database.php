@@ -435,6 +435,18 @@ class TeamOversight_Database {
         if (empty($updated_exists)) {
             $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications ADD COLUMN updated_date datetime DEFAULT NULL");
         }
+
+        // From the 2027 season a Selected / Training Only verdict is an
+        // offer: the coach records when the player has accepted it, and
+        // Finalise only places accepted offers. Existing verdicts start as
+        // not accepted. One statement, so the three columns arrive together.
+        $offer_accepted_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_trial_selections LIKE 'offer_accepted'");
+        if (empty($offer_accepted_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}team_trial_selections
+                ADD COLUMN offer_accepted tinyint(1) NOT NULL DEFAULT 0,
+                ADD COLUMN offer_accepted_at datetime DEFAULT NULL,
+                ADD COLUMN offer_accepted_by bigint(20) unsigned DEFAULT NULL");
+        }
     }
 
     public function create_tables() {
@@ -566,6 +578,9 @@ class TeamOversight_Database {
                 created_by bigint(20) unsigned DEFAULT NULL,
                 created_date datetime DEFAULT CURRENT_TIMESTAMP,
                 updated_date datetime DEFAULT NULL,
+                offer_accepted tinyint(1) NOT NULL DEFAULT 0,
+                offer_accepted_at datetime DEFAULT NULL,
+                offer_accepted_by bigint(20) unsigned DEFAULT NULL,
                 PRIMARY KEY (id),
                 UNIQUE KEY app_team (application_id, team),
                 KEY season (season),

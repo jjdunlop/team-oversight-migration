@@ -298,7 +298,9 @@ class TeamOversight_Admin {
      * Convert coach "Selected" verdicts into real team assignments + fee
      * invoices, and mark the applications accepted. Idempotent: existing
      * active assignments are skipped, so it can be run repeatedly as
-     * coaches make late additions.
+     * coaches make late additions. From 2027 only offers the player has
+     * accepted (as a coach recorded) are finalised; it never removes an
+     * assignment, even when an acceptance is withdrawn afterwards.
      */
     private function finalise_selections() {
         if (!isset($_POST['finalise_nonce']) || !wp_verify_nonce($_POST['finalise_nonce'], 'finalise_selections')) {
@@ -335,6 +337,12 @@ class TeamOversight_Admin {
     private function run_finalise_selections($season) {
         global $wpdb;
 
+        // From 2027 a Selected / Training Only verdict is an offer, and only
+        // offers the coach has marked as accepted by the player are
+        // finalised; the rest wait (listed on the page). Earlier seasons finalise
+        // every Selected / Training Only verdict, as before.
+        $needs_acceptance = TeamOversight_Coach_Portal::offer_acceptance_applies($season);
+
         $selected = $wpdb->get_results($wpdb->prepare("
             SELECT s.application_id, s.team, s.status, a.user_id, a.email, a.trial_number, a.name
             FROM {$wpdb->prefix}team_trial_selections s
@@ -342,6 +350,7 @@ class TeamOversight_Admin {
             WHERE s.status IN ('selected', 'training_only')
                 AND a.season = %s
                 AND a.application_status IN ('pending', 'accepted')
+                " . ($needs_acceptance ? 'AND s.offer_accepted = 1' : '') . "
             ORDER BY s.application_id, s.team
         ", $season));
 
@@ -363,8 +372,12 @@ class TeamOversight_Admin {
                 . '. They\'ll finalise on the next run once paid — or use <em>Mark as Paid</em> below if they paid another way.</p></div>';
         }
 
+        // Offers it leaves alone (waiting, or withdrawn after an earlier
+        // run) are listed by the Trial Applications page, which renders
+        // straight after this on every load (report_unaccepted_offers).
+
         if (empty($selected)) {
-            echo '<div class="notice notice-info"><p>No confirmed coach selections to finalise for ' . esc_html($season) . '.</p></div>';
+            echo '<div class="notice notice-info"><p>' . ($needs_acceptance ? 'No accepted offers to finalise for ' : 'No confirmed coach selections to finalise for ') . esc_html($season) . '.</p></div>';
             return;
         }
 
@@ -467,13 +480,32 @@ class TeamOversight_Admin {
                 }
             }
 
+            $assigned_tokens = array_map(function ($t) {
+                return $t['team'] . ($t['role'] === 'training_only' ? ' (T/O)' : '');
+            }, $info['teams']);
+            if ($needs_acceptance) {
+                // Finalise never undoes: a team placed by an earlier run
+                // whose offer is no longer marked accepted stays listed (its
+                // assignment is still there), so Undo Assignment still finds it.
+                $this_run = array_map(function ($t) {
+                    return $t['team'];
+                }, $info['teams']);
+                $placed = $wpdb->get_var($wpdb->prepare("
+                    SELECT assigned_team FROM {$wpdb->prefix}trial_applications
+                    WHERE id = %d AND application_status = 'accepted'
+                ", $application_id));
+                foreach (TeamOversight_Trials::parse_assigned_team($placed) as $earlier) {
+                    if (!in_array($earlier['code'], $this_run, true)) {
+                        $assigned_tokens[] = $earlier['code'] . ($earlier['training_only'] ? ' (T/O)' : '');
+                    }
+                }
+            }
+
             $wpdb->update(
                 $wpdb->prefix . 'trial_applications',
                 array(
                     'application_status' => 'accepted',
-                    'assigned_team' => implode(', ', array_map(function ($t) {
-                        return $t['team'] . ($t['role'] === 'training_only' ? ' (T/O)' : '');
-                    }, $info['teams']))
+                    'assigned_team' => implode(', ', $assigned_tokens)
                 ),
                 array('id' => $application_id),
                 array('%s', '%s'),
@@ -498,6 +530,70 @@ class TeamOversight_Admin {
             echo '<div class="notice notice-warning"><p><strong>' . count($role_differs) . ' coach verdict' . (count($role_differs) === 1 ? ' differs' : 's differ') . ' from the player\'s existing team role</strong> — Finalise never changes an existing role: '
                 . esc_html(implode('; ', $role_differs))
                 . '. If the verdict is right, change the role on <a href="' . esc_url(admin_url('admin.php?page=team-oversight-assignments&season=' . $season)) . '">Team Assignments</a> (the fee is re-priced); otherwise ask the coach to update the verdict.</p></div>';
+        }
+    }
+
+    /**
+     * Selected / Training Only offers the player hasn't accepted (2027 on),
+     * on paid applications: by team, those still waiting (not finalised)
+     * and those already on that team whose acceptance was withdrawn after
+     * an earlier Finalise (nothing is undone — the admin decides). Any
+     * active playing row on the team counts as on it, whatever its role:
+     * a verdict changed after Finalise is still a player on the team.
+     */
+    private function get_unaccepted_offers($season) {
+        global $wpdb;
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT s.team, s.status, a.trial_number, a.name,
+                EXISTS (
+                    SELECT 1 FROM {$wpdb->prefix}team_assignments t
+                    WHERE t.season = a.season AND t.team = s.team AND t.is_active = 1
+                        AND t.role IN ('playing_member', 'training_only')
+                        AND (t.email = a.email OR (a.user_id > 0 AND t.user_id = a.user_id))
+                ) AS placed
+            FROM {$wpdb->prefix}team_trial_selections s
+            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+            WHERE s.status IN ('selected', 'training_only') AND s.offer_accepted = 0
+                AND a.season = %s AND a.application_status IN ('pending', 'accepted')
+            ORDER BY s.team, a.trial_number
+        ", $season));
+
+        $offers = array('waiting' => array(), 'withdrawn' => array());
+        foreach ($rows as $row) {
+            $offers[intval($row->placed) ? 'withdrawn' : 'waiting'][$row->team][] = '#' . intval($row->trial_number) . ' ' . $row->name
+                . ($row->status === 'training_only' ? ' (Training Only)' : '');
+        }
+        return $offers;
+    }
+
+    /** One notice line per team: "SL2M: #12 Name, #15 Name (Training Only)". */
+    private static function offers_by_team_text($by_team) {
+        $parts = array();
+        foreach ($by_team as $team => $people) {
+            $parts[] = $team . ': ' . implode(', ', $people);
+        }
+        return implode('; ', $parts);
+    }
+
+    /**
+     * Trial Applications notices (2027 on) for offers Finalise leaves alone
+     * because they aren't accepted: shown on every load of the page, after
+     * a Finalise run too, whether or not there's anything to finalise — so
+     * an acceptance withdrawn after Finalise is never missed.
+     */
+    private function report_unaccepted_offers($season) {
+        $offers = $this->get_unaccepted_offers($season);
+        $waiting = array_sum(array_map('count', $offers['waiting']));
+        $withdrawn = array_sum(array_map('count', $offers['withdrawn']));
+        if ($waiting) {
+            echo '<div class="notice notice-warning"><p><strong>' . $waiting . ' offer' . ($waiting === 1 ? ' is' : 's are') . ' still waiting for the player to accept — not finalised:</strong> '
+                . esc_html(self::offers_by_team_text($offers['waiting']))
+                . '. They finalise on a later run once a coach marks <em>Player accepted</em> in the coach portal.</p></div>';
+        }
+        if ($withdrawn) {
+            echo '<div class="notice notice-warning"><p><strong>' . $withdrawn . ' player' . ($withdrawn === 1 ? ' is' : 's are') . ' already on the team without an accepted offer</strong> (acceptance withdrawn or verdict changed after an earlier Finalise, or placed another way): '
+                . esc_html(self::offers_by_team_text($offers['withdrawn']))
+                . '. Nothing was undone. If one isn\'t playing for that team after all, remove just that team on <a href="' . esc_url(admin_url('admin.php?page=team-oversight-assignments&season=' . $season)) . '">Team Assignments</a>. Undo Assignment takes the player off every team on their application, so use it only when they aren\'t playing for any of them.</p></div>';
         }
     }
 
@@ -1343,7 +1439,7 @@ class TeamOversight_Admin {
         // Coach selection verdicts for this season, keyed by application.
         $selections_by_app = array();
         $selection_rows = $wpdb->get_results($wpdb->prepare("
-            SELECT application_id, team, status FROM {$wpdb->prefix}team_trial_selections
+            SELECT application_id, team, status, offer_accepted FROM {$wpdb->prefix}team_trial_selections
             WHERE season = %s ORDER BY team
         ", $season));
         foreach ($selection_rows as $selection) {
@@ -1359,12 +1455,15 @@ class TeamOversight_Admin {
         // (not in assigned_team as "TEAM" / "TEAM (T/O)"): one it already
         // placed whose row has since gone (withdrawn on Team Assignments
         // before those edits synced verdicts) must not prompt a re-run that
-        // puts the player back.
+        // puts the player back. From 2027 only offers the player has
+        // accepted count — the same ones Finalise places.
+        $needs_acceptance = TeamOversight_Coach_Portal::offer_acceptance_applies($season);
+        $accepted_only = $needs_acceptance ? 'AND s.offer_accepted = 1' : '';
         $awaiting_finalise = intval($wpdb->get_var($wpdb->prepare("
             SELECT COUNT(DISTINCT s.application_id)
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
-            WHERE s.status IN ('selected', 'training_only') AND a.season = %s
+            WHERE s.status IN ('selected', 'training_only') AND a.season = %s {$accepted_only}
                 AND (a.application_status = 'pending' OR (a.application_status = 'accepted' AND NOT EXISTS (
                     SELECT 1 FROM {$wpdb->prefix}team_assignments t
                     WHERE t.season = a.season AND t.team = s.team AND t.is_active = 1
@@ -1382,7 +1481,7 @@ class TeamOversight_Admin {
                 SELECT COUNT(DISTINCT a.id)
                 FROM {$wpdb->prefix}team_trial_selections s
                 JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
-                WHERE s.status IN ('selected', 'training_only') AND a.season = %s
+                WHERE s.status IN ('selected', 'training_only') AND a.season = %s {$accepted_only}
                     AND a.application_status = 'accepted'
                     AND EXISTS (
                         SELECT 1 FROM {$wpdb->prefix}team_assignments t
@@ -1461,17 +1560,29 @@ class TeamOversight_Admin {
                 </form>
             </details>
 
+            <?php
+            // 2027 on: offers still waiting for the player, and players on a
+            // team whose acceptance was withdrawn after Finalise, by team —
+            // shown whether or not there's anything to finalise.
+            if ($needs_acceptance) {
+                $this->report_unaccepted_offers($season);
+            }
+            ?>
+
             <?php if ($awaiting_finalise || $finalised_uninvoiced): ?>
                 <div class="notice notice-info" style="padding: 10px 15px; display: flex; align-items: center; gap: 15px;">
                     <span>
                         <?php if ($awaiting_finalise): ?>
-                            <strong><?php echo $awaiting_finalise; ?> application(s)</strong> have coach selections awaiting finalisation or not yet reflected in their team assignments (team assignment + fee invoice).
+                            <strong><?php echo $awaiting_finalise; ?> application(s)</strong> have <?php echo $needs_acceptance ? 'accepted offers' : 'coach selections'; ?> awaiting finalisation or not yet reflected in their team assignments (team assignment + fee invoice).
                         <?php endif; ?>
                         <?php if ($finalised_uninvoiced): ?>
                             <strong><?php echo $finalised_uninvoiced; ?> finalised player(s)</strong> on teams have no <?php echo esc_html($season); ?> invoice; Finalise will create one.
                         <?php endif; ?>
+                        <?php if ($needs_acceptance): ?>
+                            <br><small>From <?php echo intval(TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM); ?>, Finalise places only the Selected / Training Only offers the player has accepted. An acceptance withdrawn after Finalise undoes nothing automatically — remove just that team on <a href="<?php echo esc_url(admin_url('admin.php?page=team-oversight-assignments&season=' . $season)); ?>">Team Assignments</a> (Undo Assignment takes the player off every team on their application).</small>
+                        <?php endif; ?>
                     </span>
-                    <form method="post" style="margin: 0;" onsubmit="return confirm('Finalise all coach-selected applications for <?php echo esc_attr($season); ?>?\n\nThis creates team assignments for every Selected verdict, generates fee invoices, and marks the applications accepted. Safe to run repeatedly.');">
+                    <form method="post" style="margin: 0;" onsubmit="return confirm('Finalise all coach-selected applications for <?php echo esc_attr($season); ?>?\n\nThis creates team assignments for every <?php echo $needs_acceptance ? 'accepted Selected / Training Only offer' : 'Selected verdict'; ?>, generates fee invoices, and marks the applications accepted. Safe to run repeatedly.');">
                         <input type="hidden" name="action" value="finalise_selections">
                         <?php wp_nonce_field('finalise_selections', 'finalise_nonce'); ?>
                         <input type="submit" class="button button-primary" value="Finalise Coach Selections">
@@ -1579,7 +1690,7 @@ class TeamOversight_Admin {
                                             $chip_classes = array('selected' => 'status-accepted', 'training_only' => 'status-awaiting_payment', 'tentative' => 'status-pending', 'rejected' => 'status-rejected');
                                             $chip_class = isset($chip_classes[$selection->status]) ? $chip_classes[$selection->status] : 'status-pending';
                                         ?>
-                                            <span class="<?php echo $chip_class; ?>" style="margin-right: 3px;"><?php echo esc_html($selection->team . ': ' . ucwords(str_replace('_', ' ', $selection->status))); ?></span>
+                                            <span class="<?php echo $chip_class; ?>" style="margin-right: 3px;"><?php echo esc_html($selection->team . ': ' . ucwords(str_replace('_', ' ', $selection->status)) . TeamOversight_Coach_Portal::offer_suffix(TeamOversight_Coach_Portal::offer_state($season, $selection->status, $selection->offer_accepted))); ?></span>
                                         <?php endforeach; ?>
                                     <?php endif; ?>
                                 </td>
@@ -3610,9 +3721,10 @@ class TeamOversight_Admin {
             // Downgrade any Selected / Training Only verdict for this team
             // to Tentative: the coach still sees the player flagged, but
             // finalisation won't silently recreate the assignment.
+            // A changed verdict clears the player's acceptance of the offer.
             $wpdb->query($wpdb->prepare("
                 UPDATE {$wpdb->prefix}team_trial_selections
-                SET status = 'tentative', updated_date = %s
+                SET status = 'tentative', offer_accepted = 0, offer_accepted_at = NULL, offer_accepted_by = NULL, updated_date = %s
                 WHERE application_id = %d AND team = %s AND status IN ('selected', 'training_only')
             ", current_time('mysql'), $application->id, $team));
 

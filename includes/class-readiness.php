@@ -7,9 +7,10 @@ if (!defined('ABSPATH')) {
 /**
  * Ready to Play checklist.
  *
- * [ready_to_play] renders, for players selected into a team (confirmed
- * playing/training assignment or a coach Selected/Training-Only verdict),
- * the steps to complete before playing, in priority order:
+ * [ready_to_play] renders, for players on a team (an active playing /
+ * training assignment, i.e. after the club's Finalise — never a coach
+ * verdict or a recorded acceptance, which are still the club's working
+ * shortlist), the steps to complete before playing, in priority order:
  *
  *  1. VV membership — external registration, manual "I've done it" tick
  *  2. Playing kit — shirt(s)/shorts/socks from the club shop. Purchases
@@ -21,7 +22,8 @@ if (!defined('ABSPATH')) {
  *     on-track (nothing overdue) counts as ready.
  *
  * The admin Player Readiness page shows the same computation for every
- * selected player in the season.
+ * selected player in the season, coach Selected / Training Only verdicts
+ * included, so the club can plan kit before Finalise.
  */
 class TeamOversight_Readiness {
 
@@ -96,9 +98,12 @@ class TeamOversight_Readiness {
 
     /**
      * Teams the user is playing/training for this season: confirmed
-     * assignments plus coach Selected/Training-Only verdicts.
+     * (active) assignments. $include_verdicts adds coach Selected /
+     * Training-Only verdicts — for the admin Player Readiness page only.
+     * What a player sees about their own selection comes from Finalise's
+     * assignments, never a verdict or an offer they accepted.
      */
-    public static function get_player_teams($user_id, $email, $season) {
+    public static function get_player_teams($user_id, $email, $season, $include_verdicts = false) {
         global $wpdb;
 
         // Team managers count as players: the separate role only exists for
@@ -109,6 +114,10 @@ class TeamOversight_Readiness {
                 AND role IN ('playing_member', 'training_only', 'team_manager')
                 AND (user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s))
         ", $season, $user_id, $email));
+
+        if (!$include_verdicts) {
+            return array_values(array_unique($assigned));
+        }
 
         $selected = $wpdb->get_col($wpdb->prepare("
             SELECT DISTINCT s.team
@@ -200,11 +209,13 @@ class TeamOversight_Readiness {
     }
 
     /**
-     * The full checklist for a player, or null if they aren't selected into
-     * any team this season.
+     * The full checklist for a player, or null if they aren't on any team
+     * this season. $include_verdicts: also count coach Selected / Training
+     * Only verdicts (the admin Player Readiness page) — never for the
+     * player-facing panel.
      */
-    public static function compute($user, $season) {
-        $teams = self::get_player_teams($user->ID, $user->user_email, $season);
+    public static function compute($user, $season, $include_verdicts = false) {
+        $teams = self::get_player_teams($user->ID, $user->user_email, $season, $include_verdicts);
 
         // Coaches/staff who aren't also playing get a reduced checklist:
         // VV registration + fees only (no shirt, no shorts & socks).
@@ -340,7 +351,7 @@ class TeamOversight_Readiness {
 
         if (empty($invoices)) {
             $fees_done = true;
-            $fees_detail = 'Your season fee will appear once the club confirms your team — nothing to pay yet.';
+            $fees_detail = 'Your season fee will appear here once the club issues this season\'s fees — nothing to pay yet.';
         } elseif ($outstanding <= 0) {
             $fees_done = true;
             $fees_detail = 'Paid in full — thank you!';
@@ -402,8 +413,9 @@ class TeamOversight_Readiness {
 
         // Selections for NEXT season happen during the current year (trials
         // run pre-season), so check the current season and the next one and
-        // render a panel for each the player is selected in. Tick submissions
-        // are handled on template_redirect (Post/Redirect/Get).
+        // render a panel for each the player is on a team in — once the club
+        // has finalised it (assignments only; coach verdicts never show here).
+        // Tick submissions are handled on template_redirect (Post/Redirect/Get).
         $current_year = intval(date('Y'));
         $seasons = array((string) $current_year, (string) ($current_year + 1));
 
@@ -794,7 +806,7 @@ class TeamOversight_Readiness {
                             if (!$player) {
                                 continue;
                             }
-                            $checklist = self::compute($player, $player_season);
+                            $checklist = self::compute($player, $player_season, true);
                             if ($checklist === null) {
                                 continue;
                             }
