@@ -806,9 +806,7 @@ class TeamOversight_Coach_Portal {
                                     $season,
                                     isset($member->user_id) ? $member->user_id : 0
                                 ); ?></span>
-                                <span class="cac-actions">
-                                    <?php echo $this->render_attendance_button(isset($member->user_id) ? $member->user_id : 0, $member->email, $active_team, $attendance_date, $season); ?>
-                                </span>
+                                <span class="cac-actions"><?php echo $this->render_attendance_button(isset($member->user_id) ? $member->user_id : 0, $member->email, $active_team, $attendance_date, $season); ?></span>
                             </div>
                         </div>
                     <?php endforeach; ?>
@@ -838,6 +836,25 @@ class TeamOversight_Coach_Portal {
                                 <?php endif; ?>
                                 <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
                             </div>
+                            <?php if (!$this->read_only): ?>
+                            <div class="cac-decide">
+                                <form method="post">
+                                    <input type="hidden" name="coach_action" value="set_selection">
+                                    <input type="hidden" name="application_id" value="<?php echo intval($member->application_id); ?>">
+                                    <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                    <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                                    <label class="cac-verdict-label"><?php echo $active_access['coach'] ? 'My verdict:' : 'Team verdict:'; ?>
+                                        <select name="selection_status" onchange="if (window.murvcCoachVerdict) { window.murvcCoachVerdict(this); } else { this.form.submit(); }">
+                                            <option value="clear">&mdash; None &mdash;</option>
+                                            <?php echo self::render_verdict_options($member->status, isset($member->application_status) && $member->application_status === 'awaiting_payment'); ?>
+                                        </select>
+                                    </label>
+                                    <noscript><button type="submit" class="button button-small">Save</button></noscript>
+                                </form>
+                                <span class="cac-offer"><?php echo $this->render_offer_control($member->application_id, $active_team, $season, $member->status, self::offer_state($season, $member->status, $member->offer_accepted), isset($member->application_status) && $member->application_status === 'awaiting_payment'); ?></span>
+                            </div>
+                            <?php endif; ?>
                             <div class="cac-footer">
                                 <span class="cac-expanders"><?php echo $this->render_card_expanders(
                                     $member->email,
@@ -848,26 +865,7 @@ class TeamOversight_Coach_Portal {
                                     $season,
                                     $member->user_id
                                 ); ?></span>
-                                <span class="cac-actions">
-                                    <?php echo $this->render_attendance_button($member->user_id, $member->email, $active_team, $attendance_date, $season); ?>
-                                    <?php if (!$this->read_only): ?>
-                                    <form method="post">
-                                        <input type="hidden" name="coach_action" value="set_selection">
-                                        <input type="hidden" name="application_id" value="<?php echo intval($member->application_id); ?>">
-                                        <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
-                                        <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
-                                        <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                                        <label class="cac-verdict-label"><?php echo $active_access['coach'] ? 'My verdict:' : 'Team verdict:'; ?>
-                                            <select name="selection_status" onchange="if (window.murvcCoachVerdict) { window.murvcCoachVerdict(this); } else { this.form.submit(); }">
-                                                <option value="clear">&mdash; None &mdash;</option>
-                                                <?php echo self::render_verdict_options($member->status, isset($member->application_status) && $member->application_status === 'awaiting_payment'); ?>
-                                            </select>
-                                        </label>
-                                        <noscript><button type="submit" class="button button-small">Save</button></noscript>
-                                    </form>
-                                    <span class="cac-offer"><?php echo $this->render_offer_control($member->application_id, $active_team, $season, $member->status, self::offer_state($season, $member->status, $member->offer_accepted), isset($member->application_status) && $member->application_status === 'awaiting_payment'); ?></span>
-                                    <?php endif; ?>
-                                </span>
+                                <span class="cac-actions"><?php echo $this->render_attendance_button($member->user_id, $member->email, $active_team, $attendance_date, $season); ?></span>
                             </div>
                         </div>
                     <?php endforeach; ?>
@@ -1008,30 +1006,31 @@ class TeamOversight_Coach_Portal {
                                     &middot; <span title="<?php echo esc_attr($a['teams_selected_names']); ?>">Applied for: <?php echo esc_html($a['teams_selected']); ?></span>
                                 </div>
 
+                                <?php if (!$this->read_only): ?>
+                                <div class="cac-decide">
+                                    <form method="post">
+                                        <input type="hidden" name="coach_action" value="set_selection">
+                                        <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
+                                        <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                                        <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                                        <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                                        <label class="cac-verdict-label"><?php echo $active_access['coach'] ? 'My verdict:' : 'Team verdict:'; ?>
+                                            <select name="selection_status" onchange="if (window.murvcCoachVerdict) { window.murvcCoachVerdict(this); } else { this.form.submit(); }">
+                                                <option value="clear" <?php selected($a['my_status'], ''); ?>>&mdash; None &mdash;</option>
+                                                <?php echo self::render_verdict_options($a['my_status'], !empty($a['payment_pending'])); ?>
+                                            </select>
+                                        </label>
+                                        <noscript><button type="submit" class="button button-small">Save</button></noscript>
+                                    </form>
+                                    <span class="cac-offer"><?php echo $this->render_offer_control($a['id'], $active_team, $season, $a['my_status'], $a['my_accepted'], !empty($a['payment_pending'])); ?></span>
+                                </div>
+                                <?php endif; ?>
+
                                 <div class="cac-footer">
                                     <span class="cac-expanders">
                                         <?php echo $this->render_card_expanders($a['email'], $a['id'], $a['form_data'], $a['notes'], $active_team, $season, $a['user_id']); ?>
                                     </span>
-                                    <span class="cac-actions">
-                                        <?php echo $this->render_attendance_button($a['user_id'], $a['email'], $active_team, $attendance_date, $season); ?>
-                                        <?php if (!$this->read_only): ?>
-                                        <form method="post">
-                                            <input type="hidden" name="coach_action" value="set_selection">
-                                            <input type="hidden" name="application_id" value="<?php echo intval($a['id']); ?>">
-                                            <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
-                                            <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
-                                            <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                                            <label class="cac-verdict-label"><?php echo $active_access['coach'] ? 'My verdict:' : 'Team verdict:'; ?>
-                                                <select name="selection_status" onchange="if (window.murvcCoachVerdict) { window.murvcCoachVerdict(this); } else { this.form.submit(); }">
-                                                    <option value="clear" <?php selected($a['my_status'], ''); ?>>&mdash; None &mdash;</option>
-                                                    <?php echo self::render_verdict_options($a['my_status'], !empty($a['payment_pending'])); ?>
-                                                </select>
-                                            </label>
-                                            <noscript><button type="submit" class="button button-small">Save</button></noscript>
-                                        </form>
-                                        <span class="cac-offer"><?php echo $this->render_offer_control($a['id'], $active_team, $season, $a['my_status'], $a['my_accepted'], !empty($a['payment_pending'])); ?></span>
-                                        <?php endif; ?>
-                                    </span>
+                                    <span class="cac-actions"><?php echo $this->render_attendance_button($a['user_id'], $a['email'], $active_team, $attendance_date, $season); ?></span>
                                 </div>
                             </div>
                             <?php endforeach; ?>
@@ -1699,12 +1698,28 @@ class TeamOversight_Coach_Portal {
             font-weight: 600;
         }
 
+        /* Card controls, two rows: the verdict and offer (editors only),
+           then the expanders with Mark attended at the right end, so the
+           expanders keep to one line and Mark attended sits in the same
+           place on every card. */
+        .cac-decide {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .cac-decide form {
+            margin: 0;
+        }
+
         .cac-footer {
             display: flex;
             flex-wrap: wrap;
             align-items: flex-start;
             gap: 12px;
-            margin-top: 6px;
+            margin-top: 8px;
         }
 
         .cac-expanders {
@@ -2113,20 +2128,41 @@ class TeamOversight_Coach_Portal {
                 width: 100%;
             }
 
-            /* Full-width rows on a phone: a big Mark attended target, then
-               the verdict with room to read the choice. */
-            .coach-portal .cac-actions {
+            /* Full-width rows on a phone: the verdict with room to read the
+               choice, the offer, a big Mark attended target, then the
+               expanders filling each line. */
+            .coach-portal .cac-decide {
                 flex-direction: column;
                 align-items: stretch;
             }
 
+            .coach-portal .cac-decide form {
+                display: flex;
+            }
+
+            .coach-portal .cac-actions {
+                order: -1;
+            }
+
+            .coach-portal .cac-actions:empty {
+                display: none;
+            }
+
             .coach-portal .cac-actions .coach-attend-btn,
-            .coach-portal .cac-actions .coach-offer-btn {
+            .coach-portal .cac-decide .coach-offer-btn {
                 width: 100%;
             }
 
-            .coach-portal .cac-actions form {
-                display: flex;
+            /* Closed expanders only, and only the card's own: an open one
+               keeps its full row, and the note Edit nested in Notes is
+               left alone. */
+            .coach-portal .cac-expanders > details:not([open]) {
+                flex: 1 1 auto;
+            }
+
+            .coach-portal .cac-expanders > .coach-app-details > summary {
+                display: block;
+                text-align: center;
             }
 
             .coach-portal .cac-verdict-label {
