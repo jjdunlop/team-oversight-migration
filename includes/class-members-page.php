@@ -134,7 +134,7 @@ class TeamOversight_Members_Page {
 
             <details class="import-export-section" style="margin: 15px 0; padding: 10px 15px; background: #fff; border: 1px solid #ccd0d4;">
                 <summary style="cursor: pointer; font-weight: 600;">Seed memberships from this year's purchases</summary>
-                <p class="description">Converts this calendar year's qualifying purchases into membership grants with real expiry dates (Full = 12 months, Associate = 3 months from purchase), using the same category rules as the stop-gap role snippet. Idempotent — already-seeded purchases are skipped. <strong>Note:</strong> after applying, members whose seeded grants have already expired (e.g. a 3-month associate term bought in February) will lose their tier role on the next sync — that is the intended lapse behaviour.</p>
+                <p class="description">Converts this calendar year's qualifying paid (processing/completed) purchases into membership grants with real expiry dates (Full = 12 months, Associate = 3 months from purchase), using the same category rules as the stop-gap role snippet. Failed, cancelled and refunded orders and refund records never count. Idempotent — already-seeded purchases are skipped. <strong>Note:</strong> after applying, members whose seeded grants have already expired (e.g. a 3-month associate term bought in February) will lose their tier role on the next sync — that is the intended lapse behaviour.</p>
                 <form method="post" style="display: inline-block; margin-right: 10px;">
                     <input type="submit" class="button" value="Dry Run (report only)">
                     <input type="hidden" name="action" value="seed_memberships_dry">
@@ -149,13 +149,15 @@ class TeamOversight_Members_Page {
 
             <details class="import-export-section" style="margin: 15px 0; padding: 10px 15px; background: #fff; border: 1px solid #ccd0d4;">
                 <summary style="cursor: pointer; font-weight: 600;">Re-scan this year's paid orders</summary>
-                <p class="description">Replays every paid (processing/completed) order from this calendar year through the normal membership-grant logic using the <strong>current</strong> product settings and category rules. Use this after adding membership attributes to a product — orders paid before the attributes were set never granted anything. Idempotent: purchases that already granted are skipped, and grants are dated from when the order was paid.</p>
+                <p class="description">Replays every paid (processing/completed) order from this calendar year through the normal membership-grant logic using the <strong>current</strong> product settings and category rules. Use this after adding membership attributes to a product — orders paid before the attributes were set never granted anything. Idempotent: purchases that already granted are skipped, and grants are dated from when the order was paid. It works through the orders in batches; if it stops partway to stay within the server's limits, a <em>Continue re-scan</em> button carries on from where it stopped.</p>
                 <form method="post" onsubmit="return confirm('Re-scan all of this year\'s paid orders? New grants are created for any qualifying purchase that has none, dated from payment.');">
                     <input type="submit" class="button button-primary" value="Re-scan Paid Orders">
                     <input type="hidden" name="action" value="rescan_orders">
                     <?php wp_nonce_field('rescan_orders', 'members_nonce'); ?>
                 </form>
             </details>
+
+            <?php $this->render_grants_to_review(); ?>
 
             <div class="invoices-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
                 <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
@@ -393,6 +395,168 @@ class TeamOversight_Members_Page {
             });
             </script>
         </div>
+        <?php
+    }
+
+    // ------------------------------------------------------------------
+    // Grants to review (refunded, cancelled or unpaid orders)
+    // ------------------------------------------------------------------
+
+    /**
+     * Membership grants whose order is no longer (or never was) paid:
+     * refunded, cancelled, failed or otherwise not processing/completed,
+     * grants on refund records (a second grant on top of the order's own,
+     * dated from the refund, so it usually runs past it), and
+     * grants whose line a later refund covered — a refund of the product's
+     * line, or of an amount with no lines (the same rule the refund hook
+     * flags by). Read-only: a refund or cancellation never ends a
+     * membership by itself — the club decides. Returns array(rows (at most
+     * $limit, latest expiry first), counts by reason => array(grants, active)).
+     */
+    private function get_grants_to_review($limit = 300) {
+        global $wpdb;
+
+        $p = $wpdb->prefix;
+        // Per refunded order: the products its refunds covered, 0 standing
+        // for a refund with no product lines.
+        $from = "
+            FROM {$p}team_memberships m
+            JOIN {$p}wc_order_stats os ON os.order_id = m.order_id
+            LEFT JOIN (
+                SELECT r.parent_id, GROUP_CONCAT(DISTINCT COALESCE(opl.product_id, 0)) AS products
+                FROM {$p}wc_order_stats r
+                LEFT JOIN {$p}wc_order_product_lookup opl ON opl.order_id = r.order_id
+                WHERE r.parent_id > 0
+                GROUP BY r.parent_id
+            ) rf ON rf.parent_id = m.order_id
+                AND (FIND_IN_SET(COALESCE(m.product_id, 0), rf.products) OR FIND_IN_SET('0', rf.products))
+            LEFT JOIN {$wpdb->users} u ON u.ID = m.user_id
+            WHERE m.order_id > 0
+                AND (os.parent_id > 0 OR os.status NOT IN ('wc-processing', 'wc-completed') OR rf.parent_id IS NOT NULL)
+        ";
+        $reason = "
+            CASE
+                WHEN os.parent_id > 0 THEN 'refund_record'
+                WHEN os.status = 'wc-refunded' THEN 'refunded'
+                WHEN os.status = 'wc-cancelled' THEN 'cancelled'
+                WHEN os.status = 'wc-failed' THEN 'failed'
+                WHEN os.status IN ('wc-processing', 'wc-completed') THEN 'line_refunded'
+                ELSE 'unpaid'
+            END
+        ";
+        $today = current_time('Y-m-d');
+
+        $counts = array();
+        $summary = $wpdb->get_results($wpdb->prepare("
+            SELECT {$reason} AS reason, COUNT(*) AS grants,
+                SUM(m.start_date <= %s AND m.end_date >= %s) AS active,
+                SUM(m.end_date < %s) AS expired
+            {$from}
+            GROUP BY reason
+        ", $today, $today, $today));
+        foreach ((array) $summary as $row) {
+            $counts[$row->reason] = array('grants' => intval($row->grants), 'active' => intval($row->active), 'expired' => intval($row->expired));
+        }
+        if (empty($counts)) {
+            return array(array(), array());
+        }
+
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT m.id, m.user_id, m.tier, m.start_date, m.end_date, m.source, m.order_id,
+                {$reason} AS reason, u.display_name
+            {$from}
+            ORDER BY m.end_date DESC, m.id DESC
+            LIMIT %d
+        ", $limit));
+
+        return array((array) $rows, $counts);
+    }
+
+    private function render_grants_to_review() {
+        list($rows, $counts) = $this->get_grants_to_review();
+        if (empty($counts)) {
+            return;
+        }
+
+        $labels = array(
+            'refunded' => 'order refunded',
+            'line_refunded' => 'membership line refunded',
+            'cancelled' => 'order cancelled',
+            'failed' => 'payment failed',
+            'unpaid' => 'order not paid',
+            'refund_record' => 'refund record (a second grant, dated from the refund)',
+        );
+        $total = 0;
+        $active = 0;
+        $expired_total = 0;
+        $parts = array();
+        foreach ($labels as $key => $label) {
+            if (empty($counts[$key])) {
+                continue;
+            }
+            $total += $counts[$key]['grants'];
+            $active += $counts[$key]['active'];
+            $expired_total += $counts[$key]['expired'];
+            $parts[] = $counts[$key]['grants'] . ' ' . $label;
+        }
+        $tiers = TeamOversight_Memberships::get_tiers();
+        $today = current_time('Y-m-d');
+        // Grants not yet expired show first (the query orders by expiry,
+        // latest first); expired ones fold away behind a count, so a new
+        // refund isn't lost among grants that have already run out.
+        $current = array();
+        $expired = array();
+        foreach ($rows as $row) {
+            if ($row->end_date >= $today) {
+                $current[] = $row;
+            } else {
+                $expired[] = $row;
+            }
+        }
+        ?>
+        <details class="import-export-section" style="margin: 15px 0; padding: 10px 15px; background: #fff; border: 1px solid #ccd0d4;">
+            <summary style="cursor: pointer; font-weight: 600;">Grants to review — from refunded, cancelled or unpaid orders (<?php echo intval($total - $expired_total); ?> current, <?php echo intval($expired_total); ?> expired)</summary>
+            <p class="description">These membership grants came from orders that were later refunded or cancelled, or were never paid — including any an earlier purchase-history seeding made from failed orders or refund records. A grant on a refund record is a second grant on top of the original order's, dated from the refund, so it usually runs on past the original. Nothing has been changed: a refund or cancellation never ends a membership by itself. Decide with the club whether each should stand. <?php echo intval($active); ?> of them are still active today.</p>
+            <p class="description">This list is read-only and never clears itself: a grant stays listed whatever the club decides (one that is ended moves to the expired list). New refunds and cancellations are also logged on Club Membership → Logs.</p>
+            <p><?php echo esc_html(implode('; ', $parts)); ?>.</p>
+            <?php if ($current): ?>
+                <?php $this->render_grants_to_review_table($current, $labels, $tiers, $today); ?>
+            <?php else: ?>
+                <p>None of them is current.</p>
+            <?php endif; ?>
+            <?php if ($expired_total > 0): ?>
+                <details style="margin-top: 10px;">
+                    <summary style="cursor: pointer;">Expired grants (<?php echo intval($expired_total); ?>)</summary>
+                    <?php if ($expired) { $this->render_grants_to_review_table($expired, $labels, $tiers, $today); } ?>
+                </details>
+            <?php endif; ?>
+            <?php if ($total > count($rows)): ?>
+                <p class="description">Showing the first <?php echo intval(count($rows)); ?> (latest expiry first).</p>
+            <?php endif; ?>
+        </details>
+        <?php
+    }
+
+    private function render_grants_to_review_table($rows, $labels, $tiers, $today) {
+        ?>
+        <table class="wp-list-table widefat striped" style="max-width: 1100px;">
+            <thead>
+                <tr><th>Member</th><th>Tier</th><th>Period</th><th>Source</th><th>Order</th><th>Why it's listed</th><th>Active today</th></tr>
+            </thead>
+            <tbody>
+                <?php foreach ($rows as $row): ?>
+                    <tr>
+                        <td><a href="<?php echo esc_url(TeamOversight_Member_Lookup::profile_url($row->user_id)); ?>"><?php echo esc_html($row->display_name ? $row->display_name : 'user #' . intval($row->user_id)); ?></a></td>
+                        <td><?php echo esc_html(isset($tiers[$row->tier]) ? $tiers[$row->tier] : $row->tier); ?></td>
+                        <td><?php echo esc_html($row->start_date . ' → ' . ($row->end_date >= TeamOversight_Memberships::PERMANENT_FROM ? 'no expiry' : $row->end_date)); ?></td>
+                        <td><?php echo esc_html($row->source); ?></td>
+                        <td>#<?php echo intval($row->order_id); ?></td>
+                        <td><?php echo esc_html(isset($labels[$row->reason]) ? $labels[$row->reason] : $row->reason); ?></td>
+                        <td><?php echo ($row->start_date <= $today && $row->end_date >= $today) ? 'Yes' : ''; ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
         <?php
     }
 
@@ -663,12 +827,14 @@ class TeamOversight_Members_Page {
         fputcsv($output, array('Name', 'Email', 'Age (at range end)', 'Gender', 'MUS Category', 'Highest Tier In Period', 'Membership Periods', 'Current Status'));
 
         foreach ($history as $h) {
+            // Text from profiles goes through csv_cell() so a name can't
+            // run as a spreadsheet formula.
             fputcsv($output, array(
-                $h['name'],
-                $h['email'],
+                TeamOversight_Exports::csv_cell($h['name']),
+                TeamOversight_Exports::csv_cell($h['email']),
                 $h['age'],
-                $h['gender'],
-                $h['mus_category'],
+                TeamOversight_Exports::csv_cell($h['gender']),
+                TeamOversight_Exports::csv_cell($h['mus_category']),
                 $h['highest_label'],
                 implode('; ', $h['periods']),
                 $h['current_label'],
@@ -876,7 +1042,8 @@ class TeamOversight_Members_Page {
         fputcsv($output, array_merge(array('MUS Category'), $genders, array('Total')));
 
         foreach ($rows as $label => $counts) {
-            $line = array($label);
+            // An unrecognised profile category keeps its raw label.
+            $line = array(TeamOversight_Exports::csv_cell($label));
             foreach ($genders as $g) {
                 $line[] = $counts[$g];
             }
@@ -1170,7 +1337,7 @@ class TeamOversight_Members_Page {
             echo '<div class="notice notice-error"><p>Invalid tier.</p></div>';
             return;
         }
-        if (!$end_date || strtotime($end_date) < strtotime('today')) {
+        if (!$end_date || strtotime($end_date) < strtotime(current_time('Y-m-d'))) {
             echo '<div class="notice notice-error"><p>Valid-until date must be today or later.</p></div>';
             return;
         }
@@ -1188,6 +1355,23 @@ class TeamOversight_Members_Page {
         $user = get_userdata($user_id);
         if (!$user) {
             echo '<div class="notice notice-error"><p>User not found.</p></div>';
+            return;
+        }
+
+        // Someone on a current or future team would be re-granted Full
+        // Membership straight away (end of this request, and daily), so a
+        // revoke would only look like it worked: refuse and say why.
+        $blockers = $this->memberships->get_revoke_blockers($user_id);
+        if (!empty($blockers)) {
+            $teams = array();
+            foreach ($blockers as $b) {
+                $teams[] = $b->team . ' (' . $b->season . ')';
+            }
+            $last = end($blockers);
+            echo '<div class="notice notice-error"><p>Membership <strong>not</strong> revoked: ' . esc_html($user->display_name)
+                . ' is on ' . esc_html(implode(', ', $teams)) . '. Team members are Full Members until 1 April after their season (here '
+                . esc_html(date('j M Y', strtotime(TeamOversight_Memberships::assignment_grant_end($last->season))))
+                . '), so the membership would come straight back. Take them off the team on VVL Oversight &rarr; Team Assignments first, then revoke.</p></div>';
             return;
         }
 
@@ -1212,15 +1396,35 @@ class TeamOversight_Members_Page {
     }
 
     private function action_rescan() {
-        $report = $this->memberships->rescan_paid_orders();
+        // A continued run passes back where the last one stopped, plus its
+        // running totals for the notice.
+        $after = isset($_POST['rescan_after']) ? max(0, intval($_POST['rescan_after'])) : 0;
+        $report = $this->memberships->rescan_paid_orders($after);
+        $checked = intval($report['orders_checked']) + (isset($_POST['rescan_checked']) ? max(0, intval($_POST['rescan_checked'])) : 0);
+        $created = intval($report['grants_created']) + (isset($_POST['rescan_created']) ? max(0, intval($_POST['rescan_created'])) : 0);
 
-        echo '<div class="notice notice-success"><p>';
+        echo '<div class="notice notice-' . ($report['complete'] ? 'success' : 'warning') . '"><p>';
         echo '<strong>Order re-scan (' . esc_html($report['year']) . '):</strong> ';
-        echo intval($report['orders_checked']) . ' paid orders checked, ' . intval($report['grants_created']) . ' new membership grants created.';
-        if (intval($report['grants_created']) === 0) {
-            echo ' Every qualifying purchase already has its grant.';
+        echo $checked . ' paid orders checked, ' . $created . ' new membership grants created.';
+        if ($report['complete']) {
+            if ($created === 0) {
+                echo ' Every qualifying purchase already has its grant.';
+            }
+            echo '</p></div>';
+            return;
         }
-        echo '</p></div>';
+        echo ' <strong>Not finished yet</strong> — it stopped after order #' . intval($report['last_order_id']) . ' to stay within the server\'s limits.</p>';
+        ?>
+        <form method="post" style="margin: 0 0 10px;">
+            <input type="hidden" name="action" value="rescan_orders">
+            <input type="hidden" name="rescan_after" value="<?php echo intval($report['last_order_id']); ?>">
+            <input type="hidden" name="rescan_checked" value="<?php echo intval($checked); ?>">
+            <input type="hidden" name="rescan_created" value="<?php echo intval($created); ?>">
+            <?php wp_nonce_field('rescan_orders', 'members_nonce'); ?>
+            <input type="submit" class="button button-primary" value="Continue re-scan">
+        </form>
+        </div>
+        <?php
     }
 
     private function action_save_rules() {
@@ -1265,19 +1469,22 @@ class TeamOversight_Members_Page {
         ));
 
         foreach ($members as $m) {
+            // Free text goes through csv_cell() so it can't run as a
+            // spreadsheet formula; money (credits are negative), mobile
+            // and age are written as they are.
             fputcsv($output, array(
-                $m['name'],
-                $m['email'],
+                TeamOversight_Exports::csv_cell($m['name']),
+                TeamOversight_Exports::csv_cell($m['email']),
                 $m['mobile'],
                 $m['age'],
-                $m['gender'],
-                $m['mus_category'],
+                TeamOversight_Exports::csv_cell($m['gender']),
+                TeamOversight_Exports::csv_cell($m['mus_category']),
                 $m['status_label'] . ($m['role_only'] ? ' (role only)' : ''),
                 $m['status_until'],
-                $m['team_list'],
+                TeamOversight_Exports::csv_cell($m['team_list']),
                 $m['invoiced'] > 0 ? number_format($m['invoiced'], 2, '.', '') : '',
                 $m['invoiced'] > 0 ? number_format($m['outstanding'], 2, '.', '') : '',
-                $m['accreditation'],
+                TeamOversight_Exports::csv_cell($m['accreditation']),
                 $m['confirmed'] ? 'Yes' : 'No',
             ));
         }
@@ -1307,8 +1514,11 @@ class TeamOversight_Members_Page {
 
         $caps_key = $wpdb->prefix . 'capabilities';
 
+        // Active grants are judged on the site's date, not the database
+        // clock's (grants are dated in site time).
+        $today = current_time('Y-m-d');
         $where = '';
-        $params = array($season, $season);
+        $params = array($today, $today, $season, $season);
         if (!$show_all) {
             $where = "
                 WHERE caps.meta_value LIKE %s
@@ -1347,7 +1557,7 @@ class TeamOversight_Members_Page {
             LEFT JOIN (
                 SELECT user_id, GROUP_CONCAT(CONCAT(tier, ':', end_date) ORDER BY end_date DESC SEPARATOR ',') AS grants
                 FROM {$wpdb->prefix}team_memberships
-                WHERE start_date <= CURDATE() AND end_date >= CURDATE()
+                WHERE start_date <= %s AND end_date >= %s
                 GROUP BY user_id
             ) mem ON mem.user_id = u.ID
             LEFT JOIN (

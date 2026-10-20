@@ -286,12 +286,15 @@ class TeamOversight_Member_Lookup {
             return array();
         }
 
+        // Active on the site's date (grants are dated in site time; the
+        // database clock may be UTC).
+        $today = current_time('Y-m-d');
         $placeholders = implode(',', array_fill(0, count($user_ids), '%d'));
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT user_id, tier FROM {$wpdb->prefix}team_memberships
             WHERE user_id IN ({$placeholders})
-                AND start_date <= CURDATE() AND end_date >= CURDATE()
-        ", $user_ids));
+                AND start_date <= %s AND end_date >= %s
+        ", array_merge(array_values($user_ids), array($today, $today))));
 
         $rank = array(
             TeamOversight_Memberships::TIER_ASSOCIATE => 1,
@@ -452,7 +455,7 @@ class TeamOversight_Member_Lookup {
         }
 
         $labels = TeamOversight_Memberships::get_tiers();
-        $today = date('Y-m-d');
+        $today = current_time('Y-m-d');
         ?>
         <table class="murvc-list">
             <?php foreach ($grants as $grant):

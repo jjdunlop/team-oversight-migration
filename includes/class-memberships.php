@@ -35,6 +35,13 @@ class TeamOversight_Memberships {
     const CATEGORY_RULES_OPTION = 'team_oversight_membership_category_rules';
     const CRON_HOOK = 'team_oversight_membership_sync';
 
+    // Order meta: ids of the grants already flagged after that order was
+    // refunded or cancelled, so each grant is flagged once.
+    const REVERSAL_FLAG_META = '_murvc_membership_reversal_flagged';
+
+    // Orders per page for the paid-order re-scan.
+    const RESCAN_BATCH = 200;
+
     private static $hooks_registered = false;
 
     public function __construct() {
@@ -57,6 +64,13 @@ class TeamOversight_Memberships {
         // Grant memberships when orders are paid.
         add_action('woocommerce_order_status_processing', array($this, 'handle_order'));
         add_action('woocommerce_order_status_completed', array($this, 'handle_order'));
+
+        // A refund or cancellation never ends a grant by itself (that is the
+        // club's call): it flags the grant in the membership log, and the
+        // Members page lists it under Grants to review.
+        add_action('woocommerce_order_status_refunded', array($this, 'flag_refunded_order'));
+        add_action('woocommerce_order_status_cancelled', array($this, 'flag_cancelled_order'));
+        add_action('woocommerce_order_refunded', array($this, 'flag_order_refund'), 10, 2);
 
         // Tier/term fields on the product edit screen.
         add_action('woocommerce_product_options_general_product_data', array($this, 'render_product_fields'));
@@ -313,27 +327,185 @@ class TeamOversight_Memberships {
      * normal grant logic, using the CURRENT product/category configuration.
      * Catches orders paid before a product's membership attributes were set.
      * Idempotent: items that already granted are skipped by the per-item dedupe.
+     *
+     * Works through the orders a page of RESCAN_BATCH ids at a time (oldest
+     * first), dropping WordPress's in-request cache after each page so memory
+     * stays flat however many orders the year has. It stops once
+     * $time_budget seconds have passed: the report then says
+     * 'complete' => false, and passing its 'last_order_id' back as
+     * $after_order_id carries on from there.
      */
-    public function rescan_paid_orders() {
+    public function rescan_paid_orders($after_order_id = 0, $time_budget = 20) {
         $year = wp_date('Y');
+        $after_order_id = max(0, intval($after_order_id));
+        $started = microtime(true);
 
-        // wc_get_orders works under both legacy (posts) and HPOS storage.
-        $order_ids = function_exists('wc_get_orders') ? wc_get_orders(array(
-            'type' => 'shop_order', // orders only — never refund records
-            'status' => array('processing', 'completed'),
-            'date_created' => $year . '-01-01...' . $year . '-12-31',
-            'return' => 'ids',
-            'limit' => -1,
-            'orderby' => 'ID',
-            'order' => 'ASC',
-        )) : array();
+        $report = array(
+            'year' => $year,
+            'orders_checked' => 0,
+            'grants_created' => 0,
+            'complete' => true,
+            'last_order_id' => $after_order_id,
+        );
+        if (!function_exists('wc_get_orders')) {
+            return $report;
+        }
 
-        $report = array('year' => $year, 'orders_checked' => 0, 'grants_created' => 0);
-        foreach ($order_ids as $order_id) {
-            $report['orders_checked']++;
-            $report['grants_created'] += (int) $this->handle_order(intval($order_id));
+        for ($page = 1; ; $page++) {
+            // wc_get_orders works under both legacy (posts) and HPOS storage.
+            $order_ids = wc_get_orders(array(
+                'type' => 'shop_order', // orders only — never refund records
+                'status' => array('processing', 'completed'),
+                'date_created' => $year . '-01-01...' . $year . '-12-31',
+                'return' => 'ids',
+                'limit' => self::RESCAN_BATCH,
+                'page' => $page,
+                'orderby' => 'ID',
+                'order' => 'ASC',
+            ));
+            if (empty($order_ids)) {
+                break;
+            }
+
+            $processed = 0;
+            foreach ($order_ids as $order_id) {
+                $order_id = intval($order_id);
+                if ($order_id <= $after_order_id) {
+                    continue; // done by an earlier run
+                }
+                $report['orders_checked']++;
+                $report['grants_created'] += (int) $this->handle_order($order_id);
+                $report['last_order_id'] = $order_id;
+                $processed++;
+            }
+            if ($processed) {
+                self::flush_runtime_cache();
+            }
+
+            if (count($order_ids) < self::RESCAN_BATCH) {
+                break;
+            }
+            // Out of time: stop, but only once this run has done something,
+            // so every continued run moves forward.
+            if ($time_budget > 0 && $report['orders_checked'] > 0 && (microtime(true) - $started) >= $time_budget) {
+                $report['complete'] = false;
+                break;
+            }
         }
         return $report;
+    }
+
+    /**
+     * Drop WordPress's in-request object cache, which otherwise keeps every
+     * order loaded until the request ends. Never flushes a persistent
+     * object cache.
+     */
+    private static function flush_runtime_cache() {
+        if (function_exists('wp_cache_supports') && wp_cache_supports('flush_runtime')) {
+            wp_cache_flush_runtime();
+        } elseif (!wp_using_ext_object_cache()) {
+            wp_cache_flush();
+        }
+    }
+
+    public function flag_refunded_order($order_id) {
+        return $this->flag_reversed_grants($order_id, 'refunded');
+    }
+
+    public function flag_cancelled_order($order_id) {
+        return $this->flag_reversed_grants($order_id, 'cancelled');
+    }
+
+    public function flag_order_refund($order_id, $refund_id = 0) {
+        return $this->flag_reversed_grants($order_id, 'refund', $refund_id);
+    }
+
+    /**
+     * After an order is refunded or cancelled, log each membership grant it
+     * gave (membership_order_refunded) so an admin can decide whether it
+     * stands. The grant itself is never changed here. A partial refund
+     * only concerns the grants whose line it refunds; a refund of an
+     * amount with no lines can't be pinned to a line, so it flags them all.
+     * Each grant is flagged once per order (order meta), so the status
+     * change and the refund hook of one full refund log it once.
+     * Returns how many grants were flagged.
+     */
+    public function flag_reversed_grants($order_id, $reason, $refund_id = 0) {
+        global $wpdb;
+
+        if (!function_exists('wc_get_order')) {
+            return 0;
+        }
+        $order = wc_get_order($order_id);
+        if (!$order || !is_a($order, 'WC_Order')) {
+            return 0;
+        }
+
+        $item_ids = array_map('intval', array_keys($order->get_items()));
+        $refund_amount = null;
+        if ($refund_id) {
+            $refund = wc_get_order($refund_id);
+            if ($refund) {
+                $refund_amount = abs((float) $refund->get_amount());
+                $refunded_items = array();
+                foreach ($refund->get_items() as $refund_item) {
+                    $refunded_items[] = intval($refund_item->get_meta('_refunded_item_id'));
+                }
+                $refunded_items = array_filter($refunded_items);
+                if (!empty($refunded_items)) {
+                    $item_ids = array_values(array_intersect($item_ids, $refunded_items));
+                }
+            }
+        }
+        if (empty($item_ids)) {
+            return 0;
+        }
+
+        $in = implode(',', array_fill(0, count($item_ids), '%d'));
+        $grants = $wpdb->get_results($wpdb->prepare("
+            SELECT id, user_id, tier, end_date FROM {$wpdb->prefix}team_memberships
+            WHERE order_item_id IN ($in)
+            ORDER BY id
+        ", $item_ids));
+        if (empty($grants)) {
+            return 0;
+        }
+
+        $flagged = $order->get_meta(self::REVERSAL_FLAG_META, true);
+        $flagged = is_array($flagged) ? array_map('intval', $flagged) : array();
+
+        if ($reason === 'refund') {
+            $what = 'Order #' . intval($order_id) . ' had a refund' . ($refund_amount !== null ? ' of $' . number_format($refund_amount, 2) : '');
+        } elseif ($reason === 'cancelled') {
+            $what = 'Order #' . intval($order_id) . ' was cancelled after payment';
+        } else {
+            $what = 'Order #' . intval($order_id) . ' was refunded ($' . number_format((float) $order->get_total_refunded(), 2) . ')';
+        }
+
+        $tiers = self::get_tiers();
+        $new = 0;
+        foreach ($grants as $grant) {
+            if (in_array(intval($grant->id), $flagged, true)) {
+                continue;
+            }
+            $flagged[] = intval($grant->id);
+            $new++;
+            if (class_exists('TeamOversight_Log')) {
+                $label = isset($tiers[$grant->tier]) ? $tiers[$grant->tier] : $grant->tier;
+                $until = ($grant->end_date >= self::PERMANENT_FROM) ? 'no expiry' : $grant->end_date;
+                TeamOversight_Log::add(
+                    'membership_order_refunded',
+                    $what . ' — it granted ' . $label . ' until ' . $until . ' (grant #' . intval($grant->id) . '). The membership is unchanged: review it under Grants to review on the Members page.',
+                    array('user_id' => intval($grant->user_id), 'amount' => $refund_amount)
+                );
+            }
+        }
+
+        if ($new) {
+            $order->update_meta_data(self::REVERSAL_FLAG_META, $flagged);
+            $order->save_meta_data();
+        }
+        return $new;
     }
 
     private function grant_exists_for_order_item($order_item_id) {
@@ -477,10 +649,10 @@ class TeamOversight_Memberships {
     public static function extend_assignment_grants_to_april() {
         global $wpdb;
         $table = $wpdb->prefix . 'team_memberships';
-        $grants = $wpdb->get_results("
+        $grants = $wpdb->get_results($wpdb->prepare("
             SELECT id, user_id, end_date FROM $table
-            WHERE source = 'assignment' AND MONTH(end_date) = 12 AND DAY(end_date) = 31 AND end_date >= CURDATE()
-        ");
+            WHERE source = 'assignment' AND MONTH(end_date) = 12 AND DAY(end_date) = 31 AND end_date >= %s
+        ", current_time('Y-m-d')));
         foreach ($grants as $g) {
             $new_end = self::assignment_grant_end(substr($g->end_date, 0, 4));
             $wpdb->update($table, array('end_date' => $new_end), array('id' => $g->id), array('%s'), array('%d'));
@@ -525,19 +697,43 @@ class TeamOversight_Memberships {
     }
 
     /**
+     * Active team assignments that would give the person Full Membership
+     * straight back after a revoke: sync_assignment_grants() re-grants for
+     * every active assignment in the current season or later (at the end of
+     * the admin request, and daily). Matched the way that sync matches a
+     * row to an account: its user_id, or its email when it has none.
+     * Returns rows of (team, season), latest season last.
+     */
+    public function get_revoke_blockers($user_id) {
+        global $wpdb;
+
+        $user = get_userdata($user_id);
+        if (!$user) {
+            return array();
+        }
+        return $wpdb->get_results($wpdb->prepare("
+            SELECT DISTINCT team, season FROM {$wpdb->prefix}team_assignments
+            WHERE is_active = 1 AND season >= %s
+                AND (user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s))
+            ORDER BY season, team
+        ", wp_date('Y'), intval($user_id), $user->user_email));
+    }
+
+    /**
      * End all active grants for a user (sets end_date to yesterday) and
-     * strips their tier roles.
+     * strips their tier roles. Dates are the site's, like the grants'.
      */
     public function revoke_all($user_id) {
         global $wpdb;
 
         $prev_tier = $this->get_active_tier($user_id);
 
+        $today = current_time('Y-m-d');
         $wpdb->query($wpdb->prepare("
             UPDATE {$wpdb->prefix}team_memberships
-            SET end_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)
-            WHERE user_id = %d AND end_date >= CURDATE()
-        ", $user_id));
+            SET end_date = %s
+            WHERE user_id = %d AND end_date >= %s
+        ", date('Y-m-d', strtotime($today . ' -1 day')), $user_id, $today));
 
         if (class_exists('TeamOversight_Log')) {
             $tiers = self::get_tiers();
@@ -559,15 +755,17 @@ class TeamOversight_Memberships {
     }
 
     /**
-     * Highest active tier from the ledger, or null.
+     * Highest active tier from the ledger, or null. "Today" is the site's
+     * date (grants are dated in site time; the database clock may be UTC).
      */
     public function get_active_tier($user_id) {
         global $wpdb;
 
+        $today = current_time('Y-m-d');
         $tiers = $wpdb->get_col($wpdb->prepare("
             SELECT DISTINCT tier FROM {$wpdb->prefix}team_memberships
-            WHERE user_id = %d AND start_date <= CURDATE() AND end_date >= CURDATE()
-        ", $user_id));
+            WHERE user_id = %d AND start_date <= %s AND end_date >= %s
+        ", $user_id, $today, $today));
 
         if (in_array(self::TIER_LIFE, $tiers, true)) {
             return self::TIER_LIFE;
@@ -706,6 +904,12 @@ class TeamOversight_Memberships {
      *   ASSOCIATE (3 months): Programs - Training Fees, Reds Social Competition,
      *     Events/Tournaments (except Trivia)
      *
+     * Only paid orders count: processing/completed, never refund records
+     * (the analytics lookup also holds failed, cancelled and refunded
+     * orders, and refunds as rows of their own). Grants an earlier run made
+     * from such orders are left alone; the Members page lists them under
+     * Grants to review.
+     *
      * Idempotent: order items that already have a grant are skipped.
      * Returns a report array; pass $apply = false for a dry run.
      */
@@ -728,6 +932,8 @@ class TeamOversight_Memberships {
                 MAX(oi.order_item_name) AS order_item_name,
                 GROUP_CONCAT(DISTINCT t.name SEPARATOR '||') AS categories
             FROM {$wpdb->prefix}wc_order_product_lookup opl
+            JOIN {$wpdb->prefix}wc_order_stats os ON os.order_id = opl.order_id
+                AND os.parent_id = 0 AND os.status IN ('wc-processing', 'wc-completed')
             JOIN {$wpdb->prefix}woocommerce_order_items oi ON oi.order_item_id = opl.order_item_id
             JOIN {$wpdb->prefix}wc_customer_lookup cl ON cl.customer_id = opl.customer_id
             LEFT JOIN {$wpdb->term_relationships} tr ON tr.object_id = opl.product_id

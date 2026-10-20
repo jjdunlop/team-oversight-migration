@@ -199,16 +199,24 @@ class TeamOversight_Programs {
         );
     }
 
-    /** Count the spots currently marked present for a session. */
-    private function checked_in_count($program, $program_key, $session_label) {
-        $marked = self::get_attendance($program_key, $session_label);
-        $count = 0;
-        foreach (self::get_attendees($program['product_id'], $session_label) as $attendee) {
-            if (!empty($marked[$attendee['order_id']]['attended'])) {
-                $count += $attendee['qty'];
-            }
+    /**
+     * The marks for a session as the roster JS reads them, plus a short
+     * hash of them so a poll can ask "anything changed since?" cheaply.
+     * One indexed query; the bookings query never runs here — the page
+     * works out how many are here from each card's booking quantity.
+     */
+    private function marked_state($program_key, $session_label) {
+        $state = array();
+        foreach (self::get_attendance($program_key, $session_label) as $order_id => $entry) {
+            $state[$order_id] = array(
+                'attended' => (bool) $entry['attended'],
+                'note' => ($entry['attended'] && $entry['by'])
+                    ? 'Marked by ' . $entry['by'] . ($entry['at'] ? ' at ' . $entry['at'] : '')
+                    : '',
+            );
         }
-        return $count;
+        ksort($state);
+        return array($state, md5((string) wp_json_encode($state)));
     }
 
     public function ajax_mark_attendance() {
@@ -225,31 +233,31 @@ class TeamOversight_Programs {
         $marked = self::get_attendance($ctx['key'], $ctx['session']);
         $entry = isset($marked[intval($_POST['order_id'])]) ? $marked[intval($_POST['order_id'])] : null;
 
+        // The "here" count is worked out on the page from the cards.
         wp_send_json_success(array(
             'attended' => (bool) ($entry && $entry['attended']),
             'note' => ($entry && $entry['attended'] && $entry['by'])
                 ? 'Marked by ' . $entry['by'] . ($entry['at'] ? ' at ' . $entry['at'] : '')
                 : '',
-            'checked_in' => $this->checked_in_count($ctx['program'], $ctx['key'], $ctx['session']),
         ));
     }
 
+    /**
+     * The 20-second poll: only the marks, and nothing at all but the hash
+     * when they haven't changed since the hash the page sent ('since').
+     */
     public function ajax_attendance_state() {
         $ctx = $this->ajax_context();
 
-        $state = array();
-        foreach (self::get_attendance($ctx['key'], $ctx['session']) as $order_id => $entry) {
-            $state[$order_id] = array(
-                'attended' => (bool) $entry['attended'],
-                'note' => ($entry['attended'] && $entry['by'])
-                    ? 'Marked by ' . $entry['by'] . ($entry['at'] ? ' at ' . $entry['at'] : '')
-                    : '',
-            );
+        list($state, $hash) = $this->marked_state($ctx['key'], $ctx['session']);
+        $since = isset($_POST['since']) ? sanitize_text_field(wp_unslash($_POST['since'])) : '';
+        if ($since !== '' && hash_equals($hash, $since)) {
+            wp_send_json_success(array('unchanged' => true, 'hash' => $hash));
         }
 
         wp_send_json_success(array(
-            'marked' => $state,
-            'checked_in' => $this->checked_in_count($ctx['program'], $ctx['key'], $ctx['session']),
+            'marked' => (object) $state,
+            'hash' => $hash,
         ));
     }
 
@@ -408,6 +416,13 @@ class TeamOversight_Programs {
             GROUP BY oi.order_id
             ORDER BY MAX(cl.last_name), MAX(cl.first_name)
         ", intval($product_id), $session_label));
+
+        // Load every attendee's account and profile meta in two queries,
+        // not two per person.
+        $user_ids = array_values(array_unique(array_filter(array_map('intval', wp_list_pluck((array) $rows, 'user_id')))));
+        if (!empty($user_ids) && function_exists('cache_users')) {
+            cache_users($user_ids);
+        }
 
         $attendees = array();
         foreach ($rows as $row) {
@@ -914,6 +929,7 @@ class TeamOversight_Programs {
                     $is_first = ($prior === 0);
                     ?>
                     <div class="coach-applicant-card<?php echo $is_first ? ' murvc-first-timer' : ''; ?><?php echo !empty($attendee['attended']) ? ' murvc-attended' : ''; ?>"
+                         data-qty="<?php echo intval($attendee['qty']); ?>"
                          data-search="<?php echo esc_attr(strtolower($attendee['name'] . ' ' . $attendee['email'])); ?>">
                         <div class="cac-header">
                             <span class="cac-name"><?php echo esc_html($attendee['name']); ?></span>
@@ -1026,9 +1042,16 @@ class TeamOversight_Programs {
                 if (attended) { list.appendChild(card); }
             }
 
-            function refreshCount(count) {
+            // "Here" = booked spots on the cards marked present, counted on
+            // the page so the server never re-runs the bookings query.
+            function refreshCount() {
                 var el = document.querySelector('.murvc-checked-count');
-                if (el && typeof count === 'number') { el.textContent = count; }
+                if (!el) { return; }
+                var count = 0;
+                root.querySelectorAll('.coach-applicant-card.murvc-attended').forEach(function (card) {
+                    count += parseInt(card.dataset.qty, 10) || 1;
+                });
+                el.textContent = count;
             }
 
             root.addEventListener('submit', function (event) {
@@ -1063,7 +1086,7 @@ class TeamOversight_Programs {
                             return;
                         }
                         applyState(card, res.data.attended, res.data.note);
-                        refreshCount(res.data.checked_in);
+                        refreshCount();
                     })
                     .catch(function () {
                         button.disabled = false;
@@ -1075,8 +1098,13 @@ class TeamOversight_Programs {
             // --- Stay in sync with other supervisors ----------------------
             // Several people can be marking at once (multiple courts), so
             // poll for everyone else's ticks; our own writes are atomic
-            // upserts server-side, so nothing is lost either way.
-            setInterval(function () {
+            // upserts server-side, so nothing is lost either way. The poll
+            // sends the hash of the marks it last saw and gets nothing back
+            // but the hash when nobody has ticked since; it skips while the
+            // tab is hidden and catches up as soon as it's shown again.
+            var lastHash = '';
+            function poll() {
+                if (document.hidden) { return; }
                 fetch(ajaxUrl, {
                     method: 'POST',
                     credentials: 'same-origin',
@@ -1084,12 +1112,15 @@ class TeamOversight_Programs {
                         action: 'murvc_attendance_state',
                         nonce: nonce,
                         program_key: programKey,
-                        session_label: sessionLabel
+                        session_label: sessionLabel,
+                        since: lastHash
                     })
                 })
                     .then(function (r) { return r.json(); })
                     .then(function (res) {
                         if (!res || !res.success) { return; }
+                        lastHash = res.data.hash || '';
+                        if (res.data.unchanged || !res.data.marked) { return; }
                         root.querySelectorAll('.coach-applicant-card').forEach(function (card) {
                             var form = card.querySelector('.murvc-attendance-form');
                             if (!form) { return; }
@@ -1099,10 +1130,14 @@ class TeamOversight_Programs {
                                 applyState(card, attended, state ? state.note : '');
                             }
                         });
-                        refreshCount(res.data.checked_in);
+                        refreshCount();
                     })
                     .catch(function () {});
-            }, 20000);
+            }
+            setInterval(poll, 20000);
+            document.addEventListener('visibilitychange', function () {
+                if (!document.hidden) { poll(); }
+            });
         })();
         </script>
         <?php echo self::render_styles(); ?>
