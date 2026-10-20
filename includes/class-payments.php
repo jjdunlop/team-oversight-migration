@@ -338,6 +338,19 @@ class TeamOversight_Payments {
     }
 
     /**
+     * Time behind on fees: months from STANDING_FLAG_DAYS, so the flag reads
+     * "a month behind", not "4 weeks"; days and weeks below that.
+     */
+    public static function describe_behind($days) {
+        $days = max(1, intval($days));
+        if ($days < self::STANDING_FLAG_DAYS) {
+            return self::describe_duration($days) . ' behind';
+        }
+        $months = (int) floor($days / 30);
+        return ($months <= 1 ? 'a month' : $months . ' months') . ' behind';
+    }
+
+    /**
      * Mail headers for plugin emails: configured From (name + address on a
      * domain the server may send as) and Reply-To. Empty From = WordPress
      * default sender.
@@ -527,6 +540,353 @@ class TeamOversight_Payments {
 
         $paid_fraction = max(0, min(1, ($invoice_amount - floatval($outstanding_amount)) / $invoice_amount));
         return date('Y-m-d', $start + (int) round($paid_fraction * ($end - $start)));
+    }
+
+    // ------------------------------------------------------------------
+    // Fee standing (coach portal confirmed players, Payment Management)
+    // ------------------------------------------------------------------
+
+    /**
+     * Days behind the schedule at which a player is flagged: they shouldn't
+     * train until it's sorted with the club (club decision).
+     */
+    const STANDING_FLAG_DAYS = 30;
+
+    /**
+     * Where each person stands on fees: how much of $season's fee is paid,
+     * and how long they've been behind the linear schedule across ALL their
+     * invoices, so a debt left from an earlier season (fully overdue, as for
+     * the reminder emails) counts too. Behind means at least $1 overdue.
+     * Invoices marked with a payment arrangement still count as behind but
+     * never towards the flag. The one place this is worked out: the coach
+     * portal and Payment Management both use it.
+     *
+     * Two rules keep the clock honest. An invoice is never behind from
+     * before its fee was billed: the later of its creation (created_date,
+     * on the database clock, so converted to the site's date with that
+     * day's offset) and its last rise (fee_raised_at, by a re-price or Edit
+     * Fee; see TeamOversight_Fees::fee_rise_fields()). So a player joining
+     * mid-season on a pro-rated fee, a late fee release or a fee raised
+     * mid-season starts at that day, not the season start; a lower fee or a
+     * re-save never restarts it. The schedule itself still runs from the
+     * season start, so from that day they must catch up with it. This is a
+     * stopgap until the fee timeline gives each player their own payment
+     * window: where it can't be exact it errs towards not flagging (every
+     * rise restarts the clock). And only an invoice at least $1 overdue
+     * sets the date (or names its season as owing), so cents left on an old
+     * invoice can't age a fresh debt; when only small amounts add up to $1,
+     * the latest of their dates is used and their seasons are named.
+     *
+     * An arrangement covers an invoice only up to its fee when the
+     * arrangement was recorded: a rise after it counts again (from the
+     * rise) until the arrangement is recorded again.
+     *
+     * Invoices belong to their account: one with an account counts only for
+     * that account, so nobody gets another account's invoices through an
+     * email they now use. One with no account (an old row) still goes by its
+     * email, and so does a person with no account.
+     *
+     * $people: array of array('user_id' => int, 'email' => string), keyed as
+     * the caller likes; returns the same keys, each an array:
+     *   has_invoice     there's a $season invoice (perhaps at $0)
+     *   fee, paid       $season's fee and what's paid of it (0 with no invoice)
+     *   paid_pct        0-100 of $season's fee, null with no fee
+     *   scheduled       $season has season dates (without them it is never behind)
+     *   overdue         $ overdue across all invoices
+     *   days_behind     days since their debt fell behind
+     *   flag_days       the same, leaving out invoices with an arrangement
+     *   flagged         flag_days >= STANDING_FLAG_DAYS
+     *   arrangement     an overdue invoice has a payment arrangement covering it
+     *   arrangement_held  the person's arrangement, overdue or not: array(note,
+     *                   at, by) from the most recently recorded, null if none
+     *                   (admins only)
+     *   other_seasons   other seasons at least $1 overdue (or, when only small
+     *                   amounts add up to $1, every other season overdue), oldest first
+     *   state           none | paid | ontrack | unscheduled | behind | arrangement | flagged
+     * One invoice query for everyone.
+     */
+    public static function get_fee_standings($people, $season) {
+        global $wpdb;
+
+        $season = (string) $season;
+        $result = array();
+        if (empty($people)) {
+            return $result;
+        }
+
+        $who = array();
+        $user_ids = array();
+        $emails = array();
+        foreach ($people as $key => $person) {
+            $email = strtolower(trim(isset($person['email']) ? (string) $person['email'] : ''));
+            $user_id = isset($person['user_id']) ? intval($person['user_id']) : 0;
+            if ($user_id <= 0 && $email !== '') {
+                $user_id = max(0, intval(TeamOversight_Fees::resolve_user_id($email)));
+            }
+            $mine = $email !== '' ? array($email) : array();
+            if ($user_id > 0) {
+                $account = get_userdata($user_id);
+                if ($account && $account->user_email) {
+                    $mine[] = strtolower($account->user_email);
+                }
+                $user_ids[] = $user_id;
+            }
+            $who[$key] = array('user_id' => $user_id, 'emails' => array_values(array_unique($mine)));
+            $emails = array_merge($emails, $mine);
+        }
+        $user_ids = array_values(array_unique($user_ids));
+        $emails = array_values(array_unique($emails));
+
+        $where = array();
+        $params = array();
+        if ($user_ids) {
+            $where[] = 'user_id IN (' . implode(',', array_fill(0, count($user_ids), '%d')) . ')';
+            $params = array_merge($params, $user_ids);
+        }
+        if ($emails) {
+            $where[] = 'email IN (' . implode(',', array_fill(0, count($emails), '%s')) . ')';
+            $params = array_merge($params, $emails);
+        }
+        $params[] = $season;
+        $invoices = $where ? $wpdb->get_results($wpdb->prepare("
+            SELECT id, user_id, email, season, invoice_amount, outstanding_amount, fee_raised_at,
+                UNIX_TIMESTAMP(created_date) AS created_ts,
+                payment_arrangement, payment_arrangement_at, payment_arrangement_note, payment_arrangement_by
+            FROM {$wpdb->prefix}team_invoices
+            WHERE (" . implode(' OR ', $where) . ") AND (season = %s OR outstanding_amount > 0 OR payment_arrangement = 1)
+        ", $params)) : array();
+        // created_date is the database's clock (CURRENT_TIMESTAMP, usually
+        // UTC); UNIX_TIMESTAMP reads it in the database's zone and wp_date
+        // gives the site's date for that moment, daylight saving included.
+
+        $scheduled = self::get_expected_factor($season) !== null;
+        $today = strtotime(current_time('Y-m-d'));
+        $days_since = function ($date) use ($today) {
+            return $date ? max(0, (int) floor(($today - strtotime($date)) / DAY_IN_SECONDS)) : 0;
+        };
+
+        foreach ($who as $key => $person) {
+            $has_invoice = false;
+            $fee = 0.0;
+            $paid = 0.0;
+            $overdue = 0.0;
+            $flag_overdue = 0.0;
+            // Earliest date an invoice at least $1 overdue fell behind; and,
+            // in case only small amounts add up to $1, the latest of them.
+            $since = $small_since = null;
+            $flag_since = $flag_small_since = null;
+            $arrangement = false;
+            $held = null;
+            $other_seasons = array();
+            $small_seasons = array();
+            foreach ($invoices as $invoice) {
+                $invoice_uid = intval($invoice->user_id);
+                $is_mine = ($invoice_uid > 0 && $person['user_id'] > 0)
+                    ? $invoice_uid === $person['user_id']
+                    : in_array(strtolower((string) $invoice->email), $person['emails'], true);
+                if (!$is_mine) {
+                    continue;
+                }
+                if (intval($invoice->payment_arrangement) === 1 && ($held === null || (string) $invoice->payment_arrangement_at > $held['at'])) {
+                    $held = array('note' => (string) $invoice->payment_arrangement_note, 'at' => (string) $invoice->payment_arrangement_at, 'by' => intval($invoice->payment_arrangement_by));
+                }
+                if ((string) $invoice->season === $season) {
+                    $has_invoice = true;
+                    $fee += floatval($invoice->invoice_amount);
+                    $paid += floatval($invoice->invoice_amount) - floatval($invoice->outstanding_amount);
+                }
+                $owed = self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+                if ($owed <= 0) {
+                    continue;
+                }
+                $overdue += $owed;
+                $fell_behind = self::get_overdue_since($invoice);
+                $created = intval($invoice->created_ts) > 0 ? wp_date('Y-m-d', intval($invoice->created_ts)) : '';
+                $billed = max($created, substr((string) $invoice->fee_raised_at, 0, 10));
+                if ($fell_behind && $billed !== '' && $billed > $fell_behind) {
+                    $fell_behind = $billed;
+                }
+                if ($fell_behind) {
+                    if ($owed >= 1 && ($since === null || $fell_behind < $since)) {
+                        $since = $fell_behind;
+                    }
+                    if ($small_since === null || $fell_behind > $small_since) {
+                        $small_since = $fell_behind;
+                    }
+                }
+                if ((string) $invoice->season !== $season) {
+                    if ($owed >= 1) {
+                        $other_seasons[] = (string) $invoice->season;
+                    } else {
+                        $small_seasons[] = (string) $invoice->season;
+                    }
+                }
+                // Both site-time datetimes, so comparing the strings is safe.
+                $covered = intval($invoice->payment_arrangement) === 1
+                    && ((string) $invoice->fee_raised_at === '' || (string) $invoice->fee_raised_at <= (string) $invoice->payment_arrangement_at);
+                if ($covered) {
+                    $arrangement = true;
+                    continue;
+                }
+                $flag_overdue += $owed;
+                if ($fell_behind) {
+                    if ($owed >= 1 && ($flag_since === null || $fell_behind < $flag_since)) {
+                        $flag_since = $fell_behind;
+                    }
+                    if ($flag_small_since === null || $fell_behind > $flag_small_since) {
+                        $flag_small_since = $fell_behind;
+                    }
+                }
+            }
+            if ($since === null) {
+                $since = $small_since;
+                // No single invoice is $1 overdue: if they're behind, the
+                // small ones are what make them so, so name their seasons.
+                if ($overdue >= 1) {
+                    $other_seasons = array_merge($other_seasons, $small_seasons);
+                }
+            }
+            if ($flag_since === null) {
+                $flag_since = $flag_small_since;
+            }
+
+            $behind = $overdue >= 1;
+            $days_behind = $behind ? $days_since($since) : 0;
+            $flag_days = $flag_overdue >= 1 ? $days_since($flag_since) : 0;
+            $flagged = $flag_overdue >= 1 && $flag_days >= self::STANDING_FLAG_DAYS;
+            $other_seasons = array_values(array_unique($other_seasons));
+            sort($other_seasons);
+
+            if ($flagged) {
+                $state = 'flagged';
+            } elseif ($behind && $flag_overdue < 1) {
+                $state = 'arrangement';
+            } elseif ($behind) {
+                $state = 'behind';
+            } elseif ($fee < 0.01) {
+                $state = 'none';
+            } elseif ($fee - $paid < 0.01) {
+                $state = 'paid';
+            } else {
+                $state = $scheduled ? 'ontrack' : 'unscheduled';
+            }
+
+            $result[$key] = array(
+                'has_invoice' => $has_invoice,
+                'fee' => round($fee, 2),
+                'paid' => round($paid, 2),
+                'paid_pct' => $fee >= 0.01 ? (int) floor(max(0, min(1, $paid / $fee)) * 100) : null,
+                'scheduled' => $scheduled,
+                'overdue' => round($overdue, 2),
+                'days_behind' => $days_behind,
+                'flag_days' => $flag_days,
+                'flagged' => $flagged,
+                'arrangement' => $arrangement,
+                'arrangement_held' => $held,
+                'other_seasons' => $other_seasons,
+                'state' => $state,
+            );
+        }
+        return $result;
+    }
+
+    /**
+     * Record or end a payment arrangement (Payment Management). It covers
+     * the person's debt, not one season: recording marks the chosen invoice
+     * and every other invoice of theirs with money still owing, so an
+     * earlier season's leftover is covered too; ending clears every one of
+     * theirs that has it. Those invoices still count as behind, but never
+     * flag the player as not to train. Invoices belong to their account
+     * (one with no account goes by its email). The note is for admins only.
+     * Logged once. Returns false when the invoice doesn't exist.
+     */
+    public static function set_payment_arrangement($invoice_id, $on, $note = '') {
+        global $wpdb;
+
+        $invoice = $wpdb->get_row($wpdb->prepare("
+            SELECT id, user_id, email, season FROM {$wpdb->prefix}team_invoices WHERE id = %d
+        ", intval($invoice_id)));
+        if (!$invoice) {
+            return false;
+        }
+
+        $user_id = intval($invoice->user_id) > 0 ? intval($invoice->user_id) : max(0, intval(TeamOversight_Fees::resolve_user_id($invoice->email)));
+        $emails = array(strtolower((string) $invoice->email));
+        $account = $user_id ? get_userdata($user_id) : null;
+        if ($account && $account->user_email) {
+            $emails[] = strtolower($account->user_email);
+        }
+        $emails = array_values(array_unique($emails));
+        // The same identity rule as get_fee_standings(): with an account,
+        // its invoices plus no-account ones under its emails; without one,
+        // everything under the email.
+        $in = implode(',', array_fill(0, count($emails), '%s'));
+        if ($user_id > 0) {
+            $mine = "((user_id > 0 AND user_id = %d) OR ((user_id IS NULL OR user_id = 0) AND email IN ($in)))";
+            $params = array_merge(array(intval($invoice->id), $user_id), $emails);
+        } else {
+            $mine = "email IN ($in)";
+            $params = array_merge(array(intval($invoice->id)), $emails);
+        }
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT id, season FROM {$wpdb->prefix}team_invoices
+            WHERE id = %d
+                OR ($mine AND " . ($on ? 'outstanding_amount > 0' : 'payment_arrangement = 1') . ")
+            ORDER BY season, id
+        ", $params));
+
+        $note = mb_substr(trim((string) $note), 0, 255);
+        $fields = $on
+            ? array('payment_arrangement' => 1, 'payment_arrangement_note' => $note, 'payment_arrangement_at' => current_time('mysql'), 'payment_arrangement_by' => get_current_user_id())
+            : array('payment_arrangement' => 0, 'payment_arrangement_note' => null, 'payment_arrangement_at' => null, 'payment_arrangement_by' => null);
+        $seasons = array();
+        $ids = array();
+        foreach ($rows as $row) {
+            $wpdb->update("{$wpdb->prefix}team_invoices", $fields, array('id' => $row->id));
+            $seasons[] = $row->season;
+            $ids[] = '#' . $row->id;
+        }
+
+        TeamOversight_Log::add(
+            'payment_arrangement',
+            ($on ? 'Payment arrangement recorded' : 'Payment arrangement ended') . ' for ' . implode(', ', array_unique($seasons)) . ' fees (invoice ' . implode(', ', $ids) . ')' . ($on && $note !== '' ? ': ' . $note : ''),
+            array('user_id' => $user_id)
+        );
+        return true;
+    }
+
+    /**
+     * One person's standing in words, without dollar amounts (the coach
+     * portal shows percentages only): "40% paid · 3 weeks behind".
+     */
+    public static function describe_standing($standing) {
+        if ($standing['state'] === 'none') {
+            return !empty($standing['has_invoice']) ? 'no fee' : 'no fee yet';
+        }
+        if ($standing['state'] === 'paid') {
+            return 'paid in full';
+        }
+        $lead = array();
+        if ($standing['paid_pct'] !== null) {
+            $lead[] = $standing['paid_pct'] . '% paid';
+        }
+        if ($standing['other_seasons']) {
+            $lead[] = implode(', ', $standing['other_seasons']) . ' fees owing';
+        }
+        $parts = $lead ? array(implode(', ', $lead)) : array();
+        // Time behind leaves out invoices with an arrangement (the flag's
+        // measure).
+        $behind = self::describe_behind($standing['flag_days']);
+        if ($standing['state'] === 'flagged') {
+            $parts[] = $behind . ' — no training';
+        } elseif ($standing['state'] === 'behind') {
+            $parts[] = $behind;
+        } elseif ($standing['state'] === 'arrangement') {
+            $parts[] = 'payment arrangement';
+        } elseif ($standing['state'] === 'ontrack') {
+            $parts[] = 'on track';
+        }
+        return implode(' · ', $parts);
     }
 
     /**

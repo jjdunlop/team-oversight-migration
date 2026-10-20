@@ -15,6 +15,7 @@ class TeamOversight_Admin {
         add_action('wp_ajax_delete_assignment', array($this, 'ajax_delete_assignment'));
         add_action('wp_ajax_update_invoice', array($this, 'ajax_update_invoice'));
         add_action('wp_ajax_use_calculated_fee', array($this, 'ajax_use_calculated_fee'));
+        add_action('wp_ajax_set_payment_arrangement', array($this, 'ajax_set_payment_arrangement'));
         add_action('wp_ajax_record_invoice_payment', array($this, 'ajax_record_invoice_payment'));
         add_action('wp_ajax_delete_invoice', array($this, 'ajax_delete_invoice'));
         add_action('wp_ajax_bulk_accept_trials', array($this, 'ajax_bulk_accept_trials'));
@@ -2162,6 +2163,42 @@ class TeamOversight_Admin {
             }
         }
 
+        // Each person's standing (the same rule the coach portal shows):
+        // how long they've been behind across all their invoices, and the
+        // one-month flag that means they shouldn't train.
+        $standing_people = array();
+        foreach ($invoices as $invoice) {
+            $standing_people[$invoice->id] = array('user_id' => intval($invoice->user_id), 'email' => $invoice->email);
+        }
+        $standings = TeamOversight_Payments::get_fee_standings($standing_people, $season);
+        $flagged_names = array();
+        foreach ($invoices as $invoice) {
+            if (!empty($standings[$invoice->id]['flagged'])) {
+                $flagged_names[] = $invoice->name ? $invoice->name : $invoice->email;
+            }
+        }
+        // Players on a team this season with no invoice for it yet, flagged
+        // by an earlier season's fees: the coach portal shows them, but they
+        // have no row here.
+        $rowless_flagged = array();
+        $team_players = $wpdb->get_results($wpdb->prepare("
+            SELECT MAX(ta.user_id) AS user_id, MAX(ta.email) AS email, MAX(u.display_name) AS name
+            FROM {$wpdb->prefix}team_assignments ta
+            LEFT JOIN {$wpdb->users} u ON u.ID = ta.user_id
+            WHERE ta.season = %s AND ta.is_active = 1 AND ta.role IN ('playing_member', 'training_only')
+            GROUP BY COALESCE(NULLIF(ta.user_id, 0), ta.email)
+        ", $season));
+        $player_people = array();
+        foreach ($team_players as $i => $player) {
+            $player_people[$i] = array('user_id' => intval($player->user_id), 'email' => $player->email);
+        }
+        foreach (TeamOversight_Payments::get_fee_standings($player_people, $season) as $i => $player_standing) {
+            if ($player_standing['flagged'] && !$player_standing['has_invoice']) {
+                $label = $team_players[$i]->name ? $team_players[$i]->name : $team_players[$i]->email;
+                $rowless_flagged[] = $player_standing['other_seasons'] ? $label . ' (' . implode(', ', $player_standing['other_seasons']) . ')' : $label;
+            }
+        }
+
         ?>
         <style>
             #invoices-table .fee-info-cell { font-size: 11px; }
@@ -2181,6 +2218,12 @@ class TeamOversight_Admin {
             .fee-breakdown-warn { margin: 6px 0 0; color: #b32d2e; }
             .fee-manual { color: #8a4b00; font-weight: 600; }
             .fee-manual-off-team { color: #b32d2e; }
+            .fee-standing { display: inline-block; margin-top: 3px; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; line-height: 1.6; }
+            .fee-standing-flagged { background: #fce8e8; color: #a00; border: 1px solid #e3a1a1; }
+            .fee-standing-arrangement { background: #e8f0fb; color: #1d4f91; border: 1px solid #a9c2e6; }
+            .fee-standing-note { color: #646970; }
+            /* The table has fixed column widths: let long button labels wrap rather than spill out. */
+            #invoices-table td:last-child .button { max-width: 100%; height: auto; min-height: 30px; white-space: normal; line-height: 1.3; padding-top: 4px; padding-bottom: 4px; }
         </style>
         <div class="wrap">
             <h1>Payment Management</h1>
@@ -2235,6 +2278,18 @@ class TeamOversight_Admin {
                 </div>
             <?php endif; ?>
 
+            <?php if (!empty($flagged_names) || !empty($rowless_flagged)): ?>
+                <div class="notice notice-error inline">
+                    <?php if (!empty($flagged_names)): ?>
+                        <p><strong><?php echo count($flagged_names); ?> <?php echo count($flagged_names) === 1 ? 'person is' : 'people are'; ?> a month or more behind on fees</strong> (all their seasons counted), so they shouldn't train; the coach portal tells the coaches of any team they're on as a player: <?php echo esc_html(implode(', ', $flagged_names)); ?>.</p>
+                    <?php endif; ?>
+                    <?php if (!empty($rowless_flagged)): ?>
+                        <p><strong>Also flagged, on a <?php echo esc_html($season); ?> team with no <?php echo esc_html($season); ?> fee</strong>, for another season's fees: <?php echo esc_html(implode(', ', $rowless_flagged)); ?>. Their row is on that season's page.</p>
+                    <?php endif; ?>
+                    <p>If one has a payment plan agreed with the club, use <em>Arrangement</em> (or <em>Extend arrangement</em>) on any of their rows: it covers everything they still owe, every season, and their coaches then see <em>payment arrangement</em> instead.</p>
+                </div>
+            <?php endif; ?>
+
             <?php if (!empty($invoices)): ?>
                 <div class="invoices-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
                     <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
@@ -2258,6 +2313,15 @@ class TeamOversight_Admin {
                                 <option value="paid">Paid</option>
                                 <option value="partial">Partial</option>
                                 <option value="outstanding">Outstanding</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="filter-standing">Schedule:</label>
+                            <select id="filter-standing">
+                                <option value="">Everyone</option>
+                                <option value="behind">Behind (any)</option>
+                                <option value="flagged">A month or more behind</option>
+                                <option value="arrangement">Payment arrangement</option>
                             </select>
                         </div>
                     </div>
@@ -2357,7 +2421,33 @@ class TeamOversight_Admin {
                                     . '. Team changes, Finalise and fee releases leave it as it is; Use calculated fee re-prices it.';
                             }
                         ?>
-                            <tr data-invoice-id="<?php echo $invoice->id; ?>" data-team="<?php echo esc_attr($invoice->team_codes ?: ''); ?>" data-status="<?php echo $payment_status; ?>">
+                            <?php
+                            $standing = isset($standings[$invoice->id]) ? $standings[$invoice->id] : null;
+                            // An arrangement is the person's: its badge and the filter
+                            // show on every season's row. Extend (keeping the terms)
+                            // appears where this row's fee is owing but not covered,
+                            // because it was never included or was raised since; End,
+                            // which ends it everywhere, wherever they have one.
+                            $held = $standing ? $standing['arrangement_held'] : null;
+                            if (intval($invoice->payment_arrangement) === 1) {
+                                $held = array('note' => (string) $invoice->payment_arrangement_note, 'at' => (string) $invoice->payment_arrangement_at, 'by' => intval($invoice->payment_arrangement_by));
+                            }
+                            $row_covered = intval($invoice->payment_arrangement) === 1
+                                && ((string) $invoice->fee_raised_at === '' || (string) $invoice->fee_raised_at <= (string) $invoice->payment_arrangement_at);
+                            $arrangement_title = '';
+                            if ($held) {
+                                $agreed_by = $held['by'] > 0 ? get_userdata($held['by']) : false;
+                                $arrangement_title = 'Payment arrangement'
+                                    . ($agreed_by ? ' recorded by ' . $agreed_by->display_name : '')
+                                    . ($held['at'] !== '' ? ' on ' . date('j M Y', strtotime($held['at'])) : '')
+                                    . ($held['note'] !== '' ? ': ' . $held['note'] : '')
+                                    . '. It covers what they owed when it was recorded, every season: still behind here, but never flagged as not to train.'
+                                    . (!$row_covered && floatval($invoice->outstanding_amount) > 0 ? ' This fee isn\'t covered (added or raised since): Extend arrangement adds it.' : '');
+                            }
+                            ?>
+                            <tr data-invoice-id="<?php echo $invoice->id; ?>" data-team="<?php echo esc_attr($invoice->team_codes ?: ''); ?>" data-status="<?php echo $payment_status; ?>"
+                                data-behind="<?php echo $standing && $standing['overdue'] >= 1 ? '1' : '0'; ?>" data-flagged="<?php echo $standing && $standing['flagged'] ? '1' : '0'; ?>" data-arrangement="<?php echo $held ? '1' : '0'; ?>"
+                                data-arrangement-note="<?php echo esc_attr($held ? $held['note'] : ''); ?>">
                                 <td><?php echo $invoice->id; ?></td>
                                 <td><?php echo esc_html($invoice->name); ?></td>
                                 <td><?php echo esc_html($invoice->email); ?></td>
@@ -2373,7 +2463,12 @@ class TeamOversight_Admin {
                                         <?php endif; ?>
                                     <?php endif; ?>
                                 </td>
-                                <td>$<?php echo number_format(isset($payments_by_invoice[$invoice->id]) ? $payments_by_invoice[$invoice->id]['total'] : 0, 2); ?></td>
+                                <td>
+                                    $<?php echo number_format(isset($payments_by_invoice[$invoice->id]) ? $payments_by_invoice[$invoice->id]['total'] : 0, 2); ?>
+                                    <?php if (floatval($invoice->invoice_amount) >= 0.01): ?>
+                                        <br><small class="fee-standing-note"><?php echo intval(floor(max(0, min(1, (floatval($invoice->invoice_amount) - floatval($invoice->outstanding_amount)) / floatval($invoice->invoice_amount))) * 100)); ?>% of the fee</small>
+                                    <?php endif; ?>
+                                </td>
                                 <td class="outstanding-cell">
                                     $<?php echo number_format($invoice->outstanding_amount, 2); ?>
                                     <?php
@@ -2392,6 +2487,24 @@ class TeamOversight_Admin {
                                     <?php else: ?>
                                         &mdash;
                                     <?php endif; ?>
+                                    <?php if ($standing && $standing['overdue'] >= 1):
+                                        // Behind is the person's, across all their seasons; say
+                                        // so when it's only another season's fees that are late.
+                                        $behind_text = TeamOversight_Payments::describe_behind($standing['days_behind']);
+                                        if ($standing['other_seasons'] && $overdue <= 0) {
+                                            $behind_text = implode(', ', $standing['other_seasons']) . ' fees ' . $behind_text;
+                                        } elseif ($standing['other_seasons']) {
+                                            $behind_text .= ' (incl. ' . implode(', ', $standing['other_seasons']) . ' fees)';
+                                        }
+                                        ?>
+                                        <br><small class="fee-standing-note" title="Across all their seasons: from the date their payments last covered to today."><?php echo esc_html($behind_text); ?></small>
+                                    <?php endif; ?>
+                                    <?php if ($standing && $standing['flagged']): ?>
+                                        <br><span class="fee-standing fee-standing-flagged" title="<?php echo intval(TeamOversight_Payments::STANDING_FLAG_DAYS); ?> days or more behind (not counting fees an arrangement covers). Coaches of a team they're on as a player see that they shouldn't train.">No training</span>
+                                    <?php endif; ?>
+                                    <?php if ($held): ?>
+                                        <br><span class="fee-standing fee-standing-arrangement" title="<?php echo esc_attr($arrangement_title); ?>">Arrangement</span>
+                                    <?php endif; ?>
                                 </td>
                                 <td>
                                     <?php if (!empty($payments_by_invoice[$invoice->id])): ?>
@@ -2403,6 +2516,20 @@ class TeamOversight_Admin {
                                 <td>
                                     <button type="button" class="button edit-invoice" onclick="editInvoice(this)">Edit Fee</button>
                                     <button type="button" class="button record-payment" onclick="recordPayment(this)">Record Payment</button>
+                                    <?php
+                                    // label, mode (record / end), title
+                                    $arrangement_buttons = array();
+                                    if (!$held) {
+                                        $arrangement_buttons[] = array('Arrangement', 'record', 'Record a payment plan agreed with the club. It covers everything they still owe, every season: they still show as behind here, but their coaches see payment arrangement instead of no training');
+                                    } else {
+                                        if (!$row_covered && floatval($invoice->outstanding_amount) > 0) {
+                                            $arrangement_buttons[] = array('Extend arrangement', 'record', 'Record the arrangement again, keeping its terms, so it also covers this fee (added or raised since) and everything else they still owe');
+                                        }
+                                        $arrangement_buttons[] = array('End arrangement', 'end', 'End the payment arrangement, on every season it covers');
+                                    }
+                                    foreach ($arrangement_buttons as $arrangement_button): ?>
+                                        <button type="button" class="button payment-arrangement" data-mode="<?php echo esc_attr($arrangement_button[1]); ?>" onclick="setPaymentArrangement(this)" title="<?php echo esc_attr($arrangement_button[2]); ?>"><?php echo esc_html($arrangement_button[0]); ?></button>
+                                    <?php endforeach; ?>
                                     <?php if ($fee_manual): ?>
                                         <button type="button" class="button use-calculated-fee" onclick="useCalculatedFee(this)" data-calculated="<?php echo esc_attr('$' . number_format($breakdown['total'], 2)); ?>">Use calculated fee</button>
                                     <?php endif; ?>
@@ -2424,8 +2551,10 @@ class TeamOversight_Admin {
                 const search = document.getElementById('search-invoices').value.toLowerCase();
                 const teamFilter = document.getElementById('filter-team').value;
                 const statusFilter = document.getElementById('filter-status').value;
-                
-                const rows = document.querySelectorAll('#invoices-table tbody tr');
+                const standingFilter = document.getElementById('filter-standing').value;
+
+                // Top-level rows only: the fee breakdown nests a table of its own.
+                const rows = document.querySelectorAll('#invoices-table > tbody > tr');
                 rows.forEach(row => {
                     const text = row.textContent.toLowerCase();
                     const teams = (row.dataset.team || '').split('|');
@@ -2434,14 +2563,57 @@ class TeamOversight_Admin {
                     const matchesSearch = search === '' || text.includes(search);
                     const matchesTeam = teamFilter === '' || teams.includes(teamFilter);
                     const matchesStatus = statusFilter === '' || status === statusFilter;
+                    const matchesStanding = standingFilter === '' || row.dataset[standingFilter] === '1';
 
-                    row.style.display = matchesSearch && matchesTeam && matchesStatus ? '' : 'none';
+                    row.style.display = matchesSearch && matchesTeam && matchesStatus && matchesStanding ? '' : 'none';
                 });
             }
 
             document.getElementById('search-invoices').addEventListener('input', filterInvoices);
             document.getElementById('filter-team').addEventListener('change', filterInvoices);
             document.getElementById('filter-status').addEventListener('change', filterInvoices);
+            document.getElementById('filter-standing').addEventListener('change', filterInvoices);
+
+            // A payment plan agreed with the club: the row still shows as
+            // behind, but the coach portal stops saying they shouldn't train.
+            function setPaymentArrangement(button) {
+                const row = button.closest('tr');
+                const name = row.children[1].textContent;
+                const ending = button.dataset.mode === 'end';
+                let note = '';
+                if (ending) {
+                    if (!confirm('End the payment arrangement for ' + name + '? If they are more than a month behind, their coaches will see that they shouldn\'t train.')) {
+                        return;
+                    }
+                } else {
+                    note = prompt('Payment arrangement for ' + name + '. Note the terms (admins only, e.g. $50 a fortnight until June):', row.dataset.arrangementNote || '');
+                    if (note === null) {
+                        return;
+                    }
+                }
+
+                const data = {
+                    action: 'set_payment_arrangement',
+                    invoice_id: row.dataset.invoiceId,
+                    arrangement: ending ? 0 : 1,
+                    note: note,
+                    nonce: '<?php echo wp_create_nonce('set_payment_arrangement'); ?>'
+                };
+
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: Object.keys(data).map(key => key + '=' + encodeURIComponent(data[key])).join('&')
+                })
+                .then(response => response.json())
+                .then(response => {
+                    if (response.success) {
+                        location.reload();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
             
             // Invoice inline editing — the FEE only. Paid comes from the
             // payments ledger and outstanding is always fee minus paid, so
@@ -2452,6 +2624,7 @@ class TeamOversight_Admin {
                 row.querySelectorAll('.edit-value').forEach(input => input.style.display = 'inline-block');
                 row.querySelector('.edit-invoice').style.display = 'none';
                 row.querySelector('.record-payment').style.display = 'none';
+                row.querySelectorAll('.payment-arrangement').forEach(b => b.style.display = 'none');
                 if (row.querySelector('.use-calculated-fee')) {
                     row.querySelector('.use-calculated-fee').style.display = 'none';
                 }
@@ -2466,6 +2639,7 @@ class TeamOversight_Admin {
                 row.querySelectorAll('.edit-value').forEach(input => input.style.display = 'none');
                 row.querySelector('.edit-invoice').style.display = 'inline-block';
                 row.querySelector('.record-payment').style.display = 'inline-block';
+                row.querySelectorAll('.payment-arrangement').forEach(b => b.style.display = 'inline-block');
                 if (row.querySelector('.use-calculated-fee')) {
                     row.querySelector('.use-calculated-fee').style.display = 'inline-block';
                 }
@@ -3930,17 +4104,22 @@ class TeamOversight_Admin {
         $before = $wpdb->get_row($wpdb->prepare("
             SELECT invoice_amount, season, user_id, fee_overridden FROM {$wpdb->prefix}team_invoices WHERE id = %d
         ", $invoice_id));
+        // A rise restarts the fee standing's clock from today; a lower fee
+        // or a re-save doesn't.
+        list($rise_fields, $rise_formats) = $before
+            ? TeamOversight_Fees::fee_rise_fields($before->invoice_amount, $invoice_amount)
+            : array(array(), array());
         $result = $wpdb->update(
             $wpdb->prefix . 'team_invoices',
-            array(
+            array_merge(array(
                 'invoice_amount' => $invoice_amount,
                 'fee_overridden' => 1,
                 'fee_overridden_at' => current_time('mysql'),
                 'fee_overridden_by' => get_current_user_id(),
                 'fee_calculated_logged' => null,
-            ),
+            ), $rise_fields),
             array('id' => $invoice_id),
-            array('%f', '%d', '%s', '%d', '%f'),
+            array_merge(array('%f', '%d', '%s', '%d', '%f'), $rise_formats),
             array('%d')
         );
         $outstanding = TeamOversight_Payments::recompute_invoice($invoice_id);
@@ -3996,6 +4175,24 @@ class TeamOversight_Admin {
             $message = 'The fee is automatic again and stays at ' . $money($result['after']) . ' (it matches the calculation, or no fee could be worked out from their teams and the fee matrix).';
         }
         wp_send_json_success($message);
+    }
+
+    public function ajax_set_payment_arrangement() {
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'set_payment_arrangement')) {
+            wp_send_json_error('Security check failed');
+        }
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        $invoice_id = isset($_POST['invoice_id']) ? intval($_POST['invoice_id']) : 0;
+        $on = isset($_POST['arrangement']) && $_POST['arrangement'] === '1';
+        $note = isset($_POST['note']) ? sanitize_text_field(wp_unslash($_POST['note'])) : '';
+        if ($invoice_id <= 0 || !TeamOversight_Payments::set_payment_arrangement($invoice_id, $on, $note)) {
+            wp_send_json_error('Invoice not found — it may have been deleted. Reload the page.');
+        }
+        wp_send_json_success();
     }
 
     public function ajax_record_invoice_payment() {

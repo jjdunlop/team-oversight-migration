@@ -2414,12 +2414,15 @@ class TeamOversight_Fees {
         }
 
         // Set the new fee; outstanding is always fee minus the payments
-        // ledger — recorded money is never touched by repricing.
+        // ledger — recorded money is never touched by repricing. A rise is
+        // stamped (fee_rise_fields()), so the fee standing never counts it
+        // as behind from before today.
+        list($rise_fields, $rise_formats) = self::fee_rise_fields($current_fee, $new_fee);
         $updated = $wpdb->update(
             $wpdb->prefix . 'team_invoices',
-            array('invoice_amount' => $new_fee),
+            array_merge(array('invoice_amount' => $new_fee), $rise_fields),
             array('id' => $invoice_id, 'fee_overridden' => 0),
-            array('%f'),
+            array_merge(array('%f'), $rise_formats),
             array('%d', '%d')
         );
         if (!$updated && self::fee_is_manual($invoice_id)) {
@@ -2434,6 +2437,23 @@ class TeamOversight_Fees {
             );
         }
         return true;
+    }
+
+    /**
+     * The fee-standing column to write with a new fee: fee_raised_at = now
+     * when the fee goes up, so the raised amount is never behind from
+     * before today. A lower fee or a re-save never restarts the behind
+     * clock. Every rise does, even back up to an amount held before (off a
+     * team and back on): that errs towards not flagging someone, never
+     * towards flagging a player who has just come back. Every writer of
+     * invoice_amount uses it: apply_invoice_amount() and Edit Fee.
+     * Returns array(fields, formats) to merge into the update.
+     */
+    public static function fee_rise_fields($current_fee, $new_fee) {
+        if (floatval($new_fee) > floatval($current_fee) + 0.005) {
+            return array(array('fee_raised_at' => current_time('mysql')), array('%s'));
+        }
+        return array(array(), array());
     }
 
     /**

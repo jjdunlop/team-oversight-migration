@@ -462,6 +462,28 @@ class TeamOversight_Database {
                 ADD COLUMN fee_overridden_by bigint(20) unsigned DEFAULT NULL,
                 ADD COLUMN fee_calculated_logged decimal(10,2) DEFAULT NULL");
         }
+
+        // 1.69.0: a payment arrangement agreed with the club (Payment
+        // Management). The invoice still shows as behind, but never flags
+        // the player as not to train. Existing invoices start with none.
+        // One statement, so the four columns arrive together.
+        $arrangement_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_invoices LIKE 'payment_arrangement'");
+        if (empty($arrangement_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}team_invoices
+                ADD COLUMN payment_arrangement tinyint(1) NOT NULL DEFAULT 0,
+                ADD COLUMN payment_arrangement_note varchar(255) DEFAULT NULL,
+                ADD COLUMN payment_arrangement_at datetime DEFAULT NULL,
+                ADD COLUMN payment_arrangement_by bigint(20) unsigned DEFAULT NULL");
+        }
+
+        // 1.69.0: when the fee was last raised (by a re-price or Edit Fee),
+        // so a fee raised mid-season is behind from that day at the
+        // earliest, not from the season start. Not backfilled: existing
+        // invoices start with none.
+        $fee_raised_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_invoices LIKE 'fee_raised_at'");
+        if (empty($fee_raised_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}team_invoices ADD COLUMN fee_raised_at datetime DEFAULT NULL");
+        }
     }
 
     public function create_tables() {
@@ -497,6 +519,11 @@ class TeamOversight_Database {
                     fee_overridden_at datetime DEFAULT NULL,
                     fee_overridden_by bigint(20) unsigned DEFAULT NULL,
                     fee_calculated_logged decimal(10,2) DEFAULT NULL,
+                    payment_arrangement tinyint(1) NOT NULL DEFAULT 0,
+                    payment_arrangement_note varchar(255) DEFAULT NULL,
+                    payment_arrangement_at datetime DEFAULT NULL,
+                    payment_arrangement_by bigint(20) unsigned DEFAULT NULL,
+                    fee_raised_at datetime DEFAULT NULL,
                     PRIMARY KEY (id),
                     KEY email (email),
                     KEY season (season),

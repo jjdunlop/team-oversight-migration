@@ -771,7 +771,26 @@ class TeamOversight_Coach_Portal {
                         $claim_people[] = array($member->user_id, $member->email);
                     }
                     $claims = $this->get_other_team_claims($claim_apps, $claim_people, $active_team, $season);
+
+                    // Where each confirmed player stands on fees, one query
+                    // for all. Percentages only: coaches never see amounts.
+                    $fee_people = array();
+                    foreach ($confirmed_players as $i => $member) {
+                        $fee_people[$i] = array('user_id' => isset($member->user_id) ? intval($member->user_id) : 0, 'email' => $member->email);
+                    }
+                    $fee_standings = TeamOversight_Payments::get_fee_standings($fee_people, $season);
+                    $no_training = array();
+                    foreach ($confirmed_players as $i => $member) {
+                        if (!empty($fee_standings[$i]['flagged'])) {
+                            $no_training[] = $member->name ?: $member->email;
+                        }
+                    }
                     ?>
+                    <?php if (!empty($no_training)): ?>
+                        <div class="coach-fee-alert">
+                            <strong><?php echo count($no_training); ?> <?php echo count($no_training) === 1 ? 'player is' : 'players are'; ?> a month or more behind on fees</strong> and shouldn't train until they've sorted it with the club: <?php echo esc_html(implode(', ', $no_training)); ?>.
+                        </div>
+                    <?php endif; ?>
                     <?php foreach ($confirmed_players as $i => $member): ?>
                         <?php $app_ctx = $confirmed_ctx[$i]; ?>
                         <div class="coach-applicant-card">
@@ -796,17 +815,19 @@ class TeamOversight_Coach_Portal {
                                 <?php if ($member->mobile): ?> &middot; <?php echo esc_html(self::format_phone($member->mobile)); ?><?php endif; ?>
                                 <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
                             </div>
+                            <?php // A confirmed player's card is the team list: no trial tools (notes, attendance), and their fees where Mark attended was. ?>
                             <div class="cac-footer">
                                 <span class="cac-expanders"><?php echo $this->render_card_expanders(
                                     $member->email,
                                     $app_ctx ? $app_ctx['id'] : 0,
                                     $app_ctx ? $app_ctx['form_data'] : array(),
-                                    $app_ctx ? $app_ctx['notes'] : array(),
+                                    array(),
                                     $active_team,
                                     $season,
-                                    isset($member->user_id) ? $member->user_id : 0
+                                    isset($member->user_id) ? $member->user_id : 0,
+                                    false
                                 ); ?></span>
-                                <span class="cac-actions"><?php echo $this->render_attendance_button(isset($member->user_id) ? $member->user_id : 0, $member->email, $active_team, $attendance_date, $season); ?></span>
+                                <span class="cac-actions"><?php echo isset($fee_standings[$i]) ? self::render_fee_standing($fee_standings[$i], $season) : ''; ?></span>
                             </div>
                         </div>
                     <?php endforeach; ?>
@@ -1960,6 +1981,67 @@ class TeamOversight_Coach_Portal {
             display: none;
         }
 
+        /* Team list fees: a status the height of the controls beside it,
+           coloured by where the player stands. */
+        .coach-portal .cac-fee {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            box-sizing: border-box;
+            min-height: var(--cp-control-h);
+            padding: 4px 12px;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.25;
+            text-align: center;
+            border: 1px solid var(--cp-border);
+            border-radius: var(--cp-radius);
+            background: #f6f7f7;
+            color: var(--cp-text);
+            cursor: help;
+        }
+
+        .coach-portal .cac-fee-paid,
+        .coach-portal .cac-fee-ontrack {
+            background: #e8f5ea;
+            border-color: #2e8540;
+            color: #1e6b2a;
+        }
+
+        .coach-portal .cac-fee-behind {
+            background: #fff4e0;
+            border-color: #d18a00;
+            color: #7a4a00;
+        }
+
+        .coach-portal .cac-fee-flagged {
+            background: #fce8e8;
+            border-color: #c62d2d;
+            color: #a00;
+        }
+
+        .coach-portal .cac-fee-arrangement {
+            background: #e8f0fb;
+            border-color: #4f7cc0;
+            color: #1d4f91;
+        }
+
+        .coach-portal .cac-fee-none {
+            font-weight: 400;
+            color: var(--cp-muted);
+        }
+
+        .coach-fee-alert {
+            margin: 0 0 10px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #7a0000;
+            background: #fce8e8;
+            border: 1px solid #e3a1a1;
+            border-left: 4px solid #c62d2d;
+            border-radius: 4px;
+        }
+
         .coach-portal .button:disabled {
             opacity: 0.6;
             cursor: wait;
@@ -2149,6 +2231,7 @@ class TeamOversight_Coach_Portal {
             }
 
             .coach-portal .cac-actions .coach-attend-btn,
+            .coach-portal .cac-actions .cac-fee,
             .coach-portal .cac-decide .coach-offer-btn {
                 width: 100%;
             }
@@ -2921,8 +3004,10 @@ class TeamOversight_Coach_Portal {
      * The one expander row every card shares: emergency contact,
      * application details, and coach notes with the add-note form.
      * Application/Notes only render when an application exists.
+     * $trial_tools false (a confirmed player's card, the team list) leaves
+     * out Notes and Attendance.
      */
-    private function render_card_expanders($email, $application_id, $form_data, $notes, $active_team, $season, $user_id = 0) {
+    private function render_card_expanders($email, $application_id, $form_data, $notes, $active_team, $season, $user_id = 0, $trial_tools = true) {
         ob_start();
         // By account: the email here is a snapshot from the application or
         // assignment, so after an email change it would find nobody, or
@@ -2957,7 +3042,7 @@ class TeamOversight_Coach_Portal {
             <?php
         }
 
-        if ($application_id) {
+        if ($trial_tools && $application_id) {
             ?>
             <details class="coach-app-details">
                 <summary>Notes (<?php echo count($notes); ?>)</summary>
@@ -3012,16 +3097,51 @@ class TeamOversight_Coach_Portal {
         }
 
         // Attendance history across every team, visible to every coach.
-        // Shown for confirmed players too, who may have no application.
-        $attendance = $this->get_person_attendance($season, $user_id, $email);
-        ?>
-        <details class="coach-app-details coach-attendance">
-            <summary>Attendance (<span class="coach-attendance-count"><?php echo count($attendance); ?></span>)</summary>
-            <div class="coach-attendance-history"><?php echo $this->render_attendance_list($attendance); ?></div>
-        </details>
-        <?php
+        if ($trial_tools) {
+            $attendance = $this->get_person_attendance($season, $user_id, $email);
+            ?>
+            <details class="coach-app-details coach-attendance">
+                <summary>Attendance (<span class="coach-attendance-count"><?php echo count($attendance); ?></span>)</summary>
+                <div class="coach-attendance-history"><?php echo $this->render_attendance_list($attendance); ?></div>
+            </details>
+            <?php
+        }
 
         return ob_get_clean();
+    }
+
+    /**
+     * A confirmed player's fee standing for the team list: percentage
+     * paid and how far behind the schedule, never an amount (fees differ
+     * by class, and some are set by hand). More than a month behind is
+     * flagged: they shouldn't train until it's sorted with the club.
+     * $standing: one TeamOversight_Payments::get_fee_standings() entry.
+     */
+    private static function render_fee_standing($standing, $season) {
+        // Before release a $0 invoice is a fee taken back until then (any
+        // payment kept as credit), not an exemption.
+        if ($standing['state'] === 'none' && !TeamOversight_Fees::fees_released($season)) {
+            $standing['has_invoice'] = false;
+        }
+        if ($standing['state'] === 'none') {
+            $title = !empty($standing['has_invoice']) ? 'They have no fee to pay for ' . $season . '.' : 'No ' . $season . ' fee has been issued for them yet.';
+        } else {
+            $dates = TeamOversight_Fees::get_season_dates($season);
+            $factor = TeamOversight_Payments::get_expected_factor($season);
+            $title = ($dates && $factor !== null)
+                ? 'Fees fall due evenly across the season (' . date('j M', strtotime($dates['start'])) . ' – ' . date('j M Y', strtotime($dates['end'])) . '), and ' . intval(round($factor * 100)) . '% of it has gone.'
+                : 'No season dates are set yet, so nothing falls due on a schedule.';
+            if ($standing['other_seasons']) {
+                $title .= ' Includes fees still owing from ' . implode(', ', $standing['other_seasons']) . '.';
+            }
+            if ($standing['arrangement']) {
+                $title .= ' The club has agreed a payment arrangement.';
+            }
+            $title .= ' A month or more behind means they shouldn\'t train until it\'s sorted with the club.';
+        }
+        return '<span class="cac-fee cac-fee-' . esc_attr($standing['state']) . '" title="' . esc_attr($title) . '">'
+            . ($standing['state'] === 'flagged' ? '&#9888; ' : '')
+            . 'Fees: ' . esc_html(TeamOversight_Payments::describe_standing($standing)) . '</span>';
     }
 
     /**
