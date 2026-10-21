@@ -1827,12 +1827,6 @@ class TeamOversight_Fees {
                 </p>
             </div>
 
-            <?php
-            if (self::timeline_applies($selected_season)) {
-                $this->render_timeline_readiness($selected_season);
-            }
-            ?>
-
             <!-- Fee matrix: full width (it's a grid), then teams -->
             <div style="display: flex; flex-wrap: wrap; gap: 30px; align-items: flex-start;">
 
@@ -2560,121 +2554,6 @@ class TeamOversight_Fees {
             });
         })();
         </script>
-        <?php
-    }
-
-    /**
-     * Configuration, 2027+ seasons (1.70.0): read-only counts for planning
-     * the fee timeline upgrade. How many of the season's team places,
-     * fee segments and invoices exist already (made before the timeline
-     * prices the season, so they may have blank dates to fill), whether
-     * its fee release date is set and applied, and the database version
-     * and storage engines the timeline relies on. Numbers and engine
-     * names only, never a person. Admins only; writes nothing.
-     */
-    private function render_timeline_readiness($season) {
-        if (!current_user_can('manage_options')) {
-            return;
-        }
-        global $wpdb;
-        $p = $wpdb->prefix;
-
-        // A zero date (0000-00-00, from a blank saved without strict mode)
-        // is as blank as NULL, so it counts as no date too.
-        $places = $wpdb->get_row($wpdb->prepare("
-            SELECT COUNT(*) AS total,
-                COALESCE(SUM(is_active = 1), 0) AS active,
-                COALESCE(SUM(start_date IS NULL OR start_date < '1000-01-01'), 0) AS no_start,
-                COALESCE(SUM(COALESCE(is_active, 0) <> 1 AND (end_date IS NULL OR end_date < '1000-01-01')), 0) AS inactive_no_stop
-            FROM {$p}team_assignments WHERE season = %s
-        ", $season));
-        $segments = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$p}team_fee_segments WHERE season = %s", $season));
-        $invoices = $wpdb->get_row($wpdb->prepare("
-            SELECT COUNT(*) AS total, COALESCE(SUM(fee_overridden = 1), 0) AS manual
-            FROM {$p}team_invoices WHERE season = %s
-        ", $season));
-
-        $release_date = self::get_fee_release_date($season);
-        $applied = get_option(self::APPLIED_OPTION, array());
-        $release_applied = is_array($applied) && !empty($applied[$season]);
-        if ($release_date === '') {
-            $release_text = 'Not set (fees are charged as people are added to teams)';
-        } else {
-            $release_text = date('j M Y', strtotime($release_date)) . ($release_applied ? ', applied' : ', not applied yet');
-        }
-
-        // The version number and whether it's MariaDB or MySQL; nothing else
-        // the server reports about itself.
-        $version_raw = (string) $wpdb->get_var('SELECT VERSION()');
-        $version = preg_match('/^(\d+(?:\.\d+){0,2})/', $version_raw, $m) ? $m[1] : 'unknown';
-        $flavour = stripos($version_raw, 'mariadb') !== false ? 'MariaDB' : 'MySQL';
-
-        $engine_tables = array('team_assignments', 'team_invoices', 'team_activity_log', 'team_assignment_changes');
-        $full_names = array();
-        foreach ($engine_tables as $t) {
-            $full_names[] = $p . $t;
-        }
-        $engine_rows = $wpdb->get_results($wpdb->prepare("
-            SELECT TABLE_NAME AS table_name, ENGINE AS engine FROM information_schema.TABLES
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (" . implode(',', array_fill(0, count($full_names), '%s')) . ")
-        ", $full_names));
-        $engines = array();
-        foreach ((array) $engine_rows as $row) {
-            $engines[substr($row->table_name, strlen($p))] = (string) $row->engine;
-        }
-        ?>
-        <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; margin-bottom: 20px;">
-            <h2 style="margin-top: 0;">Fee timeline readiness (for the 1.70 upgrade)</h2>
-            <p class="description">Read-only. From <?php echo intval(self::FEE_TIMELINE_FROM); ?> each team place's own start and stop dates set the fee, and each player's fee falls due across their own part of the payment window. These counts show what exists for <?php echo esc_html($season); ?>, including places made before the timeline, which may have blank dates to fill. Fee segment rows are no longer written or read for <?php echo esc_html($season); ?>. Nothing here changes any data.</p>
-            <table class="widefat striped" style="max-width: 720px;">
-                <tbody>
-                    <tr>
-                        <td style="width: 45%;">Team places (assignment rows)</td>
-                        <td><?php echo intval($places->total); ?> (<?php echo intval($places->active); ?> active)</td>
-                    </tr>
-                    <tr>
-                        <td>Team places with no start date</td>
-                        <td><?php echo intval($places->no_start); ?></td>
-                    </tr>
-                    <tr>
-                        <td>Inactive team places with no stop date</td>
-                        <td><?php echo intval($places->inactive_no_stop); ?></td>
-                    </tr>
-                    <tr>
-                        <td>Fee segment rows</td>
-                        <td><?php echo intval($segments); ?></td>
-                    </tr>
-                    <tr>
-                        <td>Invoices</td>
-                        <td><?php echo intval($invoices->total); ?> (<?php echo intval($invoices->manual); ?> set with Edit Fee)</td>
-                    </tr>
-                    <tr>
-                        <td>Fee release date</td>
-                        <td><?php echo esc_html($release_text); ?></td>
-                    </tr>
-                    <tr>
-                        <td>Database</td>
-                        <td><?php echo esc_html($flavour . ' ' . $version); ?></td>
-                    </tr>
-                    <tr>
-                        <td>Storage engines</td>
-                        <td>
-                            <?php foreach ($engine_tables as $i => $t): ?>
-                                <?php $engine = isset($engines[$t]) ? $engines[$t] : ''; ?>
-                                <?php echo $i ? '<br>' : ''; ?><code><?php echo esc_html($t); ?></code>:
-                                <?php if ($engine === ''): ?>
-                                    <span style="color: #996800;">not found</span>
-                                <?php elseif (strcasecmp($engine, 'InnoDB') !== 0): ?>
-                                    <span style="color: #996800;"><?php echo esc_html($engine); ?> (not InnoDB)</span>
-                                <?php else: ?>
-                                    <?php echo esc_html($engine); ?>
-                                <?php endif; ?>
-                            <?php endforeach; ?>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
         <?php
     }
 
