@@ -46,6 +46,9 @@ class TeamOversight_Member_Lookup {
         $term = isset($_GET['s']) ? trim(sanitize_text_field(wp_unslash($_GET['s']))) : '';
         $user_id = isset($_GET['user']) ? intval($_GET['user']) : 0;
         $user = $user_id ? get_user_by('id', $user_id) : null;
+        // The Fee timeline card's season: four digits or nothing (then the
+        // person's latest 2027+ season).
+        $season = (isset($_GET['season']) && is_string($_GET['season']) && preg_match('/^\d{4}$/D', $_GET['season']) === 1) ? $_GET['season'] : '';
 
         ?>
         <div class="wrap murvc-lookup">
@@ -73,7 +76,7 @@ class TeamOversight_Member_Lookup {
 
             <?php
             if ($user) {
-                $this->render_profile($user);
+                $this->render_profile($user, $season);
             } elseif ($user_id) {
                 echo '<div class="notice notice-error"><p>No account with that ID — it may have been deleted.</p></div>';
             } elseif ($term !== '') {
@@ -313,16 +316,28 @@ class TeamOversight_Member_Lookup {
         return $best;
     }
 
-    public static function profile_url($user_id, $term = '') {
+    /**
+     * One person's Member Lookup page. $term: the search to go back to.
+     * $season (four digits): open their Fee timeline for that season
+     * (&season=YYYY#fee-timeline); anything else is left off.
+     */
+    public static function profile_url($user_id, $term = '', $season = '') {
         $url = admin_url('admin.php?page=club-membership-lookup&user=' . intval($user_id));
-        return $term !== '' ? $url . '&s=' . urlencode($term) : $url;
+        if ($term !== '') {
+            $url .= '&s=' . urlencode($term);
+        }
+        $season = is_scalar($season) ? (string) $season : '';
+        if (preg_match('/^\d{4}$/D', $season) === 1) {
+            $url .= '&season=' . $season . '#fee-timeline';
+        }
+        return $url;
     }
 
     // ------------------------------------------------------------------
     // One person
     // ------------------------------------------------------------------
 
-    private function render_profile($user) {
+    private function render_profile($user, $season = '') {
         $meta = get_user_meta($user->ID); // one query for the whole profile
         $get = function ($key) use ($meta) {
             return isset($meta[$key][0]) ? $meta[$key][0] : '';
@@ -418,6 +433,8 @@ class TeamOversight_Member_Lookup {
                 <h3>Fees</h3>
                 <?php $this->render_fees($user); ?>
             </div>
+
+            <?php $this->render_fee_timeline($user, $season); ?>
 
             <div class="murvc-card">
                 <h3>Trial applications</h3>
@@ -576,6 +593,29 @@ class TeamOversight_Member_Lookup {
         <?php
     }
 
+    /**
+     * The Fee timeline card (1.70.1), card-wide after Fees, anchored at
+     * #fee-timeline: the season asked for (?season=), else the person's
+     * latest 2027+ season with a team place or an invoice. Someone with
+     * nothing on a timeline and no season asked for gets no card; a
+     * season before 2027 says timelines start then.
+     */
+    private function render_fee_timeline($user, $season) {
+        if ($season === '') {
+            $seasons = TeamOversight_Fee_Timeline::person_seasons($user);
+            if (empty($seasons)) {
+                return;
+            }
+            $season = $seasons[0];
+        }
+        ?>
+        <div class="murvc-card card-wide card-timeline" id="fee-timeline">
+            <h3>Fee timeline &middot; <?php echo esc_html($season); ?></h3>
+            <?php TeamOversight_Fee_Timeline::render_person_card($user, $season); ?>
+        </div>
+        <?php
+    }
+
     private function render_trials($user) {
         global $wpdb;
 
@@ -715,7 +755,8 @@ class TeamOversight_Member_Lookup {
         .murvc-chip.chip-none { background: #f2f2f2; color: #777; }
         .murvc-chip.chip-warn { background: #ffe9cc; color: #8a5000; }
         .murvc-chip.chip-role { background: #e6ecf5; color: #2b4d80; }
-        .murvc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 15px; margin-top: 15px; align-items: start; }
+        .murvc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 15px; margin-top: 15px; align-items: start; }
+        .murvc-card { min-width: 0; }
         .murvc-card { background: #fff; border: 1px solid #ccd0d4; border-radius: 4px; padding: 12px 15px; }
         .murvc-card.card-wide { grid-column: 1 / -1; }
         .murvc-card h3 { margin: 0 0 10px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: #555; }
@@ -734,6 +775,72 @@ class TeamOversight_Member_Lookup {
         .murvc-owing { color: #a00; font-weight: 600; }
         .murvc-payment { font-size: 12px; padding: 2px 0 2px 10px; }
         .murvc-fees details summary { cursor: pointer; }
+
+        /* Fee timeline card (1.70.1): server-drawn bars, no library. Every
+           width is a percentage or flexible, so it wraps on narrow screens. */
+        .murvc-tl { min-width: 0; max-width: 100%; }
+        .murvc-tl-intro { margin: 0; }
+        .murvc-tl-seasons { margin: 0 0 8px; font-size: 13px; }
+        .murvc-tl-notice, .murvc-tl-warn { margin: 0 0 10px !important; }
+        .murvc-tl-head { display: flex; flex-wrap: wrap; gap: 6px 28px; margin: 0 0 10px; font-size: 13px; }
+        .murvc-tl-head > div { flex: 1 1 220px; min-width: 0; }
+        .murvc-tl-head dt { font-weight: 600; color: #555; }
+        .murvc-tl-head dd { margin: 0; }
+        .murvc-tl-before { font-size: 12px; margin: 0 0 8px; }
+        .murvc-tl-sub { margin: 16px 0 8px; font-size: 13px; color: #1d2327; border-bottom: 1px solid #f0f0f1; padding-bottom: 4px; }
+        .murvc-tl-bars { margin: 0 0 10px; }
+        .murvc-tl-lane { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; margin: 0 0 6px; }
+        .murvc-tl-label { flex: 0 1 230px; min-width: 0; font-size: 13px; }
+        .murvc-tl-span { display: block; font-size: 12px; color: #646970; }
+        .murvc-tl-track { position: relative; flex: 1 1 260px; min-width: 0; height: 24px; background: #f0f0f1; border-radius: 3px; overflow: hidden; }
+        .murvc-tl-window { position: absolute; top: 0; bottom: 0; background: rgba(34, 113, 177, .14); border-left: 1px dashed #2271b1; border-right: 1px dashed #2271b1; box-sizing: border-box; }
+        .murvc-tl-seg { position: absolute; top: 5px; bottom: 5px; border-radius: 2px; background: #2271b1; }
+        .murvc-tl-seg.seg-training { background: #3c8d50; }
+        .murvc-tl-seg.seg-staff { background: #7e57b0; }
+        .murvc-tl-seg.is-future { background: repeating-linear-gradient(135deg, #2271b1 0, #2271b1 3px, #b9d3ea 3px, #b9d3ea 7px); }
+        .murvc-tl-seg.seg-training.is-future { background: repeating-linear-gradient(135deg, #3c8d50 0, #3c8d50 3px, #c3e2cb 3px, #c3e2cb 7px); }
+        .murvc-tl-seg.seg-staff.is-future { background: repeating-linear-gradient(135deg, #7e57b0 0, #7e57b0 3px, #dccdee 3px, #dccdee 7px); }
+        .murvc-tl-seg.is-unrecorded { opacity: .6; }
+        .murvc-tl-stop { position: absolute; top: 1px; bottom: 1px; width: 0; border-left: 3px solid #1d2327; margin-left: -1px; }
+        .murvc-tl-today { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid #d63638; margin-left: -1px; }
+        .murvc-tl-axis { position: relative; flex: 1 1 260px; min-width: 0; height: 16px; border-top: 1px solid #c3c4c7; }
+        .murvc-tl-tick { position: absolute; top: 0; height: 15px; border-left: 1px solid #c3c4c7; padding-left: 3px; font-size: 11px; line-height: 15px; color: #646970; white-space: nowrap; }
+        .murvc-tl-legend { margin: 6px 0 0; font-size: 12px; color: #646970; }
+        .murvc-tl-key { display: inline-block; width: 14px; height: 10px; vertical-align: middle; margin: 0 2px 0 8px; }
+        .murvc-tl-key:first-child { margin-left: 0; }
+        .murvc-tl-key.key-window { background: rgba(34, 113, 177, .14); border: 1px dashed #2271b1; box-sizing: border-box; }
+        .murvc-tl-key.key-today { width: 0; border-left: 2px solid #d63638; height: 12px; }
+        .murvc-tl-key.key-stop { width: 0; border-left: 3px solid #1d2327; height: 12px; }
+        .murvc-tl-key.key-future { background: repeating-linear-gradient(135deg, #2271b1 0, #2271b1 3px, #b9d3ea 3px, #b9d3ea 7px); }
+        .murvc-tl-badge { display: inline-block; padding: 0 7px; border-radius: 9px; font-size: 11px; font-weight: 600; background: #fcf0e1; color: #8a5000; margin: 2px 4px 0 0; }
+        .murvc-tl-badge.badge-warn { background: #fcf9e8; color: #8a6d00; border: 1px solid #dba617; }
+        .murvc-tl-place { border-top: 1px solid #f0f0f1; padding: 10px 0 6px; }
+        .murvc-tl-place h5 { margin: 0 0 2px; font-size: 13px; }
+        .murvc-tl-place-dates { margin: 0 0 8px; font-size: 12px; color: #646970; }
+        .murvc-tl-forms { display: flex; flex-wrap: wrap; gap: 8px; }
+        .murvc-tl-form { flex: 1 1 260px; min-width: 0; max-width: 100%; box-sizing: border-box; margin: 0; padding: 8px 10px; background: #f6f7f7; border: 1px solid #dcdcde; border-radius: 4px; }
+        .murvc-tl-form label { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0 8px 6px 0; max-width: 100%; }
+        .murvc-tl-form input[type=date], .murvc-tl-form select { max-width: 100%; }
+        .murvc-tl-actions { display: inline-flex; flex-wrap: wrap; gap: 4px; margin: 0 0 4px; }
+        .murvc-tl-form .description { margin: 4px 0 0; font-size: 12px; }
+        .murvc-tl-form.murvc-tl-remove { background: #fcf3f3; border-color: #f0c5c5; }
+        .murvc-tl-form .murvc-tl-danger { color: #b32d2e; border-color: #b32d2e; }
+        .murvc-tl-form .murvc-tl-danger:hover, .murvc-tl-form .murvc-tl-danger:focus { color: #8a2424; border-color: #8a2424; }
+        .murvc-tl-confirm { font-weight: 600; }
+        .murvc-tl-preview-out { margin: 6px 0 0; font-size: 13px; font-weight: 600; color: #1d2327; }
+        .murvc-tl-preview-out:empty { display: none; }
+        .murvc-tl-preview-out.is-error { color: #b32d2e; }
+        .murvc-tl-scroll { max-width: 100%; overflow-x: auto; }
+        .murvc-tl-stretches td, .murvc-tl-history td { vertical-align: top; }
+        .murvc-tl-money th { width: 26%; }
+        .murvc-tl-money .fee-manual { color: #8a5000; }
+        /* The coaches' fee pill (the same classes as the coach portal). */
+        .murvc-lookup .cac-fee { display: inline-block; padding: 3px 10px; font-size: 12px; font-weight: 600; line-height: 1.4; border: 1px solid #c3c4c7; border-radius: 4px; background: #f6f7f7; color: #1d2327; cursor: help; }
+        .murvc-lookup .cac-fee-paid, .murvc-lookup .cac-fee-ontrack { background: #e8f5ea; border-color: #2e8540; color: #1e6b2a; }
+        .murvc-lookup .cac-fee-behind { background: #fff4e0; border-color: #d18a00; color: #7a4a00; }
+        .murvc-lookup .cac-fee-flagged { background: #fce8e8; border-color: #c62d2d; color: #a00; }
+        .murvc-lookup .cac-fee-arrangement { background: #e8f0fb; border-color: #4f7cc0; color: #1d4f91; }
+        .murvc-lookup .cac-fee-none { font-weight: 400; color: #646970; }
         </style>
         <?php
     }

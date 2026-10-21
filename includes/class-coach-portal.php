@@ -3116,8 +3116,10 @@ class TeamOversight_Coach_Portal {
      * by class, and some are set by hand). More than a month behind is
      * flagged: they shouldn't train until it's sorted with the club.
      * $standing: one TeamOversight_Payments::get_fee_standings() entry.
+     * Public (1.70.1) so Member Lookup's Fee timeline shows admins the same
+     * pill coaches see.
      */
-    private static function render_fee_standing($standing, $season) {
+    public static function render_fee_standing($standing, $season) {
         // Before release a $0 invoice is a fee taken back until then (any
         // payment kept as credit), not an exemption.
         if ($standing['state'] === 'none' && !TeamOversight_Fees::fees_released($season)) {

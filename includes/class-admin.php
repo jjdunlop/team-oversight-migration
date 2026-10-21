@@ -318,6 +318,19 @@ class TeamOversight_Admin {
         global $wpdb;
         $season = $this->get_current_season();
 
+        // 2027+ (fee timeline): one start date for everyone this run
+        // places, checked before anything is inserted (a date after the
+        // late-join cutoff refuses the whole run).
+        $start = null;
+        if (TeamOversight_Fees::timeline_applies($season)) {
+            $start = isset($_POST['finalise_start_date']) ? sanitize_text_field(wp_unslash($_POST['finalise_start_date'])) : current_time('Y-m-d');
+            $invalid = TeamOversight_Fee_Timeline::validate_start($season, $start);
+            if ($invalid !== null) {
+                echo '<div class="notice notice-error"><p><strong>Nothing was finalised.</strong> ' . esc_html($invalid) . '</p></div>';
+                return;
+            }
+        }
+
         // One Finalise per season at a time: two admins (or a second click
         // while the first run is still going) must not both pass the
         // "already on the team?" check and insert a player twice. Same
@@ -329,14 +342,18 @@ class TeamOversight_Admin {
             echo '<div class="notice notice-warning"><p>Another Finalise for ' . esc_html($season) . ' is still running. Wait a moment, then reload this page and check before running it again.</p></div>';
             return;
         }
-        $this->run_finalise_selections($season);
+        $this->run_finalise_selections($season, $start);
         if ($got_lock !== null) {
             $wpdb->query($wpdb->prepare("SELECT RELEASE_LOCK(%s)", $lock));
         }
     }
 
-    /** Finalise's work, run while holding the season's Finalise lock. */
-    private function run_finalise_selections($season) {
+    /**
+     * Finalise's work, run while holding the season's Finalise lock.
+     * $start (2027+, already validated): the start date of every place
+     * this run adds, through TeamOversight_Fee_Timeline::add_stretches().
+     */
+    private function run_finalise_selections($season, $start = null) {
         global $wpdb;
 
         // From 2027 a Selected / Training Only verdict is an offer, and only
@@ -404,12 +421,57 @@ class TeamOversight_Admin {
         $manual_kept = 0;
         $not_invoiced = array();
         $role_differs = array();
+        // 2027+: new places go through the fee timeline's add_stretches()
+        // from the run's start date (already checked against the cutoff).
+        $timeline = TeamOversight_Fees::timeline_applies($season) && $start !== null;
+        $not_placed = array();
 
         foreach ($by_app as $application_id => $info) {
             // Match the person by account as well as email, so a playing
             // row stored under an older email isn't duplicated.
             $uid = $info['user_id'] > 0 ? $info['user_id'] : TeamOversight_Fees::resolve_user_id($info['email']);
             $created_for_app = false;
+            $placed_teams = $info['teams'];
+            if ($timeline) {
+                // One call per application: a team they already hold (an
+                // open place, or one covering the start) is skipped, so a
+                // re-run adds nothing; an existing role is never changed
+                // (a verdict that differs is listed); one re-price, only
+                // when it added a place or they have no invoice yet.
+                $placed = TeamOversight_Fee_Timeline::add_stretches(array('user_id' => $uid > 0 ? $uid : 0, 'email' => $info['email']), $season, $info['teams'], $start, 'finalise');
+                $assignments_created += intval($placed['added']);
+                foreach ($placed['skipped'] as $skip) {
+                    if ($skip['existing_role'] !== $skip['role']) {
+                        $role_differs[] = $info['label'] . ' — ' . $skip['team'] . ': verdict '
+                            . ($skip['role'] === 'training_only' ? 'Training Only' : 'Selected')
+                            . ', assignment ' . TeamOversight_Fees::role_label($skip['existing_role']);
+                    }
+                }
+                $conflicted = array();
+                foreach ($placed['conflicts'] as $conflict) {
+                    $not_placed[] = $info['label'] . ' — ' . $conflict['team'] . ': ' . $conflict['message'];
+                    $conflicted[] = $conflict['team'];
+                }
+                if (!$placed['ok'] && empty($placed['conflicts'])) {
+                    $not_placed[] = $info['label'] . ': ' . $placed['error'];
+                }
+                if ($placed['invoiced']) {
+                    $invoices_created++;
+                } elseif ($placed['repriced']) {
+                    $invoices_repriced++;
+                } elseif ($placed['manual_kept']) {
+                    $manual_kept++; // set with Edit Fee: kept, the calculation logged
+                }
+                if ($placed['not_priced']) {
+                    $not_invoiced[] = $info['label'];
+                }
+                if (!$placed['ok']) {
+                    continue; // nothing placed or held: the application stays as it was
+                }
+                $placed_teams = array_values(array_filter($info['teams'], function ($t) use ($conflicted) {
+                    return !in_array($t['team'], $conflicted, true);
+                }));
+            } else {
             foreach ($info['teams'] as $team_entry) {
                 // Only a playing assignment blocks creation — someone already
                 // on the team as coach/manager can still be added as a player.
@@ -487,10 +549,11 @@ class TeamOversight_Admin {
                     $not_invoiced[] = $info['label'];
                 }
             }
+            }
 
             $assigned_tokens = array_map(function ($t) {
                 return $t['team'] . ($t['role'] === 'training_only' ? ' (T/O)' : '');
-            }, $info['teams']);
+            }, $placed_teams);
             if ($needs_acceptance) {
                 // Finalise never undoes: a team placed by an earlier run
                 // whose offer is no longer marked accepted stays listed (its
@@ -527,7 +590,15 @@ class TeamOversight_Admin {
         } else {
             $invoice_note = 'no invoices yet (' . esc_html($season) . ' fees are released on ' . esc_html(date('j M Y', strtotime(TeamOversight_Fees::get_fee_release_date($season)))) . ', when everyone on a team is invoiced)';
         }
-        echo '<div class="notice notice-success"><p>Finalised ' . count($by_app) . ' application(s): ' . $assignments_created . ' new team assignment(s) created, ' . $invoice_note . ', applications marked accepted.</p></div>';
+        echo '<div class="notice notice-success"><p>Finalised ' . count($by_app) . ' application(s): ' . $assignments_created . ' new team assignment(s) created'
+            . ($timeline ? ' (starting ' . esc_html(TeamOversight_Fee_Timeline::format_date($start)) . ')' : '')
+            . ', ' . $invoice_note . ', applications marked accepted.</p></div>';
+
+        if (!empty($not_placed)) {
+            echo '<div class="notice notice-warning"><p><strong>' . count($not_placed) . ' place' . (count($not_placed) === 1 ? ' was' : 's were') . ' not added:</strong> '
+                . esc_html(implode('; ', $not_placed))
+                . '. Fix the dates on the person\'s Fee timeline (Member Lookup), then run Finalise again.</p></div>';
+        }
 
         if (!empty($not_invoiced)) {
             echo '<div class="notice notice-warning"><p><strong>' . count($not_invoiced) . ' player' . (count($not_invoiced) === 1 ? ' was' : 's were') . ' put on teams but not invoiced</strong> — no ' . esc_html($season) . ' fee could be worked out (no fee matrix amount for their fee class and role): '
@@ -538,7 +609,9 @@ class TeamOversight_Admin {
         if (!empty($role_differs)) {
             echo '<div class="notice notice-warning"><p><strong>' . count($role_differs) . ' coach verdict' . (count($role_differs) === 1 ? ' differs' : 's differ') . ' from the player\'s existing team role</strong> — Finalise never changes an existing role: '
                 . esc_html(implode('; ', $role_differs))
-                . '. If the verdict is right, change the role on <a href="' . esc_url(admin_url('admin.php?page=team-oversight-assignments&season=' . $season)) . '">Team Assignments</a> (the fee is re-priced); otherwise ask the coach to update the verdict.</p></div>';
+                . ($timeline
+                    ? '. If the verdict is right, use Change role or team from [date] on the person\'s Fee timeline (Member Lookup; the fee is re-priced); otherwise ask the coach to update the verdict.</p></div>'
+                    : '. If the verdict is right, change the role on <a href="' . esc_url(admin_url('admin.php?page=team-oversight-assignments&season=' . $season)) . '">Team Assignments</a> (the fee is re-priced); otherwise ask the coach to update the verdict.</p></div>');
         }
     }
 
@@ -1594,6 +1667,13 @@ class TeamOversight_Admin {
                     <form method="post" style="margin: 0;" onsubmit="return confirm('Finalise all coach-selected applications for <?php echo esc_attr($season); ?>?\n\nThis creates team assignments for every <?php echo $needs_acceptance ? 'accepted Selected / Training Only offer' : 'Selected verdict'; ?>, generates fee invoices, and marks the applications accepted. Safe to run repeatedly.');">
                         <input type="hidden" name="action" value="finalise_selections">
                         <?php wp_nonce_field('finalise_selections', 'finalise_nonce'); ?>
+                        <?php if (TeamOversight_Fees::timeline_applies($season)): ?>
+                            <?php $finalise_cutoff = TeamOversight_Fees::latest_start_date($season); ?>
+                            <label style="display: block; margin-bottom: 6px;">Start date for players placed by this run
+                                <input type="date" name="finalise_start_date" value="<?php echo esc_attr(current_time('Y-m-d')); ?>" min="<?php echo esc_attr(TeamOversight_Fee_Timeline::typo_guard($season)); ?>"<?php echo $finalise_cutoff !== null ? ' max="' . esc_attr($finalise_cutoff) . '"' : ''; ?> required>
+                            </label>
+                            <small style="display: block; margin-bottom: 6px;"><?php echo esc_html(TeamOversight_Fee_Timeline::cutoff_note($season)); ?> Players already on a team keep their own start.</small>
+                        <?php endif; ?>
                         <input type="submit" class="button button-primary" value="Finalise Coach Selections">
                     </form>
                 </div>
@@ -1646,6 +1726,11 @@ class TeamOversight_Admin {
                                     <option value="<?php echo esc_attr($code); ?>"><?php echo esc_html($code); ?></option>
                                 <?php endforeach; ?>
                             </select>
+                            <?php if (TeamOversight_Fees::timeline_applies($season)): ?>
+                                <?php $bulk_cutoff = TeamOversight_Fees::latest_start_date($season); ?>
+                                <label for="bulk-start-date">from</label>
+                                <input type="date" id="bulk-start-date" value="<?php echo esc_attr(current_time('Y-m-d')); ?>" min="<?php echo esc_attr(TeamOversight_Fee_Timeline::typo_guard($season)); ?>"<?php echo $bulk_cutoff !== null ? ' max="' . esc_attr($bulk_cutoff) . '"' : ''; ?> title="<?php echo esc_attr('Start date. ' . TeamOversight_Fee_Timeline::cutoff_note($season)); ?>">
+                            <?php endif; ?>
                             <button type="button" id="bulk-accept-btn" class="button button-primary" disabled>Accept Selected</button>
                         </div>
                         <div>
@@ -1755,6 +1840,10 @@ class TeamOversight_Admin {
                                                     <option value="<?php echo esc_attr($code); ?>" title="<?php echo esc_attr($name); ?>"><?php echo esc_html($code); ?></option>
                                                 <?php endforeach; ?>
                                             </select>
+                                            <?php if (TeamOversight_Fees::timeline_applies($season)): ?>
+                                                <?php $accept_cutoff = TeamOversight_Fees::latest_start_date($season); ?>
+                                                <input type="date" name="start_date" value="<?php echo esc_attr(current_time('Y-m-d')); ?>" min="<?php echo esc_attr(TeamOversight_Fee_Timeline::typo_guard($season)); ?>"<?php echo $accept_cutoff !== null ? ' max="' . esc_attr($accept_cutoff) . '"' : ''; ?> required title="<?php echo esc_attr('Start date. ' . TeamOversight_Fee_Timeline::cutoff_note($season)); ?>" style="font-size: 12px;">
+                                            <?php endif; ?>
                                             <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
                                             <input type="hidden" name="action" value="accept_trial">
                                             <input type="submit" class="button button-primary" value="Accept">
@@ -1772,7 +1861,11 @@ class TeamOversight_Admin {
                                         <form method="post" style="display: inline; margin-left: 10px;">
                                             <input type="hidden" name="trial_id" value="<?php echo $trial->id; ?>">
                                             <input type="hidden" name="action" value="undo_trial">
+                                            <?php if (TeamOversight_Fees::timeline_applies($season)): ?>
+                                                <input type="submit" class="button" value="Undo Assignment" onclick="return confirm('<?php echo esc_js('Undo takes the player off every team on this application as if they were never on them: those places are removed and charged nothing, and the application goes back to pending. If they played, use Stopped playing on their Fee timeline (Member Lookup) instead. Undo this assignment?'); ?>')">
+                                            <?php else: ?>
                                             <input type="submit" class="button" value="Undo Assignment" onclick="return confirm('Are you sure you want to undo this assignment?')">
+                                            <?php endif; ?>
                                             <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
                                         </form>
                                     <?php elseif ($trial->application_status === 'rejected'): ?>
@@ -2049,6 +2142,12 @@ class TeamOversight_Admin {
                 formData.append('trial_ids', JSON.stringify(trialIds));
                 if (team) {
                     formData.append('assigned_team', team);
+                }
+                // 2027+: the start date for everyone accepted (checked on the
+                // server before anything is written).
+                const bulkStart = document.getElementById('bulk-start-date');
+                if (bulkStart && action === 'bulk_accept') {
+                    formData.append('start_date', bulkStart.value);
                 }
                 formData.append('bulk_trial_nonce', '<?php echo wp_create_nonce('bulk_trial_action'); ?>');
                 
@@ -2449,7 +2548,20 @@ class TeamOversight_Admin {
                                 data-behind="<?php echo $standing && $standing['overdue'] >= 1 ? '1' : '0'; ?>" data-flagged="<?php echo $standing && $standing['flagged'] ? '1' : '0'; ?>" data-arrangement="<?php echo $held ? '1' : '0'; ?>"
                                 data-arrangement-note="<?php echo esc_attr($held ? $held['note'] : ''); ?>">
                                 <td><?php echo $invoice->id; ?></td>
-                                <td><?php echo esc_html($invoice->name); ?></td>
+                                <?php
+                                // 2027+: the name opens the person's Fee timeline
+                                // (their account, else the one the email resolves
+                                // to; no account, no link).
+                                $timeline_uid = 0;
+                                if (TeamOversight_Fees::timeline_applies($invoice->season)) {
+                                    $timeline_uid = intval($invoice->user_id) > 0 ? intval($invoice->user_id) : intval(TeamOversight_Fees::resolve_user_id($invoice->email));
+                                }
+                                ?>
+                                <?php if ($timeline_uid > 0): ?>
+                                    <td><a class="fee-timeline-link" href="<?php echo esc_url(TeamOversight_Member_Lookup::profile_url($timeline_uid, '', $invoice->season)); ?>" title="Open their <?php echo esc_attr($invoice->season); ?> fee timeline"><?php echo esc_html($invoice->name !== null && $invoice->name !== '' ? $invoice->name : 'user #' . $timeline_uid); ?></a></td>
+                                <?php else: ?>
+                                    <td><?php echo esc_html($invoice->name); ?></td>
+                                <?php endif; ?>
                                 <td><?php echo esc_html($invoice->email); ?></td>
                                 <td><?php echo esc_html($invoice->team_codes ? str_replace('|', ', ', $invoice->team_codes) : 'N/A'); ?></td>
                                 <td class="fee-info-cell"><span title="<?php echo esc_attr($fee_info); ?>"><?php echo esc_html($fee_info); ?></span><?php echo $breakdown_html; ?></td>
@@ -2847,7 +2959,15 @@ class TeamOversight_Admin {
                         </tr>
                         <tr>
                             <th><label for="start_date">Start Date</label></th>
+                            <?php if (TeamOversight_Fees::timeline_applies($season)): ?>
+                                <?php $add_cutoff = TeamOversight_Fees::latest_start_date($season); ?>
+                                <td>
+                                    <input type="date" name="start_date" value="<?php echo esc_attr(current_time('Y-m-d')); ?>" min="<?php echo esc_attr(TeamOversight_Fee_Timeline::typo_guard($season)); ?>"<?php echo $add_cutoff !== null ? ' max="' . esc_attr($add_cutoff) . '"' : ''; ?> required>
+                                    <p class="description"><?php echo esc_html(TeamOversight_Fee_Timeline::cutoff_note($season)); ?> The fee is charged from this date; it may be in the past.</p>
+                                </td>
+                            <?php else: ?>
                             <td><input type="date" name="start_date" value="<?php echo esc_attr(current_time('Y-m-d')); ?>" required></td>
+                            <?php endif; ?>
                         </tr>
                     </table>
                     
@@ -2860,6 +2980,9 @@ class TeamOversight_Admin {
                 </form>
             </div>
             
+            <?php if (TeamOversight_Fees::timeline_applies($season)): ?>
+                <div class="notice notice-info inline" style="margin: 15px 0;"><p>From <?php echo intval(TeamOversight_Fees::FEE_TIMELINE_FROM); ?>, each team place's start and stop dates set the fee, so <?php echo esc_html($season); ?> places are read-only here: change dates, stop a place, change a role or team, or remove a place added by mistake on the person's <strong>Fee timeline</strong> (Member Lookup), where every change is recorded and re-priced.</p></div>
+            <?php endif; ?>
             <?php if (!empty($assignments)): ?>
                 <div class="assignments-filters" style="margin: 20px 0; padding: 15px; background: #f9f9f9; border: 1px solid #ddd;">
                     <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
@@ -2914,6 +3037,31 @@ class TeamOversight_Admin {
                             <tr data-assignment-id="<?php echo $assignment->id; ?>" data-team="<?php echo esc_attr($assignment->team); ?>" data-role="<?php echo esc_attr($assignment->role); ?>" data-status="<?php echo esc_attr($assignment->registration_status); ?>" <?php echo !$assignment->is_active ? 'style="opacity: 0.6; background-color: #f9f9f9;"' : ''; ?>>
                                 <td><?php echo esc_html($assignment->name); ?></td>
                                 <td><?php echo esc_html($assignment->email); ?></td>
+                                <?php if (TeamOversight_Fees::timeline_applies($assignment->season)): ?>
+                                    <?php
+                                    // 2027+: read-only here; dates, roles and
+                                    // removals go through the person's Fee timeline.
+                                    $timeline_uid = intval($assignment->user_id) > 0 ? intval($assignment->user_id) : TeamOversight_Fees::resolve_user_id($assignment->email);
+                                    $timeline_status = ($assignment->registration_status === 'active' ? '🟢 ' : '🔴 ') . ucfirst($assignment->registration_status);
+                                    if ($assignment->end_date && $assignment->end_date > current_time('Y-m-d')) {
+                                        $timeline_status .= ' (stops ' . $assignment->end_date . ')';
+                                    } elseif ($assignment->end_date) {
+                                        $timeline_status .= ' (stopped ' . $assignment->end_date . ', first day off)';
+                                    }
+                                    ?>
+                                    <td><?php echo esc_html($assignment->team); ?></td>
+                                    <td><?php echo esc_html(str_replace('_', ' ', ucwords($assignment->role, '_'))); ?></td>
+                                    <td><?php echo esc_html($assignment->start_date ? $assignment->start_date : 'not recorded'); ?></td>
+                                    <td><?php echo esc_html($assignment->end_date ? $assignment->end_date . ' (first day off)' : ''); ?></td>
+                                    <td><?php echo esc_html($timeline_status); ?></td>
+                                    <td>
+                                        <?php if ($timeline_uid > 0): ?>
+                                            <a class="button fee-timeline-link" href="<?php echo esc_url(TeamOversight_Member_Lookup::profile_url($timeline_uid, '', $assignment->season)); ?>">Fee timeline</a>
+                                        <?php else: ?>
+                                            <span class="description">No account</span>
+                                        <?php endif; ?>
+                                    </td>
+                                <?php else: ?>
                                 <td class="editable-team" data-field="team" data-value="<?php echo esc_attr($assignment->team); ?>">
                                     <span class="display-value"><?php echo esc_html($assignment->team); ?></span>
                                     <select class="edit-value" style="display: none;">
@@ -2965,6 +3113,7 @@ class TeamOversight_Admin {
                                     <button type="button" class="button cancel-edit" onclick="cancelEdit(this)" style="display: none;">Cancel</button>
                                     <button type="button" class="button button-link-delete delete-assignment" onclick="deleteAssignment(this)" style="display: none; color: #a00;">Delete</button>
                                 </td>
+                                <?php endif; ?>
                             </tr>
                         <?php endforeach; ?>
                     </tbody>
@@ -3208,28 +3357,73 @@ class TeamOversight_Admin {
     }
     
     private function process_trial_action() {
-        if (!wp_verify_nonce($_POST['trial_nonce'], 'process_trial')) {
+        if (!isset($_POST['trial_nonce']) || !wp_verify_nonce($_POST['trial_nonce'], 'process_trial')) {
             echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
             return;
         }
-        
+
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
         global $wpdb;
         $trial_id = intval($_POST['trial_id']);
         $action = sanitize_text_field($_POST['action']);
-        
+
         if ($action === 'accept_trial') {
             $assigned_team = sanitize_text_field($_POST['assigned_team']);
-            
+
             if (empty($assigned_team)) {
                 echo '<div class="notice notice-error"><p>Please select a team.</p></div>';
                 return;
             }
-            
+
             $trial = $wpdb->get_row($wpdb->prepare("
                 SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d
             ", $trial_id));
-            
-            if ($trial && $trial->application_status === 'pending') {
+
+            if ($trial && $trial->application_status === 'pending' && TeamOversight_Fees::timeline_applies($trial->season)) {
+                // 2027+ (fee timeline): placed from the chosen start date
+                // through add_stretches() (refused after the late-join
+                // cutoff before anything is written); the application is
+                // marked accepted only once they hold the place.
+                $start = isset($_POST['start_date']) ? sanitize_text_field(wp_unslash($_POST['start_date'])) : current_time('Y-m-d');
+                $placed = TeamOversight_Fee_Timeline::add_stretches(
+                    array('user_id' => intval($trial->user_id), 'email' => $trial->email),
+                    $trial->season,
+                    array(array('team' => $assigned_team, 'role' => 'playing_member')),
+                    $start,
+                    'accept'
+                );
+                if (!$placed['ok']) {
+                    echo '<div class="notice notice-error"><p><strong>Not accepted.</strong> ' . esc_html($placed['error']) . '</p></div>';
+                    return;
+                }
+                $wpdb->update(
+                    $wpdb->prefix . 'trial_applications',
+                    array(
+                        'application_status' => 'accepted',
+                        'assigned_team' => $assigned_team
+                    ),
+                    array('id' => $trial_id),
+                    array('%s', '%s'),
+                    array('%d')
+                );
+                if ($placed['added']) {
+                    $fee_note = '';
+                    if ($placed['not_priced']) {
+                        $fee_note = ' No fee could be worked out (no fee matrix amount for their fee class and role) — fill in the fee matrix on Configuration.';
+                    } elseif (!$placed['released']) {
+                        $fee_note = ' ' . $trial->season . ' fees are released on ' . TeamOversight_Fee_Timeline::format_date(TeamOversight_Fees::get_fee_release_date($trial->season)) . ', so they\'ll be invoiced then.';
+                    } elseif ($placed['manual_kept']) {
+                        $fee_note = ' Their fee was set with Edit Fee, so it was kept as it is.';
+                    }
+                    echo '<div class="notice notice-success"><p>Trial application accepted and player assigned to ' . esc_html($assigned_team) . ' from ' . esc_html(TeamOversight_Fee_Timeline::format_date($start)) . '.' . esc_html($fee_note) . '</p></div>';
+                } else {
+                    echo '<div class="notice notice-success"><p>Trial application accepted. They already hold a place on ' . esc_html($assigned_team) . ', so nothing was added and their fee is unchanged.</p></div>';
+                }
+            } elseif ($trial && $trial->application_status === 'pending') {
                 $wpdb->update(
                     $wpdb->prefix . 'trial_applications',
                     array(
@@ -3347,7 +3541,16 @@ class TeamOversight_Admin {
                     return trim(str_replace('(T/O)', '', $team_code));
                 }, explode(',', (string) $trial->assigned_team)));
                 $trial_uid = intval($trial->user_id);
+                $undo_refused = array();
 
+                if (TeamOversight_Fees::timeline_applies($trial->season)) {
+                    // 2027+ (fee timeline): each playing place on those teams
+                    // is a Remove (added by mistake) — never on the team, no
+                    // charge — through the timeline, which records it,
+                    // syncs the verdicts, re-prices under the account email
+                    // and deletes the invoice only when it is a clean slate.
+                    list($invoice, $still_on_team, $invoice_removed, $accrued, $no_dates, $invoice_manual, $undo_refused) = $this->undo_timeline_places($trial, $undo_teams);
+                } else {
                 foreach ($undo_teams as $undo_team) {
                     $undo_ids = $wpdb->get_col($wpdb->prepare("
                         SELECT id FROM {$wpdb->prefix}team_assignments
@@ -3404,6 +3607,15 @@ class TeamOversight_Admin {
                     $accrued = $guard['accrued'];
                     $no_dates = $guard['no_dates'];
                     $invoice_manual = $guard['manual'];
+                }
+                }
+
+                if (!empty($undo_refused)) {
+                    // A place changed under us (or couldn't be removed): the
+                    // application stays accepted for what is left, so nothing
+                    // claims they are off a team they still hold.
+                    echo '<div class="notice notice-error"><p><strong>Undo did not finish.</strong> ' . esc_html(implode(' ', $undo_refused)) . ' Reload the page and check their Fee timeline (Member Lookup) before trying again.</p></div>';
+                    return;
                 }
 
                 $fee_message = '';
@@ -3487,6 +3699,85 @@ class TeamOversight_Admin {
         }
     }
     
+    /**
+     * Undo Assignment for a fee-timeline season (2027+): every playing
+     * place the person holds on the application's teams (active or
+     * stopped, by account or email) is a Remove (added by mistake) through
+     * TeamOversight_Fee_Timeline::remove_mistake() (source undo): recorded
+     * in the change table, charged nothing, re-priced under the account
+     * email, the class history restarted when no place is left, and the
+     * invoice deleted only when delete_invoice_if_empty() allows. Staff
+     * places are never touched. A team with nothing refused still drops
+     * its verdict to Tentative (as before 2027, even with no place left).
+     * Returns array(invoice before (id, invoice_amount) or null,
+     * still_on_team (any season place left), invoice_removed, accrued,
+     * no_dates, manual, refused (messages)) for Undo's notice.
+     */
+    private function undo_timeline_places($trial, $undo_teams) {
+        global $wpdb;
+        $trial_uid = intval($trial->user_id);
+        $fee_email = $trial->email;
+        $fee_account = $trial_uid > 0 ? get_userdata($trial_uid) : false;
+        if ($fee_account && $fee_account->user_email) {
+            $fee_email = $fee_account->user_email;
+        }
+        // Worked out before anything is removed (an email with no account
+        // resolves through its rows).
+        $fee_uid = TeamOversight_Fees::resolve_user_id($fee_email);
+        $invoice = $wpdb->get_row($wpdb->prepare("
+            SELECT id, invoice_amount FROM {$wpdb->prefix}team_invoices
+            WHERE (user_id = %d OR email = %s) AND season = %s
+        ", $fee_uid, $fee_email, $trial->season));
+
+        $refused = array();
+        foreach ($undo_teams as $undo_team) {
+            $undo_ids = $wpdb->get_col($wpdb->prepare("
+                SELECT id FROM {$wpdb->prefix}team_assignments
+                WHERE season = %s AND team = %s
+                    AND role IN ('playing_member', 'training_only')
+                    AND (email = %s OR email = %s OR (user_id > 0 AND user_id = %d))
+                ORDER BY id
+            ", $trial->season, $undo_team, $trial->email, $fee_email, $trial_uid));
+            $team_refused = false;
+            foreach ($undo_ids as $undo_id) {
+                $removed = TeamOversight_Fee_Timeline::remove_mistake(intval($undo_id), null, 'undo', array('reason' => 'trial assignment undone, nothing paid'));
+                if (empty($removed['ok'])) {
+                    $refused[] = $undo_team . ': ' . $removed['error'];
+                    $team_refused = true;
+                }
+            }
+            if (!$team_refused) {
+                self::sync_trial_after_assignment_removal($trial->email, $trial->season, $undo_team, $trial_uid);
+            }
+        }
+
+        $still_on_team = (bool) $wpdb->get_var($wpdb->prepare("
+            SELECT id FROM {$wpdb->prefix}team_assignments
+            WHERE (user_id = %d OR email = %s) AND season = %s LIMIT 1
+        ", $fee_uid, $fee_email, $trial->season));
+        $invoice_removed = false;
+        $accrued = 0.0;
+        $no_dates = false;
+        $manual = false;
+        if ($invoice) {
+            $exists = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$wpdb->prefix}team_invoices WHERE id = %d", $invoice->id));
+            $invoice_removed = !$exists;
+            if ($exists) {
+                $manual = TeamOversight_Fees::fee_is_manual($invoice->id);
+                if (!$still_on_team && !$manual && TeamOversight_Fees::fees_released($trial->season)) {
+                    $season_dates = TeamOversight_Fees::get_season_dates($trial->season);
+                    $no_dates = !$season_dates || strtotime($season_dates['end']) <= strtotime($season_dates['start']);
+                    if (!$no_dates) {
+                        $fees = new TeamOversight_Fees();
+                        $breakdown = $fees->fee_breakdown($fee_email, $trial->season);
+                        $accrued = floatval($breakdown['total']);
+                    }
+                }
+            }
+        }
+        return array($invoice, $still_on_team, $invoice_removed, $accrued, $no_dates, $manual, $refused);
+    }
+
     public function ajax_bulk_accept_trials() {
         // Security check
         if (!wp_verify_nonce($_POST['bulk_trial_nonce'], 'bulk_trial_action')) {
@@ -3513,35 +3804,54 @@ class TeamOversight_Admin {
             wp_send_json_error('Please select a team.');
             return;
         }
-        
+
+        // 2027+ (fee timeline): one start date for the batch, checked for
+        // every timeline season in it BEFORE the transaction starts, so a
+        // date after the late-join cutoff writes nothing at all.
+        $start_date = isset($_POST['start_date']) ? sanitize_text_field(wp_unslash($_POST['start_date'])) : '';
+        $batch_ids = array_values(array_filter(array_map('intval', $trial_ids)));
+        $batch_seasons = $batch_ids ? $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}trial_applications WHERE id IN (" . implode(',', $batch_ids) . ")") : array();
+        foreach ($batch_seasons as $batch_season) {
+            if (TeamOversight_Fees::timeline_applies($batch_season)) {
+                if ($start_date === '') {
+                    $start_date = current_time('Y-m-d');
+                }
+                $invalid = TeamOversight_Fee_Timeline::validate_start($batch_season, $start_date);
+                if ($invalid !== null) {
+                    wp_send_json_error('Nothing was accepted. ' . $invalid);
+                    return;
+                }
+            }
+        }
+
         $success_count = 0;
         $error_count = 0;
         $errors = array();
-        
+
         // Start transaction
         $wpdb->query('START TRANSACTION');
-        
+
         try {
             foreach ($trial_ids as $trial_id) {
                 $trial_id = intval($trial_id);
-                
+
                 // Get trial info
                 $trial = $wpdb->get_row($wpdb->prepare("
                     SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d
                 ", $trial_id));
-                
+
                 if (!$trial) {
                     $errors[] = "Trial ID $trial_id not found.";
                     $error_count++;
                     continue;
                 }
-                
+
                 if ($trial->application_status !== 'pending') {
                     $errors[] = "Trial for {$trial->name} is not pending.";
                     $error_count++;
                     continue;
                 }
-                
+
                 // Update trial status
                 $update_result = $wpdb->update(
                     $wpdb->prefix . 'trial_applications',
@@ -3553,13 +3863,38 @@ class TeamOversight_Admin {
                     array('%s', '%s'),
                     array('%d')
                 );
-                
+
                 if ($update_result === false) {
                     $errors[] = "Failed to update trial for {$trial->name}.";
                     $error_count++;
                     continue;
                 }
-                
+
+                if (TeamOversight_Fees::timeline_applies($trial->season)) {
+                    // 2027+: placed through the fee timeline, inside this
+                    // transaction. Already on the team counts as success;
+                    // before the release no invoice is expected.
+                    $placed = TeamOversight_Fee_Timeline::add_stretches(
+                        array('user_id' => intval($trial->user_id), 'email' => $trial->email),
+                        $trial->season,
+                        array(array('team' => $assigned_team, 'role' => 'playing_member')),
+                        $start_date,
+                        'bulk_accept'
+                    );
+                    if (!$placed['ok']) {
+                        $errors[] = "Could not place {$trial->name}: " . $placed['error'];
+                        $error_count++;
+                        continue;
+                    }
+                    if ($placed['not_priced']) {
+                        $errors[] = "Failed to generate invoice for {$trial->name}.";
+                        $error_count++;
+                        continue;
+                    }
+                    $success_count++;
+                    continue;
+                }
+
                 // Create team assignment
                 $assignment_result = $wpdb->insert(
                     $wpdb->prefix . 'team_assignments',
@@ -3697,31 +4032,78 @@ class TeamOversight_Admin {
     }
     
     private function save_team_assignment() {
-        if (!wp_verify_nonce($_POST['assignment_nonce'], $_POST['action'])) {
+        if (!isset($_POST['assignment_nonce']) || !wp_verify_nonce($_POST['assignment_nonce'], $_POST['action'])) {
             echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
             return;
         }
-        
+
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+
         global $wpdb;
-        
+
         if ($_POST['action'] === 'add_assignment') {
             $user_email = sanitize_email($_POST['user_email']);
             $team = sanitize_text_field($_POST['team']);
             $role = sanitize_text_field($_POST['role']);
             $season = sanitize_text_field($_POST['season']);
             $start_date = sanitize_text_field($_POST['start_date']);
-            
+
+            // Every season: only a real date (what a date input sends).
+            if (TeamOversight_Fee_Timeline::parse_date($start_date) === null) {
+                echo '<div class="notice notice-error"><p>Please pick a valid start date.</p></div>';
+                return;
+            }
+
             if (!is_email($user_email)) {
                 echo '<div class="notice notice-error"><p>Invalid email address.</p></div>';
                 return;
             }
-            
+
             $user = get_user_by('email', $user_email);
             if (!$user) {
                 echo '<div class="notice notice-error"><p>User not found. Please ensure the user has an account first.</p></div>';
                 return;
             }
-            
+
+            if (TeamOversight_Fees::timeline_applies($season)) {
+                // 2027+ (fee timeline): the late-join cutoff, a duplicate
+                // check by account OR email (an open place, or one covering
+                // the start, in the same place on that team), then
+                // add_stretches(), which records and re-prices.
+                $placed = TeamOversight_Fee_Timeline::add_stretches(
+                    array('user_id' => intval($user->ID), 'email' => $user_email),
+                    $season,
+                    array(array('team' => $team, 'role' => $role)),
+                    $start_date,
+                    'add_assignment'
+                );
+                if (!$placed['added'] && !empty($placed['skipped'])) {
+                    $held = $placed['skipped'][0];
+                    echo '<div class="notice notice-error"><p>This assignment already exists: they already hold ' . esc_html($held['team']) . ' as ' . esc_html(strtolower(TeamOversight_Fees::role_label($held['existing_role']))) . ' on that date. Change it on their Fee timeline (Member Lookup).</p></div>';
+                    return;
+                }
+                if (!$placed['added']) {
+                    echo '<div class="notice notice-error"><p>' . esc_html($placed['error']) . '</p></div>';
+                    return;
+                }
+                $from = TeamOversight_Fee_Timeline::format_date($start_date);
+                if ($placed['invoiced']) {
+                    echo '<div class="notice notice-success"><p>Team assignment added from ' . esc_html($from) . ' and invoice generated.</p></div>';
+                } elseif ($placed['repriced']) {
+                    echo '<div class="notice notice-success"><p>Team assignment added from ' . esc_html($from) . ' and their invoice re-priced.</p></div>';
+                } elseif ($placed['manual_kept']) {
+                    echo '<div class="notice notice-success"><p>Team assignment added from ' . esc_html($from) . '. Their fee was set with Edit Fee, so it was kept as it is (the calculated amount is logged).</p></div>';
+                } elseif (!$placed['released']) {
+                    echo '<div class="notice notice-success"><p>Team assignment added from ' . esc_html($from) . '. ' . esc_html($season) . ' fees are released on ' . esc_html(TeamOversight_Fee_Timeline::format_date(TeamOversight_Fees::get_fee_release_date($season))) . ', so they\'ll be invoiced then.</p></div>';
+                } else {
+                    echo '<div class="notice notice-warning"><p>Team assignment added from ' . esc_html($from) . ' but invoice could not be generated. Please check fee matrix configuration.</p></div>';
+                }
+                return;
+            }
+
             $existing = $wpdb->get_var($wpdb->prepare("
                 SELECT id FROM {$wpdb->prefix}team_assignments 
                 WHERE email = %s AND team = %s AND role = %s AND season = %s AND is_active = 1
@@ -3817,8 +4199,17 @@ class TeamOversight_Admin {
         }
         
         global $wpdb;
-        
+
         $assignment_id = intval($_POST['assignment_id']);
+
+        // 2027+ places are changed only on the person's Fee timeline, which
+        // records every change and re-prices from the real dates.
+        $row_season = $wpdb->get_var($wpdb->prepare("SELECT season FROM {$wpdb->prefix}team_assignments WHERE id = %d", $assignment_id));
+        if ($row_season !== null && TeamOversight_Fees::timeline_applies($row_season)) {
+            wp_send_json_error($row_season . ' dates are changed on the person\'s Fee timeline (Member Lookup), not here.');
+            return;
+        }
+
         $team = sanitize_text_field($_POST['team']);
         $role = sanitize_text_field($_POST['role']);
         $start_date = sanitize_text_field($_POST['start_date']);
@@ -3926,6 +4317,13 @@ class TeamOversight_Admin {
         $assignment = $wpdb->get_row($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}team_assignments WHERE id = %d
         ", $assignment_id));
+
+        // 2027+ places are removed only on the person's Fee timeline
+        // (Remove (added by mistake), or Stopped playing on), never deleted here.
+        if ($assignment && TeamOversight_Fees::timeline_applies($assignment->season)) {
+            wp_send_json_error($assignment->season . ' dates are changed on the person\'s Fee timeline (Member Lookup), not here.');
+            return;
+        }
 
         // Re-price the person, not the deleted row's email snapshot: their
         // account's current email (worked out while the row still exists),
