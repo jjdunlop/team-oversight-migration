@@ -17,9 +17,13 @@ if (!defined('ABSPATH')) {
  * class history (class_history() / record_class()), the request caches that
  * let a page read many people with a fixed number of queries
  * (preload_people() / preload_for_invoices()), and the pure due schedule
- * (schedule()). In 1.70.1 the schedule is only used for the change rows'
- * due_before / due_after, so the behind clock's floor has data from day
- * one; every season's due dates still follow the 1.69 schedule.
+ * (schedule(), with behind_floor()). Since 1.70.2 every 2027+ amount due
+ * follows schedule(), through TeamOversight_Payments::invoice_schedule()
+ * and its wrappers (member fees, the pay box, Ready to Play, Member Lookup,
+ * Payment Management, the dashboard, the fee standing and the reminder
+ * emails); it also fills the change rows' due_before / due_after, which
+ * the behind clock's floor reads. Seasons before 2027 keep the 1.69
+ * schedule.
  *
  * The price itself is worked out in TeamOversight_Fees::fee_breakdown(),
  * which builds the stretches from rows() (timeline_stretches()) and prices
@@ -295,6 +299,14 @@ class TeamOversight_Fee_Timeline {
             }
             if ($user_id > 0) {
                 $user_ids[] = $user_id;
+            }
+        }
+        // Every account in one go (users and their meta: two queries, not
+        // two per person), then their current emails.
+        $user_ids = array_values(array_unique($user_ids));
+        if ($user_ids) {
+            cache_users($user_ids);
+            foreach ($user_ids as $user_id) {
                 $account = get_userdata($user_id);
                 if ($account && $account->user_email) {
                     $emails[] = strtolower($account->user_email);
@@ -304,6 +316,26 @@ class TeamOversight_Fee_Timeline {
         $user_ids = array_values(array_unique($user_ids));
         $emails = array_values(array_unique($emails));
         if (!$user_ids && !$emails) {
+            return;
+        }
+        // Already loaded this request (and nothing written since: writers
+        // flush the cache)? Then there's nothing to query.
+        $loaded = true;
+        foreach ($seasons as $season) {
+            foreach ($user_ids as $user_id) {
+                if (!isset(self::$row_covered[$season]['u'][$user_id], self::$floor_covered[$season]['u'][$user_id])) {
+                    $loaded = false;
+                    break 2;
+                }
+            }
+            foreach ($emails as $email) {
+                if (!isset(self::$row_covered[$season]['e'][$email], self::$floor_covered[$season]['e'][$email])) {
+                    $loaded = false;
+                    break 2;
+                }
+            }
+        }
+        if ($loaded) {
             return;
         }
 
@@ -528,9 +560,10 @@ class TeamOversight_Fee_Timeline {
 
     /**
      * What an invoice has falling due on a day, on the fee timeline's
-     * schedule. In 1.70.1 this is used only for the change rows'
-     * due_before / due_after (so the behind clock's floor has data from
-     * the start); every season's due dates still follow the 1.69 schedule.
+     * schedule: every 2027+ season's due amounts (1.70.2, read through
+     * TeamOversight_Payments::invoice_schedule() and its wrappers), and the
+     * change rows' due_before / due_after, which the behind clock's floor
+     * reads. Seasons before 2027 keep the 1.69 schedule.
      *
      * $invoice: an invoice row (season, invoice_amount, outstanding_amount,
      * user_id, email; for the floor also id, created_ts, fee_raised_at).
@@ -935,9 +968,10 @@ class TeamOversight_Fee_Timeline {
      * $role from $from to $to (null = still on) may not overlap: the same
      * team and the same place (playing roles as one, a staff role with
      * itself). Different teams, and coach plus player, may overlap. Null
-     * when none clashes.
+     * when none clashes. Public so the How it works calculator refuses the
+     * same overlaps the writers do.
      */
-    private static function clash($rows, $team, $role, $from, $to, $exclude_id = 0) {
+    public static function clash($rows, $team, $role, $from, $to, $exclude_id = 0) {
         foreach ((array) $rows as $other) {
             if (intval($other->id) === intval($exclude_id) || (string) $other->team !== (string) $team || !self::same_place($other->role, $role)) {
                 continue;
@@ -952,7 +986,7 @@ class TeamOversight_Fee_Timeline {
         return null;
     }
 
-    private static function clash_message($team, $other) {
+    public static function clash_message($team, $other) {
         return sprintf(
             'That overlaps their other %s place (%s from %s%s). One person holds one playing place per team at a time, and each staff role once: change that place\'s dates first.',
             $team, strtolower(TeamOversight_Fees::role_label($other->role)), self::format_date($other->start_date),
@@ -1819,7 +1853,8 @@ class TeamOversight_Fee_Timeline {
      * fee_after, due_before / due_after (with an invoice, null otherwise;
      * the amount due on the timeline schedule), manual (a fee set with
      * Edit Fee, which re-pricing keeps), released, and text ("Fee $X →
-     * $Y"; plain text, so insert it with textContent).
+     * $Y · due now $A → $B", the due part with an invoice; plain text, so
+     * insert it with textContent).
      */
     public static function preview($op, $args) {
         self::flush_cache();
@@ -1885,6 +1920,11 @@ class TeamOversight_Fee_Timeline {
             $text .= ' (fee set with Edit Fee stays at ' . self::money($before['invoice']->invoice_amount) . ')';
         } elseif (!$released) {
             $text .= ' (not billed until ' . $season . ' fees are released)';
+        }
+        // What falls due by today on their own schedule, before and after
+        // (1.70.2: the amount they would see and be asked to pay).
+        if ($before['due'] !== null && $due_after !== null) {
+            $text .= ' · due now ' . self::money($before['due']) . ' → ' . self::money($due_after);
         }
         return array(
             'ok' => true, 'error' => '', 'reload' => false, 'unchanged' => !empty($plan['unchanged']),
@@ -2013,8 +2053,8 @@ class TeamOversight_Fee_Timeline {
      * forms (dates with Save, Stopped playing on, Change role or team,
      * Remove with its confirm box) and Preview; the fee_breakdown()
      * stretches; the money (fee, paid from the ledger, credit, due by
-     * today on the current season-long schedule, overdue, status and the
-     * coaches' pill); and the change history.
+     * today on the player's own schedule, overdue, next payment or behind
+     * since, status and the coaches' pill); and the change history.
      */
     public static function render_person_card($user, $season) {
         if (!current_user_can('manage_options') || !($user instanceof WP_User) || intval($user->ID) <= 0) {
@@ -2142,7 +2182,7 @@ class TeamOversight_Fee_Timeline {
                 $text = 'fees due from ' . self::format_date($window['from']) . ($window['from_set'] ? '' : ' (season start)')
                     . ' to paid in full by ' . self::format_date($window['to']) . ($window['to_set'] ? '' : ' (season end)');
             }
-            $items[] = array('Payment window', $text . '. For now it sets the late-join cutoff only: fees still fall due evenly across the season dates.');
+            $items[] = array('Payment window', $text . '. Each player\'s fee falls due evenly from their own first start (not before fees due from) to paid in full by, and all at once when every place has stopped. Paid in full by is also the late-join cutoff.');
         }
         $items[] = array('Late-join cutoff', $cutoff === null ? 'none (no season dates)' : 'nobody starts on a ' . $season . ' team after ' . self::format_date($cutoff));
         $release = TeamOversight_Fees::get_fee_release_date($season);
@@ -2527,8 +2567,10 @@ class TeamOversight_Fee_Timeline {
 
     /**
      * Fee (manual marker), paid from the ledger, credit, outstanding, due
-     * by today on the current (1.69) season-long schedule, overdue, where
-     * that leaves them, status and the coaches' pill.
+     * by today on the player's own schedule (schedule(), the one members
+     * see and pay by), overdue, the next payment or how long they've been
+     * behind (with the floor explained when it held the clock back),
+     * status and the coaches' pill.
      */
     private static function render_money($user, $season, $invoice, $breakdown) {
         global $wpdb;
@@ -2567,25 +2609,23 @@ class TeamOversight_Fee_Timeline {
             $lines[] = array('Credit', $credit >= 0.01 ? '<strong>' . esc_html(self::money($credit)) . '</strong> <span class="murvc-muted">paid above the fee</span>' : '<span class="murvc-muted">&mdash;</span>');
             $lines[] = array('Outstanding', $outstanding > 0 ? '<span class="murvc-owing">' . esc_html(self::money($outstanding)) . '</span>' : esc_html(self::money(0)));
 
-            $dates = TeamOversight_Fees::get_season_dates($season);
-            $past = intval($season) < intval(wp_date('Y'));
-            $factor = $past ? 1.0 : TeamOversight_Payments::get_expected_factor($season);
-            if ($factor === null) {
+            $schedule = TeamOversight_Payments::invoice_schedule($invoice);
+            if (empty($schedule['scheduled'])) {
                 $due_html = '<span class="murvc-muted">nothing on a schedule: the season has no dates</span>';
             } else {
-                $schedule = $past
-                    ? 'a season from an earlier year is all due'
-                    : 'on the season-long schedule: fees fall due evenly from ' . self::format_date($dates['start']) . ' to ' . self::format_date($dates['end']) . ', and ' . intval(round($factor * 100)) . '% of the season has gone. Each player\'s own payment window is not switched on yet';
-                $due_html = esc_html(self::money(round($fee * $factor, 2))) . ' <span class="murvc-muted">' . esc_html('(' . $schedule . ')') . '</span>';
+                $due_html = esc_html(self::money($schedule['due_today'])) . ' <span class="murvc-muted">' . esc_html('(' . self::describe_due($schedule) . ')') . '</span>';
             }
             $lines[] = array('Due by today', $due_html);
-            $overdue = TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $season);
+            $overdue = floatval($schedule['overdue']);
             $lines[] = array('Overdue', $overdue > 0 ? '<span class="murvc-owing">' . esc_html(self::money($overdue)) . '</span>' : '<span class="murvc-muted">&mdash;</span>');
-            if ($overdue <= 0 && $outstanding > 0) {
-                $through = TeamOversight_Payments::get_paid_through_date($invoice->invoice_amount, $invoice->outstanding_amount, $season);
-                if ($through) {
-                    $lines[] = array('Paid up to', esc_html('on schedule until ' . self::format_date($through)));
+            if ($overdue > 0 && !empty($schedule['behind_since'])) {
+                $behind = 'since ' . self::format_date($schedule['behind_since']);
+                if (!empty($schedule['fell_behind']) && $schedule['fell_behind'] < $schedule['behind_since']) {
+                    $behind .= ' (their payments last covered ' . self::format_date($schedule['fell_behind']) . ', but the behind clock never starts before the day their fee, or the change that put more due, was recorded)';
                 }
+                $lines[] = array('Behind', esc_html($behind));
+            } elseif ($outstanding > 0 && !empty($schedule['next_due'])) {
+                $lines[] = array('Next payment due', esc_html('on schedule until ' . self::format_date($schedule['next_due'])));
             }
         }
 
@@ -2597,7 +2637,7 @@ class TeamOversight_Fee_Timeline {
                 $status .= ' (counting all their fees: ' . TeamOversight_Payments::describe_behind($standing['days_behind']) . ')';
             }
             $lines[] = array('Status', esc_html($status));
-            $lines[] = array('Coaches see', TeamOversight_Coach_Portal::render_fee_standing($standing, $season));
+            $lines[] = array('Coaches see', TeamOversight_Payments::render_standing_pill($standing, $season));
         }
 
         echo '<table class="murvc-kv murvc-tl-money">';
@@ -2605,6 +2645,28 @@ class TeamOversight_Fee_Timeline {
             echo '<tr><th>' . esc_html($line[0]) . '</th><td>' . $line[1] . '</td></tr>';
         }
         echo '</table>';
+    }
+
+    /** A schedule()'s due-by-today figure explained, for the card (admins). */
+    private static function describe_due($schedule) {
+        $today = current_time('Y-m-d');
+        if (empty($schedule['window_from']) || empty($schedule['window_to'])) {
+            return 'a season from an earlier year is all due';
+        }
+        if (!empty($schedule['stopped_on']) && $today >= $schedule['stopped_on']) {
+            return 'every place has stopped, the last on ' . self::format_date($schedule['stopped_on']) . ', so everything for the time played is due';
+        }
+        if ($schedule['window_from'] >= $schedule['window_to']) {
+            $text = 'their first start (' . self::format_date($schedule['window_from']) . ') is on or after paid in full by, so it all falls due that day';
+        } else {
+            $text = 'their own schedule: the fee falls due evenly from ' . self::format_date($schedule['window_from'])
+                . ' (fees due from, or their first start if later) to ' . self::format_date($schedule['window_to'])
+                . ' (paid in full by), and ' . intval($schedule['due_pct']) . '% is due now';
+        }
+        if (!empty($schedule['stopped_on'])) {
+            $text .= '; their last place stops on ' . self::format_date($schedule['stopped_on']) . ', when the rest falls due';
+        }
+        return $text;
     }
 
     /** One change row in words. */
@@ -2974,10 +3036,11 @@ class TeamOversight_Fee_Timeline {
 
     /**
      * admin-ajax.php?action=murvc_fee_timeline_preview: what a card form
-     * would do to the fee, without saving (preview()). manage_options and
-     * the place's nonce are required. Replies { text } (plain text: the
-     * page inserts it with textContent) or { message } when the change
-     * would be refused.
+     * would do to the fee and to what is due by today, without saving
+     * (preview()). manage_options and the place's nonce are required.
+     * Replies { text, fee_before, fee_after, due_before, due_after } (text
+     * is plain: the page inserts it with textContent) or { message } when
+     * the change would be refused.
      */
     public static function ajax_preview() {
         $request = self::read_request();
@@ -3018,6 +3081,8 @@ class TeamOversight_Fee_Timeline {
             'text' => !empty($result['unchanged']) ? 'Nothing would change.' : 'If saved: ' . $result['text'] . '.',
             'fee_before' => $result['fee_before'],
             'fee_after' => $result['fee_after'],
+            'due_before' => $result['due_before'],
+            'due_after' => $result['due_after'],
         ));
     }
 }

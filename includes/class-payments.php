@@ -9,8 +9,13 @@ if (!defined('ABSPATH')) {
  *
  * Fees are a balance against a season timeline, not an invoice event:
  *  - the season has manually-entered start/end dates (Configuration page)
- *  - a player's fee accrues linearly across the season, so "overdue" =
- *    what the schedule says should be paid by today minus what has been
+ *  - 2026 and earlier: a player's fee accrues linearly across the season,
+ *    so "overdue" = what the schedule says should be paid by today minus
+ *    what has been paid
+ *  - 2027 on (1.70.2): each player's fee falls due evenly across their own
+ *    part of the season's payment window (TeamOversight_Fee_Timeline::
+ *    schedule()); invoice_schedule() and its wrappers are the one door to
+ *    either schedule
  *  - members pay any amount, any time: [member_fees] shows their balance
  *    and adds the configured payment product to the cart at the entered
  *    price; paid orders reduce outstanding and are recorded in the
@@ -261,8 +266,12 @@ class TeamOversight_Payments {
         $minimum = ($minimum === null) ? self::get_reminder_minimum() : floatval($minimum);
 
         $invoices = $wpdb->get_results("
-            SELECT * FROM {$wpdb->prefix}team_invoices WHERE outstanding_amount > 0
+            SELECT *, UNIX_TIMESTAMP(created_date) AS created_ts FROM {$wpdb->prefix}team_invoices WHERE outstanding_amount > 0
         ");
+        // 2027+ invoices are scheduled from their places and floors: load
+        // them all at once (a no-op when this request already has them,
+        // as send_overdue_reminders() calls this three times).
+        TeamOversight_Fee_Timeline::preload_for_invoices($invoices);
 
         $people = array();
         foreach ($invoices as $invoice) {
@@ -286,10 +295,20 @@ class TeamOversight_Payments {
                 );
             }
             $people[$key]['outstanding'] += floatval($invoice->outstanding_amount);
-            $people[$key]['overdue'] += self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+            if (TeamOversight_Fees::timeline_applies($invoice->season)) {
+                // 2027+: their own schedule, and a behind date that never
+                // starts before the fee, or the change that put it due,
+                // was recorded (behind_floor()), so reminder grace counts
+                // from then.
+                $schedule = TeamOversight_Fee_Timeline::schedule($invoice);
+                $people[$key]['overdue'] += $schedule['overdue'];
+                $since = $schedule['behind_since'];
+            } else {
+                $people[$key]['overdue'] += self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+                $since = self::get_overdue_since($invoice);
+            }
 
             // Track the earliest date anything of theirs fell behind.
-            $since = self::get_overdue_since($invoice);
             if ($since && ($people[$key]['overdue_since'] === null || $since < $people[$key]['overdue_since'])) {
                 $people[$key]['overdue_since'] = $since;
             }
@@ -543,6 +562,174 @@ class TeamOversight_Payments {
     }
 
     // ------------------------------------------------------------------
+    // An invoice's due schedule (1.70.2): the one door every screen that
+    // shows or charges an amount due goes through, so the amount shown and
+    // the amount charged always agree. A season before TeamOversight_Fees::
+    // FEE_TIMELINE_FROM keeps the 1.69 schedule above, returned verbatim
+    // (get_overdue(), get_paid_through_date(), get_overdue_since(),
+    // render_fee_progress()); a 2027+ season uses the player's own
+    // schedule, TeamOversight_Fee_Timeline::schedule(): nothing until the
+    // payment window opens (or their start, if later), then evenly up to
+    // "Paid in full by", and everything at once once every place has
+    // stopped.
+    //
+    // Invoice rows passed in should carry id, user_id, email, season,
+    // invoice_amount, outstanding_amount, fee_raised_at and
+    // UNIX_TIMESTAMP(created_date) AS created_ts (behind_floor() looks the
+    // last two up, one query, when they're missing). For a list, call
+    // TeamOversight_Fee_Timeline::preload_for_invoices() first, so each
+    // 2027+ schedule costs no query.
+    // ------------------------------------------------------------------
+
+    /**
+     * Everything about an invoice's schedule in one array:
+     *   engine        'season' (the 1.69 schedule) or 'timeline' (2027+)
+     *   scheduled     it has a schedule (season dates, or an earlier
+     *                 calendar year's season, which is all due)
+     *   fee, paid, outstanding
+     *   due_today     what the schedule has due by today (null unscheduled)
+     *   due_pct       the same as a percentage of the fee (null unscheduled)
+     *   overdue       due by today - paid, never more than outstanding
+     *   paid_through  the day the schedule catches up with what's paid
+     *   next_due      'season': paid_through (shown only when nothing is
+     *                 overdue, as before); 'timeline': set only then
+     *   behind_since  when it fell behind (null when not overdue); for
+     *                 2027+ never before behind_floor()
+     *   fell_behind   when the schedule overtook what was paid (2027+:
+     *                 before the floor is applied)
+     *   window_from, window_to, stopped_on   2027+ only: the player's own
+     *                 window (W0, W1) and the stop everything falls due on
+     *   progress_html the thin progress bar members see
+     */
+    public static function invoice_schedule($invoice) {
+        $invoice = (object) $invoice;
+        if (TeamOversight_Fees::timeline_applies($invoice->season)) {
+            $schedule = TeamOversight_Fee_Timeline::schedule($invoice);
+            $schedule['engine'] = 'timeline';
+            $schedule['progress_html'] = self::timeline_progress_html($schedule);
+            return $schedule;
+        }
+        $amount = $invoice->invoice_amount;
+        $outstanding = $invoice->outstanding_amount;
+        $season = $invoice->season;
+        $past = intval($season) > 0 && intval($season) < intval(wp_date('Y'));
+        $factor = $past ? 1.0 : self::get_expected_factor($season);
+        $paid_through = self::get_paid_through_date($amount, $outstanding, $season);
+        $behind_since = self::get_overdue_since($invoice);
+        return array(
+            'engine' => 'season',
+            'scheduled' => $factor !== null,
+            'fee' => round(floatval($amount), 2),
+            'paid' => round(floatval($amount) - floatval($outstanding), 2),
+            'outstanding' => round(max(0, floatval($outstanding)), 2),
+            'fraction' => $factor,
+            'due_today' => $factor === null ? null : round(floatval($amount) * $factor, 2),
+            'due_pct' => $factor === null ? null : (int) round($factor * 100),
+            'overdue' => self::get_overdue($amount, $outstanding, $season),
+            'paid_through' => $paid_through,
+            'next_due' => $paid_through,
+            'behind_since' => $behind_since,
+            'fell_behind' => $behind_since,
+            'window_from' => null,
+            'window_to' => null,
+            'stopped_on' => null,
+            'progress_html' => self::render_fee_progress($amount, $outstanding, $season),
+        );
+    }
+
+    /** Overdue now on the invoice's schedule (get_overdue() verbatim before 2027). */
+    public static function invoice_overdue($invoice) {
+        $invoice = (object) $invoice;
+        if (!TeamOversight_Fees::timeline_applies($invoice->season)) {
+            return self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+        }
+        $schedule = TeamOversight_Fee_Timeline::schedule($invoice);
+        return $schedule['overdue'];
+    }
+
+    /**
+     * The next payment date ('YYYY-MM-DD') or null. Before 2027 this is
+     * get_paid_through_date() verbatim, which callers show only when
+     * nothing is overdue and something is outstanding (as they always
+     * have); for 2027+ it is null unless that holds.
+     */
+    public static function invoice_next_due($invoice) {
+        $invoice = (object) $invoice;
+        if (!TeamOversight_Fees::timeline_applies($invoice->season)) {
+            return self::get_paid_through_date($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+        }
+        $schedule = TeamOversight_Fee_Timeline::schedule($invoice);
+        return $schedule['next_due'];
+    }
+
+    /** When the invoice fell behind, or null (get_overdue_since() verbatim before 2027; floored for 2027+). */
+    public static function invoice_behind_since($invoice) {
+        $invoice = (object) $invoice;
+        if (!TeamOversight_Fees::timeline_applies($invoice->season)) {
+            return self::get_overdue_since($invoice);
+        }
+        $schedule = TeamOversight_Fee_Timeline::schedule($invoice);
+        return $schedule['behind_since'];
+    }
+
+    /** The members' progress bar for the invoice (render_fee_progress() verbatim before 2027). */
+    public static function invoice_progress_html($invoice) {
+        $invoice = (object) $invoice;
+        if (!TeamOversight_Fees::timeline_applies($invoice->season)) {
+            return self::render_fee_progress($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+        }
+        return self::timeline_progress_html(TeamOversight_Fee_Timeline::schedule($invoice));
+    }
+
+    /**
+     * The progress bar for a 2027+ schedule: fill = share of the fee paid
+     * (red while anything is overdue), marker = the share due by today.
+     * Empty without a schedule or a fee.
+     */
+    private static function timeline_progress_html($schedule) {
+        $fee = floatval($schedule['fee']);
+        if (empty($schedule['scheduled']) || $fee <= 0) {
+            return '';
+        }
+        $paid_pct = (int) round(max(0, min(1, floatval($schedule['paid']) / $fee)) * 100);
+        $due_pct = max(0, min(100, intval($schedule['due_pct'])));
+        $state = floatval($schedule['overdue']) > 0 ? 'behind' : 'ontrack';
+        return '<div class="fee-progress" title="' . esc_attr('Paid ' . $paid_pct . '% — ' . $due_pct . '% is due by today on your schedule') . '">'
+            . '<div class="fee-progress-fill fee-progress-' . $state . '" style="width: ' . min(100, $paid_pct) . '%;"></div>'
+            . '<div class="fee-progress-marker" style="left: ' . $due_pct . '%;"></div>'
+            . '</div>'
+            . '<p class="fee-progress-caption">' . esc_html('Paid ' . $paid_pct . '% · ' . $due_pct . '% due by today') . '</p>';
+    }
+
+    /**
+     * A 2027+ schedule in a member's words, with no amounts: when their
+     * fee falls due. '' when it isn't on a schedule.
+     */
+    public static function describe_member_schedule($schedule) {
+        if (empty($schedule['scheduled'])) {
+            return '';
+        }
+        $today = current_time('Y-m-d');
+        $fmt = array('TeamOversight_Fee_Timeline', 'format_date');
+        if (empty($schedule['window_from'])) {
+            return 'That season is over, so anything still owing is due now.';
+        }
+        if (!empty($schedule['stopped_on']) && $today >= $schedule['stopped_on']) {
+            return 'You stopped on ' . call_user_func($fmt, $schedule['stopped_on']) . ', so everything for the time you played is due now.';
+        }
+        if ($schedule['window_from'] >= $schedule['window_to']) {
+            $started = $today >= $schedule['window_from'];
+            return 'Your fee ' . ($started ? 'fell' : 'falls') . ' due in full on ' . call_user_func($fmt, $schedule['window_from']) . ', the day you ' . ($started ? 'started' : 'start') . '.';
+        }
+        $text = 'Your fee falls due evenly from ' . call_user_func($fmt, $schedule['window_from']) . ' to ' . call_user_func($fmt, $schedule['window_to'])
+            . ($today < $schedule['window_from'] ? ', so nothing is due before ' . call_user_func($fmt, $schedule['window_from']) : '') . '.';
+        if (!empty($schedule['stopped_on'])) {
+            $text .= ' You stop on ' . call_user_func($fmt, $schedule['stopped_on']) . ': anything still owing falls due that day.';
+        }
+        return $text;
+    }
+
+    // ------------------------------------------------------------------
     // Fee standing (coach portal confirmed players, Payment Management)
     // ------------------------------------------------------------------
 
@@ -568,14 +755,18 @@ class TeamOversight_Payments {
      * Fee; see TeamOversight_Fees::fee_rise_fields()). So a player joining
      * mid-season on a pro-rated fee, a late fee release or a fee raised
      * mid-season starts at that day, not the season start; a lower fee or a
-     * re-save never restarts it. The schedule itself still runs from the
-     * season start, so from that day they must catch up with it. This is a
-     * stopgap until the fee timeline gives each player their own payment
-     * window: where it can't be exact it errs towards not flagging (every
-     * rise restarts the clock). And only an invoice at least $1 overdue
-     * sets the date (or names its season as owing), so cents left on an old
-     * invoice can't age a fresh debt; when only small amounts add up to $1,
-     * the latest of their dates is used and their seasons are named.
+     * re-save never restarts it. For seasons before 2027 the schedule
+     * itself still runs from the season start, so from that day they must
+     * catch up with it (the 1.69 stopgap, kept exactly). A 2027+ invoice
+     * (1.70.2) uses the player's own schedule (TeamOversight_Fee_Timeline::
+     * schedule()), whose behind date is already floored by behind_floor():
+     * billed, raised, the latest recorded change that put more money due,
+     * and the payment window moved earlier. Where it can't be exact it
+     * errs towards not flagging (every rise restarts the clock). And only
+     * an invoice at least $1 overdue sets the date (or names its season as
+     * owing), so cents left on an old invoice can't age a fresh debt; when
+     * only small amounts add up to $1, the latest of their dates is used
+     * and their seasons are named.
      *
      * An arrangement covers an invoice only up to its fee when the
      * arrangement was recorded: a rise after it counts again (from the
@@ -603,7 +794,13 @@ class TeamOversight_Payments {
      *   other_seasons   other seasons at least $1 overdue (or, when only small
      *                   amounts add up to $1, every other season overdue), oldest first
      *   state           none | paid | ontrack | unscheduled | behind | arrangement | flagged
-     * One invoice query for everyone.
+     *   due_pct, window_from, window_to, stopped_on   (1.70.2) a 2027+
+     *                   $season invoice's own schedule: the share of the fee
+     *                   due by today, their window (W0, W1) and the stop
+     *                   everything falls due on; null otherwise.
+     *                   Percentages and dates only (the coach portal shows them)
+     * One invoice query for everyone, plus one for the 2027+ places and one
+     * for their floors (preloaded), however many people.
      */
     public static function get_fee_standings($people, $season) {
         global $wpdb;
@@ -658,43 +855,89 @@ class TeamOversight_Payments {
         // created_date is the database's clock (CURRENT_TIMESTAMP, usually
         // UTC); UNIX_TIMESTAMP reads it in the database's zone and wp_date
         // gives the site's date for that moment, daylight saving included.
+        TeamOversight_Fee_Timeline::preload_for_invoices($invoices);
 
         $scheduled = self::get_expected_factor($season) !== null;
         $today = strtotime(current_time('Y-m-d'));
+        foreach ($who as $key => $person) {
+            $result[$key] = self::standing_from_invoices($person, $invoices, $season, $scheduled, $today);
+        }
+        return $result;
+    }
+
+    /**
+     * One person's fee standing (one get_fee_standings() entry, same keys)
+     * from invoice rows already in hand: the second half of
+     * get_fee_standings(), which runs it for each person over its one
+     * invoice query. $person: array(user_id, emails (lower case)), the
+     * identity get_fee_standings() works out; only the invoices that belong
+     * to it count (the same identity rule). $invoices: invoice rows with the
+     * columns get_fee_standings() selects. A 2027+ invoice may carry its
+     * schedule already worked out in ->schedule (a
+     * TeamOversight_Fee_Timeline::schedule() array): the How it works page
+     * prices a hypothetical player in memory that way, with no invoice or
+     * places in the database. $scheduled / $today_ts: the season has dates,
+     * and the site's today as a timestamp (worked out here when null).
+     * Reads only.
+     */
+    public static function standing_from_invoices($person, $invoices, $season, $scheduled = null, $today_ts = null) {
+        $season = (string) $season;
+        $person = array(
+            'user_id' => isset($person['user_id']) ? intval($person['user_id']) : 0,
+            'emails' => isset($person['emails']) ? array_values((array) $person['emails']) : array(),
+        );
+        if ($scheduled === null) {
+            $scheduled = self::get_expected_factor($season) !== null;
+        }
+        $today = $today_ts !== null ? intval($today_ts) : strtotime(current_time('Y-m-d'));
         $days_since = function ($date) use ($today) {
             return $date ? max(0, (int) floor(($today - strtotime($date)) / DAY_IN_SECONDS)) : 0;
         };
 
-        foreach ($who as $key => $person) {
-            $has_invoice = false;
-            $fee = 0.0;
-            $paid = 0.0;
-            $overdue = 0.0;
-            $flag_overdue = 0.0;
-            // Earliest date an invoice at least $1 overdue fell behind; and,
-            // in case only small amounts add up to $1, the latest of them.
-            $since = $small_since = null;
-            $flag_since = $flag_small_since = null;
-            $arrangement = false;
-            $held = null;
-            $other_seasons = array();
-            $small_seasons = array();
-            foreach ($invoices as $invoice) {
-                $invoice_uid = intval($invoice->user_id);
-                $is_mine = ($invoice_uid > 0 && $person['user_id'] > 0)
-                    ? $invoice_uid === $person['user_id']
-                    : in_array(strtolower((string) $invoice->email), $person['emails'], true);
-                if (!$is_mine) {
+        $has_invoice = false;
+        $fee = 0.0;
+        $paid = 0.0;
+        $overdue = 0.0;
+        $flag_overdue = 0.0;
+        // Earliest date an invoice at least $1 overdue fell behind; and,
+        // in case only small amounts add up to $1, the latest of them.
+        $since = $small_since = null;
+        $flag_since = $flag_small_since = null;
+        $arrangement = false;
+        $held = null;
+        $other_seasons = array();
+        $small_seasons = array();
+        $season_schedule = null;
+        foreach ((array) $invoices as $invoice) {
+            $invoice_uid = intval($invoice->user_id);
+            $is_mine = ($invoice_uid > 0 && $person['user_id'] > 0)
+                ? $invoice_uid === $person['user_id']
+                : in_array(strtolower((string) $invoice->email), $person['emails'], true);
+            if (!$is_mine) {
+                continue;
+            }
+            if (intval($invoice->payment_arrangement) === 1 && ($held === null || (string) $invoice->payment_arrangement_at > $held['at'])) {
+                $held = array('note' => (string) $invoice->payment_arrangement_note, 'at' => (string) $invoice->payment_arrangement_at, 'by' => intval($invoice->payment_arrangement_by));
+            }
+            if ((string) $invoice->season === $season) {
+                $has_invoice = true;
+                $fee += floatval($invoice->invoice_amount);
+                $paid += floatval($invoice->invoice_amount) - floatval($invoice->outstanding_amount);
+            }
+            if (TeamOversight_Fees::timeline_applies($invoice->season)) {
+                // 2027+: the player's own schedule; its behind date is
+                // already floored (behind_floor()).
+                $schedule = (isset($invoice->schedule) && is_array($invoice->schedule)) ? $invoice->schedule : TeamOversight_Fee_Timeline::schedule($invoice);
+                if ((string) $invoice->season === $season && $season_schedule === null) {
+                    $season_schedule = $schedule;
+                }
+                $owed = $schedule['overdue'];
+                if ($owed <= 0) {
                     continue;
                 }
-                if (intval($invoice->payment_arrangement) === 1 && ($held === null || (string) $invoice->payment_arrangement_at > $held['at'])) {
-                    $held = array('note' => (string) $invoice->payment_arrangement_note, 'at' => (string) $invoice->payment_arrangement_at, 'by' => intval($invoice->payment_arrangement_by));
-                }
-                if ((string) $invoice->season === $season) {
-                    $has_invoice = true;
-                    $fee += floatval($invoice->invoice_amount);
-                    $paid += floatval($invoice->invoice_amount) - floatval($invoice->outstanding_amount);
-                }
+                $overdue += $owed;
+                $fell_behind = $schedule['behind_since'];
+            } else {
                 $owed = self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
                 if ($owed <= 0) {
                     continue;
@@ -706,88 +949,91 @@ class TeamOversight_Payments {
                 if ($fell_behind && $billed !== '' && $billed > $fell_behind) {
                     $fell_behind = $billed;
                 }
-                if ($fell_behind) {
-                    if ($owed >= 1 && ($since === null || $fell_behind < $since)) {
-                        $since = $fell_behind;
-                    }
-                    if ($small_since === null || $fell_behind > $small_since) {
-                        $small_since = $fell_behind;
-                    }
+            }
+            if ($fell_behind) {
+                if ($owed >= 1 && ($since === null || $fell_behind < $since)) {
+                    $since = $fell_behind;
                 }
-                if ((string) $invoice->season !== $season) {
-                    if ($owed >= 1) {
-                        $other_seasons[] = (string) $invoice->season;
-                    } else {
-                        $small_seasons[] = (string) $invoice->season;
-                    }
-                }
-                // Both site-time datetimes, so comparing the strings is safe.
-                $covered = intval($invoice->payment_arrangement) === 1
-                    && ((string) $invoice->fee_raised_at === '' || (string) $invoice->fee_raised_at <= (string) $invoice->payment_arrangement_at);
-                if ($covered) {
-                    $arrangement = true;
-                    continue;
-                }
-                $flag_overdue += $owed;
-                if ($fell_behind) {
-                    if ($owed >= 1 && ($flag_since === null || $fell_behind < $flag_since)) {
-                        $flag_since = $fell_behind;
-                    }
-                    if ($flag_small_since === null || $fell_behind > $flag_small_since) {
-                        $flag_small_since = $fell_behind;
-                    }
+                if ($small_since === null || $fell_behind > $small_since) {
+                    $small_since = $fell_behind;
                 }
             }
-            if ($since === null) {
-                $since = $small_since;
-                // No single invoice is $1 overdue: if they're behind, the
-                // small ones are what make them so, so name their seasons.
-                if ($overdue >= 1) {
-                    $other_seasons = array_merge($other_seasons, $small_seasons);
+            if ((string) $invoice->season !== $season) {
+                if ($owed >= 1) {
+                    $other_seasons[] = (string) $invoice->season;
+                } else {
+                    $small_seasons[] = (string) $invoice->season;
                 }
             }
-            if ($flag_since === null) {
-                $flag_since = $flag_small_since;
+            // Both site-time datetimes, so comparing the strings is safe.
+            $covered = intval($invoice->payment_arrangement) === 1
+                && ((string) $invoice->fee_raised_at === '' || (string) $invoice->fee_raised_at <= (string) $invoice->payment_arrangement_at);
+            if ($covered) {
+                $arrangement = true;
+                continue;
             }
-
-            $behind = $overdue >= 1;
-            $days_behind = $behind ? $days_since($since) : 0;
-            $flag_days = $flag_overdue >= 1 ? $days_since($flag_since) : 0;
-            $flagged = $flag_overdue >= 1 && $flag_days >= self::STANDING_FLAG_DAYS;
-            $other_seasons = array_values(array_unique($other_seasons));
-            sort($other_seasons);
-
-            if ($flagged) {
-                $state = 'flagged';
-            } elseif ($behind && $flag_overdue < 1) {
-                $state = 'arrangement';
-            } elseif ($behind) {
-                $state = 'behind';
-            } elseif ($fee < 0.01) {
-                $state = 'none';
-            } elseif ($fee - $paid < 0.01) {
-                $state = 'paid';
-            } else {
-                $state = $scheduled ? 'ontrack' : 'unscheduled';
+            $flag_overdue += $owed;
+            if ($fell_behind) {
+                if ($owed >= 1 && ($flag_since === null || $fell_behind < $flag_since)) {
+                    $flag_since = $fell_behind;
+                }
+                if ($flag_small_since === null || $fell_behind > $flag_small_since) {
+                    $flag_small_since = $fell_behind;
+                }
             }
-
-            $result[$key] = array(
-                'has_invoice' => $has_invoice,
-                'fee' => round($fee, 2),
-                'paid' => round($paid, 2),
-                'paid_pct' => $fee >= 0.01 ? (int) floor(max(0, min(1, $paid / $fee)) * 100) : null,
-                'scheduled' => $scheduled,
-                'overdue' => round($overdue, 2),
-                'days_behind' => $days_behind,
-                'flag_days' => $flag_days,
-                'flagged' => $flagged,
-                'arrangement' => $arrangement,
-                'arrangement_held' => $held,
-                'other_seasons' => $other_seasons,
-                'state' => $state,
-            );
         }
-        return $result;
+        if ($since === null) {
+            $since = $small_since;
+            // No single invoice is $1 overdue: if they're behind, the
+            // small ones are what make them so, so name their seasons.
+            if ($overdue >= 1) {
+                $other_seasons = array_merge($other_seasons, $small_seasons);
+            }
+        }
+        if ($flag_since === null) {
+            $flag_since = $flag_small_since;
+        }
+
+        $behind = $overdue >= 1;
+        $days_behind = $behind ? $days_since($since) : 0;
+        $flag_days = $flag_overdue >= 1 ? $days_since($flag_since) : 0;
+        $flagged = $flag_overdue >= 1 && $flag_days >= self::STANDING_FLAG_DAYS;
+        $other_seasons = array_values(array_unique($other_seasons));
+        sort($other_seasons);
+
+        if ($flagged) {
+            $state = 'flagged';
+        } elseif ($behind && $flag_overdue < 1) {
+            $state = 'arrangement';
+        } elseif ($behind) {
+            $state = 'behind';
+        } elseif ($fee < 0.01) {
+            $state = 'none';
+        } elseif ($fee - $paid < 0.01) {
+            $state = 'paid';
+        } else {
+            $state = $scheduled ? 'ontrack' : 'unscheduled';
+        }
+
+        return array(
+            'has_invoice' => $has_invoice,
+            'fee' => round($fee, 2),
+            'paid' => round($paid, 2),
+            'paid_pct' => $fee >= 0.01 ? (int) floor(max(0, min(1, $paid / $fee)) * 100) : null,
+            'scheduled' => $scheduled,
+            'overdue' => round($overdue, 2),
+            'days_behind' => $days_behind,
+            'flag_days' => $flag_days,
+            'flagged' => $flagged,
+            'arrangement' => $arrangement,
+            'arrangement_held' => $held,
+            'other_seasons' => $other_seasons,
+            'state' => $state,
+            'due_pct' => $season_schedule ? $season_schedule['due_pct'] : null,
+            'window_from' => $season_schedule ? $season_schedule['window_from'] : null,
+            'window_to' => $season_schedule ? $season_schedule['window_to'] : null,
+            'stopped_on' => $season_schedule ? $season_schedule['stopped_on'] : null,
+        );
     }
 
     /**
@@ -887,6 +1133,127 @@ class TeamOversight_Payments {
             $parts[] = 'on track';
         }
         return implode(' · ', $parts);
+    }
+
+    /**
+     * One person's fee standing as the pill coaches see on the team list
+     * (and admins on Member Lookup's Fee timeline card): percentage paid
+     * and how far behind, never an amount (fees differ by class, and some
+     * are set by hand, so a reduced fee would show). More than a month
+     * behind is flagged: they shouldn't train until it's sorted with the
+     * club. The tooltip explains the schedule: for 2026 and earlier the
+     * season-long one, as before; for 2027+ (1.70.2) the player's own
+     * window, in percentages and dates only. $standing: one
+     * get_fee_standings() entry. Style it with standing_pill_css().
+     */
+    public static function render_standing_pill($standing, $season) {
+        $pill = self::standing_pill_parts($standing, $season);
+        return '<span class="cac-fee cac-fee-' . esc_attr($pill['state']) . '" title="' . esc_attr($pill['title']) . '">'
+            . ($pill['flag'] ? '&#9888; ' : '')
+            . esc_html($pill['text']) . '</span>';
+    }
+
+    /**
+     * What render_standing_pill() draws, as plain text: state (the
+     * cac-fee-<state> class), title (the tooltip), text ("Fees: ...") and
+     * flag (the warning sign in front). The How it works calculator sends
+     * these to its script, which builds the same pill with textContent.
+     * Percentages and dates only, never an amount.
+     */
+    public static function standing_pill_parts($standing, $season) {
+        $season = (string) $season;
+        // Before release a $0 invoice is a fee taken back until then (any
+        // payment kept as credit), not an exemption.
+        if ($standing['state'] === 'none' && !TeamOversight_Fees::fees_released($season)) {
+            $standing['has_invoice'] = false;
+        }
+        if ($standing['state'] === 'none') {
+            $title = !empty($standing['has_invoice']) ? 'They have no fee to pay for ' . $season . '.' : 'No ' . $season . ' fee has been issued for them yet.';
+        } else {
+            if (TeamOversight_Fees::timeline_applies($season)) {
+                $title = self::standing_schedule_title($standing, $season);
+            } else {
+                $dates = TeamOversight_Fees::get_season_dates($season);
+                $factor = self::get_expected_factor($season);
+                $title = ($dates && $factor !== null)
+                    ? 'Fees fall due evenly across the season (' . date('j M', strtotime($dates['start'])) . ' – ' . date('j M Y', strtotime($dates['end'])) . '), and ' . intval(round($factor * 100)) . '% of it has gone.'
+                    : 'No season dates are set yet, so nothing falls due on a schedule.';
+            }
+            if ($standing['other_seasons']) {
+                $title .= ' Includes fees still owing from ' . implode(', ', $standing['other_seasons']) . '.';
+            }
+            if ($standing['arrangement']) {
+                $title .= ' The club has agreed a payment arrangement.';
+            }
+            $title .= ' A month or more behind means they shouldn\'t train until it\'s sorted with the club.';
+        }
+        return array(
+            'state' => (string) $standing['state'],
+            'title' => $title,
+            'text' => 'Fees: ' . self::describe_standing($standing),
+            'flag' => $standing['state'] === 'flagged',
+        );
+    }
+
+    /**
+     * The 2027+ pill tooltip's first sentence: the player's own schedule
+     * from the standing's due_pct / window_from / window_to / stopped_on.
+     * Percentages and dates only, never an amount.
+     */
+    private static function standing_schedule_title($standing, $season) {
+        if (!TeamOversight_Fees::get_season_dates($season)) {
+            return 'No season dates are set yet, so nothing falls due on a schedule.';
+        }
+        if (!isset($standing['due_pct']) || $standing['due_pct'] === null) {
+            return 'No ' . $season . ' fee has been issued for them yet.';
+        }
+        $today = current_time('Y-m-d');
+        $fmt = array('TeamOversight_Fee_Timeline', 'format_date');
+        $stopped_on = !empty($standing['stopped_on']) ? (string) $standing['stopped_on'] : '';
+        if ($stopped_on !== '' && $today >= $stopped_on) {
+            return 'They stopped on ' . call_user_func($fmt, $stopped_on) . ', so everything for the time played is due now.';
+        }
+        if (empty($standing['window_from']) || empty($standing['window_to'])) {
+            return 'The ' . $season . ' season is over, so everything still owing is due now.';
+        }
+        if ($standing['window_from'] >= $standing['window_to']) {
+            $title = 'They started on or after the paid-in-full date, so all of it ' . ($today >= $standing['window_from'] ? 'fell' : 'falls') . ' due on ' . call_user_func($fmt, $standing['window_from']) . '.';
+        } else {
+            $pct = intval($standing['due_pct']);
+            $title = 'Fees fall due evenly from ' . call_user_func($fmt, $standing['window_from']) . ' to ' . call_user_func($fmt, $standing['window_to']) . '; '
+                . ($pct >= 100 ? 'all of it is due now' : ($pct <= 0 ? 'nothing is due yet' : $pct . '% is due now')) . '.';
+        }
+        if ($stopped_on !== '') {
+            $title .= ' They stop on ' . call_user_func($fmt, $stopped_on) . ', when the rest for the time played falls due.';
+        }
+        return $title;
+    }
+
+    /**
+     * The fee standing pill's CSS, every rule under $scope (a selector such
+     * as '.coach-portal' or '.murvc-lookup'), shared by the coach portal and
+     * Member Lookup. Sizes follow the coach portal's --cp-* tokens where the
+     * page defines them.
+     */
+    public static function standing_pill_css($scope) {
+        $scope = trim(preg_replace('/[^A-Za-z0-9_.#\- ]/', '', (string) $scope));
+        $rules = array(
+            '.cac-fee' => 'display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-height: var(--cp-control-h, 0); padding: 4px 12px; font-size: 13px; font-weight: 600; line-height: 1.25; text-align: center; border: 1px solid var(--cp-border, #c3c4c7); border-radius: var(--cp-radius, 4px); background: #f6f7f7; color: var(--cp-text, #1d2327); cursor: help;',
+            '.cac-fee-paid, .cac-fee-ontrack' => 'background: #e8f5ea; border-color: #2e8540; color: #1e6b2a;',
+            '.cac-fee-behind' => 'background: #fff4e0; border-color: #d18a00; color: #7a4a00;',
+            '.cac-fee-flagged' => 'background: #fce8e8; border-color: #c62d2d; color: #a00;',
+            '.cac-fee-arrangement' => 'background: #e8f0fb; border-color: #4f7cc0; color: #1d4f91;',
+            '.cac-fee-none' => 'font-weight: 400; color: var(--cp-muted, #646970);',
+        );
+        $css = '';
+        foreach ($rules as $selectors => $body) {
+            $scoped = array();
+            foreach (explode(',', $selectors) as $selector) {
+                $scoped[] = trim($scope . ' ' . trim($selector));
+            }
+            $css .= implode(', ', $scoped) . ' { ' . $body . " }\n";
+        }
+        return $css;
     }
 
     /**
@@ -1019,13 +1386,14 @@ class TeamOversight_Payments {
 
     /**
      * All invoices for a user (matched by user_id with email fallback),
-     * newest season first.
+     * newest season first, each with created_ts (what invoice_schedule()
+     * floors the behind clock with).
      */
     public static function get_user_invoices($user) {
         global $wpdb;
 
         return $wpdb->get_results($wpdb->prepare("
-            SELECT * FROM {$wpdb->prefix}team_invoices
+            SELECT *, UNIX_TIMESTAMP(created_date) AS created_ts FROM {$wpdb->prefix}team_invoices
             WHERE user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s)
             ORDER BY season DESC, id
         ", $user->ID, $user->user_email));
@@ -1059,7 +1427,7 @@ class TeamOversight_Payments {
 
         $overdue = 0;
         foreach ($invoices as $invoice) {
-            $overdue += self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+            $overdue += self::invoice_overdue($invoice);
         }
         if ($overdue <= 0) {
             return '';
@@ -1096,6 +1464,8 @@ class TeamOversight_Payments {
         $payment_product = self::get_payment_product();
         $total_outstanding = 0;
         $total_overdue = 0;
+        // The same schedules maybe_start_payment() charges by (invoice_schedule()).
+        TeamOversight_Fee_Timeline::preload_for_invoices($invoices);
 
         ob_start();
         ?>
@@ -1106,30 +1476,37 @@ class TeamOversight_Payments {
                 <?php
                 $paid = self::get_ledger_paid($invoice->id);
                 $credit = round($paid - floatval($invoice->invoice_amount), 2);
-                $overdue = self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+                $schedule = self::invoice_schedule($invoice);
+                $timeline = $schedule['engine'] === 'timeline';
+                $overdue = $schedule['overdue'];
                 $total_outstanding += floatval($invoice->outstanding_amount);
                 $total_overdue += $overdue;
                 $dates = TeamOversight_Fees::get_season_dates($invoice->season);
                 ?>
                 <div class="member-fees-season">
                     <h4><?php echo esc_html($invoice->season); ?> Season</h4>
-                    <?php if ($dates): ?>
+                    <?php if ($dates && $timeline): ?>
+                        <p class="member-fees-schedule"><?php echo esc_html('Fees cover ' . TeamOversight_Fee_Timeline::format_date($dates['start']) . ' – ' . TeamOversight_Fee_Timeline::format_date($dates['end']) . '. ' . self::describe_member_schedule($schedule)); ?> Pay any amount, as often as you like, as long as you keep ahead of your schedule.</p>
+                    <?php elseif ($dates): ?>
                         <p class="member-fees-schedule">Season runs <?php echo esc_html(date('j M Y', strtotime($dates['start']))); ?> &ndash; <?php echo esc_html(date('j M Y', strtotime($dates['end']))); ?>. Fees fall due progressively across the season — pay any amount, as often as you like, as long as you keep ahead of the schedule.</p>
                     <?php endif; ?>
                     <table class="member-fees-table">
                         <tr><th>Season fee</th><td>$<?php echo number_format($invoice->invoice_amount, 2); ?></td></tr>
                         <tr><th>Paid so far</th><td>$<?php echo number_format(max(0, $paid), 2); ?></td></tr>
                         <tr class="member-fees-owing"><th>Remaining</th><td>$<?php echo number_format($invoice->outstanding_amount, 2); ?></td></tr>
+                        <?php if ($timeline && $schedule['scheduled']): ?>
+                            <tr><th>Due by today</th><td>$<?php echo number_format($schedule['due_today'], 2); ?></td></tr>
+                        <?php endif; ?>
                         <tr class="<?php echo $overdue > 0 ? 'member-fees-overdue' : ''; ?>"><th>Overdue now</th><td>$<?php echo number_format($overdue, 2); ?></td></tr>
                         <?php if ($credit >= 0.01 && floatval($invoice->outstanding_amount) <= 0): ?>
                             <tr class="member-fees-uptodate"><th>In credit</th><td>$<?php echo number_format($credit, 2); ?> — you've paid more than this season's fee; the club will offset or refund it.</td></tr>
                         <?php endif; ?>
-                        <?php $paid_through = self::get_paid_through_date($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season); ?>
+                        <?php $paid_through = $schedule['next_due']; ?>
                         <?php if ($overdue <= 0 && floatval($invoice->outstanding_amount) > 0 && $paid_through): ?>
                             <tr class="member-fees-uptodate"><th>Next payment due</th><td><?php echo esc_html(date('j M Y', strtotime($paid_through))); ?></td></tr>
                         <?php endif; ?>
                     </table>
-                    <?php echo self::render_fee_progress($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season); ?>
+                    <?php echo $schedule['progress_html']; ?>
                 </div>
             <?php endforeach; ?>
 
@@ -1280,9 +1657,10 @@ class TeamOversight_Payments {
         if ($choice === 'full') {
             $amount = round($total_outstanding, 2);
         } elseif ($choice === 'overdue') {
+            // The same schedules [member_fees] and Ready to Play show.
             $overdue = 0;
             foreach ($invoices as $invoice) {
-                $overdue += self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+                $overdue += self::invoice_overdue($invoice);
             }
             $amount = round(min($overdue, $total_outstanding), 2);
         } else {

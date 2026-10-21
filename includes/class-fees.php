@@ -47,13 +47,13 @@ class TeamOversight_Fees {
     }
 
     // ------------------------------------------------------------------
-    // Fee timeline (1.70, from the 2027 season). Each team place will have
-    // a real start and stop date, the fee will follow those dates, and each
-    // player's fee will fall due across their own part of a payment window
-    // the club sets: "Fees due from" to "Paid in full by", each falling
-    // back to the season dates when blank. 1.70.0 lays the groundwork only:
-    // these helpers read, and nothing prices, schedules or validates with
-    // them yet, so every season still charges and falls due as before.
+    // Fee timeline (1.70, from the 2027 season). Each team place has a real
+    // start and stop date and the fee follows those dates (1.70.1), and
+    // each player's fee falls due across their own part of a payment
+    // window the club sets (1.70.2): "Fees due from" to "Paid in full by",
+    // each falling back to the season dates when blank. "Paid in full by"
+    // is also the late-join cutoff. Seasons before 2027 charge and fall
+    // due as they always did.
     // ------------------------------------------------------------------
 
     /** First season on the fee timeline. Earlier seasons keep the fee-segment engine and the season-long schedule. */
@@ -705,8 +705,13 @@ class TeamOversight_Fees {
      * recorded, and from today the class as judged now when it differs
      * (what record_class() would write now). With no history at all, the
      * class as judged now applies throughout. Reads only.
+     *
+     * $fixed_class (a person fee class, see person_fee_classes()): price a
+     * hypothetical person who holds that class throughout, with no class
+     * history and no profile to read (fee_breakdown_for_class(), the How it
+     * works page). Everything else is the same code.
      */
-    private function timeline_stretches($email, $season, $rows) {
+    private function timeline_stretches($email, $season, $rows, $fixed_class = null) {
         $places = array();
         $points = array();
         foreach ((array) $rows as $row) {
@@ -727,8 +732,13 @@ class TeamOversight_Fees {
         }
 
         $today = current_time('Y-m-d');
-        $live = $this->determine_person_fee_class($email, $season);
-        $history = TeamOversight_Fee_Timeline::class_history($email, $season);
+        if ($fixed_class !== null) {
+            $live = (string) $fixed_class;
+            $history = array();
+        } else {
+            $live = $this->determine_person_fee_class($email, $season);
+            $history = TeamOversight_Fee_Timeline::class_history($email, $season);
+        }
         $last = empty($history) ? null : $history[count($history) - 1]['class'];
         $live_differs = $last !== null && $last !== $live;
         foreach ($history as $h) {
@@ -778,6 +788,28 @@ class TeamOversight_Fees {
             $stretches[] = array('from' => $at, 'to' => $next, 'buckets' => $buckets, 'legacy' => false);
         }
         return $stretches;
+    }
+
+    /**
+     * fee_breakdown() for a hypothetical person on the fee timeline (2027+):
+     * $rows (team places as fee_breakdown() takes them: team, role,
+     * start_date, end_date) priced for someone who holds $person_class (one
+     * of person_fee_classes()) all season, through the same
+     * timeline_stretches() and price_stretches() as every real fee. It
+     * reads the season dates and the fee matrix and nothing about any
+     * person, and writes nothing. The How it works page's worked examples
+     * and fee calculator price through it. Null for a season before the fee
+     * timeline (those seasons price from fee segments, which a hypothetical
+     * person has none of).
+     */
+    public function fee_breakdown_for_class($season, $rows, $person_class) {
+        if (!self::timeline_applies($season)) {
+            return null;
+        }
+        $result = $this->price_stretches($this->timeline_stretches('', $season, (array) $rows, (string) $person_class), $season);
+        $result['engine'] = 'timeline';
+        $result['rows'] = $rows;
+        return $result;
     }
 
     /**
@@ -2399,8 +2431,10 @@ class TeamOversight_Fees {
             update_option('team_oversight_season_dates', $all_dates);
         }
         // The effective window moved earlier: more falls due sooner, so the
-        // behind clock never counts from before today (floor rule 4).
-        $moved_earlier = $old_window && ($p0 < $old_window['from'] || $p1 < $old_window['to']);
+        // behind clock never counts from before today (floor rule 4). A
+        // season getting its first dates is the biggest move earlier of all:
+        // nothing was due, and now some may be.
+        $moved_earlier = !$old_window || $p0 < $old_window['from'] || $p1 < $old_window['to'];
         $raised_at = (isset($saved['raised_at']) && is_string($saved['raised_at'])) ? $saved['raised_at'] : '';
         if ($moved_earlier) {
             $raised_at = current_time('mysql');
@@ -2441,7 +2475,7 @@ class TeamOversight_Fees {
                     . self::release_gaps_html(array('manual' => $repriced['manual'], 'unpriced' => $repriced['unpriced']));
             }
         } else {
-            $notice .= '<p>Only the payment window changed, so no fee was re-priced.</p>';
+            $notice .= '<p>Only the payment window changed, so no fee was re-priced; what each player has due follows the new window straight away.</p>';
         }
         echo '<div class="notice notice-success">' . $notice . '</div>';
 
@@ -2477,7 +2511,7 @@ class TeamOversight_Fees {
         $confirm = 'Changing the ' . $season . ' season start or end re-prices every automatic ' . $season . ' invoice straight away (once fees are released). Fees set with Edit Fee are kept, payments are never changed, and each change is logged. Save?';
         ?>
         <h2 style="margin-top: 0;">Season dates and payment window</h2>
-        <p class="description">From <?php echo intval(self::FEE_TIMELINE_FROM); ?> each team place's own start and stop dates set the fee. <strong>Season start and end</strong> are what fees cover (pro-rata; days outside them aren't charged). <strong>Fees due from</strong> and <strong>Paid in full by</strong> are the payment window; left blank they use the season start and end. Paid in full by is also the <strong>late-join cutoff</strong>: nobody starts on a team after it. Changing the season start or end re-prices this season's invoices straight away (once fees are released; fees set with Edit Fee are kept); changing only the payment window re-prices nothing. Every change is logged. For now members' due amounts still follow the season dates; the personal schedule over this window comes in a later update.</p>
+        <p class="description">From <?php echo intval(self::FEE_TIMELINE_FROM); ?> each team place's own start and stop dates set the fee. <strong>Season start and end</strong> are what fees cover (pro-rata; days outside them aren't charged). <strong>Fees due from</strong> and <strong>Paid in full by</strong> are the payment window; left blank they use the season start and end. Paid in full by is also the <strong>late-join cutoff</strong>: nobody starts on a team after it. Changing the season start or end re-prices this season's invoices straight away (once fees are released; fees set with Edit Fee are kept); changing only the payment window re-prices nothing. Every change is logged. Each player's fee falls due evenly from their own first start (not before Fees due from) to Paid in full by, and all at once when they stop; a window change moves what everyone has due straight away. Moving the window earlier never makes anyone count as behind from before the day it was saved.</p>
         <form method="post" id="season-config-form" data-start="<?php echo esc_attr($dates ? $dates['start'] : ''); ?>" data-end="<?php echo esc_attr($dates ? $dates['end'] : ''); ?>" data-confirm="<?php echo esc_attr($confirm); ?>">
             <p style="margin: 8px 0;">
                 <label>Season start
@@ -2591,7 +2625,7 @@ class TeamOversight_Fees {
         ?>
         <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; margin-bottom: 20px;">
             <h2 style="margin-top: 0;">Fee timeline readiness (for the 1.70 upgrade)</h2>
-            <p class="description">Read-only. From <?php echo intval(self::FEE_TIMELINE_FROM); ?> each team place's own start and stop dates set the fee; each player's fee falling due across their own part of the payment window comes in a later update, so <?php echo esc_html($season); ?> amounts still fall due over the season dates. These counts show what exists for <?php echo esc_html($season); ?>, including places made before the timeline, which may have blank dates to fill. Fee segment rows are no longer written or read for <?php echo esc_html($season); ?>. Nothing here changes any data.</p>
+            <p class="description">Read-only. From <?php echo intval(self::FEE_TIMELINE_FROM); ?> each team place's own start and stop dates set the fee, and each player's fee falls due across their own part of the payment window. These counts show what exists for <?php echo esc_html($season); ?>, including places made before the timeline, which may have blank dates to fill. Fee segment rows are no longer written or read for <?php echo esc_html($season); ?>. Nothing here changes any data.</p>
             <table class="widefat striped" style="max-width: 720px;">
                 <tbody>
                     <tr>
@@ -2702,6 +2736,16 @@ class TeamOversight_Fees {
     /** Fee classes, most common first — the grid's rows. */
     public static function standard_fee_classes() {
         return array('Full Adult', 'Melb Uni Student', 'Other Student', 'Junior U/19 (VVL)', 'JPL/YSL', 'Unknown');
+    }
+
+    /**
+     * The classes determine_person_fee_class() can give a person (their
+     * class ignoring teams): Junior U/19 (VVL) becomes JPL/YSL per place on
+     * a junior-league team (fee_class_for_team()), and nobody is ever put
+     * in Unknown. Keep in step with determine_fee_class().
+     */
+    public static function person_fee_classes() {
+        return array('Full Adult', 'Melb Uni Student', 'Other Student', 'Junior U/19 (VVL)');
     }
 
     /** Team roles, players first — the grid's columns. */

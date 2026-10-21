@@ -223,6 +223,17 @@ class TeamOversight_Admin {
             'team-oversight-export',
             array($this, 'export_page')
         );
+
+        // A plain-English guide with the live settings, worked examples and
+        // a fee calculator, all priced by the real engine (writes nothing).
+        add_submenu_page(
+            'team-oversight',
+            'How it works',
+            'How it works',
+            'manage_options',
+            TeamOversight_Help_Page::PAGE_SLUG,
+            array('TeamOversight_Help_Page', 'render_page')
+        );
     }
     
     public function enqueue_admin_scripts() {
@@ -793,15 +804,19 @@ class TeamOversight_Admin {
         ", $today, $today)));
 
         $invoices = $wpdb->get_results("
-            SELECT invoice_amount, outstanding_amount, season
+            SELECT *, UNIX_TIMESTAMP(created_date) AS created_ts
             FROM {$wpdb->prefix}team_invoices WHERE outstanding_amount > 0
         ");
+        // Each invoice on its own season's schedule (2027+: the player's
+        // own window), preloaded so the tiles cost the same queries however
+        // many invoices there are.
+        TeamOversight_Fee_Timeline::preload_for_invoices($invoices);
         $outstanding_total = 0;
         $overdue_total = 0;
         $overdue_people = 0;
         foreach ($invoices as $invoice) {
             $outstanding_total += floatval($invoice->outstanding_amount);
-            $overdue = TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+            $overdue = TeamOversight_Payments::invoice_overdue($invoice);
             if ($overdue >= 1) {
                 $overdue_total += $overdue;
                 $overdue_people++;
@@ -2205,6 +2220,7 @@ class TeamOversight_Admin {
         $invoices = $wpdb->get_results($wpdb->prepare("
             SELECT
                 inv.*,
+                UNIX_TIMESTAMP(inv.created_date) AS created_ts,
                 MAX(u.display_name) AS name,
                 GROUP_CONCAT(DISTINCT ta.team ORDER BY ta.team SEPARATOR '|') AS team_codes
             FROM {$wpdb->prefix}team_invoices inv
@@ -2237,6 +2253,13 @@ class TeamOversight_Admin {
         }
 
         $season_dates = TeamOversight_Fees::get_season_dates($season);
+        $timeline_season = TeamOversight_Fees::timeline_applies($season);
+        $payment_window = $timeline_season ? TeamOversight_Fees::get_payment_window($season) : null;
+
+        // 2027+: every row's places and behind-clock floors in two queries,
+        // so the Overdue column (each player's own schedule) and the fee
+        // breakdowns cost no query per row for them.
+        TeamOversight_Fee_Timeline::preload_for_invoices($invoices);
 
         // One fees instance with matrix lookups cached: every row works out
         // its fee breakdown.
@@ -2336,7 +2359,9 @@ class TeamOversight_Admin {
                         <option value="<?php echo esc_url(admin_url('admin.php?page=team-oversight-invoices&season=' . $available_season)); ?>" <?php selected($season, $available_season); ?>><?php echo esc_html($available_season); ?></option>
                     <?php endforeach; ?>
                 </select>
-                <?php if ($season_dates): ?>
+                <?php if ($season_dates && $payment_window): ?>
+                    <span class="description" style="margin-left: 15px;"><?php echo esc_html('Fees cover ' . TeamOversight_Fee_Timeline::format_date($season_dates['start']) . ' – ' . TeamOversight_Fee_Timeline::format_date($season_dates['end']) . '; they fall due from each player\'s start (not before ' . TeamOversight_Fee_Timeline::format_date($payment_window['from']) . ') to ' . TeamOversight_Fee_Timeline::format_date($payment_window['to']) . '; a player who stops owes the rest at once.'); ?></span>
+                <?php elseif ($season_dates): ?>
                     <span class="description" style="margin-left: 15px;">Season runs <?php echo esc_html($season_dates['start']); ?> &ndash; <?php echo esc_html($season_dates['end']); ?>; fees fall due linearly between these dates.</span>
                 <?php else: ?>
                     <span class="description" style="margin-left: 15px; color: #996800;">No season dates set — nothing shows as overdue and pro-rata is off. Set them in <a href="<?php echo esc_url(admin_url('admin.php?page=team-oversight-fees&season=' . $season)); ?>">Configuration</a>.</span>
@@ -2593,7 +2618,7 @@ class TeamOversight_Admin {
                                     <?php endif; ?>
                                 </td>
                                 <td>
-                                    <?php $overdue = TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season); ?>
+                                    <?php $overdue = TeamOversight_Payments::invoice_overdue($invoice); ?>
                                     <?php if ($overdue > 0): ?>
                                         <span style="color: #a00; font-weight: 600;">$<?php echo number_format($overdue, 2); ?></span>
                                     <?php else: ?>
@@ -2609,7 +2634,9 @@ class TeamOversight_Admin {
                                             $behind_text .= ' (incl. ' . implode(', ', $standing['other_seasons']) . ' fees)';
                                         }
                                         ?>
-                                        <br><small class="fee-standing-note" title="Across all their seasons: from the date their payments last covered to today."><?php echo esc_html($behind_text); ?></small>
+                                        <br><small class="fee-standing-note" title="<?php echo esc_attr($timeline_season
+                                            ? 'Across all their seasons: from the date their payments last covered on their own schedule to today, never counting from before the day their fee, or the change that put more due, was recorded.'
+                                            : 'Across all their seasons: from the date their payments last covered to today.'); ?>"><?php echo esc_html($behind_text); ?></small>
                                     <?php endif; ?>
                                     <?php if ($standing && $standing['flagged']): ?>
                                         <br><span class="fee-standing fee-standing-flagged" title="<?php echo intval(TeamOversight_Payments::STANDING_FLAG_DAYS); ?> days or more behind (not counting fees an arrangement covers). Coaches of a team they're on as a player see that they shouldn't train.">No training</span>

@@ -1982,54 +1982,8 @@ class TeamOversight_Coach_Portal {
         }
 
         /* Team list fees: a status the height of the controls beside it,
-           coloured by where the player stands. */
-        .coach-portal .cac-fee {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            box-sizing: border-box;
-            min-height: var(--cp-control-h);
-            padding: 4px 12px;
-            font-size: 13px;
-            font-weight: 600;
-            line-height: 1.25;
-            text-align: center;
-            border: 1px solid var(--cp-border);
-            border-radius: var(--cp-radius);
-            background: #f6f7f7;
-            color: var(--cp-text);
-            cursor: help;
-        }
-
-        .coach-portal .cac-fee-paid,
-        .coach-portal .cac-fee-ontrack {
-            background: #e8f5ea;
-            border-color: #2e8540;
-            color: #1e6b2a;
-        }
-
-        .coach-portal .cac-fee-behind {
-            background: #fff4e0;
-            border-color: #d18a00;
-            color: #7a4a00;
-        }
-
-        .coach-portal .cac-fee-flagged {
-            background: #fce8e8;
-            border-color: #c62d2d;
-            color: #a00;
-        }
-
-        .coach-portal .cac-fee-arrangement {
-            background: #e8f0fb;
-            border-color: #4f7cc0;
-            color: #1d4f91;
-        }
-
-        .coach-portal .cac-fee-none {
-            font-weight: 400;
-            color: var(--cp-muted);
-        }
+           coloured by where the player stands (shared with Member Lookup). */
+        <?php echo TeamOversight_Payments::standing_pill_css('.coach-portal'); ?>
 
         .coach-fee-alert {
             margin: 0 0 10px;
@@ -3116,34 +3070,12 @@ class TeamOversight_Coach_Portal {
      * by class, and some are set by hand). More than a month behind is
      * flagged: they shouldn't train until it's sorted with the club.
      * $standing: one TeamOversight_Payments::get_fee_standings() entry.
-     * Public (1.70.1) so Member Lookup's Fee timeline shows admins the same
-     * pill coaches see.
+     * Since 1.70.2 the pill (and its 2027+ tooltip, measured against each
+     * player's own window) lives in TeamOversight_Payments::
+     * render_standing_pill(), shared with Member Lookup's Fee timeline.
      */
     public static function render_fee_standing($standing, $season) {
-        // Before release a $0 invoice is a fee taken back until then (any
-        // payment kept as credit), not an exemption.
-        if ($standing['state'] === 'none' && !TeamOversight_Fees::fees_released($season)) {
-            $standing['has_invoice'] = false;
-        }
-        if ($standing['state'] === 'none') {
-            $title = !empty($standing['has_invoice']) ? 'They have no fee to pay for ' . $season . '.' : 'No ' . $season . ' fee has been issued for them yet.';
-        } else {
-            $dates = TeamOversight_Fees::get_season_dates($season);
-            $factor = TeamOversight_Payments::get_expected_factor($season);
-            $title = ($dates && $factor !== null)
-                ? 'Fees fall due evenly across the season (' . date('j M', strtotime($dates['start'])) . ' – ' . date('j M Y', strtotime($dates['end'])) . '), and ' . intval(round($factor * 100)) . '% of it has gone.'
-                : 'No season dates are set yet, so nothing falls due on a schedule.';
-            if ($standing['other_seasons']) {
-                $title .= ' Includes fees still owing from ' . implode(', ', $standing['other_seasons']) . '.';
-            }
-            if ($standing['arrangement']) {
-                $title .= ' The club has agreed a payment arrangement.';
-            }
-            $title .= ' A month or more behind means they shouldn\'t train until it\'s sorted with the club.';
-        }
-        return '<span class="cac-fee cac-fee-' . esc_attr($standing['state']) . '" title="' . esc_attr($title) . '">'
-            . ($standing['state'] === 'flagged' ? '&#9888; ' : '')
-            . 'Fees: ' . esc_html(TeamOversight_Payments::describe_standing($standing)) . '</span>';
+        return TeamOversight_Payments::render_standing_pill($standing, $season);
     }
 
     /**

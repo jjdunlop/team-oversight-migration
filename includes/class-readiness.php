@@ -327,27 +327,40 @@ class TeamOversight_Readiness {
         // schedule bar and next-due date stay scoped to this panel's season.
         global $wpdb;
         $invoices = $wpdb->get_results($wpdb->prepare("
-            SELECT * FROM {$wpdb->prefix}team_invoices
+            SELECT *, UNIX_TIMESTAMP(created_date) AS created_ts FROM {$wpdb->prefix}team_invoices
             WHERE user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s)
         ", $user->ID, $user->user_email));
+        // Each invoice on its own season's schedule, the same one the pay
+        // box charges by (TeamOversight_Payments::invoice_schedule()).
+        TeamOversight_Fee_Timeline::preload_for_invoices($invoices);
 
         $outstanding = 0;
         $overdue = 0;
         $invoiced_total = 0;
         $season_invoiced = 0;
         $season_outstanding = 0;
+        $season_invoice = null;
         $other_season_debt = false;
         foreach ($invoices as $invoice) {
             $outstanding += floatval($invoice->outstanding_amount);
             $invoiced_total += floatval($invoice->invoice_amount);
-            $overdue += TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+            $overdue += TeamOversight_Payments::invoice_overdue($invoice);
             if ((string) $invoice->season === (string) $season) {
                 $season_invoiced += floatval($invoice->invoice_amount);
                 $season_outstanding += floatval($invoice->outstanding_amount);
+                if ($season_invoice === null) {
+                    $season_invoice = $invoice;
+                }
             } elseif (floatval($invoice->outstanding_amount) > 0) {
                 $other_season_debt = true;
             }
         }
+        // 2027+: the panel season's invoice on the player's own schedule
+        // (2026 and earlier keep the season-long wording and maths).
+        $season_schedule = (TeamOversight_Fees::timeline_applies($season) && $season_invoice)
+            ? TeamOversight_Payments::invoice_schedule($season_invoice)
+            : null;
+        $own_schedule = $season_schedule ? TeamOversight_Payments::describe_member_schedule($season_schedule) : '';
 
         if (empty($invoices)) {
             $fees_done = true;
@@ -357,10 +370,14 @@ class TeamOversight_Readiness {
             $fees_detail = 'Paid in full — thank you!';
         } elseif ($overdue <= 0) {
             $fees_done = true;
-            $fees_detail = 'You\'re on track. Fees fall due progressively across the season — pay any amount, as often as you like, as long as you stay ahead of the schedule.';
+            $fees_detail = $own_schedule !== ''
+                ? 'You\'re on track. ' . $own_schedule . ' Pay any amount, as often as you like, as long as you stay ahead of your schedule.'
+                : 'You\'re on track. Fees fall due progressively across the season — pay any amount, as often as you like, as long as you stay ahead of the schedule.';
         } else {
             $fees_done = false;
-            $fees_detail = 'You\'ve fallen behind the payment schedule — please make a payment to get back on track.';
+            $fees_detail = $own_schedule !== ''
+                ? 'You\'ve fallen behind your payment schedule — please make a payment to get back on track. ' . $own_schedule
+                : 'You\'ve fallen behind the payment schedule — please make a payment to get back on track.';
             if ($other_season_debt) {
                 $fees_detail .= ' Your balance includes unpaid fees carried over from another season.';
             }
@@ -381,7 +398,10 @@ class TeamOversight_Readiness {
             'other_season_debt' => $other_season_debt,
             'season_invoiced' => round($season_invoiced, 2),
             'season_outstanding' => round($season_outstanding, 2),
-            'paid_through' => TeamOversight_Payments::get_paid_through_date($season_invoiced, $season_outstanding, $season),
+            'paid_through' => $season_schedule
+                ? $season_schedule['next_due']
+                : (TeamOversight_Fees::timeline_applies($season) ? null : TeamOversight_Payments::get_paid_through_date($season_invoiced, $season_outstanding, $season)),
+            'season_progress_html' => $season_schedule ? $season_schedule['progress_html'] : null,
         );
 
         $ready = true;
@@ -488,7 +508,9 @@ class TeamOversight_Readiness {
                                     <tr class="rtp-fees-uptodate"><th>Next payment due</th><td><?php echo esc_html(date('j M Y', strtotime($step['paid_through']))); ?></td></tr>
                                 <?php endif; ?>
                             </table>
-                            <?php if ($step['season_invoiced'] > 0): ?>
+                            <?php if ($step['season_progress_html'] !== null): ?>
+                                <?php echo $step['season_progress_html']; ?>
+                            <?php elseif ($step['season_invoiced'] > 0 && !TeamOversight_Fees::timeline_applies($season)): ?>
                                 <?php echo TeamOversight_Payments::render_fee_progress($step['season_invoiced'], $step['season_outstanding'], $season); ?>
                             <?php endif; ?>
 

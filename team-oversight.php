@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), and casual program attendance (Club Programs).
- * Version: 1.70.1
+ * Version: 1.70.2
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.70.1');
+define('TEAM_OVERSIGHT_VERSION', '1.70.2');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -272,12 +272,15 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coach-portal.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-payments.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-readiness.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-help-page.php';
 
     // Initialize components
     new TeamOversight_Database();
     new TeamOversight_Fees();
     // Static and guarded: hooks added once, not per new TeamOversight_Fees().
     TeamOversight_Fee_Timeline::register_hooks();
+    // VVL Oversight → How it works: the calculator's AJAX hook, added once.
+    TeamOversight_Help_Page::register_hooks();
     new TeamOversight_Trials();
     new TeamOversight_Imports();
     new TeamOversight_Exports();

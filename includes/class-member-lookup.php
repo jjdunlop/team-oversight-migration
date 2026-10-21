@@ -550,24 +550,43 @@ class TeamOversight_Member_Lookup {
         foreach ($payments as $payment) {
             $by_invoice[$payment->invoice_id][] = $payment;
         }
+        // Each invoice on its own season's schedule (invoice_schedule():
+        // 2026 and earlier the season-long one, 2027+ the player's own).
+        TeamOversight_Fee_Timeline::preload_for_invoices($invoices);
         ?>
         <table class="wp-list-table widefat striped murvc-fees">
             <thead>
                 <tr>
-                    <th>Season</th><th>Fee</th><th>Paid</th><th>Outstanding</th><th>Overdue</th><th>Payments</th>
+                    <th>Season</th><th>Fee</th><th>Paid</th><th>Outstanding</th><th>Credit</th><th>Due by today</th><th>Overdue</th><th>Payments</th>
                 </tr>
             </thead>
             <tbody>
                 <?php foreach ($invoices as $invoice):
                     $paid = floatval($invoice->invoice_amount) - floatval($invoice->outstanding_amount);
-                    $overdue = TeamOversight_Payments::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+                    $schedule = TeamOversight_Payments::invoice_schedule($invoice);
+                    $overdue = $schedule['overdue'];
                     $rows = isset($by_invoice[$invoice->id]) ? $by_invoice[$invoice->id] : array();
+                    $ledger_paid = 0.0;
+                    foreach ($rows as $payment) {
+                        $ledger_paid += floatval($payment->amount);
+                    }
+                    $credit = round($ledger_paid - floatval($invoice->invoice_amount), 2);
+                    $due_title = '';
+                    if ($schedule['engine'] === 'timeline' && $schedule['scheduled'] && !empty($schedule['window_from'])) {
+                        $due_title = !empty($schedule['stopped_on']) && current_time('Y-m-d') >= $schedule['stopped_on']
+                            ? 'Stopped ' . TeamOversight_Fee_Timeline::format_date($schedule['stopped_on']) . ': everything for the time played is due'
+                            : 'Their own schedule: due evenly from ' . TeamOversight_Fee_Timeline::format_date($schedule['window_from']) . ' to ' . TeamOversight_Fee_Timeline::format_date($schedule['window_to']);
+                    } elseif ($schedule['scheduled']) {
+                        $due_title = 'Season-long schedule (' . $invoice->season . ')';
+                    }
                     ?>
                     <tr>
                         <td><strong><?php echo esc_html($invoice->season); ?></strong></td>
                         <td>$<?php echo number_format($invoice->invoice_amount, 2); ?></td>
                         <td>$<?php echo number_format($paid, 2); ?></td>
                         <td><?php echo $invoice->outstanding_amount > 0 ? '<span class="murvc-owing">$' . number_format($invoice->outstanding_amount, 2) . '</span>' : '$0.00'; ?></td>
+                        <td><?php echo $credit >= 0.01 ? '$' . number_format($credit, 2) : '<span class="murvc-muted">&mdash;</span>'; ?></td>
+                        <td><?php echo empty($schedule['scheduled']) ? '<span class="murvc-muted">&mdash;</span>' : '<span title="' . esc_attr($due_title) . '">$' . number_format($schedule['due_today'], 2) . ' <span class="murvc-muted">(' . intval($schedule['due_pct']) . '%)</span></span>'; ?></td>
                         <td><?php echo $overdue > 0 ? '<span class="murvc-owing">$' . number_format($overdue, 2) . '</span>' : '<span class="murvc-muted">&mdash;</span>'; ?></td>
                         <td>
                             <?php if (empty($rows)): ?>
@@ -834,13 +853,8 @@ class TeamOversight_Member_Lookup {
         .murvc-tl-stretches td, .murvc-tl-history td { vertical-align: top; }
         .murvc-tl-money th { width: 26%; }
         .murvc-tl-money .fee-manual { color: #8a5000; }
-        /* The coaches' fee pill (the same classes as the coach portal). */
-        .murvc-lookup .cac-fee { display: inline-block; padding: 3px 10px; font-size: 12px; font-weight: 600; line-height: 1.4; border: 1px solid #c3c4c7; border-radius: 4px; background: #f6f7f7; color: #1d2327; cursor: help; }
-        .murvc-lookup .cac-fee-paid, .murvc-lookup .cac-fee-ontrack { background: #e8f5ea; border-color: #2e8540; color: #1e6b2a; }
-        .murvc-lookup .cac-fee-behind { background: #fff4e0; border-color: #d18a00; color: #7a4a00; }
-        .murvc-lookup .cac-fee-flagged { background: #fce8e8; border-color: #c62d2d; color: #a00; }
-        .murvc-lookup .cac-fee-arrangement { background: #e8f0fb; border-color: #4f7cc0; color: #1d4f91; }
-        .murvc-lookup .cac-fee-none { font-weight: 400; color: #646970; }
+        /* The coaches' fee pill (the coach portal's own CSS, shared). */
+        <?php echo TeamOversight_Payments::standing_pill_css('.murvc-lookup'); ?>
         </style>
         <?php
     }
