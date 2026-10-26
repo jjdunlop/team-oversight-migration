@@ -431,6 +431,10 @@ class TeamOversight_Readiness {
             'url_label' => 'Fee details',
             'detail' => $fees_detail,
             'has_invoice' => !empty($invoices) && !$only_not_released,
+            // Nothing to pay until the release, so it counts as done (the
+            // admin Ready flag doesn't change), but the player sees it in
+            // orange as one to come back to.
+            'waiting' => $only_not_released,
             'invoiced' => round($invoiced_total, 2),
             'paid' => round(max(0, $invoiced_total - $outstanding), 2),
             'outstanding' => round($outstanding, 2),
@@ -518,15 +522,27 @@ class TeamOversight_Readiness {
             <h3>Get Ready to <?php echo !empty($checklist['staff_only']) ? 'Coach' : 'Play'; ?> — <?php echo esc_html($season); ?></h3>
             <p class="rtp-teams"><?php echo !empty($checklist['staff_only']) ? "You're coaching:" : "You're in:"; ?> <strong><?php echo esc_html(implode(', ', $team_names)); ?></strong></p>
 
-            <?php if ($checklist['ready']): ?>
+            <?php
+            // A step that's waiting on the club (fees not released yet)
+            // shows in orange, so the player knows to come back to it.
+            $any_waiting = false;
+            foreach ($checklist['steps'] as $step) {
+                if (!empty($step['waiting'])) {
+                    $any_waiting = true;
+                }
+            }
+            ?>
+            <?php if ($checklist['ready'] && $any_waiting): ?>
+                <p class="rtp-all-done rtp-nearly">All done for now — just your fee to come once it's released.</p>
+            <?php elseif ($checklist['ready']): ?>
                 <p class="rtp-all-done">✔ You're all set — see you on court!</p>
             <?php endif; ?>
 
             <?php $step_number = 0; ?>
-            <?php foreach ($checklist['steps'] as $step_key => $step): $step_number++; ?>
-                <div class="rtp-step <?php echo $step['done'] ? 'rtp-done' : 'rtp-todo'; ?>">
+            <?php foreach ($checklist['steps'] as $step_key => $step): $step_number++; $waiting = !empty($step['waiting']); ?>
+                <div class="rtp-step <?php echo $waiting ? 'rtp-waiting' : ($step['done'] ? 'rtp-done' : 'rtp-todo'); ?>">
                     <div class="rtp-step-header">
-                        <span class="rtp-step-status"><?php echo $step['done'] ? '✔' : $step_number; ?></span>
+                        <span class="rtp-step-status"><?php echo ($step['done'] && !$waiting) ? '✔' : $step_number; ?></span>
                         <span class="rtp-step-title"><?php echo esc_html($step['title']); ?></span>
                     </div>
                     <div class="rtp-step-body">
@@ -658,6 +674,20 @@ class TeamOversight_Readiness {
 
         .rtp-done .rtp-step-status {
             background: #46b450;
+        }
+
+        .rtp-step.rtp-waiting {
+            border-left-color: #e8740c;
+        }
+
+        .rtp-waiting .rtp-step-status {
+            background: #e8740c;
+        }
+
+        .rtp-all-done.rtp-nearly {
+            background: #fff4e5;
+            border-color: #f5c58b;
+            color: #8a4b08;
         }
 
         .rtp-step-title {
@@ -920,7 +950,7 @@ class TeamOversight_Readiness {
                                     <?php echo $kit_step['done'] ? '<span style="color:#1a7a2e;">✔' . (empty($kit_step['auto_done']) ? ' (player ticked)' : ' (purchased)') . '</span><br>' : ''; ?>
                                     <?php echo esc_html(implode(' · ', $kit_summary)); ?>
                                 </td>
-                                <td><?php echo $checklist['steps']['fees']['done'] ? '<span style="color:#1a7a2e;">✔</span>' : '<span style="color:#a00;">' . esc_html($checklist['steps']['fees']['detail']) . '</span>'; ?></td>
+                                <td><?php echo !empty($checklist['steps']['fees']['waiting']) ? '<span style="color:#996800;">Fee not released yet</span>' : ($checklist['steps']['fees']['done'] ? '<span style="color:#1a7a2e;">✔</span>' : '<span style="color:#a00;">' . esc_html($checklist['steps']['fees']['detail']) . '</span>'); ?></td>
                                 <td><?php echo $checklist['ready'] ? '<strong style="color:#1a7a2e;">✔</strong>' : '—'; ?></td>
                             </tr>
                         <?php endforeach; ?>
