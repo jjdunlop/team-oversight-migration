@@ -53,6 +53,10 @@ class TeamOversight_Log {
                 'membership_revoked' => 'Revoked',
                 'membership_order_refunded' => 'Order refunded or cancelled',
                 'membership_grant' => 'Granted (pre-1.22)',
+                // Duplicate accounts (1.71.0).
+                'account_merged' => 'Accounts merged',
+                'account_merge_undone' => 'Account merge undone',
+                'duplicate_dismissed' => 'Marked not duplicates',
             ),
         );
 

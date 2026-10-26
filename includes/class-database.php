@@ -492,6 +492,17 @@ class TeamOversight_Database {
             require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
             dbDelta(self::assignment_changes_table_sql());
         }
+
+        // 1.71.0: the account-merge journal (summary + backup per merge) and
+        // the 'not the same person' decisions for Duplicate accounts.
+        if (!$wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_account_merges'") && class_exists('TeamOversight_Account_Merge')) {
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta(TeamOversight_Account_Merge::table_sql());
+        }
+        if (!$wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_duplicate_decisions'") && class_exists('TeamOversight_Duplicates')) {
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta(TeamOversight_Duplicates::decisions_table_sql());
+        }
     }
 
     /**
@@ -720,6 +731,12 @@ class TeamOversight_Database {
             ",
             'team_assignment_changes' => self::assignment_changes_table_sql(),
         );
+        if (class_exists('TeamOversight_Account_Merge')) {
+            $tables['team_account_merges'] = TeamOversight_Account_Merge::table_sql();
+        }
+        if (class_exists('TeamOversight_Duplicates')) {
+            $tables['team_duplicate_decisions'] = TeamOversight_Duplicates::decisions_table_sql();
+        }
 
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
         

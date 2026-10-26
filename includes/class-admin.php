@@ -54,6 +54,15 @@ class TeamOversight_Admin {
 
         add_submenu_page(
             'club-membership',
+            'Duplicate accounts',
+            TeamOversight_Duplicates_Page::menu_title(),
+            'manage_options',
+            TeamOversight_Duplicates_Page::PAGE_SLUG,
+            array('TeamOversight_Duplicates_Page', 'render_page')
+        );
+
+        add_submenu_page(
+            'club-membership',
             'Membership History',
             'Membership History',
             'manage_options',
