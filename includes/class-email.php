@@ -27,8 +27,9 @@ class TeamOversight_Email {
 
     // Club palette (the site's colours) and the fee bar's colours, which
     // match the bar members see on the Player Checklist. The "due today"
-    // line is club blue rather than the page's near-black: dark modes turn
-    // a black line on a grey track invisible.
+    // line is a bright blue rather than the page's near-black: phone dark
+    // modes darken the grey track but leave dark colours alone, so a dark
+    // line vanishes; this blue stands out on the light and the dark track.
     const RED = '#C8102E';
     const BLUE = '#1F4E9C';
     const NAVY = '#0F2A52';
@@ -39,7 +40,7 @@ class TeamOversight_Email {
     const BAR_ONTRACK = '#46b450';
     const BAR_BEHIND = '#dc3232';
     const BAR_TRACK = '#e8e8e8';
-    const BAR_MARKER = '#1F4E9C';
+    const BAR_MARKER = '#2F6FE4';
     const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
     const CLUB_NAME = 'Melbourne University Renegades Volleyball Club';
@@ -514,10 +515,13 @@ class TeamOversight_Email {
     /**
      * The fee progress bar members see on the Player Checklist, drawn so
      * email programs show it: one 10px row of percentage-width cells, the
-     * "due today" line a 3px border where the cell at that point starts.
+     * "due today" line a 4px border where the cell at that point starts.
      * (A column of its own gets squeezed to nothing when the percentages
      * fill the row, and rows thinner than their text grow in apps with a
      * minimum text size, so the line can't stick out as it does on the page.)
+     * Above it a ▼ points at the same spot: phone dark modes darken the
+     * grey track but not the line, so the line can vanish, while text is
+     * always recoloured to stay readable.
      * $paid_pct / $due_pct 0-100; $behind picks the red fill.
      */
     public static function progress_bar($paid_pct, $due_pct, $behind) {
@@ -534,7 +538,7 @@ class TeamOversight_Email {
             return $cell[2] > $cell[1];
         }));
 
-        $line = '3px solid ' . self::BAR_MARKER;
+        $line = '4px solid ' . self::BAR_MARKER;
         $row = '<tr>';
         $last = count($cells) - 1;
         foreach ($cells as $i => $cell) {
@@ -548,7 +552,21 @@ class TeamOversight_Email {
             $row .= '<td width="' . $width . '%" height="10" bgcolor="' . $cell[0] . '" style="width:' . $width . '%;height:10px;font-size:1px;line-height:1px;mso-line-height-rule:exactly;background-color:' . $cell[0] . ';' . $border . '">&nbsp;</td>';
         }
         $row .= '</tr>';
-        return '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">' . $row . '</table>';
+
+        // The pointer: a 2% column centred on the due point (at either end,
+        // flush with that end).
+        $spacer = 'font-size:1px;line-height:1px;mso-line-height-rule:exactly;';
+        $before = $due === 100 ? 98 : max(0, $due - 1);
+        $after = 100 - $before - 2;
+        $align = $due === 0 ? 'left' : ($due === 100 ? 'right' : 'center');
+        $pointer = '<tr>'
+            . ($before > 0 ? '<td width="' . $before . '%" style="width:' . $before . '%;' . $spacer . '">&nbsp;</td>' : '')
+            . '<td width="2%" align="' . $align . '" style="width:2%;text-align:' . $align . ';font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:11px;mso-line-height-rule:exactly;color:' . self::BAR_MARKER . ';white-space:nowrap;">&#9660;</td>'
+            . ($after > 0 ? '<td width="' . $after . '%" style="width:' . $after . '%;' . $spacer . '">&nbsp;</td>' : '')
+            . '</tr>';
+
+        return '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">' . $pointer . '</table>'
+            . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:2px;">' . $row . '</table>';
     }
 
     /**
@@ -594,7 +612,7 @@ class TeamOversight_Email {
                 $card_text[] = '  ' . $bar['caption'];
             }
             if ($i === $last) {
-                $foot = ($has_bar ? 'The coloured bar is what you\'ve paid; the thin blue line is where the schedule expects you to be today. ' : '')
+                $foot = ($has_bar ? 'The coloured bar is what you\'ve paid; the ▼ and line show where the schedule expects you to be today. ' : '')
                     . 'Figures as at ' . $as_at . '.';
                 $inner .= '<p style="' . $small . 'padding-top:8px;">' . esc_html($foot) . '</p>';
             }
