@@ -938,6 +938,12 @@ class TeamOversight_Admin {
         if (isset($_POST['action']) && $_POST['action'] === 'send_test_trial_emails') {
             TeamOversight_Trial_Emails::send_test_emails();
         }
+        if (isset($_POST['action']) && $_POST['action'] === 'save_account_email_settings') {
+            TeamOversight_Account_Emails::save_admin_settings();
+        }
+        if (isset($_POST['action']) && $_POST['action'] === 'send_test_account_emails') {
+            TeamOversight_Account_Emails::send_test_emails();
+        }
 
         $texts = TeamOversight_Payments::get_reminder_texts();
 
@@ -1076,6 +1082,7 @@ class TeamOversight_Admin {
             </div>
 
             <?php TeamOversight_Trial_Emails::render_admin_section(); ?>
+            <?php TeamOversight_Account_Emails::render_admin_section(); ?>
         </div>
         <?php
     }

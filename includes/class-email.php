@@ -41,6 +41,8 @@ class TeamOversight_Email {
     const BAR_BEHIND = '#dc3232';
     const BAR_TRACK = '#e8e8e8';
     const BAR_MARKER = '#2F6FE4';
+    // Each device's own system font (WooCommerce's receipts use its nearest
+    // option, Helvetica: close, and the club chose to keep this one).
     const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
     const CLUB_NAME = 'Melbourne University Renegades Volleyball Club';
@@ -104,9 +106,13 @@ class TeamOversight_Email {
             }
         }
 
+        // Every email carries its own id (hidden), which also lets the
+        // sending hook find this message and no other.
+        $id = wp_generate_uuid4();
         return array(
-            'html' => self::layout($args['program'], $heading, implode("\n", $html_parts), $preheader, $args['why']),
+            'html' => self::layout($args['program'], $heading, implode("\n", $html_parts), $preheader, $args['why'], $id),
             'text' => self::text_layout($args['program'], $heading, $text_parts, $args['why']),
+            'id' => $id,
         );
     }
 
@@ -225,13 +231,16 @@ class TeamOversight_Email {
      */
     private static function words_html($words, $vars) {
         $html = '';
-        foreach (preg_split('~(https?://[^\s<>"\'{}]+|\{link\})~i', $words, -1, PREG_SPLIT_DELIM_CAPTURE) as $i => $segment) {
+        // {link} and {something_link} are links the plugin itself fills in
+        // (a page, a reset link), so they're linked wherever they're used.
+        foreach (preg_split('~(https?://[^\s<>"\'{}]+|\{(?:[a-z]+_)?link\})~i', $words, -1, PREG_SPLIT_DELIM_CAPTURE) as $i => $segment) {
             if ($i % 2 === 0) {
                 $html .= esc_html(strtr(self::decode($segment), $vars));
                 continue;
             }
-            if (strtolower($segment) === '{link}') {
-                $url = isset($vars['{link}']) ? $vars['{link}'] : '';
+            if ($segment[0] === '{') {
+                $key = strtolower($segment);
+                $url = isset($vars[$key]) ? $vars[$key] : '';
                 $html .= $url !== '' ? self::link($url) : '';
                 continue;
             }
@@ -269,9 +278,9 @@ class TeamOversight_Email {
      * (the account merge's) and the site's mailer still apply. The HTML
      * content type is set on this message only, never through the global
      * wp_mail_content_type filter, which would turn every other plugin's
-     * plain-text mail into one run-on paragraph. A one-shot phpmailer_init
-     * hook, added just for this call and removed whatever happens, adds the
-     * plain-text version and the logo to this message.
+     * plain-text mail into one run-on paragraph. The hook from
+     * prepare_mailer(), removed whatever happens, adds the plain-text
+     * version and the logo to this message.
      */
     public static function send($to, $subject, $email, $headers = array()) {
         $headers = array_values(array_filter((array) $headers, function ($header) {
@@ -281,11 +290,32 @@ class TeamOversight_Email {
         $headers[] = self::MARKER_HEADER;
         $subject = trim(preg_replace('/\s+/u', ' ', (string) $subject));
 
-        $html = (string) $email['html'];
+        $detach = self::prepare_mailer($email);
+        try {
+            $sent = wp_mail($to, $subject, (string) $email['html'], $headers);
+        } finally {
+            $detach();
+        }
+        return (bool) $sent;
+    }
+
+    /**
+     * Ready the next send of a built email: a phpmailer_init hook that
+     * acts only on the message carrying this email's id, then removes
+     * itself, and adds the plain-text version and the logo to it. Returns
+     * a function that removes the hook, for after the send (when another
+     * plugin sends the message, as Ultimate Member does, call it from that
+     * plugin's after-sending hook).
+     */
+    public static function prepare_mailer($email) {
         $text = isset($email['text']) ? (string) $email['text'] : '';
+        $id = isset($email['id']) ? (string) $email['id'] : '';
         $logo = TEAM_OVERSIGHT_PLUGIN_DIR . 'assets/email-logo.png';
         $priority = PHP_INT_MAX;
-        $init = function ($phpmailer) use ($text, $logo, $priority, &$init) {
+        $init = function ($phpmailer) use ($text, $id, $logo, $priority, &$init) {
+            if ($id !== '' && strpos((string) $phpmailer->Body, $id) === false) {
+                return; // someone else's message
+            }
             // This message only: off again before anything else can send.
             remove_action('phpmailer_init', $init, $priority);
             if ($phpmailer->ContentType !== 'text/html') {
@@ -300,12 +330,9 @@ class TeamOversight_Email {
             }
         };
         add_action('phpmailer_init', $init, $priority);
-        try {
-            $sent = wp_mail($to, $subject, $html, $headers);
-        } finally {
+        return function () use (&$init, $priority) {
             remove_action('phpmailer_init', $init, $priority);
-        }
-        return (bool) $sent;
+        };
     }
 
     // ------------------------------------------------------------------
@@ -320,7 +347,12 @@ class TeamOversight_Email {
         return (string) apply_filters('team_oversight_email_logo_url', TEAM_OVERSIGHT_PLUGIN_URL . 'assets/email-logo.png');
     }
 
-    private static function layout($program, $heading, $body_html, $preheader, $why) {
+    /*
+     * No numeric character references above 255 in the layout: Ultimate
+     * Member runs wp_kses_decode_entities() over the whole email, which
+     * turns those into stray bytes. The characters themselves are used.
+     */
+    private static function layout($program, $heading, $body_html, $preheader, $why, $id) {
         $f = self::FONT;
         $home = esc_url(home_url('/'));
         $site = esc_html(preg_replace('~^https?://~', '', untrailingslashit(home_url())));
@@ -331,7 +363,7 @@ class TeamOversight_Email {
             // Hidden text inboxes show after the subject, padded so the
             // body's first words don't follow it.
             $preheader_html = '<div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">'
-                . esc_html($preheader) . str_repeat('&#8199;&#847; ', 40) . '</div>';
+                . esc_html($preheader) . str_repeat("\u{2007}\u{034F} ", 40) . '</div>';
         }
 
         $program_html = $program !== ''
@@ -340,7 +372,7 @@ class TeamOversight_Email {
 
         // A different hidden string in every email, so Gmail never folds
         // the body away as "repeated" in a thread of same-subject emails.
-        $unique = '<span style="display:none;mso-hide:all;font-size:0;line-height:0;max-height:0;overflow:hidden;opacity:0;color:transparent;">' . esc_html(wp_generate_uuid4()) . '</span>';
+        $unique = '<span style="display:none;mso-hide:all;font-size:0;line-height:0;max-height:0;overflow:hidden;opacity:0;color:transparent;">' . esc_html($id) . '</span>';
 
         return '<!DOCTYPE html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
@@ -561,7 +593,7 @@ class TeamOversight_Email {
         $align = $due === 0 ? 'left' : ($due === 100 ? 'right' : 'center');
         $pointer = '<tr>'
             . ($before > 0 ? '<td width="' . $before . '%" style="width:' . $before . '%;' . $spacer . '">&nbsp;</td>' : '')
-            . '<td width="2%" align="' . $align . '" style="width:2%;text-align:' . $align . ';font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:11px;mso-line-height-rule:exactly;color:' . self::BAR_MARKER . ';white-space:nowrap;">&#9660;</td>'
+            . '<td width="2%" align="' . $align . '" style="width:2%;text-align:' . $align . ';font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:11px;mso-line-height-rule:exactly;color:' . self::BAR_MARKER . ';white-space:nowrap;">' . "\u{25BC}" . '</td>'
             . ($after > 0 ? '<td width="' . $after . '%" style="width:' . $after . '%;' . $spacer . '">&nbsp;</td>' : '')
             . '</tr>';
 
