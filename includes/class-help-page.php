@@ -1410,7 +1410,8 @@ class TeamOversight_Help_Page {
         ));
 
         echo '<h3>Reminder emails</h3>';
-        echo '<p>Optional and off by default, set on ' . self::admin_link('team-oversight-emails', 'Emails') . ': templates, From and Reply-To, the interval and grace period, a preview of who would be emailed, and Send reminders now. Section 5 shows the current settings. The same page holds the trial applicant emails (received, payment needed, payment received, changes saved).</p>';
+        echo '<p>Optional and off by default, set on ' . self::admin_link('team-oversight-emails', 'Emails') . ': the wording, From and Reply-To, the interval and grace period, a preview of who would be emailed, and Send reminders now. Section 5 shows the current settings. The same page holds the trial applicant emails (received, payment needed, payment received, changes saved).</p>';
+        echo '<p>Every email shares one club look: the logo and club name, the program it\'s about above the heading (<em>Club fees · 2026</em>, <em>Trials · 2027</em>), the message, and the same footer. The wording stays editable as plain text; the plugin draws the parts that hold figures. The reminder\'s fee cards show what the Player Checklist shows (season fee, paid so far, remaining, overdue now or the next payment date, and the progress bar), each worked out the same way as the checklist and the pay box, as at the day it\'s sent. They never name a team.</p>';
 
         echo '<h3>Coach portal privacy</h3>';
         self::ul(array(

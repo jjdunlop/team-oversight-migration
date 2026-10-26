@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), and casual program attendance (Club Programs).
- * Version: 1.71.0
+ * Version: 1.72.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.71.0');
+define('TEAM_OVERSIGHT_VERSION', '1.72.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -262,6 +262,7 @@ function team_oversight_init() {
     // Load all classes
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-database.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-log.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-email.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-admin.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-fees.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-fee-timeline.php';
@@ -288,6 +289,9 @@ function team_oversight_init() {
 
     // Initialize components
     new TeamOversight_Database();
+    // Saved email wording moved to the 1.72 email format, once (a cheap
+    // option check after that).
+    TeamOversight_Email::maybe_upgrade();
     new TeamOversight_Fees();
     // Static and guarded: hooks added once, not per new TeamOversight_Fees().
     TeamOversight_Fee_Timeline::register_hooks();

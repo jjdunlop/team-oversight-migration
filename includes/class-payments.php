@@ -33,6 +33,10 @@ class TeamOversight_Payments {
     const REMINDER_CRON = 'team_oversight_overdue_reminders';
     const EMAIL_SUBJECT_OPTION = 'team_oversight_overdue_email_subject';
     const EMAIL_BODY_OPTION = 'team_oversight_overdue_email_body';
+    // 1.72.0 on: the reminder's wording (subject, heading, body; blank =
+    // the built-in text) in the HTML email format. The two options above
+    // keep the 1.71 plain-text wording untouched, for a site put back on 1.71.
+    const REMINDER_TEXT_OPTION = 'team_oversight_reminder_email';
     const REMINDER_MIN_OPTION = 'team_oversight_reminder_minimum';
     const REMINDER_GRACE_OPTION = 'team_oversight_reminder_grace_days';
     const REMINDER_HOUR_OPTION = 'team_oversight_reminder_hour';
@@ -292,21 +296,22 @@ class TeamOversight_Payments {
                     'outstanding' => 0.0,
                     'overdue_since' => null,
                     'days_overdue' => 0,
+                    // Each invoice row (with created_ts) and its schedule,
+                    // so the reminder email's fee cards show the very
+                    // figures these totals were added up from.
+                    'invoices' => array(),
                 );
             }
             $people[$key]['outstanding'] += floatval($invoice->outstanding_amount);
-            if (TeamOversight_Fees::timeline_applies($invoice->season)) {
-                // 2027+: their own schedule, and a behind date that never
-                // starts before the fee, or the change that put it due,
-                // was recorded (behind_floor()), so reminder grace counts
-                // from then.
-                $schedule = TeamOversight_Fee_Timeline::schedule($invoice);
-                $people[$key]['overdue'] += $schedule['overdue'];
-                $since = $schedule['behind_since'];
-            } else {
-                $people[$key]['overdue'] += self::get_overdue($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
-                $since = self::get_overdue_since($invoice);
-            }
+            // The invoice's own schedule: before 2027 get_overdue() /
+            // get_overdue_since() verbatim; 2027+ the player's schedule,
+            // whose behind date never starts before the fee, or the change
+            // that put it due, was recorded (behind_floor()), so reminder
+            // grace counts from then.
+            $schedule = self::invoice_schedule($invoice);
+            $people[$key]['invoices'][] = array('invoice' => $invoice, 'schedule' => $schedule);
+            $people[$key]['overdue'] += $schedule['overdue'];
+            $since = $schedule['behind_since'];
 
             // Track the earliest date anything of theirs fell behind.
             if ($since && ($people[$key]['overdue_since'] === null || $since < $people[$key]['overdue_since'])) {
@@ -330,15 +335,181 @@ class TeamOversight_Payments {
         return 'MURVC club fees overdue — ${overdue}';
     }
 
+    public static function get_default_reminder_heading() {
+        return 'Your club fees are behind';
+    }
+
+    /**
+     * The default reminder text (TeamOversight_Email's format): {fees} is
+     * the fee cards with the progress bar, {button} the Pay button.
+     */
     public static function get_default_reminder_body() {
         return "Hi {first_name},\n\n"
             . "Your MURVC club fees have been behind the payment schedule for {time_overdue}.\n\n"
-            . "  Overdue now:     \${overdue}\n"
-            . "  Total remaining: \${outstanding}\n\n"
-            . "You can pay any amount online — part of it or all of it, whatever suits — and it comes straight off your balance:\n"
-            . "{link}\n\n"
-            . "If you think this is a mistake, or you'd like to arrange a payment plan, just reply to this email.\n\n"
-            . "Melbourne University Renegades Volleyball Club";
+            . "{fees}\n\n"
+            . "You can pay any amount online — part of it or all of it, whatever suits — and it comes straight off your balance.\n\n"
+            . "{button}\n\n"
+            . "If you think this is a mistake, or you'd like to arrange a payment plan, just reply to this email.";
+    }
+
+    /**
+     * The reminder's wording: the saved subject, heading and body, or the
+     * default for any left blank (blank means "use the built-in wording",
+     * so improvements to it reach a site that never changed it).
+     */
+    public static function get_reminder_texts() {
+        $defaults = array(
+            'subject' => self::get_default_reminder_subject(),
+            'heading' => self::get_default_reminder_heading(),
+            'body' => self::get_default_reminder_body(),
+        );
+        $saved = get_option(self::REMINDER_TEXT_OPTION, array());
+        $saved = is_array($saved) ? $saved : array();
+        $texts = array('customised' => false);
+        foreach ($defaults as $field => $default) {
+            $mine = isset($saved[$field]) ? trim((string) $saved[$field]) : '';
+            $texts[$field] = $mine !== '' ? $mine : $default;
+            if ($mine !== '') {
+                $texts['customised'] = true;
+            }
+        }
+        return $texts;
+    }
+
+    /** Things in the reminder's text that won't come out as meant. */
+    public static function check_reminder_body($body) {
+        return TeamOversight_Email::check_text(
+            $body,
+            array('{name}', '{first_name}', '{overdue}', '{outstanding}', '{link}', '{days_overdue}', '{time_overdue}'),
+            array('fees', 'button'),
+            array('fees' => 'the email shows no figures and no progress bar.')
+        );
+    }
+
+    /**
+     * The fee cards for a reminder: one per invoice with money owing,
+     * newest season first, the email version of the checklist's fees step.
+     * $items: get_overdue_people()'s 'invoices' (each the invoice row and
+     * its invoice_schedule()), so the cards show the figures the subject's
+     * total was added up from; a bare invoice row is scheduled here.
+     * Returns array($cards, $totals).
+     */
+    public static function fee_cards($items) {
+        $rows_only = array();
+        foreach ((array) $items as $item) {
+            if (is_object($item)) {
+                $rows_only[] = $item;
+            }
+        }
+        TeamOversight_Fee_Timeline::preload_for_invoices($rows_only);
+
+        $owing = array();
+        foreach ((array) $items as $item) {
+            $invoice = is_array($item) ? $item['invoice'] : $item;
+            if (floatval($invoice->outstanding_amount) > 0) {
+                $owing[] = array(
+                    'invoice' => $invoice,
+                    'schedule' => is_array($item) && isset($item['schedule']) ? $item['schedule'] : self::invoice_schedule($invoice),
+                );
+            }
+        }
+        usort($owing, function ($a, $b) {
+            $by_season = intval($b['invoice']->season) - intval($a['invoice']->season);
+            return $by_season !== 0 ? $by_season : intval($b['invoice']->id) - intval($a['invoice']->id);
+        });
+
+        // Days behind counted as get_overdue_people() counts them.
+        $today = strtotime(current_time('Y-m-d'));
+        $cards = array();
+        $totals = array('overdue' => 0.0, 'outstanding' => 0.0);
+        foreach ($owing as $item) {
+            $invoice = $item['invoice'];
+            $schedule = $item['schedule'];
+            $timeline = $schedule['engine'] === 'timeline';
+            $overdue = floatval($schedule['overdue']);
+
+            if ($overdue >= 1) {
+                $days = !empty($schedule['behind_since'])
+                    ? max(0, (int) floor(($today - strtotime($schedule['behind_since'])) / DAY_IN_SECONDS))
+                    : 0;
+                $pill = array($days >= 1 ? self::describe_duration($days) . ' behind' : 'Behind', 'bad');
+            } elseif ($overdue > 0) {
+                // Cents left over: not worth a red "10 months behind".
+                $pill = array('Under $1 overdue', 'neutral');
+            } else {
+                $pill = array('On track', 'good');
+            }
+
+            $rows = array(
+                array('Season fee', TeamOversight_Email::money($schedule['fee']), ''),
+                // Never below zero, as on the checklist and [member_fees].
+                array('Paid so far', TeamOversight_Email::money(max(0, floatval($schedule['paid']))), ''),
+                array('Remaining', TeamOversight_Email::money($schedule['outstanding']), 'total'),
+                array('Overdue now', TeamOversight_Email::money($overdue), $overdue > 0 ? 'bad' : ''),
+            );
+            // As on the checklist: the next payment date only when nothing
+            // is overdue and something is still owing.
+            if ($overdue <= 0 && floatval($schedule['outstanding']) > 0 && !empty($schedule['next_due'])) {
+                $rows[] = array('Next payment due', TeamOversight_Fee_Timeline::format_date($schedule['next_due']), 'good');
+            }
+
+            // The checklist's bar (none where members see none). In the
+            // email it is red whenever anything is overdue and never full
+            // while money is owing: before 2027 the page's rounded rule can
+            // draw a full green bar beside a red "Overdue now".
+            $parts = self::invoice_progress_parts($invoice, $timeline ? $schedule : null);
+            $bar = null;
+            if ($parts !== null) {
+                $bar = array(
+                    'paid_pct' => floatval($schedule['outstanding']) > 0 ? min(99, $parts['paid_pct']) : $parts['paid_pct'],
+                    'due_pct' => $parts['due_pct'],
+                    'behind' => $overdue > 0,
+                    'caption' => $parts['caption'],
+                );
+            }
+
+            $cards[] = array(
+                'season' => (string) $invoice->season,
+                'title' => $invoice->season . ' season',
+                'pill' => $pill,
+                'rows' => $rows,
+                'bar' => $bar,
+                'schedule' => $timeline ? self::describe_member_schedule($schedule) : '',
+            );
+            $totals['overdue'] += $overdue;
+            $totals['outstanding'] += floatval($schedule['outstanding']);
+        }
+        return array($cards, $totals);
+    }
+
+    /**
+     * A made-up member for the Emails page's preview and test send: fixed,
+     * illustrative numbers (no invoice behind them), drawn by the same
+     * card code as a real reminder. Returns array($person, $cards, $totals).
+     */
+    public static function sample_reminder($name = 'Alex Example') {
+        $season = current_time('Y');
+        $timeline = TeamOversight_Fees::timeline_applies($season);
+        $person = array('name' => $name, 'first_name' => '', 'overdue' => 99.60, 'outstanding' => 330.00, 'days_overdue' => 23);
+        $cards = array(array(
+            'season' => $season,
+            'title' => $season . ' season',
+            'pill' => array(self::describe_duration(23) . ' behind', 'bad'),
+            'rows' => array(
+                array('Season fee', '$480.00', ''),
+                array('Paid so far', '$150.00', ''),
+                array('Remaining', '$330.00', 'total'),
+                array('Overdue now', '$99.60', 'bad'),
+            ),
+            'bar' => array(
+                'paid_pct' => 31,
+                'due_pct' => 52,
+                'behind' => true,
+                'caption' => $timeline ? 'Paid 31% · 52% due by today' : 'Paid 31% · season 52% elapsed',
+            ),
+            'schedule' => '',
+        ));
+        return array($person, $cards, array('overdue' => 99.60, 'outstanding' => 330.00));
     }
 
     /** "a week" / "3 weeks" / "2 months" — readable, not "37 days". */
@@ -395,32 +566,41 @@ class TeamOversight_Payments {
     }
 
     /**
-     * Render the reminder subject+body from the saved templates (or the
-     * defaults). Placeholders: {name} {first_name} {overdue} {outstanding}
-     * {link}. Returns array(subject, body).
+     * Build the reminder for one person from the saved wording (or the
+     * defaults). $person: name, first_name (optional), overdue, outstanding,
+     * days_overdue; $cards / $totals from fee_cards(). Placeholders: {name}
+     * {first_name} {overdue} {outstanding} {time_overdue} {days_overdue}
+     * {link}. Returns array(subject, email) with email = array(html, text).
      */
-    public static function render_reminder_email($name, $overdue, $outstanding, $link = null, $days_overdue = 0) {
-        $subject_tpl = get_option(self::EMAIL_SUBJECT_OPTION);
-        if (!is_string($subject_tpl) || trim($subject_tpl) === '') {
-            $subject_tpl = self::get_default_reminder_subject();
-        }
-        $body_tpl = get_option(self::EMAIL_BODY_OPTION);
-        if (!is_string($body_tpl) || trim($body_tpl) === '') {
-            $body_tpl = self::get_default_reminder_body();
-        }
-
-        $first = trim((string) strtok((string) $name, ' '));
-        $replacements = array(
+    public static function render_reminder_email($person, $cards = array(), $totals = null, $link = null) {
+        $texts = self::get_reminder_texts();
+        $link = $link !== null ? $link : self::get_reminder_link();
+        $name = (string) $person['name'];
+        $days = intval($person['days_overdue']);
+        $vars = array(
             '{name}' => $name,
-            '{first_name}' => $first !== '' ? $first : $name,
-            '{overdue}' => number_format(floatval($overdue), 2),
-            '{outstanding}' => number_format(floatval($outstanding), 2),
-            '{link}' => $link !== null ? $link : self::get_reminder_link(),
-            '{days_overdue}' => intval($days_overdue),
-            '{time_overdue}' => self::describe_duration(intval($days_overdue)),
+            '{first_name}' => !empty($person['first_name']) ? $person['first_name'] : TeamOversight_Email::first_name(0, $name),
+            '{overdue}' => number_format(floatval($person['overdue']), 2),
+            '{outstanding}' => number_format(floatval($person['outstanding']), 2),
+            '{link}' => $link,
+            '{days_overdue}' => (string) $days,
+            '{time_overdue}' => self::describe_duration($days),
         );
 
-        return array(strtr($subject_tpl, $replacements), strtr($body_tpl, $replacements));
+        $seasons = array_values(array_unique(wp_list_pluck($cards, 'season')));
+        $email = TeamOversight_Email::render(array(
+            'program' => 'Club fees' . (count($seasons) === 1 ? ' · ' . $seasons[0] : ''),
+            'heading' => $texts['heading'],
+            'body' => $texts['body'],
+            'vars' => $vars,
+            'blocks' => $cards ? array('fees' => TeamOversight_Email::fee_block($cards, wp_date('j M Y'), $totals)) : array(),
+            'button' => array('url' => $link, 'label' => 'Pay my fees'),
+            // Figures only: the words are the admin's.
+            'preheader' => '${overdue} overdue · ${outstanding} remaining',
+            'why' => 'You\'re getting this because your Renegades account has club fees behind the payment schedule.',
+        ));
+
+        return array(TeamOversight_Email::fill($texts['subject'], $vars), $email);
     }
 
     /**
@@ -430,7 +610,7 @@ class TeamOversight_Payments {
      * Returns a report array.
      */
     public function send_overdue_reminders($force = false, $dry_run = false) {
-        $report = array('enabled' => (bool) get_option(self::REMINDERS_ENABLED_OPTION), 'sent' => 0, 'skipped_recent' => 0, 'skipped_no_account' => 0, 'skipped_small' => 0, 'skipped_grace' => 0, 'minimum' => self::get_reminder_minimum(), 'grace_days' => self::get_reminder_grace_days(), 'recipients' => array());
+        $report = array('enabled' => (bool) get_option(self::REMINDERS_ENABLED_OPTION), 'sent' => 0, 'failed' => 0, 'skipped_recent' => 0, 'skipped_no_account' => 0, 'skipped_small' => 0, 'skipped_grace' => 0, 'minimum' => self::get_reminder_minimum(), 'grace_days' => self::get_reminder_grace_days(), 'recipients' => array());
 
         if (!$force && !$report['enabled']) {
             return $report;
@@ -471,15 +651,27 @@ class TeamOversight_Payments {
                 continue;
             }
 
-            list($subject, $message) = self::render_reminder_email($person['name'], $person['overdue'], $person['outstanding'], $checklist_url, $person['days_overdue']);
+            $person['first_name'] = TeamOversight_Email::first_name($person['user_id'], $person['name']);
+            list($cards, $totals) = self::fee_cards($person['invoices']);
+            list($subject, $email) = self::render_reminder_email($person, $cards, $totals, $checklist_url);
 
-            if (wp_mail($person['email'], $subject, $message, self::get_email_headers())) {
+            if (TeamOversight_Email::send($person['email'], $subject, $email, self::get_email_headers())) {
                 update_user_meta($person['user_id'], self::REMINDER_META, time());
                 $report['sent']++;
                 if (class_exists('TeamOversight_Log')) {
                     TeamOversight_Log::add(
                         'email_reminder',
                         'Overdue reminder sent to ' . $person['email'],
+                        array('user_id' => $person['user_id'], 'amount' => $person['overdue'])
+                    );
+                }
+            } else {
+                // Not stamped, so the next run tries them again.
+                $report['failed']++;
+                if (class_exists('TeamOversight_Log')) {
+                    TeamOversight_Log::add(
+                        'email_reminder',
+                        'Overdue reminder to ' . $person['email'] . ' NOT delivered, check the site\'s mail setup',
                         array('user_id' => $person['user_id'], 'amount' => $person['overdue'])
                     );
                 }
@@ -687,18 +879,48 @@ class TeamOversight_Payments {
      * Empty without a schedule or a fee.
      */
     private static function timeline_progress_html($schedule) {
+        $parts = self::timeline_progress_parts($schedule);
+        if ($parts === null) {
+            return '';
+        }
+        $paid_pct = $parts['paid_pct'];
+        $due_pct = $parts['due_pct'];
+        return '<div class="fee-progress" title="' . esc_attr('Paid ' . $paid_pct . '% — ' . $due_pct . '% is due by today on your schedule') . '">'
+            . '<div class="fee-progress-fill fee-progress-' . $parts['state'] . '" style="width: ' . min(100, $paid_pct) . '%;"></div>'
+            . '<div class="fee-progress-marker" style="left: ' . $due_pct . '%;"></div>'
+            . '</div>'
+            . '<p class="fee-progress-caption">' . esc_html($parts['caption']) . '</p>';
+    }
+
+    /** timeline_progress_html()'s numbers as plain parts (see fee_progress_parts()). */
+    private static function timeline_progress_parts($schedule) {
         $fee = floatval($schedule['fee']);
         if (empty($schedule['scheduled']) || $fee <= 0) {
-            return '';
+            return null;
         }
         $paid_pct = (int) round(max(0, min(1, floatval($schedule['paid']) / $fee)) * 100);
         $due_pct = max(0, min(100, intval($schedule['due_pct'])));
-        $state = floatval($schedule['overdue']) > 0 ? 'behind' : 'ontrack';
-        return '<div class="fee-progress" title="' . esc_attr('Paid ' . $paid_pct . '% — ' . $due_pct . '% is due by today on your schedule') . '">'
-            . '<div class="fee-progress-fill fee-progress-' . $state . '" style="width: ' . min(100, $paid_pct) . '%;"></div>'
-            . '<div class="fee-progress-marker" style="left: ' . $due_pct . '%;"></div>'
-            . '</div>'
-            . '<p class="fee-progress-caption">' . esc_html('Paid ' . $paid_pct . '% · ' . $due_pct . '% due by today') . '</p>';
+        return array(
+            'paid_pct' => $paid_pct,
+            'due_pct' => $due_pct,
+            'state' => floatval($schedule['overdue']) > 0 ? 'behind' : 'ontrack',
+            'caption' => 'Paid ' . $paid_pct . '% · ' . $due_pct . '% due by today',
+        );
+    }
+
+    /**
+     * The members' progress bar for an invoice as plain parts (paid_pct,
+     * due_pct, state, caption), or null when members see no bar: the same
+     * numbers and rule as invoice_progress_html(), for emails, which can't
+     * use the page's bar. Pass the invoice's schedule when it's already
+     * worked out (a 2027+ one is then not computed again).
+     */
+    public static function invoice_progress_parts($invoice, $schedule = null) {
+        $invoice = (object) $invoice;
+        if (!TeamOversight_Fees::timeline_applies($invoice->season)) {
+            return self::fee_progress_parts($invoice->invoice_amount, $invoice->outstanding_amount, $invoice->season);
+        }
+        return self::timeline_progress_parts($schedule !== null ? $schedule : TeamOversight_Fee_Timeline::schedule($invoice));
     }
 
     /**
@@ -1261,21 +1483,41 @@ class TeamOversight_Payments {
      * the schedule says you should be today. Empty string without dates.
      */
     public static function render_fee_progress($invoice_amount, $outstanding_amount, $season) {
+        $parts = self::fee_progress_parts($invoice_amount, $outstanding_amount, $season);
+        if ($parts === null) {
+            return '';
+        }
+        $paid_pct = $parts['paid_pct'];
+        $sched_pct = $parts['due_pct'];
+
+        return '<div class="fee-progress" title="Paid ' . $paid_pct . '% — schedule expects ' . $sched_pct . '%">'
+            . '<div class="fee-progress-fill fee-progress-' . $parts['state'] . '" style="width: ' . min(100, $paid_pct) . '%;"></div>'
+            . '<div class="fee-progress-marker" style="left: ' . min(100, $sched_pct) . '%;"></div>'
+            . '</div>'
+            . '<p class="fee-progress-caption">Paid ' . $paid_pct . '% &middot; season ' . $sched_pct . '% elapsed</p>';
+    }
+
+    /**
+     * render_fee_progress()'s numbers (2026 and earlier) as plain parts, for
+     * the email's copy of the bar: paid_pct, due_pct (the marker), state
+     * ('ontrack' when the rounded paid % is at least the schedule's),
+     * caption. Null when there's no bar (no season dates, or no fee).
+     */
+    private static function fee_progress_parts($invoice_amount, $outstanding_amount, $season) {
         $expected = self::get_expected_factor($season);
         $invoice_amount = floatval($invoice_amount);
         if ($expected === null || $invoice_amount <= 0) {
-            return '';
+            return null;
         }
 
         $paid_pct = (int) round(max(0, min(1, ($invoice_amount - floatval($outstanding_amount)) / $invoice_amount)) * 100);
         $sched_pct = (int) round($expected * 100);
-        $state = $paid_pct >= $sched_pct ? 'ontrack' : 'behind';
-
-        return '<div class="fee-progress" title="Paid ' . $paid_pct . '% — schedule expects ' . $sched_pct . '%">'
-            . '<div class="fee-progress-fill fee-progress-' . $state . '" style="width: ' . min(100, $paid_pct) . '%;"></div>'
-            . '<div class="fee-progress-marker" style="left: ' . min(100, $sched_pct) . '%;"></div>'
-            . '</div>'
-            . '<p class="fee-progress-caption">Paid ' . $paid_pct . '% &middot; season ' . $sched_pct . '% elapsed</p>';
+        return array(
+            'paid_pct' => $paid_pct,
+            'due_pct' => $sched_pct,
+            'state' => $paid_pct >= $sched_pct ? 'ontrack' : 'behind',
+            'caption' => 'Paid ' . $paid_pct . '% · season ' . $sched_pct . '% elapsed',
+        );
     }
 
     /**

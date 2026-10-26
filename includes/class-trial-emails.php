@@ -9,6 +9,9 @@ if (!defined('ABSPATH')) {
  * applicant did or paid for: application received, payment needed, payment
  * received, changes saved. Each can be switched off or reworded on
  * VVL Oversight → Emails, and they share the From / Reply-To set there.
+ * Since 1.72.0 they're HTML in the club's email look (TeamOversight_Email);
+ * the wording stays plain text, with {details} (the trial number, teams and
+ * positions) and {button} drawn by the plugin.
  *
  * Deliberately NOT here: selection outcomes (accepted, rejected, team
  * offers). Those are the club's to communicate personally, so nothing in
@@ -16,7 +19,14 @@ if (!defined('ABSPATH')) {
  */
 class TeamOversight_Trial_Emails {
 
+    /**
+     * Each email's on/off switch. Before 1.72.0 it held the wording too;
+     * that wording is left there untouched, for a site put back on 1.71.
+     */
     const OPTION = 'team_oversight_trial_emails';
+
+    /** 1.72.0 on: each email's subject, heading and body (blank = the built-in text). */
+    const TEXT_OPTION = 'team_oversight_trial_email_texts';
 
     /**
      * Trial emails have their own Reply-To, separate from the fee
@@ -60,91 +70,106 @@ class TeamOversight_Trial_Emails {
     }
 
     /**
-     * The emails, with their default wording. Placeholders:
-     * {first_name} {name} {season} {trial_number} {teams} {positions}
-     * {fee} {link}.
+     * The emails, with their default wording (TeamOversight_Email's
+     * format). Placeholders: {first_name} {name} {season} {trial_number}
+     * {teams} {positions} {fee} {link}. Blocks: {details}, {button}.
+     * 'button' is the button's default words, 'details' what the details
+     * box lists under the trial number.
      */
     public static function get_events() {
-        $sign_off = "Melbourne University Renegades Volleyball Club";
+        $tip = "> Coaches may ask for your trial number at trials — plenty of players write it on their hand or arm on the day.";
 
         return array(
             'submitted' => array(
                 'label' => 'Application received',
                 'when' => 'An application is submitted and needs no payment — or a previously unpaid one becomes confirmed.',
                 'subject' => 'Your {season} MURVC trial application — #{trial_number}',
+                'heading' => 'Application received',
+                'preheader' => 'Your trial number is #{trial_number}.',
+                'button' => 'View or change my application',
+                'details' => array('teams', 'positions'),
                 'body' => "Hi {first_name},\n\n"
                     . "Thanks for applying to trial with MURVC for the {season} season.\n\n"
-                    . "  Trial number: #{trial_number}\n"
-                    . "  Teams:        {teams}\n"
-                    . "  Positions:    {positions}\n\n"
-                    . "Coaches may ask for your trial number at trials — plenty of players write it on their hand or arm on the day.\n\n"
-                    . "Need to change something? Your application stays editable until applications close:\n"
-                    . "{link}\n\n"
-                    . $sign_off,
+                    . "{details}\n\n"
+                    . $tip . "\n\n"
+                    . "Need to change something? Your application stays editable until applications close.\n\n"
+                    . "{button}",
             ),
             'payment_needed' => array(
                 'label' => 'Payment needed',
                 'when' => 'An application is saved but the trial fee is due — on first submission, or when an edit makes the fee apply.',
                 'subject' => 'Action needed: pay your {season} MURVC trial fee',
+                'heading' => 'Pay your trial fee to confirm your application',
+                'preheader' => 'Your application is saved. Pay the trial fee to confirm it.',
+                'button' => 'Go to the trial page',
+                'details' => array('teams', 'fee'),
                 'body' => "Hi {first_name},\n\n"
                     . "Your {season} MURVC trial application has been saved, but it won't be confirmed until the trial fee ({fee}) is paid. Coaches can see your application, but can't select you for a team until it's paid.\n\n"
-                    . "  Trial number: #{trial_number}\n"
-                    . "  Teams:        {teams}\n\n"
-                    . "You can pay from the trial page — look for the \"Pay the trial fee\" button:\n"
-                    . "{link}\n\n"
-                    . "Already paid, or think this is a mistake? Just reply to this email.\n\n"
-                    . $sign_off,
+                    . "{details}\n\n"
+                    . "You can pay from the trial page — look for the \"Pay the trial fee\" button.\n\n"
+                    . "{button}\n\n"
+                    . "Already paid, or think this is a mistake? Just reply to this email.",
             ),
             'paid' => array(
                 'label' => 'Payment received',
                 'when' => 'The trial fee is paid online, or an admin uses Mark as Paid.',
                 'subject' => 'Payment received — {season} MURVC trial #{trial_number}',
+                'heading' => 'Payment received',
+                'preheader' => 'Your {season} trial application is confirmed. Your trial number is #{trial_number}.',
+                'button' => 'View my application',
+                'details' => array('teams', 'positions'),
                 'body' => "Hi {first_name},\n\n"
                     . "Thanks — we've received your trial fee, and your {season} application is confirmed.\n\n"
-                    . "  Trial number: #{trial_number}\n"
-                    . "  Teams:        {teams}\n"
-                    . "  Positions:    {positions}\n\n"
-                    . "Coaches may ask for your trial number at trials — plenty of players write it on their hand or arm on the day.\n\n"
-                    . $sign_off,
+                    . "{details}\n\n"
+                    . $tip,
             ),
             'edited' => array(
                 'label' => 'Changes saved',
                 'when' => 'A confirmed application is edited and saved (no new payment needed).',
                 'subject' => 'Your {season} MURVC trial application has been updated',
+                'heading' => 'Application updated',
+                'preheader' => 'Your changes are saved. Your trial number is still #{trial_number}.',
+                'button' => 'View or change my application',
+                'details' => array('teams', 'positions'),
+                'unchanged' => true,
                 'body' => "Hi {first_name},\n\n"
                     . "Your changes to your {season} MURVC trial application have been saved.\n\n"
-                    . "  Trial number: #{trial_number} (unchanged)\n"
-                    . "  Teams:        {teams}\n"
-                    . "  Positions:    {positions}\n\n"
-                    . "You can keep making changes until applications close:\n"
-                    . "{link}\n\n"
-                    . "If you didn't make this change, please reply to this email.\n\n"
-                    . $sign_off,
+                    . "{details}\n\n"
+                    . "You can keep making changes until applications close.\n\n"
+                    . "{button}\n\n"
+                    . "If you didn't make this change, please reply to this email.",
             ),
         );
     }
 
     /**
      * Saved settings merged over the defaults: every email on unless
-     * switched off; an empty subject or body means "use the default", so
-     * improvements to the built-in wording reach anyone who never
-     * customised it.
+     * switched off; an empty subject, heading or body means "use the
+     * default", so improvements to the built-in wording reach anyone who
+     * never customised it.
      */
     public static function get_settings() {
-        $saved = get_option(self::OPTION, array());
+        $switches = get_option(self::OPTION, array());
+        $switches = is_array($switches) ? $switches : array();
+        $saved = get_option(self::TEXT_OPTION, array());
         $saved = is_array($saved) ? $saved : array();
 
         $settings = array();
         foreach (self::get_events() as $key => $event) {
+            $switch = isset($switches[$key]) && is_array($switches[$key]) ? $switches[$key] : array();
             $mine = isset($saved[$key]) && is_array($saved[$key]) ? $saved[$key] : array();
-            $subject = isset($mine['subject']) ? trim((string) $mine['subject']) : '';
-            $body = isset($mine['body']) ? trim((string) $mine['body']) : '';
-            $settings[$key] = array(
-                'enabled' => isset($mine['enabled']) ? !empty($mine['enabled']) : true,
-                'subject' => $subject !== '' ? $subject : $event['subject'],
-                'body' => $body !== '' ? $body : $event['body'],
-                'customised' => ($subject !== '' || $body !== ''),
+            $setting = array(
+                'enabled' => isset($switch['enabled']) ? !empty($switch['enabled']) : true,
+                'customised' => false,
             );
+            foreach (array('subject', 'heading', 'body') as $field) {
+                $text = isset($mine[$field]) ? trim((string) $mine[$field]) : '';
+                $setting[$field] = $text !== '' ? $text : $event[$field];
+                if ($text !== '') {
+                    $setting['customised'] = true;
+                }
+            }
+            $settings[$key] = $setting;
         }
         return $settings;
     }
@@ -153,10 +178,6 @@ class TeamOversight_Trial_Emails {
     public static function get_vars($application) {
         $user = !empty($application->user_id) ? get_userdata($application->user_id) : false;
         $name = $user ? $user->display_name : (string) $application->name;
-        $first = $user ? trim((string) get_user_meta($user->ID, 'first_name', true)) : '';
-        if ($first === '') {
-            $first = trim((string) strtok($name, ' '));
-        }
 
         $database = new TeamOversight_Database();
         $config = $database->get_teams_config($application->season);
@@ -173,7 +194,7 @@ class TeamOversight_Trial_Emails {
 
         return array(
             '{name}' => $name,
-            '{first_name}' => $first !== '' ? $first : $name,
+            '{first_name}' => TeamOversight_Email::first_name($user ? $user->ID : 0, $name),
             '{season}' => (string) $application->season,
             '{trial_number}' => (string) intval($application->trial_number),
             '{teams}' => $team_names ? implode(', ', $team_names) : '—',
@@ -197,15 +218,53 @@ class TeamOversight_Trial_Emails {
         );
     }
 
-    /** Returns array(subject, body) for an event with the given values. */
+    /**
+     * Returns array(subject, email) for an event with the given values,
+     * email = array('html' => ..., 'text' => ...).
+     */
     public static function render($event, $vars) {
+        $events = self::get_events();
         $settings = self::get_settings();
         if (!isset($settings[$event])) {
-            return array('', '');
+            return array('', array('html' => '', 'text' => ''));
+        }
+        $setting = $settings[$event];
+        $email = TeamOversight_Email::render(array(
+            'program' => 'Trials · ' . $vars['{season}'],
+            'heading' => $setting['heading'],
+            'body' => $setting['body'],
+            'vars' => $vars,
+            'blocks' => array('details' => self::details_block($events[$event], $vars)),
+            'button' => array('url' => $vars['{link}'], 'label' => $events[$event]['button']),
+            'preheader' => $events[$event]['preheader'],
+            'why' => 'You\'re getting this because you applied to trial with the Renegades.',
+        ));
+        return array(TeamOversight_Email::fill($setting['subject'], $vars), $email);
+    }
+
+    /** {details}: the trial number, big, then the teams and positions (or fee). */
+    private static function details_block($event, $vars) {
+        $vars = array_map(function ($value) {
+            return html_entity_decode((string) $value, ENT_QUOTES, 'UTF-8');
+        }, $vars);
+        $labels = array('teams' => 'Teams', 'positions' => 'Positions', 'fee' => 'Trial fee');
+        $rows = array();
+        foreach ($event['details'] as $field) {
+            $value = $vars['{' . $field . '}'];
+            if ($value !== '') {
+                $rows[] = array($labels[$field], $value);
+            }
+        }
+        $label = 'Your trial number' . (!empty($event['unchanged']) ? ' (unchanged)' : '');
+        $number = '#' . $vars['{trial_number}'];
+
+        $text = array($label . ': ' . $number);
+        foreach ($rows as $row) {
+            $text[] = $row[0] . ': ' . $row[1];
         }
         return array(
-            strtr($settings[$event]['subject'], $vars),
-            strtr($settings[$event]['body'], $vars),
+            'html' => TeamOversight_Email::details($rows, $label, $number),
+            'text' => implode("\n", $text),
         );
     }
 
@@ -228,8 +287,8 @@ class TeamOversight_Trial_Emails {
         }
 
         $vars = self::get_vars($application);
-        list($subject, $body) = self::render($event, $vars);
-        $sent = wp_mail($to, $subject, $body, self::get_headers());
+        list($subject, $email) = self::render($event, $vars);
+        $sent = TeamOversight_Email::send($to, $subject, $email, self::get_headers());
 
         TeamOversight_Log::add(
             'email_trial',
@@ -294,7 +353,9 @@ class TeamOversight_Trial_Emails {
                 Placeholders: <code>{first_name}</code> <code>{name}</code> <code>{season}</code> <code>{trial_number}</code>
                 <code>{teams}</code> <code>{positions}</code> <code>{fee}</code> <code>{link}</code>
                 (the trial page: <a href="<?php echo esc_url(self::get_form_url()); ?>" target="_blank"><?php echo esc_html(self::get_form_url()); ?></a>).
-                Clear a subject or body and save to go back to the built-in wording.
+                Put <code>{details}</code> on a line of its own for the box with the trial number, teams and positions.
+                <?php echo TeamOversight_Email::format_help(); ?>
+                Clear a subject, heading or body and save to go back to the built-in wording.
             </p>
 
             <form method="post">
@@ -305,7 +366,7 @@ class TeamOversight_Trial_Emails {
                     <span class="description" style="display: block; margin-top: 4px;">Where applicants' replies land — separate from the fee reminders' Reply-To, so trial questions reach whoever runs trials. Leave blank to use the reminders' Reply-To instead.</span>
                 </p>
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 15px;">
-                    <?php foreach ($events as $key => $event): $s = $settings[$key]; list($p_subject, $p_body) = self::render($key, $sample); ?>
+                    <?php foreach ($events as $key => $event): $s = $settings[$key]; list($p_subject, $p_email) = self::render($key, $sample); ?>
                         <div style="border: 1px solid #dcdcde; border-radius: 4px; padding: 12px 14px; <?php echo $s['enabled'] ? '' : 'background: #f6f7f7;'; ?>">
                             <label style="font-size: 14px;">
                                 <input type="checkbox" name="trial_emails[<?php echo esc_attr($key); ?>][enabled]" value="1" <?php checked($s['enabled']); ?>>
@@ -314,13 +375,31 @@ class TeamOversight_Trial_Emails {
                             </label>
                             <p class="description" style="margin: 4px 0 8px;"><?php echo esc_html($event['when']); ?></p>
                             <p style="margin: 0 0 6px;">
-                                <input type="text" name="trial_emails[<?php echo esc_attr($key); ?>][subject]" value="<?php echo esc_attr($s['subject']); ?>" style="width: 100%;">
+                                <label>Subject<br>
+                                    <input type="text" name="trial_emails[<?php echo esc_attr($key); ?>][subject]" value="<?php echo esc_attr($s['subject']); ?>" style="width: 100%;">
+                                </label>
                             </p>
-                            <textarea name="trial_emails[<?php echo esc_attr($key); ?>][body]" rows="10" style="width: 100%; font-family: monospace; font-size: 12px;"><?php echo esc_textarea($s['body']); ?></textarea>
+                            <p style="margin: 0 0 6px;">
+                                <label>Heading<br>
+                                    <input type="text" name="trial_emails[<?php echo esc_attr($key); ?>][heading]" value="<?php echo esc_attr($s['heading']); ?>" style="width: 100%;">
+                                </label>
+                            </p>
+                            <label>Message<br>
+                                <textarea name="trial_emails[<?php echo esc_attr($key); ?>][body]" rows="12" style="width: 100%; font-size: 13px;"><?php echo esc_textarea($s['body']); ?></textarea>
+                            </label>
+                            <?php foreach (self::check_body($s['body']) as $warning): ?>
+                                <p style="color: #b32d2e; margin: 4px 0;">&#9888; <?php echo esc_html($warning); ?></p>
+                            <?php endforeach; ?>
+                            <?php if (TeamOversight_Email::normalise($s['body']) !== TeamOversight_Email::normalise($event['body'])): ?>
+                                <details style="margin-top: 6px;">
+                                    <summary style="cursor: pointer;">Built-in wording</summary>
+                                    <pre style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 4px; padding: 10px; white-space: pre-wrap; font-size: 12px; margin: 6px 0 0;"><?php echo esc_html($event['body']); ?></pre>
+                                </details>
+                            <?php endif; ?>
                             <details style="margin-top: 6px;">
                                 <summary style="cursor: pointer;">Preview</summary>
                                 <p style="background: #f0f0f1; padding: 6px 10px; border-radius: 4px; margin: 6px 0;"><strong>Subject:</strong> <?php echo esc_html($p_subject); ?></p>
-                                <pre style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 4px; padding: 10px; white-space: pre-wrap; font-size: 12px; margin: 0;"><?php echo esc_html($p_body); ?></pre>
+                                <?php echo TeamOversight_Email::preview_frame($p_email['html']); ?>
                             </details>
                         </div>
                     <?php endforeach; ?>
@@ -328,6 +407,7 @@ class TeamOversight_Trial_Emails {
                 <p>
                     <input type="submit" class="button button-primary" value="Save Trial Emails">
                     <input type="hidden" name="action" value="save_trial_email_settings">
+                    <input type="hidden" name="email_format" value="<?php echo esc_attr(TeamOversight_Email::FORM_FORMAT); ?>">
                     <?php wp_nonce_field('trial_email_settings', 'trial_email_settings_nonce'); ?>
                 </p>
             </form>
@@ -351,20 +431,45 @@ class TeamOversight_Trial_Emails {
         }
 
         $posted = isset($_POST['trial_emails']) && is_array($_POST['trial_emails']) ? wp_unslash($_POST['trial_emails']) : array();
-        $saved = array();
+        // A page opened before 1.72 posts the old plain-text layout: move
+        // it to this format, as the update did, so it never comes back.
+        $stale = !isset($_POST['email_format']) || wp_unslash($_POST['email_format']) !== TeamOversight_Email::FORM_FORMAT;
+        $switches = get_option(self::OPTION, array());
+        $switches = is_array($switches) ? $switches : array();
+        $texts = array();
+        $warnings = array();
         foreach (self::get_events() as $key => $event) {
             $mine = isset($posted[$key]) && is_array($posted[$key]) ? $posted[$key] : array();
             $subject = isset($mine['subject']) ? sanitize_text_field($mine['subject']) : '';
+            $heading = isset($mine['heading']) ? sanitize_text_field($mine['heading']) : '';
             $body = isset($mine['body']) ? sanitize_textarea_field($mine['body']) : '';
+            if ($stale) {
+                $body = TeamOversight_Email::upgrade_posted($body, 'trial', $key);
+            }
+            // Only the switch is written to the 1.71 option; its old
+            // wording stays as it was.
+            $switch = isset($switches[$key]) && is_array($switches[$key]) ? $switches[$key] : array();
+            $switch['enabled'] = !empty($mine['enabled']) ? 1 : 0;
+            $switches[$key] = $switch;
             // Wording left identical to the default is stored as "default",
             // so later improvements to the built-in text still reach it.
-            $saved[$key] = array(
-                'enabled' => !empty($mine['enabled']) ? 1 : 0,
+            $texts[$key] = array(
                 'subject' => (trim($subject) === $event['subject']) ? '' : $subject,
-                'body' => (self::normalise($body) === self::normalise($event['body'])) ? '' : $body,
+                'heading' => (trim($heading) === $event['heading']) ? '' : $heading,
+                'body' => (TeamOversight_Email::normalise($body) === TeamOversight_Email::normalise($event['body'])) ? '' : TeamOversight_Email::normalise($body),
             );
+            foreach (self::check_body($body !== '' ? $body : $event['body']) as $warning) {
+                $warnings[] = $event['label'] . ': ' . $warning;
+            }
         }
-        update_option(self::OPTION, $saved);
+        update_option(self::OPTION, $switches);
+        update_option(self::TEXT_OPTION, $texts);
+        if ($stale) {
+            echo '<div class="notice notice-info"><p>This page was opened before the emails were updated, so the wording you saved has been moved to the new layout. Check the previews below.</p></div>';
+        }
+        if ($warnings) {
+            echo '<div class="notice notice-warning"><p>' . implode('<br>', array_map('esc_html', $warnings)) . '</p></div>';
+        }
 
         $reply_raw = isset($_POST['trial_email_replyto']) ? trim(wp_unslash($_POST['trial_email_replyto'])) : '';
         $reply_to = sanitize_email($reply_raw);
@@ -376,9 +481,9 @@ class TeamOversight_Trial_Emails {
         echo '<div class="notice notice-success"><p>Trial email settings saved.</p></div>';
     }
 
-    /** Line endings differ between a textarea round-trip and PHP source. */
-    private static function normalise($text) {
-        return trim(str_replace("\r\n", "\n", (string) $text));
+    /** Things in a trial email's text that won't come out as meant. */
+    public static function check_body($body) {
+        return TeamOversight_Email::check_text($body, array_keys(self::get_sample_vars()), array('details', 'button'));
     }
 
     public static function send_test_emails() {
@@ -399,8 +504,8 @@ class TeamOversight_Trial_Emails {
             if (!$s['enabled']) {
                 continue;
             }
-            list($subject, $body) = self::render($key, $sample);
-            if (wp_mail($admin->user_email, '[TEST] ' . $subject, $body, self::get_headers())) {
+            list($subject, $email) = self::render($key, $sample);
+            if (TeamOversight_Email::send($admin->user_email, '[TEST] ' . $subject, $email, self::get_headers())) {
                 $sent++;
             } else {
                 $failed++;

@@ -426,7 +426,14 @@ class TeamOversight_Readiness {
 
     public function render_shortcode() {
         if (!is_user_logged_in()) {
-            return '';
+            // The fee reminder's button lands here, often in a browser that
+            // isn't logged in: say how to see it rather than show nothing.
+            $login_url = function_exists('um_get_core_page')
+                ? add_query_arg('redirect_to', urlencode(get_permalink()), um_get_core_page('login'))
+                : wp_login_url(get_permalink());
+            return '<div class="rtp-panel rtp-logged-out" style="border:2px solid #e0e0e0;border-radius:8px;padding:20px;background:#f9f9f9;max-width:640px;margin:0 0 20px;">'
+                . '<p style="margin:0 0 12px;"><strong>Please log in to see your Player Checklist and club fees.</strong></p>'
+                . '<p style="margin:0;"><a class="button button-primary" href="' . esc_url($login_url) . '">Log in</a></p></div>';
         }
 
         $user = wp_get_current_user();

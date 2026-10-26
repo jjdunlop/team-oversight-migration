@@ -939,22 +939,16 @@ class TeamOversight_Admin {
             TeamOversight_Trial_Emails::send_test_emails();
         }
 
-        $subject = get_option(TeamOversight_Payments::EMAIL_SUBJECT_OPTION);
-        if (!is_string($subject) || trim($subject) === '') {
-            $subject = TeamOversight_Payments::get_default_reminder_subject();
-        }
-        $body = get_option(TeamOversight_Payments::EMAIL_BODY_OPTION);
-        if (!is_string($body) || trim($body) === '') {
-            $body = TeamOversight_Payments::get_default_reminder_body();
-        }
+        $texts = TeamOversight_Payments::get_reminder_texts();
 
-        // Live preview with sample numbers.
-        list($preview_subject, $preview_body) = TeamOversight_Payments::render_reminder_email('Alex Example', 150, 425.50, null, 9);
+        // Live preview with a made-up member and sample numbers.
+        list($sample_person, $sample_cards, $sample_totals) = TeamOversight_Payments::sample_reminder();
+        list($preview_subject, $preview_email) = TeamOversight_Payments::render_reminder_email($sample_person, $sample_cards, $sample_totals);
 
         ?>
         <div class="wrap">
             <h1>Emails</h1>
-            <p class="description">Club emails sent by the plugin: the overdue-fees reminder (below), and the trial application emails (further down). Reminder placeholders: <code>{first_name}</code>, <code>{name}</code>, <code>{overdue}</code>, <code>{outstanding}</code>, <code>{time_overdue}</code> ("a week", "3 weeks"), <code>{days_overdue}</code>, <code>{link}</code> (the fees/checklist page from Player Readiness settings).</p>
+            <p class="description" style="max-width: 900px;">Club emails sent by the plugin: the overdue-fees reminder (below), and the trial application emails (further down). They all share one club look: the logo and club name, the program above the heading, your message, and the same footer. Reminder placeholders: <code>{first_name}</code>, <code>{name}</code>, <code>{overdue}</code>, <code>{outstanding}</code>, <code>{time_overdue}</code> ("a week", "3 weeks"), <code>{days_overdue}</code>, <code>{link}</code> (the fees/checklist page from Player Readiness settings). Put <code>{fees}</code> on a line of its own for their fees with the progress bar, as on the Player Checklist. <?php echo TeamOversight_Email::format_help(); ?></p>
 
             <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start;">
                 <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; min-width: 420px; flex: 1; max-width: 620px;">
@@ -1020,20 +1014,38 @@ class TeamOversight_Admin {
                                 <input type="email" name="email_replyto" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION)); ?>" placeholder="treasurer@renegades.com.au" style="width: 100%;">
                             </label>
                         </p>
-                        <p class="description">From must be an address this server may send as — the safest choice is the same address WooCommerce order emails use (<?php echo esc_html(get_option('woocommerce_email_from_address', get_option('admin_email'))); ?>). Reply-To can be any real mailbox (that's where member replies land). Leave From blank for the WordPress default. The From name and address are shared with the trial application emails below; those have their own Reply-To.</p>
+                        <p class="description">From must be an address the site's mail account may send as (the account the site sends through, or an alias set up on it); otherwise the mail service swaps in its own address. Reply-To can be any real mailbox (that's where member replies land). Leave From blank for the site's default sender. The From name and address are shared with the trial application emails below; those have their own Reply-To.</p>
+                        <?php if ($texts['customised']): ?>
+                            <p style="color: #996800; margin-bottom: 0;">The wording below has been customised. Clear a field and save to go back to the built-in wording.</p>
+                        <?php endif; ?>
                         <p>
                             <label><strong>Subject</strong><br>
-                                <input type="text" name="email_subject" value="<?php echo esc_attr($subject); ?>" style="width: 100%;">
+                                <input type="text" name="email_subject" value="<?php echo esc_attr($texts['subject']); ?>" style="width: 100%;">
                             </label>
                         </p>
                         <p>
-                            <label><strong>Body</strong><br>
-                                <textarea name="email_body" rows="14" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($body); ?></textarea>
+                            <label><strong>Heading</strong><br>
+                                <input type="text" name="email_heading" value="<?php echo esc_attr($texts['heading']); ?>" style="width: 100%;">
                             </label>
                         </p>
+                        <p>
+                            <label><strong>Message</strong><br>
+                                <textarea name="email_body" rows="16" style="width: 100%; font-size: 13px;"><?php echo esc_textarea($texts['body']); ?></textarea>
+                            </label>
+                        </p>
+                        <?php foreach (TeamOversight_Payments::check_reminder_body($texts['body']) as $warning): ?>
+                            <p style="color: #b32d2e; margin: 4px 0;">&#9888; <?php echo esc_html($warning); ?></p>
+                        <?php endforeach; ?>
+                        <?php if (TeamOversight_Email::normalise($texts['body']) !== TeamOversight_Email::normalise(TeamOversight_Payments::get_default_reminder_body())): ?>
+                            <details style="margin: 6px 0 12px;">
+                                <summary style="cursor: pointer;">Built-in wording</summary>
+                                <pre style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 4px; padding: 10px; white-space: pre-wrap; font-size: 12px; margin: 6px 0 0;"><?php echo esc_html(TeamOversight_Payments::get_default_reminder_body()); ?></pre>
+                            </details>
+                        <?php endif; ?>
                         <p>
                             <input type="submit" class="button button-primary" value="Save Email Settings">
                             <input type="hidden" name="action" value="save_email_settings">
+                            <input type="hidden" name="email_format" value="<?php echo esc_attr(TeamOversight_Email::FORM_FORMAT); ?>">
                             <?php wp_nonce_field('email_settings', 'email_settings_nonce'); ?>
                         </p>
                     </form>
@@ -1056,10 +1068,10 @@ class TeamOversight_Admin {
                 </div>
 
                 <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; min-width: 380px; flex: 1; max-width: 560px;">
-                    <h2 style="margin-top: 0;">Preview <small style="font-weight: normal; color: #666;">(sample member: Alex Example, $150.00 overdue of $425.50)</small></h2>
+                    <h2 style="margin-top: 0;">Preview <small style="font-weight: normal; color: #666;">(made-up member: Alex Example, $99.60 overdue of $330.00)</small></h2>
                     <p style="background: #f0f0f1; padding: 8px 12px; border-radius: 4px;"><strong>Subject:</strong> <?php echo esc_html($preview_subject); ?></p>
-                    <pre style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 4px; padding: 14px; white-space: pre-wrap; font-size: 13px;"><?php echo esc_html($preview_body); ?></pre>
-                    <p class="description">Saved changes show here immediately. "Send test email to me" delivers this exact preview to your own address.</p>
+                    <?php echo TeamOversight_Email::preview_frame($preview_email['html'], 900); ?>
+                    <p class="description">Saved changes show here immediately. A real reminder shows each person's own fees, worked out the same way as their Player Checklist. "Send test email to me" delivers this preview to your own address.</p>
                 </div>
             </div>
 
@@ -1092,8 +1104,31 @@ class TeamOversight_Admin {
         }
         $payments = new TeamOversight_Payments();
         $payments->maybe_schedule_reminder_cron();
-        update_option(TeamOversight_Payments::EMAIL_SUBJECT_OPTION, sanitize_text_field(wp_unslash($_POST['email_subject'])));
-        update_option(TeamOversight_Payments::EMAIL_BODY_OPTION, sanitize_textarea_field(wp_unslash($_POST['email_body'])));
+        // Wording left identical to the default is stored blank ("use the
+        // default"), so later improvements to the built-in text reach it.
+        // It goes in the 1.72 option only: the 1.71 options keep their
+        // plain-text wording for a site put back on 1.71.
+        $subject = sanitize_text_field(wp_unslash(isset($_POST['email_subject']) ? $_POST['email_subject'] : ''));
+        $heading = sanitize_text_field(wp_unslash(isset($_POST['email_heading']) ? $_POST['email_heading'] : ''));
+        $body = sanitize_textarea_field(wp_unslash(isset($_POST['email_body']) ? $_POST['email_body'] : ''));
+        // A page opened before 1.72 posts the old plain-text layout: move
+        // it to this format, as the update did, so it never comes back.
+        $stale = !isset($_POST['email_format']) || wp_unslash($_POST['email_format']) !== TeamOversight_Email::FORM_FORMAT;
+        if ($stale) {
+            $body = TeamOversight_Email::upgrade_posted($body, 'reminder');
+        }
+        update_option(TeamOversight_Payments::REMINDER_TEXT_OPTION, array(
+            'subject' => trim($subject) === TeamOversight_Payments::get_default_reminder_subject() ? '' : $subject,
+            'heading' => trim($heading) === TeamOversight_Payments::get_default_reminder_heading() ? '' : $heading,
+            'body' => TeamOversight_Email::normalise($body) === TeamOversight_Email::normalise(TeamOversight_Payments::get_default_reminder_body()) ? '' : TeamOversight_Email::normalise($body),
+        ));
+        if ($stale) {
+            echo '<div class="notice notice-info"><p>This page was opened before the emails were updated, so the reminder wording you saved has been moved to the new layout. Check the preview.</p></div>';
+        }
+        $warnings = TeamOversight_Payments::check_reminder_body($body !== '' ? $body : TeamOversight_Payments::get_default_reminder_body());
+        if ($warnings) {
+            echo '<div class="notice notice-warning"><p>Overdue reminder: ' . implode('<br>', array_map('esc_html', $warnings)) . '</p></div>';
+        }
         update_option(TeamOversight_Payments::EMAIL_FROM_NAME_OPTION, sanitize_text_field(wp_unslash($_POST['email_from_name'])));
         update_option(TeamOversight_Payments::EMAIL_FROM_OPTION, sanitize_email(wp_unslash($_POST['email_from'])));
         update_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION, sanitize_email(wp_unslash($_POST['email_replyto'])));
@@ -1112,8 +1147,10 @@ class TeamOversight_Admin {
         }
 
         $admin = wp_get_current_user();
-        list($subject, $body) = TeamOversight_Payments::render_reminder_email($admin->display_name, 150, 425.50, null, 9);
-        if (wp_mail($admin->user_email, '[TEST] ' . $subject, $body, TeamOversight_Payments::get_email_headers())) {
+        list($person, $cards, $totals) = TeamOversight_Payments::sample_reminder($admin->display_name);
+        $person['first_name'] = TeamOversight_Email::first_name($admin->ID, $admin->display_name);
+        list($subject, $email) = TeamOversight_Payments::render_reminder_email($person, $cards, $totals);
+        if (TeamOversight_Email::send($admin->user_email, '[TEST] ' . $subject, $email, TeamOversight_Payments::get_email_headers())) {
             echo '<div class="notice notice-success"><p>Test email sent to ' . esc_html($admin->user_email) . '.</p></div>';
         } else {
             echo '<div class="notice notice-error"><p>Sending failed — check the site\'s email configuration.</p></div>';
@@ -1136,6 +1173,9 @@ class TeamOversight_Admin {
         echo '<div class="notice notice-' . ($dry_run ? 'info' : 'success') . '"><p>';
         echo '<strong>Overdue reminders ' . ($dry_run ? 'preview' : 'sent') . ':</strong> ';
         echo intval($report['sent']) . ($dry_run ? ' would receive an email' : ' emails sent');
+        if (!empty($report['failed'])) {
+            echo ', <strong>' . intval($report['failed']) . ' NOT delivered</strong> (check the site\'s mail setup; they\'ll be tried again on the next run)';
+        }
         if ($report['skipped_recent'] > 0) {
             echo ', ' . intval($report['skipped_recent']) . ' skipped (reminded recently)';
         }
