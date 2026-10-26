@@ -1714,9 +1714,28 @@ class TeamOversight_Payments {
         <div class="member-fees-panel">
             <h3>Your Club Fees</h3>
 
+            <?php $any_fee = false; ?>
             <?php foreach ($invoices as $invoice): ?>
                 <?php
                 $paid = self::get_ledger_paid($invoice->id);
+                // Before the club releases a season's fees, an invoice with
+                // nothing owing is only a placeholder ($0, or an early
+                // payment held as credit): say when the fee comes instead of
+                // showing $0 figures. A fee set by hand before the release
+                // (money owing) shows as usual.
+                if (!TeamOversight_Fees::fees_released($invoice->season) && floatval($invoice->outstanding_amount) <= 0):
+                    $release_date = TeamOversight_Fees::get_fee_release_date($invoice->season);
+                    ?>
+                    <div class="member-fees-season">
+                        <h4><?php echo esc_html($invoice->season); ?> Season</h4>
+                        <p class="member-fees-schedule"><?php echo esc_html('This season\'s fee hasn\'t been released yet'
+                            . ($release_date !== '' ? ': it will appear here on ' . TeamOversight_Fee_Timeline::format_date($release_date) : '') . '.'
+                            . ($paid >= 0.01 ? ' The $' . number_format($paid, 2) . ' you\'ve already paid will come off it.' : ' Nothing to pay until then.')); ?></p>
+                    </div>
+                    <?php
+                    continue;
+                endif;
+                $any_fee = true;
                 $credit = round($paid - floatval($invoice->invoice_amount), 2);
                 $schedule = self::invoice_schedule($invoice);
                 $timeline = $schedule['engine'] === 'timeline';
@@ -1756,7 +1775,7 @@ class TeamOversight_Payments {
                 <?php echo self::render_pay_box($total_outstanding, $total_overdue); ?>
             <?php elseif ($total_outstanding > 0): ?>
                 <p><em>Online payment isn't available yet — please contact the club to arrange payment.</em></p>
-            <?php else: ?>
+            <?php elseif ($any_fee): ?>
                 <p><strong>You're all paid up — thank you!</strong></p>
             <?php endif; ?>
         </div>

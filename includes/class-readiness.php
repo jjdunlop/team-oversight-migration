@@ -330,6 +330,38 @@ class TeamOversight_Readiness {
             SELECT *, UNIX_TIMESTAMP(created_date) AS created_ts FROM {$wpdb->prefix}team_invoices
             WHERE user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s)
         ", $user->ID, $user->user_email));
+        // Until the club releases this season's fees, an invoice for it with
+        // nothing owing is only a placeholder ($0, or an early payment held
+        // as credit): not a fee, so not "paid in full", and left out of the
+        // figures. A fee set by hand before the release (money owing on it)
+        // still counts, as it always has.
+        $released = TeamOversight_Fees::fees_released($season);
+        $held = 0.0;
+        if (!$released) {
+            $counted = array();
+            foreach ($invoices as $invoice) {
+                if ((string) $invoice->season === (string) $season && floatval($invoice->outstanding_amount) <= 0) {
+                    $held += max(0, TeamOversight_Payments::get_ledger_paid($invoice->id));
+                    continue;
+                }
+                $counted[] = $invoice;
+            }
+            $invoices = $counted;
+        }
+        $season_fee_set = false;
+        foreach ($invoices as $invoice) {
+            if ((string) $invoice->season === (string) $season) {
+                $season_fee_set = true;
+            }
+        }
+        $not_released = '';
+        if (!$released && !$season_fee_set) {
+            $release_date = TeamOversight_Fees::get_fee_release_date($season);
+            $not_released = 'Your ' . $season . ' season fee hasn\'t been released yet'
+                . ($release_date !== '' ? ': it will appear here on ' . TeamOversight_Fee_Timeline::format_date($release_date) : '') . '.'
+                . ($held >= 0.01 ? ' The $' . number_format($held, 2) . ' you\'ve already paid will come off it.' : '');
+        }
+
         // Each invoice on its own season's schedule, the same one the pay
         // box charges by (TeamOversight_Payments::invoice_schedule()).
         TeamOversight_Fee_Timeline::preload_for_invoices($invoices);
@@ -362,7 +394,12 @@ class TeamOversight_Readiness {
             : null;
         $own_schedule = $season_schedule ? TeamOversight_Payments::describe_member_schedule($season_schedule) : '';
 
-        if (empty($invoices)) {
+        // Nothing to show but "not released yet": no table of $0 figures.
+        $only_not_released = $not_released !== '' && $outstanding <= 0;
+        if ($only_not_released) {
+            $fees_done = true;
+            $fees_detail = $not_released . ' Nothing to pay until then.';
+        } elseif (empty($invoices)) {
             $fees_done = true;
             $fees_detail = 'Your season fee will appear here once the club issues this season\'s fees — nothing to pay yet.';
         } elseif ($outstanding <= 0) {
@@ -382,6 +419,9 @@ class TeamOversight_Readiness {
                 $fees_detail .= ' Your balance includes unpaid fees carried over from another season.';
             }
         }
+        if ($not_released !== '' && !$only_not_released) {
+            $fees_detail .= ' ' . $not_released;
+        }
 
         $steps['fees'] = array(
             'title' => 'Stay up to date on your fees',
@@ -390,7 +430,7 @@ class TeamOversight_Readiness {
             'url' => get_option(self::FEES_URL_OPTION),
             'url_label' => 'Fee details',
             'detail' => $fees_detail,
-            'has_invoice' => !empty($invoices),
+            'has_invoice' => !empty($invoices) && !$only_not_released,
             'invoiced' => round($invoiced_total, 2),
             'paid' => round(max(0, $invoiced_total - $outstanding), 2),
             'outstanding' => round($outstanding, 2),
