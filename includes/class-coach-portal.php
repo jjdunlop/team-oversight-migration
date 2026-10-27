@@ -1094,7 +1094,8 @@ class TeamOversight_Coach_Portal {
                     <?php endif; ?>
                     <?php foreach ($confirmed_players as $i => $member): ?>
                         <?php $app_ctx = $confirmed_ctx[$i]; ?>
-                        <div class="coach-applicant-card">
+                        <?php // The roster lists playing members first, then Training Only; each keeps its colour bar. ?>
+                        <div class="coach-applicant-card confirmed-<?php echo esc_attr($member->role); ?>">
                             <div class="cac-header">
                                 <?php if ($app_ctx): ?>
                                     <span class="cac-number">#<?php echo intval($app_ctx['trial_number']); ?></span>
@@ -2014,6 +2015,9 @@ class TeamOversight_Coach_Portal {
         .coach-applicant-card.verdict-tentative { border-left-color: #f0b429; background: #fffdf5; }
         .coach-applicant-card.verdict-training_only { border-left-color: #339af0; background: #f5faff; }
         .coach-applicant-card.verdict-rejected { border-left-color: #dc3232; background: #fdf8f8; opacity: 0.8; }
+        /* Confirmed players: white, but the side bar keeps their colour. */
+        .coach-applicant-card.confirmed-playing_member { border-left-color: #46b450; }
+        .coach-applicant-card.confirmed-training_only { border-left-color: #339af0; }
 
         .coach-section-heading {
             margin: 24px 0 6px 0;
