@@ -459,6 +459,15 @@ class TeamOversight_Database {
                 ADD COLUMN registration_override_at datetime DEFAULT NULL");
         }
 
+        // 1.75.0: a confirmed player's position on their team for the
+        // season (a label only), by account (or email with none). Read
+        // before the verdict's team_position, which is where it starts.
+        $team_positions_exists = $wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_positions'");
+        if (!$team_positions_exists) {
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta(self::team_positions_table_sql());
+        }
+
         // 1.74.0: the position a coach gives a player with a verdict for
         // their team, separate from the positions on the application.
         $team_position_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_trial_selections LIKE 'team_position'");
@@ -533,6 +542,31 @@ class TeamOversight_Database {
      * One definition for migrate_database(), create_tables() and
      * team_oversight_create_tables().
      */
+    /**
+     * 1.75.0: confirmed players' positions on their team for a season (a
+     * label coaches set on the team list; nothing is priced or placed by
+     * it). One definition, shared by migrate_database(), create_tables()
+     * and activation. A person table for account merges.
+     */
+    public static function team_positions_table_sql() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+        return "CREATE TABLE {$wpdb->prefix}team_positions (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                season varchar(10) NOT NULL,
+                team varchar(50) NOT NULL,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                email varchar(255) NOT NULL DEFAULT '',
+                position varchar(20) NOT NULL,
+                updated_by bigint(20) unsigned DEFAULT NULL,
+                updated_at datetime DEFAULT NULL,
+                PRIMARY KEY  (id),
+                KEY season_team (season, team),
+                KEY user_id (user_id),
+                KEY email (email)
+            ) $charset_collate;";
+    }
+
     public static function assignment_changes_table_sql() {
         global $wpdb;
         $charset_collate = $wpdb->get_charset_collate();
@@ -749,6 +783,7 @@ class TeamOversight_Database {
                 ) $charset_collate;
             ",
             'team_assignment_changes' => self::assignment_changes_table_sql(),
+            'team_positions' => self::team_positions_table_sql(),
         );
         if (class_exists('TeamOversight_Account_Merge')) {
             $tables['team_account_merges'] = TeamOversight_Account_Merge::table_sql();

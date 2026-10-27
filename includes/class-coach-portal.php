@@ -128,6 +128,7 @@ class TeamOversight_Coach_Portal {
         add_action('wp_ajax_coach_set_verdict', array($this, 'ajax_set_verdict'));
         add_action('wp_ajax_coach_set_offer', array($this, 'ajax_set_offer'));
         add_action('wp_ajax_coach_set_position', array($this, 'ajax_set_position'));
+        add_action('wp_ajax_coach_set_member_position', array($this, 'ajax_set_member_position'));
     }
 
     // ------------------------------------------------------------------
@@ -429,26 +430,180 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
-     * Team positions for a team's season, by account and by email, for
-     * the confirmed players (whose place came from a verdict): one query.
+     * Team positions for a team's season, by account and by email: the
+     * position set on the team list (team_positions, 1.75.0) over the one
+     * given with the trial verdict, where it started. Two queries.
      * Returns array('users' => id => key, 'emails' => email => key).
      */
     private function get_team_positions_for_team($team, $season) {
         global $wpdb;
-        $rows = $wpdb->get_results($wpdb->prepare("
+        $map = array('users' => array(), 'emails' => array());
+        $add = function ($user_id, $email, $position) use (&$map) {
+            if (intval($user_id) > 0) {
+                $map['users'][intval($user_id)] = $position;
+            }
+            if ((string) $email !== '') {
+                $map['emails'][strtolower((string) $email)] = $position;
+            }
+        };
+        $from_verdicts = $wpdb->get_results($wpdb->prepare("
             SELECT a.user_id, a.email, s.team_position
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
             WHERE s.team = %s AND s.season = %s AND s.team_position IS NOT NULL AND s.team_position <> ''
         ", $team, $season));
-        $map = array('users' => array(), 'emails' => array());
-        foreach ($rows as $row) {
-            if (intval($row->user_id) > 0) {
-                $map['users'][intval($row->user_id)] = $row->team_position;
-            }
-            $map['emails'][strtolower((string) $row->email)] = $row->team_position;
+        foreach ($from_verdicts as $row) {
+            $add($row->user_id, $row->email, $row->team_position);
+        }
+        foreach ($wpdb->get_results($wpdb->prepare("
+            SELECT user_id, email, position FROM {$wpdb->prefix}team_positions WHERE team = %s AND season = %s
+        ", $team, $season)) as $row) {
+            $add($row->user_id, $row->email, $row->position);
         }
         return $map;
+    }
+
+    /**
+     * The person's active playing place (playing member or training only)
+     * on the team this season, by account or email, or null.
+     */
+    private static function playing_place($team, $season, $user_id, $email) {
+        global $wpdb;
+        return $wpdb->get_row($wpdb->prepare("
+            SELECT ta.id, ta.user_id, ta.email, u.display_name
+            FROM {$wpdb->prefix}team_assignments ta
+            LEFT JOIN {$wpdb->users} u ON u.ID = ta.user_id
+            WHERE ta.season = %s AND ta.team = %s AND ta.is_active = 1
+                AND ta.role IN ('playing_member', 'training_only')
+                AND ((%d > 0 AND ta.user_id = %d) OR (ta.email <> '' AND ta.email = %s))
+            LIMIT 1
+        ", $season, $team, intval($user_id), intval($user_id), (string) $email));
+    }
+
+    /**
+     * Save (or with '' clear) a person's position on the team for the
+     * season in team_positions: one row per person, by account, else email.
+     */
+    private static function store_team_position($team, $season, $user_id, $email, $position) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'team_positions';
+        $user_id = intval($user_id);
+        $existing = $user_id > 0
+            ? $wpdb->get_col($wpdb->prepare("SELECT id FROM $table WHERE season = %s AND team = %s AND user_id = %d", $season, $team, $user_id))
+            : $wpdb->get_col($wpdb->prepare("SELECT id FROM $table WHERE season = %s AND team = %s AND (user_id IS NULL OR user_id = 0) AND email = %s", $season, $team, (string) $email));
+        if ($position === '') {
+            foreach ($existing as $id) {
+                $wpdb->delete($table, array('id' => intval($id)), array('%d'));
+            }
+            return;
+        }
+        $fields = array('position' => $position, 'email' => (string) $email, 'updated_by' => get_current_user_id(), 'updated_at' => current_time('mysql'));
+        if ($existing) {
+            $wpdb->update($table, $fields, array('id' => intval($existing[0])), array('%s', '%s', '%d', '%s'), array('%d'));
+            return;
+        }
+        $wpdb->insert($table, array_merge(array('season' => $season, 'team' => $team, 'user_id' => $user_id > 0 ? $user_id : null), $fields), array('%s', '%s', '%d', '%s', '%s', '%d', '%s'));
+    }
+
+    /**
+     * The position menu on a confirmed player's card (team list), editors
+     * only; viewers see the position as text.
+     */
+    private function render_member_position_control($team, $season, $user_id, $email, $position) {
+        $label = self::team_position_label($position);
+        if ($this->read_only) {
+            return $label !== '' ? '<span class="cac-position-text">Team position: <strong>' . esc_html($label) . '</strong></span>' : '';
+        }
+        ob_start();
+        ?>
+        <form method="post" class="coach-position-form">
+            <input type="hidden" name="coach_action" value="set_member_position">
+            <input type="hidden" name="member_user_id" value="<?php echo intval($user_id); ?>">
+            <input type="hidden" name="member_email" value="<?php echo esc_attr($email); ?>">
+            <input type="hidden" name="coach_team" value="<?php echo esc_attr($team); ?>">
+            <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+            <?php wp_nonce_field('coach_portal_action', 'coach_nonce', false, true); ?>
+            <label class="cac-verdict-label">Team position:
+                <select name="team_position" onchange="if (window.murvcCoachPosition) { window.murvcCoachPosition(this); } else { this.form.submit(); }">
+                    <option value=""<?php selected($label, ''); ?>>&mdash; Choose &mdash;</option>
+                    <?php foreach (self::get_team_positions() as $key => $name): ?>
+                        <option value="<?php echo esc_attr($key); ?>"<?php selected($position, $key); ?>><?php echo esc_html($name); ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <noscript><button type="submit" class="button button-small">Save</button></noscript>
+        </form>
+        <?php
+        return ob_get_clean();
+    }
+
+    /**
+     * Save a confirmed player's team position from the team list (a label,
+     * so a coach of the team sets it, no admin step). In team_positions,
+     * and on their trial verdict for the team too when there is one, so
+     * the two never disagree.
+     */
+    private function save_member_position($team, $season) {
+        global $wpdb;
+        $user_id = isset($_POST['member_user_id']) ? intval($_POST['member_user_id']) : 0;
+        $email = isset($_POST['member_email']) ? sanitize_email(wp_unslash($_POST['member_email'])) : '';
+        $position = isset($_POST['team_position']) ? sanitize_key(wp_unslash($_POST['team_position'])) : '';
+        if ($position !== '' && self::team_position_label($position) === '') {
+            return '<div class="coach-portal-notice"><p>Please pick one of the positions.</p></div>';
+        }
+        $place = ($user_id > 0 || $email !== '') ? self::playing_place($team, $season, $user_id, $email) : null;
+        if (!$place) {
+            return '<div class="coach-portal-notice"><p>That player isn\'t on ' . esc_html($team) . ' — reload the page.</p></div>';
+        }
+        $user_id = intval($place->user_id);
+        $email = (string) $place->email;
+        self::store_team_position($team, $season, $user_id, $email, $position);
+        $wpdb->query($wpdb->prepare("
+            UPDATE {$wpdb->prefix}team_trial_selections s
+            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+            SET s.team_position = %s
+            WHERE s.team = %s AND s.season = %s AND s.status IN ('tentative', 'selected', 'training_only')
+                AND ((%d > 0 AND a.user_id = %d) OR a.email = %s)
+        ", $position !== '' ? $position : null, $team, $season, $user_id, $user_id, $email));
+        $who = esc_html($place->display_name ? $place->display_name : $email);
+        if ($position === '') {
+            return '<div class="coach-portal-success"><p>Team position cleared for ' . $who . ' on ' . esc_html($team) . '.</p></div>';
+        }
+        return '<div class="coach-portal-success"><p>' . $who . ': <strong>' . esc_html(self::team_position_label($position)) . '</strong> for ' . esc_html($team) . '.</p></div>';
+    }
+
+    /** After a team list position save: the card's menu and top line. */
+    private function member_refresh($season) {
+        global $wpdb;
+        $team = isset($_POST['coach_team']) ? sanitize_text_field(wp_unslash($_POST['coach_team'])) : '';
+        $user_id = isset($_POST['member_user_id']) ? intval($_POST['member_user_id']) : 0;
+        $email = isset($_POST['member_email']) ? sanitize_email(wp_unslash($_POST['member_email'])) : '';
+        $position = self::position_for_person($this->get_team_positions_for_team($team, $season), $user_id, $email);
+        $applied = $wpdb->get_var($wpdb->prepare("
+            SELECT preferred_positions FROM {$wpdb->prefix}trial_applications
+            WHERE season = %s AND ((%d > 0 AND user_id = %d) OR email = %s)
+            ORDER BY id DESC LIMIT 1
+        ", $season, $user_id, $user_id, $email));
+        return array(
+            'position' => $this->render_member_position_control($team, $season, $user_id, $email, $position),
+            'meta_position' => self::meta_position_html('selected', $position, $this->format_positions($applied)),
+        );
+    }
+
+    /** Save a confirmed player's team position in the background. */
+    public function ajax_set_member_position() {
+        if (!is_user_logged_in() || !isset($_POST['coach_action']) || $_POST['coach_action'] !== 'set_member_position') {
+            wp_send_json_error(array('notice' => '<div class="coach-portal-notice"><p>Your session has expired — please reload the page.</p></div>', 'expired' => true));
+        }
+        $season = isset($_POST['coach_season']) ? sanitize_text_field(wp_unslash($_POST['coach_season'])) : '';
+        $notice = $this->handle_actions($this->get_editable_team_codes($season), $season);
+        if (strpos($notice, 'coach-portal-success') === false) {
+            wp_send_json_error(array(
+                'notice' => $notice !== '' ? $notice : '<div class="coach-portal-notice"><p>That position could not be saved.</p></div>',
+                'expired' => $notice === self::expired_notice(),
+            ));
+        }
+        wp_send_json_success(array_merge(array('notice' => $notice), $this->member_refresh($season)));
     }
 
     /** A confirmed player's team position from get_team_positions_for_team(), or ''. */
@@ -543,7 +698,7 @@ class TeamOversight_Coach_Portal {
      * notice for the next render, and redirect back to the page.
      */
     public function maybe_handle_actions() {
-        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'set_offer', 'set_position', 'add_note', 'edit_note', 'delete_note'), true)) {
+        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'set_offer', 'set_position', 'set_member_position', 'add_note', 'edit_note', 'delete_note'), true)) {
             return;
         }
         if (!is_user_logged_in()) {
@@ -959,8 +1114,13 @@ class TeamOversight_Coach_Portal {
                             <div class="cac-meta">
                                 <a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a>
                                 <?php if ($member->mobile): ?> &middot; <?php echo esc_html(self::format_phone($member->mobile)); ?><?php endif; ?>
-                                <span class="cac-meta-position"><?php echo self::meta_position_html('selected', self::position_for_person($position_map, isset($member->user_id) ? $member->user_id : 0, $member->email), $this->format_positions($member->preferred_positions)); ?></span>
+                                <?php $member_position = self::position_for_person($position_map, isset($member->user_id) ? $member->user_id : 0, $member->email); ?>
+                                <span class="cac-meta-position"><?php echo self::meta_position_html('selected', $member_position, $this->format_positions($member->preferred_positions)); ?></span>
                             </div>
+                            <?php $member_control = $this->render_member_position_control($active_team, $season, isset($member->user_id) ? $member->user_id : 0, $member->email, $member_position); ?>
+                            <?php if ($member_control !== ''): ?>
+                                <div class="cac-decide"><span class="cac-position"><?php echo $member_control; ?></span></div>
+                            <?php endif; ?>
                             <?php // A confirmed player's card is the team list: no trial tools (notes, attendance), and their fees where Mark attended was. ?>
                             <div class="cac-footer">
                                 <span class="cac-expanders"><?php echo $this->render_card_expanders(
@@ -1327,7 +1487,9 @@ class TeamOversight_Coach_Portal {
                 var previous = '';
                 Array.prototype.forEach.call(select.options, function (o) { if (o.defaultSelected) { previous = o.value; } });
                 var body = new FormData(form);
-                body.append('action', 'coach_set_position');
+                // A confirmed player's card (team list) saves by person.
+                var kind = form.querySelector('input[name="coach_action"]');
+                body.append('action', kind && kind.value === 'set_member_position' ? 'coach_set_member_position' : 'coach_set_position');
                 if (card && card.getAttribute('data-card-context') === 'board') { body.append('card_context', 'board'); }
                 select.disabled = true;
                 fetch(<?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>, { method: 'POST', credentials: 'same-origin', body: body })
@@ -2437,7 +2599,7 @@ class TeamOversight_Coach_Portal {
     // ------------------------------------------------------------------
 
     private function handle_actions($my_team_codes, $season) {
-        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'set_offer', 'set_position', 'add_note', 'edit_note', 'delete_note'), true)) {
+        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'set_offer', 'set_position', 'set_member_position', 'add_note', 'edit_note', 'delete_note'), true)) {
             return '';
         }
 
@@ -2450,6 +2612,12 @@ class TeamOversight_Coach_Portal {
         $team = isset($_POST['coach_team']) ? sanitize_text_field($_POST['coach_team']) : '';
         if (!in_array($team, $my_team_codes, true)) {
             return '<div class="coach-portal-notice"><p>You can only act for teams you coach (or can edit as committee).</p></div>';
+        }
+
+        // A confirmed player's position, set on the team list: by person,
+        // not application (they may have been placed without one).
+        if ($_POST['coach_action'] === 'set_member_position') {
+            return $this->save_member_position($team, $season);
         }
 
         global $wpdb;
@@ -2604,6 +2772,12 @@ class TeamOversight_Coach_Portal {
                 array('%s'),
                 array('%d')
             );
+            // Already on the team: the team list's copy follows, so the two
+            // never disagree.
+            $place = self::playing_place($team, $season, intval($application->user_id), $application->email);
+            if ($place) {
+                self::store_team_position($team, $season, intval($place->user_id), (string) $place->email, $position);
+            }
             if ($position === '') {
                 return '<div class="coach-portal-success"><p>Team position cleared for ' . $who . ' on ' . esc_html($team) . '.</p></div>';
             }

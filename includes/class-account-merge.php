@@ -119,6 +119,8 @@ class TeamOversight_Account_Merge {
             // The email too, or a later account with the old address would
             // pick up this person's class history by email.
             'team_assignment_changes' => array('user_id', 'email', '', 'season'),
+            // 1.75.0: confirmed players' team positions.
+            'team_positions' => array('user_id', 'email', '', 'season'),
         );
     }
 
@@ -138,6 +140,7 @@ class TeamOversight_Account_Merge {
             array('team_trial_selections', 'created_by'),
             array('team_trial_selections', 'offer_accepted_by'),
             array('trial_applications', 'registration_override_by'),
+            array('team_positions', 'updated_by'),
             array('team_invoices', 'fee_overridden_by'),
             array('team_invoices', 'payment_arrangement_by'),
         );
@@ -816,6 +819,7 @@ class TeamOversight_Account_Merge {
             'team_fee_segments' => 'fee history',
             'trial_applications' => 'trial applications',
             'team_assignment_changes' => 'fee timeline changes',
+            'team_positions' => 'team positions',
         );
         $all_users = array($keep_id => $keep) + $extras;
         $by_table = array();
@@ -1875,7 +1879,7 @@ class TeamOversight_Account_Merge {
         // moved, would end up split across two accounts (what plan() refuses).
         $tables = self::person_tables();
         $labels = array('team_assignments' => 'team places', 'team_invoices' => 'club fee invoices', 'team_fee_segments' => 'fee history rows',
-            'trial_applications' => 'trial applications', 'team_assignment_changes' => 'fee timeline changes');
+            'trial_applications' => 'trial applications', 'team_assignment_changes' => 'fee timeline changes', 'team_positions' => 'team positions');
         // Every season the merge moved anything in, checked across every
         // club table (a moved trial application can lead to a new team
         // place and invoice on the kept account, for example).
