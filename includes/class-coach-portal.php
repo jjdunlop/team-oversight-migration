@@ -853,7 +853,16 @@ class TeamOversight_Coach_Portal {
                 }
                 ?>
 
-                <h4>Coaching Staff (<?php echo count($staff); ?>)</h4>
+                <div class="coach-staff-heading">
+                    <h4>Coaching Staff (<?php echo count($staff); ?>)</h4>
+                    <form method="post" class="coach-export-form">
+                        <input type="hidden" name="coach_action" value="export_roster">
+                        <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                        <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                        <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                        <button type="submit" class="button coach-btn-secondary" title="Everyone on the team or with a verdict for it (Selected, Training Only, Tentative, Rejected), and everyone who applied with no verdict yet, with emails: filter by the Verdict column to copy a group's emails.">Export team list &amp; verdicts (CSV)</button>
+                    </form>
+                </div>
                 <?php if (!empty($staff)): ?>
                     <table class="coach-portal-table coach-roster-table">
                         <thead><tr><th>Name</th><th>Role</th><th>Email</th><th>Mobile</th></tr></thead>
@@ -1037,13 +1046,6 @@ class TeamOversight_Coach_Portal {
                 <?php else: ?>
                     <p>No players yet — record verdicts below to build your team.</p>
                 <?php endif; ?>
-                <form method="post">
-                    <input type="hidden" name="coach_action" value="export_roster">
-                    <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
-                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
-                    <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                    <button type="submit" class="button coach-btn-secondary" title="Everyone on the team or with a verdict for it (Selected, Training Only, Tentative, Rejected), and everyone who applied with no verdict yet, with emails: filter by the Verdict column to copy a group's emails.">Export team list &amp; verdicts (CSV)</button>
-                </form>
             </div>
 
             <div class="coach-team-section">
@@ -2173,6 +2175,24 @@ class TeamOversight_Coach_Portal {
 
         .coach-portal .cac-position-text {
             color: var(--cp-text);
+        }
+
+        /* The team list export, on the right of the Coaching Staff heading. */
+        .coach-portal .coach-staff-heading {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px 12px;
+            margin: 1.33em 0 8px;
+        }
+
+        .coach-portal .coach-staff-heading h4 {
+            margin: 0;
+        }
+
+        .coach-portal .coach-export-form {
+            margin: 0;
         }
 
         /* Team list fees: a status the height of the controls beside it,
