@@ -1238,6 +1238,12 @@ class TeamOversight_Coach_Portal {
                     $actioned = array();
                     $others = array();
                     foreach ($applicants as $a) {
+                        // A Tentative, Selected or Training Only verdict for
+                        // this team puts them on the team list above; listing
+                        // them here as well doubled them up.
+                        if (in_array($a['my_status'], array('tentative', 'selected', 'training_only'), true)) {
+                            continue;
+                        }
                         if ($a['picked_mine'] && !$a['my_status']) {
                             $needs_action[] = $a;
                         } elseif ($a['picked_mine']) {
@@ -1254,13 +1260,9 @@ class TeamOversight_Coach_Portal {
                     usort($needs_action, function ($x, $y) use ($unpaid_last) {
                         return $unpaid_last($x, $y) ?: $x['trial_number'] - $y['trial_number'];
                     });
-                    // Verdict recorded: grouped by the verdict, strongest
-                    // first, then by trial number within each verdict.
-                    $verdict_rank = array('selected' => 0, 'tentative' => 1, 'training_only' => 2, 'rejected' => 3);
-                    usort($actioned, function ($x, $y) use ($verdict_rank, $unpaid_last) {
-                        $rx = isset($verdict_rank[$x['my_status']]) ? $verdict_rank[$x['my_status']] : 9;
-                        $ry = isset($verdict_rank[$y['my_status']]) ? $verdict_rank[$y['my_status']] : 9;
-                        return $unpaid_last($x, $y) ?: ($rx !== $ry ? $rx - $ry : $x['trial_number'] - $y['trial_number']);
+                    // Rejected by this team: by trial number.
+                    usort($actioned, function ($x, $y) use ($unpaid_last) {
+                        return $unpaid_last($x, $y) ?: $x['trial_number'] - $y['trial_number'];
                     });
                     // Other applicants: players this team can field first;
                     // over-age players (needing a VV exemption) go last.
@@ -1269,31 +1271,17 @@ class TeamOversight_Coach_Portal {
                         $fy = empty($y['age_flag']) ? 0 : 1;
                         return $unpaid_last($x, $y) ?: ($fx !== $fy ? $fx - $fy : $x['trial_number'] - $y['trial_number']);
                     });
-                    // From 2027 a section with this team's offers in it counts
-                    // them by state: "Selected · offer pending: 2 · Selected · accepted: 1".
-                    $offer_tally = function ($items) {
-                        $tally = array();
-                        foreach ($items as $item) {
-                            if ($item['my_accepted'] !== null) {
-                                $key = ($item['my_status'] === 'selected' ? 'Selected' : 'Training Only') . self::offer_suffix($item['my_accepted']);
-                                $tally[$key] = isset($tally[$key]) ? $tally[$key] + 1 : 1;
-                            }
-                        }
-                        $bits = array();
-                        foreach (array('Selected · offer pending', 'Selected · accepted', 'Training Only · offer pending', 'Training Only · accepted') as $key) {
-                            if (isset($tally[$key])) {
-                                $bits[] = $key . ': ' . $tally[$key];
-                            }
-                        }
-                        return $bits ? implode(' · ', $bits) . '. The club finalises accepted offers only.' : '';
-                    };
-                    $others_offers = $offer_tally($others);
+                    // Tentative, Selected and Training Only players are on the
+                    // team list above (with the offer counts from 2027), so
+                    // these sections hold no verdict yet, Rejected, and the
+                    // rest of the competition.
+                    $moves_up = ' Once they have a Tentative, Selected or Training Only verdict they move to the team list above.';
                     $sections = array(
                         $active_access['coach']
-                            ? array('Applied to your team — awaiting your verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and you haven\'t recorded a verdict yet.')
-                            : array('Applied to this team — awaiting a verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and the team has no verdict on them yet.'),
-                        array('Applied to ' . $team_word . ' — verdict recorded', $actioned, $offer_tally($actioned)),
-                        array('Other applicants', $others, 'Applicants who didn\'t select ' . $team_word . ' — shown because players get redirected between trials and VV can grant age exemptions. Over-age players are listed last.' . ($others_offers !== '' ? ' ' . $others_offers : '')),
+                            ? array('Applied to your team — awaiting your verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and you haven\'t recorded a verdict yet.' . $moves_up)
+                            : array('Applied to this team — awaiting a verdict', $needs_action, 'They selected ' . $active_config['name'] . ' on their form and the team has no verdict on them yet.' . $moves_up),
+                        array('Applied to ' . $team_word . ' — Rejected', $actioned, ''),
+                        array('Other applicants', $others, 'Applicants who didn\'t select ' . $team_word . ' — shown because players get redirected between trials and VV can grant age exemptions. Over-age players are listed last.'),
                     );
                     ?>
                     <div id="coach-applicant-list">
