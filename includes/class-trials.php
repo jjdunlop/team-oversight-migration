@@ -1469,7 +1469,7 @@ class TeamOversight_Trials {
                 $trialling_p1 = true;
             }
         }
-        $form_data['Registration Type'] = self::classify_registration($season, $history, $transfer_season, $registered_abroad_flag, $trialling_p1);
+        $form_data['Registration Type'] = self::classify_registration($season, $history, $transfer_season, $registered_abroad_flag, $trialling_p1, isset($form_data['Transfer: Level Played']) ? $form_data['Transfer: Level Played'] : '');
 
         // Snapshot the account details as they were at submission time.
         $form_data['Contact Number (at submission)'] = $prefill['mobile'];
@@ -2135,15 +2135,22 @@ class TeamOversight_Trials {
      *                  decides)
      *  - Club Transfer last VVL club was a different club, as recently as
      *                  the season before the one applied for
-     *  - Free Agent    played VVL elsewhere but skipped at least one season
+     *  - Free Agent    played VVL elsewhere but skipped at least one season,
+     *                  or last played Youth State League there (club
+     *                  decision, 1.74.0: no club transfer from YSL)
      *  - Returning     Renegades history, no other VVL club since
      *  - New           never played VVL
+     * An admin can set a different one per application (Trial
+     * Applications), which registration_type() then returns.
      */
-    public static function classify_registration($app_season, $history, $last_season_raw, $registered_abroad, $trialling_p1 = false) {
+    public static function classify_registration($app_season, $history, $last_season_raw, $registered_abroad, $trialling_p1 = false, $transfer_level = '') {
         if ($registered_abroad && $trialling_p1) {
             return 'ITC';
         }
         if ($history === 'transfer') {
+            if (self::is_youth_level($transfer_level)) {
+                return 'Free Agent';
+            }
             $last = ($last_season_raw === 'earlier') ? 0 : intval($last_season_raw);
             return ($last >= intval($app_season) - 1) ? 'Club Transfer' : 'Free Agent';
         }
@@ -2151,6 +2158,53 @@ class TeamOversight_Trials {
             return 'New';
         }
         return 'Returning';
+    }
+
+    /** The registration types, as stored and shown. */
+    public static function registration_types() {
+        return array('ITC', 'Club Transfer', 'Free Agent', 'Returning', 'New');
+    }
+
+    /**
+     * Is this level (a get_level_options() key, or the label stored with
+     * the application) Youth State League?
+     */
+    public static function is_youth_level($level) {
+        $level = trim((string) $level);
+        return strpos($level, 'YSL') === 0 || stripos($level, 'Youth State League') === 0;
+    }
+
+    /**
+     * An application's registration type, the one place every screen and
+     * export reads it from: the admin's override when there is one, else
+     * the type worked out at submission, with the YSL rule applied to
+     * applications saved before it (their stored type is never rewritten).
+     * $application: a trial_applications row.
+     */
+    public static function registration_type($application) {
+        $application = (object) $application;
+        $override = isset($application->registration_override) ? trim((string) $application->registration_override) : '';
+        if ($override !== '' && in_array($override, self::registration_types(), true)) {
+            return $override;
+        }
+        return self::worked_out_registration_type($application);
+    }
+
+    /** The registration type from the answers alone (no override). */
+    public static function worked_out_registration_type($application) {
+        $application = (object) $application;
+        $form_data = isset($application->form_data) ? $application->form_data : null;
+        $form_data = is_array($form_data) ? $form_data : ($form_data ? json_decode((string) $form_data, true) : array());
+        $form_data = is_array($form_data) ? $form_data : array();
+        if (isset($form_data['Registration Type']) && $form_data['Registration Type'] !== '') {
+            $type = $form_data['Registration Type'];
+        } else {
+            $type = (isset($application->is_transfer_player) && intval($application->is_transfer_player) === 1) ? 'Club Transfer' : '';
+        }
+        if ($type === 'Club Transfer' && isset($form_data['Transfer: Level Played']) && self::is_youth_level($form_data['Transfer: Level Played'])) {
+            $type = 'Free Agent';
+        }
+        return $type;
     }
 
     /**

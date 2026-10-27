@@ -137,6 +137,7 @@ class TeamOversight_Account_Merge {
             array('team_trial_notes', 'author_id'),
             array('team_trial_selections', 'created_by'),
             array('team_trial_selections', 'offer_accepted_by'),
+            array('trial_applications', 'registration_override_by'),
             array('team_invoices', 'fee_overridden_by'),
             array('team_invoices', 'payment_arrangement_by'),
         );

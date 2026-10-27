@@ -448,6 +448,24 @@ class TeamOversight_Database {
                 ADD COLUMN offer_accepted_by bigint(20) unsigned DEFAULT NULL");
         }
 
+        // 1.74.0: an admin's call on an application's VV registration type
+        // (blank = worked out from the answers: see
+        // TeamOversight_Trials::registration_type()), with who and when.
+        $registration_override_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}trial_applications LIKE 'registration_override'");
+        if (empty($registration_override_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications
+                ADD COLUMN registration_override varchar(20) DEFAULT NULL,
+                ADD COLUMN registration_override_by bigint(20) unsigned DEFAULT NULL,
+                ADD COLUMN registration_override_at datetime DEFAULT NULL");
+        }
+
+        // 1.74.0: the position a coach gives a player with a verdict for
+        // their team, separate from the positions on the application.
+        $team_position_exists = $wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_trial_selections LIKE 'team_position'");
+        if (empty($team_position_exists)) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}team_trial_selections ADD COLUMN team_position varchar(20) DEFAULT NULL");
+        }
+
         // 1.68.5: a fee set by hand with Edit Fee sticks. fee_overridden
         // marks it (with when and by whom), so no automatic re-price changes
         // it; fee_calculated_logged is the calculated amount last logged
@@ -689,6 +707,7 @@ class TeamOversight_Database {
                 offer_accepted tinyint(1) NOT NULL DEFAULT 0,
                 offer_accepted_at datetime DEFAULT NULL,
                 offer_accepted_by bigint(20) unsigned DEFAULT NULL,
+                team_position varchar(20) DEFAULT NULL,
                 PRIMARY KEY (id),
                 UNIQUE KEY app_team (application_id, team),
                 KEY season (season),

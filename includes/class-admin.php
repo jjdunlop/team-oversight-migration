@@ -309,7 +309,7 @@ class TeamOversight_Admin {
             $this->finalise_selections();
         }
 
-        if (isset($_POST['action']) && in_array($_POST['action'], array('accept_trial', 'reject_trial', 'undo_trial', 'mark_trial_paid', 'waive_trial_fee', 'delete_trial'), true)) {
+        if (isset($_POST['action']) && in_array($_POST['action'], array('accept_trial', 'reject_trial', 'undo_trial', 'mark_trial_paid', 'waive_trial_fee', 'delete_trial', 'set_trial_registration'), true)) {
             $this->process_trial_action();
         }
 
@@ -1769,11 +1769,12 @@ class TeamOversight_Admin {
                             </select>
                         </div>
                         <div>
-                            <label for="filter-transfer">Transfer Player:</label>
+                            <label for="filter-transfer">Registration:</label>
                             <select id="filter-transfer">
                                 <option value="">All</option>
-                                <option value="1">Yes</option>
-                                <option value="0">No</option>
+                                <?php foreach (TeamOversight_Trials::registration_types() as $registration_type): ?>
+                                    <option value="<?php echo esc_attr($registration_type); ?>"><?php echo esc_html($registration_type); ?></option>
+                                <?php endforeach; ?>
                             </select>
                         </div>
                     </div>
@@ -1824,7 +1825,7 @@ class TeamOversight_Admin {
                             <th>Email</th>
                             <th>Interested Teams</th>
                             <th>Positions</th>
-                            <th>Transfer Player</th>
+                            <th title="VV registration type: worked out from the application (Youth State League at another club counts as a free agent), or set here by an admin">Registration</th>
                             <th>Status</th>
                             <th>Payment</th>
                             <th>Actions</th>
@@ -1836,8 +1837,11 @@ class TeamOversight_Admin {
                             $positions = json_decode($trial->preferred_positions, true);
                             $form_data = !empty($trial->form_data) ? json_decode($trial->form_data, true) : array();
                             $gender_trialling = isset($form_data['Trialling For']) ? $form_data['Trialling For'] : '';
+                            $registration = TeamOversight_Trials::registration_type($trial);
+                            $registration_auto = TeamOversight_Trials::worked_out_registration_type($trial);
+                            $registration_override = isset($trial->registration_override) ? (string) $trial->registration_override : '';
                         ?>
-                            <tr data-trial-id="<?php echo $trial->id; ?>" data-status="<?php echo esc_attr($trial->application_status); ?>" data-transfer="<?php echo $trial->is_transfer_player ? '1' : '0'; ?>">
+                            <tr data-trial-id="<?php echo $trial->id; ?>" data-status="<?php echo esc_attr($trial->application_status); ?>" data-transfer="<?php echo esc_attr($registration); ?>">
                                 <td>
                                     <?php if ($trial->application_status === 'pending'): ?>
                                         <input type="checkbox" class="trial-checkbox" value="<?php echo $trial->id; ?>" data-email="<?php echo esc_attr($trial->email); ?>" data-season="<?php echo esc_attr($trial->season); ?>">
@@ -1860,7 +1864,25 @@ class TeamOversight_Admin {
                                     <?php endif; ?>
                                 </td>
                                 <td><?php echo esc_html(implode(', ', $positions)); ?></td>
-                                <td><?php echo $trial->is_transfer_player ? 'Yes' : 'No'; ?></td>
+                                <td>
+                                    <?php // Worked out from the answers (Auto), or the club's call for this application, e.g. a YSL player who also played State League games is a transfer after all. ?>
+                                    <form method="post" style="display: inline;">
+                                        <input type="hidden" name="trial_id" value="<?php echo intval($trial->id); ?>">
+                                        <input type="hidden" name="action" value="set_trial_registration">
+                                        <?php wp_nonce_field('process_trial', 'trial_nonce'); ?>
+                                        <select name="registration_override" onchange="this.form.submit()" style="font-size: 12px; max-width: 170px;" title="Registration type for this application">
+                                            <option value=""<?php selected($registration_override, ''); ?>>Auto: <?php echo esc_html($registration_auto !== '' ? $registration_auto : '—'); ?></option>
+                                            <?php foreach (TeamOversight_Trials::registration_types() as $registration_type): ?>
+                                                <option value="<?php echo esc_attr($registration_type); ?>"<?php selected($registration_override, $registration_type); ?>><?php echo esc_html($registration_type); ?> (set by club)</option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                        <noscript><input type="submit" class="button button-small" value="Save"></noscript>
+                                    </form>
+                                    <?php if ($registration_override !== ''): ?>
+                                        <?php $override_by = !empty($trial->registration_override_by) ? get_userdata($trial->registration_override_by) : false; ?>
+                                        <br><small style="color: #996800;">Set by <?php echo esc_html($override_by ? $override_by->display_name : 'an admin'); ?><?php echo !empty($trial->registration_override_at) ? ', ' . esc_html(mysql2date('j M Y', $trial->registration_override_at)) : ''; ?></small>
+                                    <?php endif; ?>
+                                </td>
                                 <td>
                                     <span class="status-<?php echo esc_attr($trial->application_status); ?>">
                                         <?php echo esc_html(ucwords(str_replace('_', ' ', $trial->application_status))); ?>
@@ -3453,6 +3475,41 @@ class TeamOversight_Admin {
         global $wpdb;
         $trial_id = intval($_POST['trial_id']);
         $action = sanitize_text_field($_POST['action']);
+
+        if ($action === 'set_trial_registration') {
+            // The club's call on one application's registration type (blank
+            // = back to the type worked out from the answers). The answers
+            // themselves are never changed; a player's later edit keeps it.
+            $value = isset($_POST['registration_override']) ? sanitize_text_field(wp_unslash($_POST['registration_override'])) : '';
+            if ($value !== '' && !in_array($value, TeamOversight_Trials::registration_types(), true)) {
+                echo '<div class="notice notice-error"><p>That isn\'t a registration type.</p></div>';
+                return;
+            }
+            $trial = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d", $trial_id));
+            if (!$trial) {
+                echo '<div class="notice notice-error"><p>Application not found.</p></div>';
+                return;
+            }
+            $wpdb->update(
+                $wpdb->prefix . 'trial_applications',
+                array(
+                    'registration_override' => $value !== '' ? $value : null,
+                    'registration_override_by' => $value !== '' ? get_current_user_id() : null,
+                    'registration_override_at' => $value !== '' ? current_time('mysql') : null,
+                ),
+                array('id' => $trial_id),
+                array('%s', '%d', '%s'),
+                array('%d')
+            );
+            $who = esc_html($trial->name) . ' (#' . intval($trial->trial_number) . ')';
+            if ($value === '') {
+                $auto = TeamOversight_Trials::worked_out_registration_type($trial);
+                echo '<div class="notice notice-success"><p>' . $who . ' is back to the registration type worked out from their application: <strong>' . esc_html($auto !== '' ? $auto : 'none') . '</strong>.</p></div>';
+            } else {
+                echo '<div class="notice notice-success"><p>' . $who . ' set to <strong>' . esc_html($value) . '</strong>. Coaches see it straight away.</p></div>';
+            }
+            return;
+        }
 
         if ($action === 'accept_trial') {
             $assigned_team = sanitize_text_field($_POST['assigned_team']);

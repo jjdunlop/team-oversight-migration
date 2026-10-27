@@ -38,6 +38,30 @@ class TeamOversight_Coach_Portal {
     /** First season whose offers need the player's acceptance before Finalise. */
     const OFFER_ACCEPTANCE_FROM = 2027;
 
+    /** Verdicts that carry a team position (1.74.0). */
+    const POSITION_STATUSES = array('tentative', 'selected', 'training_only');
+
+    /**
+     * The positions a coach can give a player for their team. Stored on
+     * the team's verdict (team_trial_selections.team_position), never on
+     * the application, whose positions are the player's own answer.
+     */
+    public static function get_team_positions() {
+        return array(
+            'pass_hitter' => 'Pass hitter',
+            'opposite' => 'Opposite',
+            'setter' => 'Setter',
+            'middle' => 'Middle',
+            'libero' => 'Libero',
+        );
+    }
+
+    /** A team position's label, or '' for none / an unknown key. */
+    public static function team_position_label($key) {
+        $positions = self::get_team_positions();
+        return ($key !== null && isset($positions[$key])) ? $positions[$key] : '';
+    }
+
     public static function get_verdict_labels() {
         return array(
             'tentative' => 'Tentative',
@@ -90,6 +114,7 @@ class TeamOversight_Coach_Portal {
         add_action('wp_ajax_coach_mark_attendance', array($this, 'ajax_mark_attendance'));
         add_action('wp_ajax_coach_set_verdict', array($this, 'ajax_set_verdict'));
         add_action('wp_ajax_coach_set_offer', array($this, 'ajax_set_offer'));
+        add_action('wp_ajax_coach_set_position', array($this, 'ajax_set_position'));
     }
 
     // ------------------------------------------------------------------
@@ -299,21 +324,45 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
-     * After a verdict or acceptance save: the card's verdict, its chips and
-     * its Offer accepted control, read back from what was stored.
+     * Save a player's team position in the background, like a verdict.
+     * Same handle_actions() as the form post: nonce, may edit this team,
+     * actionable application, a Tentative / Selected / Training Only verdict.
+     */
+    public function ajax_set_position() {
+        if (!is_user_logged_in() || !isset($_POST['coach_action']) || $_POST['coach_action'] !== 'set_position') {
+            wp_send_json_error(array('notice' => '<div class="coach-portal-notice"><p>Your session has expired — please reload the page.</p></div>', 'expired' => true));
+        }
+
+        $season = isset($_POST['coach_season']) ? sanitize_text_field(wp_unslash($_POST['coach_season'])) : '';
+        $notice = $this->handle_actions($this->get_editable_team_codes($season), $season);
+        if (strpos($notice, 'coach-portal-success') === false) {
+            wp_send_json_error(array(
+                'notice' => $notice !== '' ? $notice : '<div class="coach-portal-notice"><p>That position could not be saved.</p></div>',
+                'expired' => $notice === self::expired_notice(),
+            ));
+        }
+
+        wp_send_json_success(array_merge(array('notice' => $notice), $this->card_refresh($season)));
+    }
+
+    /**
+     * After a verdict, acceptance or position save: the card's verdict, its
+     * chips, its Offer accepted control and its team position control,
+     * read back from what was stored.
      */
     private function card_refresh($season) {
         global $wpdb;
         $application_id = isset($_POST['application_id']) ? intval($_POST['application_id']) : 0;
         $team = isset($_POST['coach_team']) ? sanitize_text_field(wp_unslash($_POST['coach_team'])) : '';
         $row = $wpdb->get_row($wpdb->prepare("
-            SELECT s.status, s.offer_accepted, a.application_status
+            SELECT s.status, s.offer_accepted, s.team_position, a.application_status
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
             WHERE s.application_id = %d AND s.team = %s
         ", $application_id, $team));
         $status = $row ? $row->status : '';
         $state = $row ? self::offer_state($season, $row->status, $row->offer_accepted) : null;
+        $position = $row ? (string) $row->team_position : '';
         $board = isset($_POST['card_context']) && $_POST['card_context'] === 'board';
         $chips = $board
             ? self::render_board_verdict_chip($status, $state)
@@ -323,7 +372,78 @@ class TeamOversight_Coach_Portal {
             'status' => $status,
             'chips' => $chips,
             'offer' => $this->render_offer_control($application_id, $team, $season, $status, $state, $row && $row->application_status === 'awaiting_payment'),
+            'position' => $this->render_position_control($application_id, $team, $season, $status, $position),
+            // The page asks for a position after a verdict that takes one
+            // and doesn't have one yet.
+            'needs_position' => in_array($status, self::POSITION_STATUSES, true) && self::team_position_label($position) === '',
         );
+    }
+
+    /**
+     * The team position picker on a card, for a Tentative, Selected or
+     * Training Only verdict on the active team. Viewers see the position
+     * as text. '' otherwise.
+     */
+    private function render_position_control($application_id, $team, $season, $status, $position) {
+        if (!in_array($status, self::POSITION_STATUSES, true)) {
+            return '';
+        }
+        $label = self::team_position_label($position);
+        if ($this->read_only) {
+            return $label !== '' ? '<span class="cac-position-text">Team position: <strong>' . esc_html($label) . '</strong></span>' : '';
+        }
+        ob_start();
+        ?>
+        <form method="post" class="coach-position-form">
+            <input type="hidden" name="coach_action" value="set_position">
+            <input type="hidden" name="application_id" value="<?php echo intval($application_id); ?>">
+            <input type="hidden" name="coach_team" value="<?php echo esc_attr($team); ?>">
+            <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+            <?php wp_nonce_field('coach_portal_action', 'coach_nonce', false, true); ?>
+            <label class="cac-verdict-label">Team position:
+                <select name="team_position" onchange="if (window.murvcCoachPosition) { window.murvcCoachPosition(this); } else { this.form.submit(); }">
+                    <option value=""<?php selected($label, ''); ?>>&mdash; Choose &mdash;</option>
+                    <?php foreach (self::get_team_positions() as $key => $name): ?>
+                        <option value="<?php echo esc_attr($key); ?>"<?php selected($position, $key); ?>><?php echo esc_html($name); ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+            <noscript><button type="submit" class="button button-small">Save</button></noscript>
+        </form>
+        <?php
+        return ob_get_clean();
+    }
+
+    /**
+     * Team positions for a team's season, by account and by email, for
+     * the confirmed players (whose place came from a verdict): one query.
+     * Returns array('users' => id => key, 'emails' => email => key).
+     */
+    private function get_team_positions_for_team($team, $season) {
+        global $wpdb;
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT a.user_id, a.email, s.team_position
+            FROM {$wpdb->prefix}team_trial_selections s
+            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+            WHERE s.team = %s AND s.season = %s AND s.team_position IS NOT NULL AND s.team_position <> ''
+        ", $team, $season));
+        $map = array('users' => array(), 'emails' => array());
+        foreach ($rows as $row) {
+            if (intval($row->user_id) > 0) {
+                $map['users'][intval($row->user_id)] = $row->team_position;
+            }
+            $map['emails'][strtolower((string) $row->email)] = $row->team_position;
+        }
+        return $map;
+    }
+
+    /** A confirmed player's team position from get_team_positions_for_team(), or ''. */
+    private static function position_for_person($map, $user_id, $email) {
+        if (intval($user_id) > 0 && isset($map['users'][intval($user_id)])) {
+            return $map['users'][intval($user_id)];
+        }
+        $email = strtolower((string) $email);
+        return isset($map['emails'][$email]) ? $map['emails'][$email] : '';
     }
 
     /** Every team's verdict on one application, shaped for render_verdict_chips(). */
@@ -332,7 +452,7 @@ class TeamOversight_Coach_Portal {
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config($season);
         $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT team, status, offer_accepted FROM {$wpdb->prefix}team_trial_selections
+            SELECT team, status, offer_accepted, team_position FROM {$wpdb->prefix}team_trial_selections
             WHERE application_id = %d
             ORDER BY team
         ", $application_id));
@@ -343,6 +463,7 @@ class TeamOversight_Coach_Portal {
                 'team_name' => isset($teams_config[$sel->team]) ? $teams_config[$sel->team]['name'] : $sel->team,
                 'status' => $sel->status,
                 'accepted' => self::offer_state($season, $sel->status, $sel->offer_accepted),
+                'position' => (string) $sel->team_position,
             );
         }
         return $selections;
@@ -408,7 +529,7 @@ class TeamOversight_Coach_Portal {
      * notice for the next render, and redirect back to the page.
      */
     public function maybe_handle_actions() {
-        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'set_offer', 'add_note', 'edit_note', 'delete_note'), true)) {
+        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'set_offer', 'set_position', 'add_note', 'edit_note', 'delete_note'), true)) {
             return;
         }
         if (!is_user_logged_in()) {
@@ -759,6 +880,8 @@ class TeamOversight_Coach_Portal {
                     $confirmed_ctx = array();
                     $claim_apps = array();
                     $claim_people = array();
+                    // Confirmed players' team positions (from their verdicts), in one query.
+                    $position_map = $this->get_team_positions_for_team($active_team, $season);
                     foreach ($confirmed_players as $i => $member) {
                         $confirmed_ctx[$i] = $this->get_application_context($member->user_id, $member->email, $season);
                         if ($confirmed_ctx[$i]) {
@@ -813,7 +936,9 @@ class TeamOversight_Coach_Portal {
                             <div class="cac-meta">
                                 <a href="mailto:<?php echo esc_attr($member->email); ?>"><?php echo esc_html($member->email); ?></a>
                                 <?php if ($member->mobile): ?> &middot; <?php echo esc_html(self::format_phone($member->mobile)); ?><?php endif; ?>
-                                <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
+                                <?php $team_position = self::team_position_label(self::position_for_person($position_map, isset($member->user_id) ? $member->user_id : 0, $member->email)); ?>
+                                <?php if ($team_position !== ''): ?> &middot; <span class="cac-position-text">Team position: <strong><?php echo esc_html($team_position); ?></strong></span><?php endif; ?>
+                                <?php if ($this->format_positions($member->preferred_positions)): ?> &middot; <?php echo $team_position !== '' ? 'applied as ' : ''; ?><?php echo esc_html($this->format_positions($member->preferred_positions)); ?><?php endif; ?>
                             </div>
                             <?php // A confirmed player's card is the team list: no trial tools (notes, attendance), and their fees where Mark attended was. ?>
                             <div class="cac-footer">
@@ -874,7 +999,10 @@ class TeamOversight_Coach_Portal {
                                     <noscript><button type="submit" class="button button-small">Save</button></noscript>
                                 </form>
                                 <span class="cac-offer"><?php echo $this->render_offer_control($member->application_id, $active_team, $season, $member->status, self::offer_state($season, $member->status, $member->offer_accepted), isset($member->application_status) && $member->application_status === 'awaiting_payment'); ?></span>
+                                <span class="cac-position"><?php echo $this->render_position_control($member->application_id, $active_team, $season, $member->status, (string) $member->team_position); ?></span>
                             </div>
+                            <?php elseif (self::team_position_label($member->team_position) !== ''): ?>
+                            <div class="cac-decide"><span class="cac-position"><?php echo $this->render_position_control($member->application_id, $active_team, $season, $member->status, (string) $member->team_position); ?></span></div>
                             <?php endif; ?>
                             <div class="cac-footer">
                                 <span class="cac-expanders"><?php echo $this->render_card_expanders(
@@ -891,16 +1019,16 @@ class TeamOversight_Coach_Portal {
                         </div>
                     <?php endforeach; ?>
 
-                    <form method="post">
-                        <input type="hidden" name="coach_action" value="export_roster">
-                        <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
-                        <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
-                        <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
-                        <button type="submit" class="button coach-btn-secondary">Export team list (CSV)</button>
-                    </form>
                 <?php else: ?>
                     <p>No players yet — record verdicts below to build your team.</p>
                 <?php endif; ?>
+                <form method="post">
+                    <input type="hidden" name="coach_action" value="export_roster">
+                    <input type="hidden" name="coach_team" value="<?php echo esc_attr($active_team); ?>">
+                    <input type="hidden" name="coach_season" value="<?php echo esc_attr($season); ?>">
+                    <?php wp_nonce_field('coach_portal_action', 'coach_nonce'); ?>
+                    <button type="submit" class="button coach-btn-secondary" title="Everyone on the team or with a verdict for it (Selected, Training Only, Tentative, Rejected), and everyone who applied with no verdict yet, with emails: filter by the Verdict column to copy a group's emails.">Export team list &amp; verdicts (CSV)</button>
+                </form>
             </div>
 
             <div class="coach-team-section">
@@ -1044,6 +1172,7 @@ class TeamOversight_Coach_Portal {
                                         <noscript><button type="submit" class="button button-small">Save</button></noscript>
                                     </form>
                                     <span class="cac-offer"><?php echo $this->render_offer_control($a['id'], $active_team, $season, $a['my_status'], $a['my_accepted'], !empty($a['payment_pending'])); ?></span>
+                                    <span class="cac-position"><?php echo $this->render_position_control($a['id'], $active_team, $season, $a['my_status'], $a['my_position']); ?></span>
                                 </div>
                                 <?php endif; ?>
 
@@ -1156,8 +1285,14 @@ class TeamOversight_Coach_Portal {
                             // (a changed verdict clears the acceptance).
                             var offer = card.querySelector('.cac-offer');
                             if (offer && typeof res.data.offer === 'string') { offer.innerHTML = res.data.offer; }
+                            // So does the team position picker.
+                            var place = card.querySelector('.cac-position');
+                            if (place && typeof res.data.position === 'string') { place.innerHTML = res.data.position; }
                         }
                         showFlash(res.data.notice);
+                        // Tentative / Selected / Training Only with no position
+                        // yet: ask for it straight away.
+                        if (card && res.data.needs_position) { askPosition(card); }
                     })
                     .catch(function () {
                         // Couldn't reach the server this way — fall back to a
@@ -1166,6 +1301,101 @@ class TeamOversight_Coach_Portal {
                         savePlace(form);
                         form.submit();
                     });
+            };
+
+            // Team position: saved in the background like a verdict, with
+            // the card's chips and picker refreshed from what was stored.
+            window.murvcCoachPosition = function (select) {
+                var form = select.form;
+                var card = select.closest('.coach-applicant-card');
+                var previous = '';
+                Array.prototype.forEach.call(select.options, function (o) { if (o.defaultSelected) { previous = o.value; } });
+                var body = new FormData(form);
+                body.append('action', 'coach_set_position');
+                if (card && card.getAttribute('data-card-context') === 'board') { body.append('card_context', 'board'); }
+                select.disabled = true;
+                fetch(<?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>, { method: 'POST', credentials: 'same-origin', body: body })
+                    .then(function (r) { return r.json(); })
+                    .then(function (res) {
+                        select.disabled = false;
+                        if (!res || typeof res !== 'object') {
+                            select.value = previous;
+                            showFlash('<div class="coach-portal-notice coach-portal-expired"><p>Your session has expired — reload the page (you may need to log in again).</p></div>', true);
+                            return;
+                        }
+                        if (!res.success) {
+                            select.value = previous;
+                            showFlash(res.data && res.data.notice ? res.data.notice : '<div class="coach-portal-notice"><p>That position could not be saved — please try again.</p></div>', !!(res.data && res.data.expired));
+                            return;
+                        }
+                        if (card) {
+                            var chips = card.querySelector('.cac-verdicts');
+                            if (chips && typeof res.data.chips === 'string') { chips.innerHTML = res.data.chips; }
+                            var place = card.querySelector('.cac-position');
+                            if (place && typeof res.data.position === 'string') { place.innerHTML = res.data.position; }
+                        }
+                        showFlash(res.data.notice);
+                    })
+                    .catch(function () {
+                        select.disabled = false;
+                        savePlace(form);
+                        form.submit();
+                    });
+            };
+
+            // The pop-up after a verdict: one tap per position, or Not now
+            // (the picker stays on the card either way).
+            var askPosition = function (card) {
+                var select = card.querySelector('.coach-position-form select[name="team_position"]');
+                if (!select || select.value) { return; }
+                var old = portal.querySelector('.coach-position-modal');
+                if (old) { old.parentNode.removeChild(old); }
+                var nameEl = card.querySelector('.cac-name');
+                var teamInput = card.querySelector('.coach-position-form input[name="coach_team"]');
+                var modal = document.createElement('div');
+                modal.className = 'coach-position-modal';
+                var box = document.createElement('div');
+                box.className = 'coach-position-box';
+                box.setAttribute('role', 'dialog');
+                box.setAttribute('aria-modal', 'true');
+                var heading = document.createElement('p');
+                heading.className = 'coach-position-heading';
+                heading.textContent = 'Position for ' + (nameEl ? nameEl.textContent : 'this player') + (teamInput ? ' on ' + teamInput.value : '') + '?';
+                box.setAttribute('aria-label', heading.textContent);
+                box.appendChild(heading);
+                var close = function () {
+                    document.removeEventListener('keydown', onKey);
+                    if (modal.parentNode) { modal.parentNode.removeChild(modal); }
+                };
+                var onKey = function (event) { if (event.key === 'Escape') { close(); } };
+                var list = document.createElement('div');
+                list.className = 'coach-position-choices';
+                Array.prototype.forEach.call(select.options, function (o) {
+                    if (!o.value) { return; }
+                    var b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'button coach-btn-secondary';
+                    b.textContent = o.textContent;
+                    b.addEventListener('click', function () {
+                        close();
+                        select.value = o.value;
+                        window.murvcCoachPosition(select);
+                    });
+                    list.appendChild(b);
+                });
+                box.appendChild(list);
+                var later = document.createElement('button');
+                later.type = 'button';
+                later.className = 'coach-position-later';
+                later.textContent = 'Not now';
+                later.addEventListener('click', close);
+                box.appendChild(later);
+                modal.appendChild(box);
+                modal.addEventListener('click', function (event) { if (event.target === modal) { close(); } });
+                document.addEventListener('keydown', onKey);
+                portal.appendChild(modal);
+                var first = list.querySelector('button');
+                if (first) { first.focus(); }
             };
 
             var savePlace = function (form) {
@@ -1977,8 +2207,60 @@ class TeamOversight_Coach_Portal {
             color: #1e6b2a;
         }
 
-        .coach-portal .cac-offer:empty {
+        .coach-portal .cac-offer:empty,
+        .coach-portal .cac-position:empty {
             display: none;
+        }
+
+        .coach-portal .cac-position-text {
+            color: var(--cp-text);
+        }
+
+        /* The team position pop-up after a verdict: a small card over a dimmed page. */
+        .coach-portal .coach-position-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 100000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            background: rgba(20, 30, 45, 0.45);
+        }
+
+        .coach-portal .coach-position-box {
+            width: 100%;
+            max-width: 360px;
+            padding: 18px;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        }
+
+        .coach-portal .coach-position-heading {
+            margin: 0 0 12px;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--cp-text);
+        }
+
+        .coach-portal .coach-position-choices {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .coach-portal .coach-position-later {
+            display: block;
+            margin: 12px auto 0;
+            padding: 6px 12px;
+            background: none;
+            border: 0;
+            color: var(--cp-muted);
+            font: inherit;
+            font-size: 13px;
+            text-decoration: underline;
+            cursor: pointer;
         }
 
         /* Team list fees: a status the height of the controls beside it,
@@ -2223,7 +2505,7 @@ class TeamOversight_Coach_Portal {
     // ------------------------------------------------------------------
 
     private function handle_actions($my_team_codes, $season) {
-        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'set_offer', 'add_note', 'edit_note', 'delete_note'), true)) {
+        if (!isset($_POST['coach_action']) || !in_array($_POST['coach_action'], array('set_selection', 'set_offer', 'set_position', 'add_note', 'edit_note', 'delete_note'), true)) {
             return '';
         }
 
@@ -2369,6 +2651,33 @@ class TeamOversight_Coach_Portal {
             return '<div class="coach-portal-success"><p>Acceptance undone for ' . $who . ' — the <strong>' . esc_html($offer) . '</strong> offer for ' . esc_html($team) . ' is pending again.</p></div>';
         }
 
+        if ($_POST['coach_action'] === 'set_position') {
+            // The coach's choice of position on their team, kept with the
+            // team's verdict; the application's own positions are untouched.
+            $position = isset($_POST['team_position']) ? sanitize_key(wp_unslash($_POST['team_position'])) : '';
+            if ($position !== '' && self::team_position_label($position) === '') {
+                return '<div class="coach-portal-notice"><p>Please pick one of the positions.</p></div>';
+            }
+            $verdict = $wpdb->get_row($wpdb->prepare("
+                SELECT id, status FROM {$wpdb->prefix}team_trial_selections
+                WHERE application_id = %d AND team = %s
+            ", $application_id, $team));
+            if (!$verdict || !in_array($verdict->status, self::POSITION_STATUSES, true)) {
+                return '<div class="coach-portal-notice"><p>' . $who . ' has no Tentative, Selected or Training Only verdict for ' . esc_html($team) . ' — reload the page to see the current verdict.</p></div>';
+            }
+            $wpdb->update(
+                $wpdb->prefix . 'team_trial_selections',
+                array('team_position' => $position !== '' ? $position : null),
+                array('id' => $verdict->id),
+                array('%s'),
+                array('%d')
+            );
+            if ($position === '') {
+                return '<div class="coach-portal-success"><p>Team position cleared for ' . $who . ' on ' . esc_html($team) . '.</p></div>';
+            }
+            return '<div class="coach-portal-success"><p>' . $who . ': <strong>' . esc_html(self::team_position_label($position)) . '</strong> for ' . esc_html($team) . '.</p></div>';
+        }
+
         // set_selection
         $status = sanitize_text_field($_POST['selection_status']);
 
@@ -2500,8 +2809,10 @@ class TeamOversight_Coach_Portal {
         $labels = self::get_verdict_labels();
         $html = '';
         foreach ($selections as $sel) {
+            $position = in_array($sel['status'], self::POSITION_STATUSES, true) && isset($sel['position']) ? self::team_position_label($sel['position']) : '';
             $label = (isset($labels[$sel['status']]) ? $labels[$sel['status']] : ucfirst($sel['status']))
-                . self::offer_suffix(isset($sel['accepted']) ? $sel['accepted'] : null);
+                . self::offer_suffix(isset($sel['accepted']) ? $sel['accepted'] : null)
+                . ($position !== '' ? ' · ' . $position : '');
             $html .= '<span class="verdict-chip verdict-chip-' . esc_attr($sel['status']) . '" title="' . esc_attr($sel['team_name'] . ' — ' . $label) . '">'
                 . esc_html($sel['team']) . ': ' . esc_html($label)
                 . '</span> ';
@@ -2531,9 +2842,6 @@ class TeamOversight_Coach_Portal {
             return;
         }
 
-        $roster = $this->get_roster($team, $season);
-        $selection_roster = $this->get_selection_roster($team, $season, $roster);
-
         $filename = 'team_list_' . sanitize_file_name($team) . "_{$season}.csv";
 
         header('Content-Type: text/csv');
@@ -2544,24 +2852,53 @@ class TeamOversight_Coach_Portal {
         $output = fopen('php://output', 'w');
         // UTF-8 BOM so Excel reads accents/dashes correctly.
         fwrite($output, "\xEF\xBB\xBF");
-        fputcsv($output, array('Name', 'Role', 'Positions', 'Status', 'Email', 'Mobile'));
+        foreach ($this->roster_export_rows($team, $season) as $row) {
+            fputcsv($output, $row);
+        }
+        fclose($output);
+        exit;
+    }
 
-        // Names, positions and emails are member-controlled, so they go
-        // through the shared TeamOversight_Exports::csv_cell() (a name like
-        // =HYPERLINK(...) would otherwise be live when a coach opens the
-        // list). Never the mobile column: international numbers start with +.
+    /**
+     * The team list CSV, header first: everyone with a place or a verdict
+     * for the team, then everyone who applied for it with no verdict yet,
+     * grouped by verdict (Confirmed, Selected, Training Only, Tentative,
+     * Rejected, No verdict) so a coach can filter a group and copy its
+     * emails. Team Position is the coach's choice; Applied Positions the
+     * player's own answer.
+     *
+     * Names, positions and emails are member-controlled, so they go through
+     * the shared TeamOversight_Exports::csv_cell() (a name like
+     * =HYPERLINK(...) would otherwise be live when a coach opens the list).
+     * Never the mobile column: international numbers start with +.
+     */
+    private function roster_export_rows($team, $season) {
+        global $wpdb;
+        $cell = array('TeamOversight_Exports', 'csv_cell');
+        $rows = array(array('Name', 'Verdict', 'Status', 'Role', 'Team Position', 'Applied Positions', 'Email', 'Mobile'));
+        $listed = array();
+        $unpaid = function ($application_status) {
+            return $application_status === 'awaiting_payment' ? ' · trial fee unpaid' : '';
+        };
+
+        $roster = $this->get_roster($team, $season);
+        $position_map = $this->get_team_positions_for_team($team, $season);
         foreach ($roster as $member) {
-            fputcsv($output, array(
-                TeamOversight_Exports::csv_cell($member->name ?: $member->email),
-                str_replace('_', ' ', ucwords($member->role, '_')),
-                TeamOversight_Exports::csv_cell($this->format_positions($member->preferred_positions)),
+            $rows[] = array(
+                call_user_func($cell, $member->name ?: $member->email),
                 'Confirmed',
-                TeamOversight_Exports::csv_cell($member->email),
+                'Confirmed',
+                str_replace('_', ' ', ucwords($member->role, '_')),
+                self::team_position_label(self::position_for_person($position_map, isset($member->user_id) ? $member->user_id : 0, $member->email)),
+                call_user_func($cell, $this->format_positions($member->preferred_positions)),
+                call_user_func($cell, $member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
-            ));
+            );
+            $listed[strtolower((string) $member->email)] = true;
         }
 
-        foreach ($selection_roster as $member) {
+        $verdict_labels = self::get_verdict_labels();
+        foreach ($this->get_selection_roster($team, $season, $roster) as $member) {
             $status_labels = array(
                 'selected' => 'Selected (awaiting finalisation)',
                 'training_only' => 'Training Only (awaiting finalisation)',
@@ -2573,18 +2910,75 @@ class TeamOversight_Coach_Portal {
                 $status_labels[$member->status] = ($member->status === 'selected' ? 'Selected' : 'Training Only')
                     . ($offer ? ' · accepted (awaiting finalisation)' : ' · offer pending');
             }
-            fputcsv($output, array(
-                TeamOversight_Exports::csv_cell($member->name),
+            $rows[] = array(
+                call_user_func($cell, $member->name),
+                isset($verdict_labels[$member->status]) ? $verdict_labels[$member->status] : ucfirst($member->status),
+                (isset($status_labels[$member->status]) ? $status_labels[$member->status] : ucfirst($member->status)) . $unpaid($member->application_status),
                 $member->status === 'training_only' ? 'Training Only' : 'Playing Member',
-                TeamOversight_Exports::csv_cell($this->format_positions($member->preferred_positions)),
-                isset($status_labels[$member->status]) ? $status_labels[$member->status] : ucfirst($member->status),
-                TeamOversight_Exports::csv_cell($member->email),
+                self::team_position_label($member->team_position),
+                call_user_func($cell, $this->format_positions($member->preferred_positions)),
+                call_user_func($cell, $member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
-            ));
+            );
+            $listed[strtolower((string) $member->email)] = true;
         }
 
-        fclose($output);
-        exit;
+        // Rejected for this team (by its coaches, or the application by the club).
+        $rejected = $wpdb->get_results($wpdb->prepare("
+            SELECT a.name, a.email, a.preferred_positions, a.application_status, um_mobile.meta_value AS mobile
+            FROM {$wpdb->prefix}team_trial_selections s
+            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+            LEFT JOIN {$wpdb->usermeta} um_mobile ON a.user_id = um_mobile.user_id AND um_mobile.meta_key = 'mobile_number'
+            WHERE s.team = %s AND s.season = %s AND s.status = 'rejected'
+                AND a.application_status IN ('pending', 'accepted', 'awaiting_payment', 'rejected')
+            ORDER BY a.trial_number
+        ", $team, $season));
+        foreach ($rejected as $member) {
+            if (isset($listed[strtolower((string) $member->email)])) {
+                continue;
+            }
+            $rows[] = array(
+                call_user_func($cell, $member->name),
+                'Rejected',
+                'Rejected' . $unpaid($member->application_status),
+                '',
+                '',
+                call_user_func($cell, $this->format_positions($member->preferred_positions)),
+                call_user_func($cell, $member->email),
+                $member->mobile ? self::format_phone($member->mobile) : '',
+            );
+            $listed[strtolower((string) $member->email)] = true;
+        }
+
+        // Applied for this team, no verdict for it yet.
+        $applied = $wpdb->get_results($wpdb->prepare("
+            SELECT a.name, a.email, a.preferred_positions, a.application_status, um_mobile.meta_value AS mobile
+            FROM {$wpdb->prefix}trial_applications a
+            LEFT JOIN {$wpdb->prefix}team_trial_selections s ON s.application_id = a.id AND s.team = %s
+            LEFT JOIN {$wpdb->usermeta} um_mobile ON a.user_id = um_mobile.user_id AND um_mobile.meta_key = 'mobile_number'
+            WHERE a.season = %s AND s.id IS NULL
+                AND a.application_status IN ('pending', 'accepted', 'awaiting_payment')
+                AND a.interested_teams LIKE %s
+            ORDER BY a.trial_number
+        ", $team, $season, '%' . $wpdb->esc_like('"' . $team . '"') . '%'));
+        foreach ($applied as $member) {
+            if (isset($listed[strtolower((string) $member->email)])) {
+                continue;
+            }
+            $rows[] = array(
+                call_user_func($cell, $member->name),
+                'No verdict',
+                'Applied, no verdict yet' . $unpaid($member->application_status),
+                '',
+                '',
+                call_user_func($cell, $this->format_positions($member->preferred_positions)),
+                call_user_func($cell, $member->email),
+                $member->mobile ? self::format_phone($member->mobile) : '',
+            );
+            $listed[strtolower((string) $member->email)] = true;
+        }
+
+        return $rows;
     }
 
     // ------------------------------------------------------------------
@@ -2935,7 +3329,7 @@ class TeamOversight_Coach_Portal {
             'trial_number' => intval($app->trial_number),
             'form_data' => $form_data,
             'notes' => $this->get_notes_for_application(intval($app->id)),
-            'reg_type' => isset($form_data['Registration Type']) ? $form_data['Registration Type'] : (intval($app->is_transfer_player) === 1 ? 'Club Transfer' : ''),
+            'reg_type' => TeamOversight_Trials::registration_type($app),
             'transfer_club' => isset($form_data['Transfer: Previous Club']) ? $form_data['Transfer: Previous Club'] : '',
         );
     }
@@ -3254,7 +3648,7 @@ class TeamOversight_Coach_Portal {
         } elseif ($reg_type === 'Free Agent') {
             $class = 'chip-freeagent';
             $label = 'FA' . ($club ? ': ' . $club : '');
-            $title = 'Free agent — skipped at least one VVL season, no club transfer required' . ($club ? ' (previously ' . $club . ')' : '') . '.';
+            $title = 'Free agent — no club transfer required: skipped at least one VVL season, or last played Youth State League' . ($club ? ' (previously ' . $club . ')' : '') . '.';
         } elseif ($reg_type === 'New') {
             $class = 'chip-new';
             $label = 'New';
@@ -3393,8 +3787,8 @@ class TeamOversight_Coach_Portal {
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT s.status, s.offer_accepted, s.application_id, a.name, a.email, a.trial_number, a.user_id, a.preferred_positions,
-                a.is_transfer_player, a.form_data, a.application_status,
+            SELECT s.status, s.offer_accepted, s.team_position, s.application_id, a.name, a.email, a.trial_number, a.user_id, a.preferred_positions,
+                a.is_transfer_player, a.form_data, a.application_status, a.registration_override,
                 um_mobile.meta_value AS mobile
             FROM {$wpdb->prefix}team_trial_selections s
             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
@@ -3433,7 +3827,7 @@ class TeamOversight_Coach_Portal {
             $row->is_transfer = intval($row->is_transfer_player) === 1;
             $decoded = $row->form_data ? json_decode($row->form_data, true) : array();
             $row->transfer_club = (is_array($decoded) && isset($decoded['Transfer: Previous Club'])) ? $decoded['Transfer: Previous Club'] : '';
-            $row->reg_type = (is_array($decoded) && isset($decoded['Registration Type'])) ? $decoded['Registration Type'] : ($row->is_transfer ? 'Club Transfer' : '');
+            $row->reg_type = TeamOversight_Trials::registration_type($row);
             if ($cutoff) {
                 $birth_date = get_user_meta($row->user_id, 'birth_date', true);
                 $birth_ts = $birth_date ? strtotime(str_replace('/', '-', $birth_date)) : false;
@@ -3503,6 +3897,7 @@ class TeamOversight_Coach_Portal {
                 'team_name' => isset($teams_config[$sel->team]) ? $teams_config[$sel->team]['name'] : $sel->team,
                 'status' => $sel->status,
                 'accepted' => self::offer_state($season, $sel->status, $sel->offer_accepted),
+                'position' => (string) $sel->team_position,
             );
         }
 
@@ -3564,10 +3959,12 @@ class TeamOversight_Coach_Portal {
             $selections = isset($selections_by_app[$row->id]) ? $selections_by_app[$row->id] : array();
             $my_status = '';
             $my_accepted = null;
+            $my_position = '';
             foreach ($selections as $sel) {
                 if ($sel['team'] === $active_team) {
                     $my_status = $sel['status'];
                     $my_accepted = $sel['accepted'];
+                    $my_position = $sel['position'];
                 }
             }
 
@@ -3578,7 +3975,7 @@ class TeamOversight_Coach_Portal {
                 'trial_number' => intval($row->trial_number),
                 'is_transfer' => intval($row->is_transfer_player) === 1,
                 'transfer_club' => isset($form_data['Transfer: Previous Club']) ? $form_data['Transfer: Previous Club'] : '',
-                'reg_type' => isset($form_data['Registration Type']) ? $form_data['Registration Type'] : (intval($row->is_transfer_player) === 1 ? 'Club Transfer' : ''),
+                'reg_type' => TeamOversight_Trials::registration_type($row),
                 'name' => $row->name,
                 'email' => $row->email,
                 'mobile' => $row->user_id ? get_user_meta($row->user_id, 'mobile_number', true) : '',
@@ -3593,6 +3990,7 @@ class TeamOversight_Coach_Portal {
                 'selections' => $selections,
                 'my_status' => $my_status,
                 'my_accepted' => $my_accepted,
+                'my_position' => $my_position,
                 'notes' => isset($notes_by_app[$row->id]) ? $notes_by_app[$row->id] : array(),
                 'form_data' => $form_data,
             );
