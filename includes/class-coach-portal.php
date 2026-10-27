@@ -1049,8 +1049,10 @@ class TeamOversight_Coach_Portal {
                 $offer_summary = ($offer_counts['pending'] || $offer_counts['accepted'])
                     ? ' — ' . $offer_counts['pending'] . ' offer' . ($offer_counts['pending'] === 1 ? '' : 's') . ' pending, ' . $offer_counts['accepted'] . ' accepted'
                     : '';
+                // Everyone on the list, so coaches can see how big the team would be.
+                $player_total = count($confirmed_players) + count($selection_roster);
                 ?>
-                <h4>Players (<?php echo count($confirmed_players); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?><?php echo esc_html($offer_summary); ?>)</h4>
+                <h4><?php echo $player_total . ($player_total === 1 ? ' Player' : ' Players'); ?> (<?php echo count($confirmed_players); ?> confirmed<?php echo count($selection_roster) ? ', ' . count($selection_roster) . ' in selection' : ''; ?><?php echo esc_html($offer_summary); ?>)</h4>
                 <?php if (!empty($confirmed_players) || !empty($selection_roster)): ?>
                     <?php
                     // Other teams' verdicts and confirmed places for everyone
