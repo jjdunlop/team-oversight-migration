@@ -43,6 +43,59 @@ class TeamOversight_Trial_Emails {
     const DEFAULT_REPLYTO = 'vvldelegate@renegades.com.au';
 
     /**
+     * 1.80.3: the "pay your trial fee" email waits this long after a save
+     * and goes only if the fee is still unpaid then. The player is usually
+     * still at the checkout when the form saves, so an instant email told
+     * people who were paying anyway to pay.
+     */
+    const PAYMENT_NUDGE_DELAY = 900;
+    const PAYMENT_NUDGE_HOOK = 'murvc_trial_payment_nudge';
+
+    /** Adds the delayed payment email's handler, once per request. */
+    public static function register_hooks() {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+        add_action(self::PAYMENT_NUDGE_HOOK, array(__CLASS__, 'send_payment_nudge'), 10, 1);
+    }
+
+    /**
+     * Check again in 15 minutes instead of emailing now. One check per
+     * application: a second save while one is waiting keeps the first. If
+     * the check can't be scheduled, the email goes now, as before 1.80.3.
+     */
+    public static function schedule_payment_nudge($application_id) {
+        $application_id = intval($application_id);
+        if ($application_id <= 0) {
+            return false;
+        }
+        $args = array($application_id);
+        if (wp_next_scheduled(self::PAYMENT_NUDGE_HOOK, $args)) {
+            return true;
+        }
+        $scheduled = wp_schedule_single_event(time() + self::PAYMENT_NUDGE_DELAY, self::PAYMENT_NUDGE_HOOK, $args);
+        if ($scheduled === false || is_wp_error($scheduled)) {
+            return self::send_for_id('payment_needed', $application_id);
+        }
+        return true;
+    }
+
+    /** The delayed check: email only an application that still owes its trial fee (paid, closed or deleted: nothing). */
+    public static function send_payment_nudge($application_id) {
+        global $wpdb;
+        $application = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d",
+            intval($application_id)
+        ));
+        if (!$application || $application->application_status !== 'awaiting_payment') {
+            return false;
+        }
+        return self::send('payment_needed', $application);
+    }
+
+    /**
      * Where applicant replies go. Never saved -> the VVL delegate. Saved
      * blank -> '' , meaning "use the fee reminders' Reply-To" (see
      * get_headers()), so the admin can opt back into one shared inbox.
@@ -102,7 +155,7 @@ class TeamOversight_Trial_Emails {
             ),
             'payment_needed' => array(
                 'label' => 'Payment needed',
-                'when' => 'An application is saved but the trial fee is due — on first submission, or when an edit makes the fee apply.',
+                'when' => '15 minutes after an application is saved with the trial fee due (on first submission, or when an edit makes the fee apply), and only if it is still unpaid then. Someone who pays straight away gets Payment received instead.',
                 'subject' => 'Action needed: pay your {season} MURVC trial fee',
                 'heading' => 'Pay your trial fee to confirm your application',
                 'preheader' => 'Your application is saved. Pay the trial fee to confirm it.',

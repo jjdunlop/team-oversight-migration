@@ -1648,17 +1648,16 @@ class TeamOversight_Trials {
         // Since 1.80.0 that email is only sent when someone presses Send, for
         // one team, so an application save has nothing to tell it.)
 
-        // Exactly one email per save, describing where the application now
+        // At most one email per save, describing where the application now
         // stands: fee due, a confirmed application changed, or confirmed
-        // (a new application, or an unpaid one that no longer owes).
+        // (a new application, or an unpaid one that no longer owes). The
+        // fee-due email waits 15 minutes and goes only if it is still
+        // unpaid (1.80.3), since the player is usually at the checkout now.
         if ($charge_fee) {
-            $email_event = 'payment_needed';
-        } elseif ($is_edit) {
-            $email_event = 'edited';
+            TeamOversight_Trial_Emails::schedule_payment_nudge($application_id);
         } else {
-            $email_event = 'submitted';
+            TeamOversight_Trial_Emails::send_for_id($is_edit ? 'edited' : 'submitted', $application_id);
         }
-        TeamOversight_Trial_Emails::send_for_id($email_event, $application_id);
 
         if (!$charge_fee) {
             // Back to the rego page itself, where the green panel shows the
