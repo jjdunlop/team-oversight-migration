@@ -34,26 +34,38 @@ if (!defined('ABSPATH')) {
  *    only about that team and that their other applications are decided
  *    separately. It never says anything about another team's verdict or
  *    offer.
- *  - Send works while THIS team's verdict is Rejected and the application is
- *    live: 'pending' or 'accepted' (a Payment-pending application can't be
- *    told until the fee is paid; a rejected, expired or deleted one never),
- *    the account still exists and the email is switched on (Emails, Offers
- *    and selection). block_reason() is the one rule; the cards, the bulk
- *    panel, the Offers page and the server all ask it.
+ *  - Send works while THIS team's verdict is Rejected, the player applied for
+ *    THIS team (a Rejected verdict on a team they never applied for tells
+ *    them nothing: there is no application to answer), the application is
+ *    live ('pending', 'accepted' or Payment pending; a rejected, expired or
+ *    deleted one never), the account still exists and the email is switched
+ *    on (Emails, Offers and selection). block_reason() is the one rule; the
+ *    cards, the bulk panel, the Offers page and the server all ask it.
+ *  - A player who already holds a place this season (an offer they accepted
+ *    or locked in, or an application the club accepted: placed_map()) can
+ *    still be told, but is left out of the counts that nag (the flow chart's
+ *    "Rejected, not told", the status strip, the checklist) and out of the
+ *    send-them-all buttons, and their email suggests no other way in.
  *  - The email permission (TeamOversight_Offers::emails_live()) still holds
  *    every message: a notice pressed while it is closed waits in the outbox
  *    (the card says so), and the outbox's own hold catches anything more
  *    than a day old when it is opened. At send time the outbox re-checks
  *    the notice (send_check(): still Rejected for that team, application
  *    still live, account still there).
+ *  - A pressed notice whose email never went (the outbox skipped it: an
+ *    administrator discarded the held messages, the email was switched off,
+ *    or the verdict had changed when it was due) is NOT a told player
+ *    (dropped()): it is "not told yet" again everywhere, and Send re-opens
+ *    the same outbox row (TeamOversight_Offer_Emails::rearm_skipped(), one
+ *    compare-and-set), so it still goes at most once.
  *  - Don't send (administrators, on the Not selected tab) records a final
  *    'stopped' row: kept as a record, never sent.
  *  - If the verdict later changes from Rejected, the row stays and the card
  *    shows it as history; it is never sent twice.
  *
  * States of a per-team row: 'queued' (sent: the button was pressed and the
- * email queued; final), 'stopped' (Don't send; final) and 'failed' (the
- * outbox refused it; Send works again). A row from before 1.80.0 has team ''
+ * email queued; final unless its email is skipped, see dropped()), 'stopped'
+ * (Don't send; final) and 'failed' (the outbox refused it; Send works again). A row from before 1.80.0 has team ''
  * (one per application, from the old automatic notice: scheduled, held,
  * queued, cancelled, stopped) and is kept as history; migrate_legacy_rows()
  * mapped its 'queued' / 'stopped' rows once to each team that had rejected
@@ -87,8 +99,8 @@ class TeamOversight_Not_Selected {
     /** The 1.79.x state of an old per-application notice that waited for an administrator (history only since 1.80.0). */
     const HELD = 'held';
 
-    /** Applications that can be told (a Payment-pending one waits for its fee; any other status is no longer open). */
-    const LIVE_STATUSES = array('pending', 'accepted');
+    /** Applications that can be told: still live (Payment pending included, 1.80.0 review: an unpaid trial fee doesn't stop a "not selected" email); any other status is no longer open. */
+    const LIVE_STATUSES = array('pending', 'accepted', 'awaiting_payment');
 
     /** Rejections not told for this many days are listed on the Offers page's status strip and the setup checklist. */
     const UNTOLD_FLAG_DAYS = 7;
@@ -160,12 +172,76 @@ class TeamOversight_Not_Selected {
 
     /** The team codes an application asked for, in the order they were stored. */
     private static function applied_codes($app) {
-        $codes = json_decode((string) $app->interested_teams, true);
+        return self::codes_from_json(is_object($app) && isset($app->interested_teams) ? $app->interested_teams : '');
+    }
+
+    /** The team codes in a stored interested_teams value (JSON list), in order, without repeats. */
+    private static function codes_from_json($json) {
+        $codes = json_decode((string) $json, true);
         $out = array();
         foreach ((array) $codes as $code) {
             if (is_string($code) && $code !== '' && !in_array($code, $out, true)) {
                 $out[] = $code;
             }
+        }
+        return $out;
+    }
+
+    /**
+     * Did this application ask for $team? (A trial_applications row with
+     * interested_teams.) A Rejected verdict on a team the player never
+     * applied for is not answered with a "not selected" email (1.80.0
+     * review): coaches see every applicant in the competition and may give
+     * any of them a verdict, but the email answers an application.
+     */
+    public static function applied_for($application, $team) {
+        return is_object($application) && in_array((string) $team, self::applied_codes($application), true);
+    }
+
+    /**
+     * Which applications' players already hold a place this season: an
+     * application the club accepted (placed), or a live offer they accepted
+     * or locked in (TeamOversight_Offers::places_held(), the one reader of
+     * offers this class uses; it never names that team). $statuses:
+     * application id => application_status (from the caller's own query).
+     * Returns application id => bool. One query.
+     */
+    public static function placed_map(array $statuses) {
+        $out = array();
+        foreach ($statuses as $id => $status) {
+            $out[intval($id)] = (string) $status === 'accepted';
+        }
+        $held = class_exists('TeamOversight_Offers') ? TeamOversight_Offers::places_held(array_keys($out)) : array();
+        foreach ($held as $id => $teams) {
+            if (!empty($teams)) {
+                $out[intval($id)] = true;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * What the coach portal's cards need to know about some applications
+     * besides their notices (for_applications()): application id =>
+     * array(applied (team codes), placed (bool)). Two queries for a page.
+     */
+    public static function card_facts(array $application_ids) {
+        global $wpdb;
+        $ids = array_values(array_unique(array_filter(array_map('intval', $application_ids))));
+        if (empty($ids)) {
+            return array();
+        }
+        $rows = $wpdb->get_results('SELECT id, interested_teams, application_status FROM ' . $wpdb->prefix . 'trial_applications WHERE id IN (' . implode(',', $ids) . ')');
+        $statuses = array();
+        $applied = array();
+        foreach ((array) $rows as $row) {
+            $statuses[intval($row->id)] = (string) $row->application_status;
+            $applied[intval($row->id)] = self::codes_from_json($row->interested_teams);
+        }
+        $placed = self::placed_map($statuses);
+        $out = array();
+        foreach ($applied as $id => $codes) {
+            $out[$id] = array('applied' => $codes, 'placed' => !empty($placed[$id]));
         }
         return $out;
     }
@@ -271,15 +347,19 @@ class TeamOversight_Not_Selected {
      * card, the bulk panel, the Offers page and the server all ask. Reads
      * only. $application_status / $user_id: the application's; $verdict: the
      * team's verdict status ('' = none); $info: the team's notice
-     * (for_applications() shape) or null; $team_name for the wording.
+     * (for_applications() shape) or null; $team_name for the wording;
+     * $applied: whether the application asked for this team (applied_for()).
      * Returns array(code, text) with code: sent (already sent: text is the
-     * status line), stopped (Don't send was chosen), verdict (not Rejected),
-     * unpaid, closed, account, off. Every text is coach-safe.
+     * status line; a pressed notice whose email was skipped is not "sent",
+     * see dropped()), stopped (Don't send was chosen), verdict (not
+     * Rejected), not_applied (they never applied for this team), closed,
+     * account, off. A Payment-pending application may be told (1.80.0
+     * review). Every text is coach-safe.
      */
-    public static function block_reason($application_status, $user_id, $verdict, $info, $team_name) {
+    public static function block_reason($application_status, $user_id, $verdict, $info, $team_name, $applied = true) {
         $vars = array('{team}' => (string) $team_name);
         if (is_array($info) && isset($info['state'])) {
-            if ($info['state'] === 'sent') {
+            if ($info['state'] === 'sent' && !self::dropped($info)) {
                 return array('code' => 'sent', 'text' => self::status_text($info));
             }
             if ($info['state'] === 'stopped') {
@@ -289,8 +369,8 @@ class TeamOversight_Not_Selected {
         if ((string) $verdict !== 'rejected') {
             return array('code' => 'verdict', 'text' => self::w('ns_reason_verdict', $vars));
         }
-        if ((string) $application_status === 'awaiting_payment') {
-            return array('code' => 'unpaid', 'text' => self::w('ns_reason_unpaid', $vars));
+        if (!$applied) {
+            return array('code' => 'not_applied', 'text' => self::w('ns_not_applied', $vars));
         }
         if (!in_array((string) $application_status, self::LIVE_STATUSES, true)) {
             return array('code' => 'closed', 'text' => self::w('ns_reason_closed', $vars));
@@ -303,6 +383,23 @@ class TeamOversight_Not_Selected {
             return array('code' => 'off', 'text' => self::w('ns_reason_off', $vars));
         }
         return null;
+    }
+
+    /**
+     * A notice whose button was pressed but whose email will never go: the
+     * outbox skipped it (an administrator discarded the held messages, the
+     * email was switched off, or the verdict or application had changed when
+     * it was due). The player was never told, so it counts as not told and
+     * Send works again (send_now() re-opens the same outbox row). $info: a
+     * for_applications() entry.
+     */
+    public static function dropped($info) {
+        return is_array($info) && isset($info['state'], $info['email_status']) && $info['state'] === 'sent' && $info['email_status'] === 'skipped';
+    }
+
+    /** Is a notice (a for_applications() entry, or null for none) still to be told: none, refused by the outbox, or dropped()? */
+    public static function info_untold($info) {
+        return !is_array($info) || !isset($info['state']) || $info['state'] === 'failed' || self::dropped($info);
     }
 
     // ------------------------------------------------------------------
@@ -325,9 +422,12 @@ class TeamOversight_Not_Selected {
      * row is claimed with ONE INSERT IGNORE (or a compare-and-set from
      * 'failed'); only the winner queues the outbox row, so a double press,
      * a second tab, or a coach and the committee at once send it once.
+     * A notice pressed before whose email was skipped (dropped()) is sent
+     * again by re-opening its outbox row with one compare-and-set
+     * (send_again()), so that too goes once however many press it.
      * $via: 'coach' | 'admin' (the row's source). Never throws. Returns
      * array(ok, changed, code (sent | already | stopped | season | team |
-     * application | verdict | unpaid | closed | account | off | outbox |
+     * application | verdict | not_applied | closed | account | off | outbox |
      * error), message).
      */
     public static function send_for_team($application_id, $team, $season, $actor_id, $via = 'coach') {
@@ -360,7 +460,7 @@ class TeamOversight_Not_Selected {
         $verdict = self::verdict_row($app->id, $team);
         $row = self::row_for($app->id, $team);
         $info = $row ? self::info_from_row($row, self::email_rows_for(array($row)), self::names_for(array($row))) : null;
-        $block = self::block_reason((string) $app->application_status, intval($app->user_id), $verdict ? (string) $verdict->status : '', $info, $team_name);
+        $block = self::block_reason((string) $app->application_status, intval($app->user_id), $verdict ? (string) $verdict->status : '', $info, $team_name, self::applied_for($app, $team));
         if ($block !== null) {
             if ($block['code'] === 'sent') {
                 return self::result(true, false, 'already', self::w('ns_already', array('{team}' => $team_name, '{status}' => $block['text'])));
@@ -372,6 +472,10 @@ class TeamOversight_Not_Selected {
         $since = self::verdict_at($verdict);
         $since = $since !== '' ? $since : $now;
         $table = self::table();
+        if ($row && $row->state === self::SENT) {
+            // Pressed before, but its email was skipped (block_reason() let it through only then): send it again, once.
+            return self::send_again($app, $row, $team, $season, $team_name, $actor_id, $via, $now);
+        }
         if ($row && $row->state === self::FAILED) {
             $won = $wpdb->query($wpdb->prepare(
                 "UPDATE $table SET state = %s, queued_at = %s, send_after = %s, source = %s, acted_by = NULLIF(%d, 0), acted_at = %s WHERE id = %d AND state = %s",
@@ -408,6 +512,61 @@ class TeamOversight_Not_Selected {
             return self::result(false, false, 'outbox', 'The email could not be queued, so nothing was sent. Try again in a moment; if it keeps happening, tell the club.');
         }
         self::log('Not-selected email for application ' . intval($app->id) . ' (' . $season . ' ' . $team . ') queued by user #' . $actor_id . ' (' . ($via === 'admin' ? 'Offers page' : 'coach portal') . ').', $app);
+        $live = TeamOversight_Offers::emails_live();
+        return self::result(true, true, 'sent', self::w($live ? 'ns_done' : 'ns_done_waiting', array('{team}' => $team_name)));
+    }
+
+    /**
+     * Send again a notice that was pressed but whose email was skipped
+     * (dropped()). The claim is ONE compare-and-set: for a per-team row the
+     * outbox row 'skipped' -> 'pending' (TeamOversight_Offer_Emails::
+     * rearm_skipped(), with this press's context); for a row mapped from
+     * before 1.80.0 (source 'legacy', whose old per-application email can
+     * never go) the row itself becomes this press's (source, acted_by) and
+     * the per-team email is queued. Only the winner sends; the row records
+     * who pressed it now. An outbox refusal leaves the row 'failed' (Send
+     * works again), as on a first press.
+     */
+    private static function send_again($app, $row, $team, $season, $team_name, $actor_id, $via, $now) {
+        global $wpdb;
+        $table = self::table();
+        $context = array('application_id' => intval($app->id), 'team' => $team, 'by' => $actor_id, 'via' => $via);
+        $key = self::dedupe_key($app->id, $team);
+        $lost = function () use ($app, $team, $team_name) {
+            $fresh = self::row_for($app->id, $team);
+            $fresh_info = $fresh ? self::info_from_row($fresh, self::email_rows_for(array($fresh)), self::names_for(array($fresh))) : null;
+            if ($fresh_info && $fresh_info['state'] === 'sent' && !self::dropped($fresh_info)) {
+                return self::result(true, false, 'already', self::w('ns_already', array('{team}' => $team_name, '{status}' => self::status_text($fresh_info))));
+            }
+            return self::result(false, false, 'error', 'That changed while you were looking at it, so nothing was sent. Reload the page.');
+        };
+        if ((string) $row->source === 'legacy') {
+            $won = $wpdb->query($wpdb->prepare(
+                "UPDATE $table SET source = %s, acted_by = NULLIF(%d, 0), acted_at = %s, queued_at = %s, send_after = %s WHERE id = %d AND state = %s AND source = 'legacy'",
+                $via, $actor_id, $now, $now, $now, intval($row->id), self::SENT
+            ));
+            if ($won !== 1) {
+                return $lost();
+            }
+            $queued = class_exists('TeamOversight_Offer_Emails') ? TeamOversight_Offer_Emails::queue('not_selected', 0, $context) : array('id' => 0, 'queued' => false, 'status' => '', 'error' => 'The email outbox is not available.');
+            if (!empty($queued['id']) && empty($queued['queued']) && $queued['status'] === 'skipped') {
+                TeamOversight_Offer_Emails::rearm_skipped($key, $context);
+            }
+            if (empty($queued['id'])) {
+                $wpdb->query($wpdb->prepare("UPDATE $table SET state = %s WHERE id = %d AND state = %s AND acted_at = %s", self::FAILED, intval($row->id), self::SENT, $now));
+                self::alert('The "not selected" email for application ' . intval($app->id) . ' (' . $season . ' ' . $team . ') could not be queued' . (!empty($queued['error']) ? ' (' . $queued['error'] . ')' : '') . '; nothing was sent and Send works again.');
+                return self::result(false, false, 'outbox', 'The email could not be queued, so nothing was sent. Try again in a moment; if it keeps happening, tell the club.');
+            }
+        } else {
+            if (!class_exists('TeamOversight_Offer_Emails') || !TeamOversight_Offer_Emails::rearm_skipped($key, $context)) {
+                return $lost();
+            }
+            $wpdb->query($wpdb->prepare(
+                "UPDATE $table SET source = %s, acted_by = NULLIF(%d, 0), acted_at = %s, queued_at = %s WHERE id = %d AND state = %s",
+                $via, $actor_id, $now, $now, intval($row->id), self::SENT
+            ));
+        }
+        self::log('Not-selected email for application ' . intval($app->id) . ' (' . $season . ' ' . $team . ') pressed again by user #' . $actor_id . ' (' . ($via === 'admin' ? 'Offers page' : 'coach portal') . ') after the first one was not sent.', $app);
         $live = TeamOversight_Offers::emails_live();
         return self::result(true, true, 'sent', self::w($live ? 'ns_done' : 'ns_done_waiting', array('{team}' => $team_name)));
     }
@@ -497,14 +656,19 @@ class TeamOversight_Not_Selected {
         $row = self::row_for($sel->application_id, $team);
         $now = self::now();
         $table = self::table();
+        $dropped = false;
         if ($row && $row->state === self::SENT) {
-            return self::result(false, false, 'sent', 'That email has already been sent and can\'t be taken back.');
+            $dropped = self::dropped(self::info_from_row($row, self::email_rows_for(array($row)), array()));
+            if (!$dropped) {
+                return self::result(false, false, 'sent', 'That email has already been sent and can\'t be taken back.');
+            }
         }
         if ($row && $row->state === self::STOPPED) {
             return self::result(true, false, 'already', 'Nothing to do: it was already marked Don\'t send.');
         }
-        if ($row && $row->state === self::FAILED) {
-            $won = $wpdb->query($wpdb->prepare("UPDATE $table SET state = %s, acted_by = NULLIF(%d, 0), acted_at = %s, source = 'admin' WHERE id = %d AND state = %s", self::STOPPED, intval($actor_id), $now, intval($row->id), self::FAILED));
+        if ($row && ($row->state === self::FAILED || $dropped)) {
+            // Refused by the outbox, or pressed but never sent (its email was skipped): Don't send closes it for good.
+            $won = $wpdb->query($wpdb->prepare("UPDATE $table SET state = %s, acted_by = NULLIF(%d, 0), acted_at = %s, source = 'admin' WHERE id = %d AND state = %s", self::STOPPED, intval($actor_id), $now, intval($row->id), (string) $row->state));
         } else {
             $since = self::verdict_at($sel);
             $won = $wpdb->query($wpdb->prepare(
@@ -523,7 +687,8 @@ class TeamOversight_Not_Selected {
      * The outbox's check just before it sends (TeamOversight_Offer_Emails
      * prepare_not_selected()): the notice still applies when the
      * application exists and is live, THIS team's verdict is still Rejected
-     * and the account exists. Returns array(ok, note, app).
+     * and nobody has chosen Don't send for it since. (The account is checked
+     * by the caller.) Returns array(ok, note, app).
      */
     public static function send_check($application_id, $team) {
         $app = self::load_application($application_id);
@@ -536,6 +701,10 @@ class TeamOversight_Not_Selected {
         $verdict = self::verdict_row($app->id, $team);
         if (!$verdict || (string) $verdict->status !== 'rejected') {
             return array('ok' => false, 'note' => 'The verdict for ' . $team . ' is no longer Rejected, so the notice no longer applies.', 'app' => $app);
+        }
+        $row = self::row_for($app->id, $team);
+        if ($row && $row->state === self::STOPPED) {
+            return array('ok' => false, 'note' => 'An administrator chose Don\'t send for this player and team.', 'app' => $app);
         }
         return array('ok' => true, 'note' => '', 'app' => $app);
     }
@@ -601,6 +770,8 @@ class TeamOversight_Not_Selected {
             'email_sent_at' => $email ? (string) $email['sent_at'] : '',
             'email_note' => $email ? (string) $email['note'] : '',
             'email_row_id' => $email ? intval($email['id']) : 0,
+            // The team's verdict on the player now (for_applications() reads it; null when the caller didn't).
+            'verdict_now' => property_exists($row, 'verdict_now') ? (string) $row->verdict_now : null,
         );
     }
 
@@ -610,8 +781,10 @@ class TeamOversight_Not_Selected {
      * (sent | stopped | failed), source (coach | admin | legacy), legacy,
      * by, by_name, at (when the button was pressed), since, email_status
      * (the outbox row's status, '' when none), email_sent_at, email_note,
-     * email_row_id). Three queries whatever the number (the rows, the
-     * outbox, the names). Rows from before 1.80.0 (team '') are left out.
+     * email_row_id, verdict_now (that team's verdict on the player now, ''
+     * when it has none)). Three queries whatever the number (the rows with
+     * the verdicts, the outbox, the names). Rows from before 1.80.0 (team
+     * '') are left out.
      */
     public static function for_applications(array $application_ids) {
         global $wpdb;
@@ -619,7 +792,9 @@ class TeamOversight_Not_Selected {
         if (empty($ids)) {
             return array();
         }
-        $rows = $wpdb->get_results('SELECT * FROM ' . self::table() . " WHERE team <> '' AND application_id IN (" . implode(',', $ids) . ') ORDER BY id');
+        $rows = $wpdb->get_results('SELECT n.*, COALESCE(s.status, \'\') AS verdict_now FROM ' . self::table() . " n
+             LEFT JOIN {$wpdb->prefix}team_trial_selections s ON s.application_id = n.application_id AND s.team = n.team
+             WHERE n.team <> '' AND n.application_id IN (" . implode(',', $ids) . ') ORDER BY n.id');
         if (empty($rows)) {
             return array();
         }
@@ -660,7 +835,18 @@ class TeamOversight_Not_Selected {
             $vars['{date}'] = $sent !== '' ? $sent : $pressed;
             return self::w(!empty($info['by_name']) ? 'ns_sent' : 'ns_sent_auto', $vars);
         }
-        if (!empty($info['legacy'])) {
+        if ($email === 'skipped') {
+            // Never sent (dropped()): say why, from the outbox's note.
+            $note = isset($info['email_note']) ? (string) $info['email_note'] : '';
+            if (class_exists('TeamOversight_Offer_Emails') && $note === TeamOversight_Offer_Emails::DISCARD_NOTE) {
+                return self::w('ns_discarded', $vars);
+            }
+            if (class_exists('TeamOversight_Offer_Emails') && $note === TeamOversight_Offer_Emails::OFF_NOTE) {
+                return self::w('ns_skipped_off', $vars);
+            }
+            return self::w('ns_skipped', $vars);
+        }
+        if (!empty($info['legacy']) && $email === '') {
             // Mapped from a notice sent before 1.80.0 (one per player): it went out under its old message.
             return self::w('ns_sent_auto', $vars);
         }
@@ -670,21 +856,21 @@ class TeamOversight_Not_Selected {
         if ($email === 'failed' || $email === 'unknown') {
             return self::w('ns_problem', $vars);
         }
-        if ($email === 'skipped') {
-            return self::w('ns_skipped', $vars);
-        }
         $live = class_exists('TeamOversight_Offers') && TeamOversight_Offers::emails_live();
         return self::w($live ? 'ns_sending' : 'ns_waiting', $vars);
     }
 
     /**
      * The Rejected players of one team (the coach portal's board: the bulk
-     * panel and the flow chart's count), one query: a list of objects with
+     * panel and the flow chart's count): a list of objects with
      * selection_id, application_id, name, email, trial_number, user_id,
      * application_status, verdict_at, notice (for_applications() entry or
-     * null), reason (block_reason() or null). Applications that are no
-     * longer open (rejected by the club, expired, deleted) are left out,
-     * like everywhere on the portal.
+     * null), reason (block_reason() or null), placed (they already hold a
+     * place this season: placed_map()). Applications that are no longer
+     * open (rejected by the club, expired, deleted) are left out, like
+     * everywhere on the portal, and so are players who never applied for
+     * this team (nothing is sent to them about it). A few queries whatever
+     * the number.
      */
     public static function team_rejections($team, $season) {
         global $wpdb;
@@ -693,7 +879,7 @@ class TeamOversight_Not_Selected {
             return array();
         }
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT s.id AS selection_id, s.application_id, s.created_date, s.updated_date, a.name, a.email, a.trial_number, a.user_id, a.application_status
+            "SELECT s.id AS selection_id, s.application_id, s.created_date, s.updated_date, a.name, a.email, a.trial_number, a.user_id, a.application_status, a.interested_teams
              FROM {$wpdb->prefix}team_trial_selections s
              JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
              WHERE s.team = %s AND s.season = %s AND s.status = 'rejected'
@@ -701,13 +887,21 @@ class TeamOversight_Not_Selected {
              ORDER BY a.trial_number, a.id",
             $team, (string) $season
         ));
-        if (empty($rows)) {
+        $kept = array();
+        foreach ((array) $rows as $row) {
+            if (in_array($team, self::codes_from_json($row->interested_teams), true)) {
+                $kept[] = $row;
+            }
+        }
+        if (empty($kept)) {
             return array();
         }
         $ids = array();
         $people = array();
-        foreach ($rows as $row) {
+        $statuses = array();
+        foreach ($kept as $row) {
             $ids[] = intval($row->application_id);
+            $statuses[intval($row->application_id)] = (string) $row->application_status;
             if (intval($row->user_id) > 0) {
                 $people[] = intval($row->user_id);
             }
@@ -716,101 +910,58 @@ class TeamOversight_Not_Selected {
             cache_users(array_values(array_unique($people)));
         }
         $notices = self::for_applications($ids);
+        $placed = self::placed_map($statuses);
         $team_name = self::team_name($team, $season);
         $out = array();
-        foreach ($rows as $row) {
+        foreach ($kept as $row) {
             $info = isset($notices[intval($row->application_id)][$team]) ? $notices[intval($row->application_id)][$team] : null;
             $row->selection_id = intval($row->selection_id);
             $row->application_id = intval($row->application_id);
             $row->verdict_at = !empty($row->updated_date) ? (string) $row->updated_date : (string) $row->created_date;
             $row->notice = $info;
-            $row->reason = self::block_reason((string) $row->application_status, intval($row->user_id), 'rejected', $info, $team_name);
+            $row->placed = !empty($placed[$row->application_id]);
+            $row->reason = self::block_reason((string) $row->application_status, intval($row->user_id), 'rejected', $info, $team_name, true);
+            unset($row->interested_teams);
             $out[] = $row;
         }
         return $out;
     }
 
-    /** Is a team_rejections() / untold() row still to be told (no notice, or one the outbox refused)? */
+    /** Is a team_rejections() / untold() row still to be told (no notice, one the outbox refused, or one whose email was never sent: dropped())? */
     public static function is_untold($row) {
         $info = is_object($row) ? $row->notice : (isset($row['notice']) ? $row['notice'] : null);
-        return !$info || $info['state'] === 'failed';
+        return self::info_untold($info);
     }
 
     /**
-     * The Offers page's Not selected tab, part 1: every Rejected verdict of
-     * the season whose player hasn't been told (no notice row, or one the
-     * outbox refused) and whose application is still open (pending,
-     * accepted, or Payment pending, which shows why it can't be sent), oldest
-     * verdict first. A list of arrays: selection_id, application_id, team,
-     * team_name, name, trial_number, user_id, application_status,
-     * verdict_at, days (since the verdict), reason (block_reason() or null).
+     * Is a team_rejections() / untold() row one that should be sent now:
+     * not told yet, nothing stopping it, and no place held this season? The
+     * flow chart's "Rejected, not told", the board's and the Offers page's
+     * send-them-all lists and the week-old flag count only these.
      */
-    public static function untold($season) {
-        global $wpdb;
-        $season = is_scalar($season) ? (string) $season : '';
-        if (!preg_match('/^\d{4}$/D', $season) || !class_exists('TeamOversight_Offers') || !TeamOversight_Offers::applies($season)) {
-            return array();
-        }
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT s.id AS selection_id, s.application_id, s.team, s.created_date, s.updated_date, a.name, a.trial_number, a.user_id, a.application_status
-             FROM {$wpdb->prefix}team_trial_selections s
-             JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
-             LEFT JOIN " . self::table() . " n ON n.application_id = s.application_id AND n.team = s.team
-             WHERE s.season = %s AND s.status = 'rejected' AND a.application_status IN ('pending', 'accepted', 'awaiting_payment')
-               AND (n.id IS NULL OR n.state = %s)
-             ORDER BY COALESCE(s.updated_date, s.created_date), s.id LIMIT 1000",
-            $season, self::FAILED
-        ));
-        if (empty($rows)) {
-            return array();
-        }
-        $people = array();
-        foreach ($rows as $row) {
-            if (intval($row->user_id) > 0) {
-                $people[] = intval($row->user_id);
-            }
-        }
-        if ($people) {
-            cache_users(array_values(array_unique($people)));
-        }
-        $config = self::teams_config($season);
-        $out = array();
-        foreach ($rows as $row) {
-            $at = !empty($row->updated_date) ? (string) $row->updated_date : (string) $row->created_date;
-            $name = self::team_name($row->team, $season, $config);
-            $out[] = array(
-                'selection_id' => intval($row->selection_id),
-                'application_id' => intval($row->application_id),
-                'team' => (string) $row->team,
-                'team_name' => $name,
-                'name' => (string) $row->name,
-                'trial_number' => intval($row->trial_number),
-                'user_id' => intval($row->user_id),
-                'application_status' => (string) $row->application_status,
-                'verdict_at' => $at,
-                'days' => self::days_since($at),
-                'reason' => self::block_reason((string) $row->application_status, intval($row->user_id), 'rejected', null, $name),
-            );
-        }
-        return $out;
+    public static function is_due($row) {
+        $reason = is_object($row) ? $row->reason : (isset($row['reason']) ? $row['reason'] : null);
+        $placed = is_object($row) ? !empty($row->placed) : !empty($row['placed']);
+        return self::is_untold($row) && $reason === null && !$placed;
     }
 
     /**
-     * How many rejections of a season (or, with '', every offers season)
-     * have not been told, counting only those whose verdict is at least
-     * $older_than_days old. One query. The status strip, the setup
-     * checklist and the one-off upgrade's note read it.
+     * The rejections not told yet, shared by untold() and untold_count():
+     * every Rejected verdict of $season ('' = every offers season) on a team
+     * the player applied for, whose application is still open, and with no
+     * notice, a notice the outbox refused, or one whose email was skipped
+     * (dropped()); only verdicts at least $older_than_days old when given.
+     * Oldest verdict first. A list of arrays (see untold()) with notice and
+     * placed. A few queries whatever the number (the verdicts, their notices
+     * and outbox rows, the offers behind placed_map(), the accounts).
      */
-    public static function untold_count($season = '', $older_than_days = 0) {
+    private static function untold_rows($season, $older_than_days, $limit) {
         global $wpdb;
-        $where = array("s.status = 'rejected'", "a.application_status IN ('pending', 'accepted', 'awaiting_payment')", '(n.id IS NULL OR n.state = %s)');
-        $args = array(self::FAILED);
-        if ($season !== '' && $season !== null) {
-            if (!preg_match('/^\d{4}$/D', (string) $season) || !class_exists('TeamOversight_Offers') || !TeamOversight_Offers::applies((string) $season)) {
-                return 0;
-            }
+        $where = array("s.status = 'rejected'", "a.application_status IN ('pending', 'accepted', 'awaiting_payment')", '(n.id IS NULL OR n.state IN (%s, %s))');
+        $args = array(self::FAILED, self::SENT);
+        if ($season !== '') {
             $where[] = 's.season = %s';
-            $args[] = (string) $season;
+            $args[] = $season;
         } else {
             $where[] = 's.season REGEXP %s AND CAST(s.season AS UNSIGNED) >= %d';
             $args[] = '^[0-9]{4}$';
@@ -820,13 +971,127 @@ class TeamOversight_Not_Selected {
             $where[] = 'COALESCE(s.updated_date, s.created_date) < %s';
             $args[] = date('Y-m-d H:i:s', strtotime(self::now()) - intval($older_than_days) * DAY_IN_SECONDS);
         }
-        return intval($wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->prefix}team_trial_selections s
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT s.id AS selection_id, s.application_id, s.team, s.season, s.created_date, s.updated_date, a.name, a.trial_number, a.user_id, a.application_status, a.interested_teams, n.id AS notice_id
+             FROM {$wpdb->prefix}team_trial_selections s
              JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
              LEFT JOIN " . self::table() . " n ON n.application_id = s.application_id AND n.team = s.team
-             WHERE " . implode(' AND ', $where),
+             WHERE " . implode(' AND ', $where) . '
+             ORDER BY COALESCE(s.updated_date, s.created_date), s.id LIMIT ' . max(1, intval($limit)),
             $args
-        )));
+        ));
+        $kept = array();
+        $notice_ids = array();
+        foreach ((array) $rows as $row) {
+            if (!in_array((string) $row->team, self::codes_from_json($row->interested_teams), true)) {
+                continue; // they never applied for this team: nothing to tell them about it
+            }
+            $kept[] = $row;
+            if (intval($row->notice_id) > 0) {
+                $notice_ids[] = intval($row->notice_id);
+            }
+        }
+        $infos = array();
+        if ($notice_ids) {
+            $notices = $wpdb->get_results('SELECT * FROM ' . self::table() . ' WHERE id IN (' . implode(',', array_values(array_unique($notice_ids))) . ')');
+            $emails = self::email_rows_for((array) $notices);
+            $names = self::names_for((array) $notices);
+            foreach ((array) $notices as $notice) {
+                $infos[intval($notice->id)] = self::info_from_row($notice, $emails, $names);
+            }
+        }
+        $statuses = array();
+        $people = array();
+        $untold = array();
+        foreach ($kept as $row) {
+            $info = intval($row->notice_id) > 0 && isset($infos[intval($row->notice_id)]) ? $infos[intval($row->notice_id)] : null;
+            if (!self::info_untold($info)) {
+                continue; // sent (or on its way): told
+            }
+            $row->notice = $info;
+            $untold[] = $row;
+            $statuses[intval($row->application_id)] = (string) $row->application_status;
+            if (intval($row->user_id) > 0) {
+                $people[] = intval($row->user_id);
+            }
+        }
+        if (empty($untold)) {
+            return array();
+        }
+        if ($people) {
+            cache_users(array_values(array_unique($people)));
+        }
+        $placed = self::placed_map($statuses);
+        $configs = array();
+        $out = array();
+        foreach ($untold as $row) {
+            $row_season = (string) $row->season;
+            if (!isset($configs[$row_season])) {
+                $configs[$row_season] = self::teams_config($row_season);
+            }
+            $at = !empty($row->updated_date) ? (string) $row->updated_date : (string) $row->created_date;
+            $name = self::team_name($row->team, $row_season, $configs[$row_season]);
+            $out[] = array(
+                'selection_id' => intval($row->selection_id),
+                'application_id' => intval($row->application_id),
+                'season' => $row_season,
+                'team' => (string) $row->team,
+                'team_name' => $name,
+                'name' => (string) $row->name,
+                'trial_number' => intval($row->trial_number),
+                'user_id' => intval($row->user_id),
+                'application_status' => (string) $row->application_status,
+                'verdict_at' => $at,
+                'days' => self::days_since($at),
+                'notice' => $row->notice,
+                'dropped' => self::dropped($row->notice),
+                'placed' => !empty($placed[intval($row->application_id)]),
+                'reason' => self::block_reason((string) $row->application_status, intval($row->user_id), 'rejected', $row->notice, $name, true),
+            );
+        }
+        return $out;
+    }
+
+    /**
+     * The Offers page's Not selected tab, part 1: every Rejected verdict of
+     * the season, on a team the player applied for, whose player hasn't been
+     * told (no notice row, one the outbox refused, or one whose email was
+     * skipped: dropped()) and whose application is still open (pending,
+     * accepted or Payment pending), oldest verdict first. A list of arrays:
+     * selection_id, application_id, season, team, team_name, name,
+     * trial_number, user_id, application_status, verdict_at, days (since the
+     * verdict), notice (the for_applications() entry, or null), dropped,
+     * placed (they already hold a place this season: left out of Send all)
+     * and reason (block_reason() or null).
+     */
+    public static function untold($season) {
+        $season = is_scalar($season) ? (string) $season : '';
+        if (!preg_match('/^\d{4}$/D', $season) || !class_exists('TeamOversight_Offers') || !TeamOversight_Offers::applies($season)) {
+            return array();
+        }
+        return self::untold_rows($season, 0, 1000);
+    }
+
+    /**
+     * How many rejections of a season (or, with '', every offers season)
+     * are due to be told (is_due(): not told yet, nothing stopping a Send,
+     * and no place held this season), counting only those whose verdict is
+     * at least $older_than_days old. The status strip, the setup checklist
+     * and the one-off upgrade's note read it, so they never nag about a
+     * player nobody can (or needs to) send one to.
+     */
+    public static function untold_count($season = '', $older_than_days = 0) {
+        $season = ($season === null || !is_scalar($season)) ? '' : (string) $season;
+        if ($season !== '' && (!preg_match('/^\d{4}$/D', $season) || !class_exists('TeamOversight_Offers') || !TeamOversight_Offers::applies($season))) {
+            return 0;
+        }
+        $n = 0;
+        foreach (self::untold_rows($season, $older_than_days, 20000) as $row) {
+            if (self::is_due($row)) {
+                $n++;
+            }
+        }
+        return $n;
     }
 
     /**
@@ -834,8 +1099,8 @@ class TeamOversight_Not_Selected {
      * maybe_upgrade()): since 1.80.0 it writes NOTHING. Players rejected
      * before offers began are simply "not told yet" (the coach's card, the
      * Not selected tab), and nothing is sent unless someone presses Send.
-     * Returns how many (player, team) rejections are not told, for the
-     * upgrade's flag and log line.
+     * Returns how many (player, team) rejections are due to be told
+     * (untold_count()), for the upgrade's flag and log line.
      */
     public static function backlog_count() {
         return self::untold_count('', 0);
@@ -1066,10 +1331,18 @@ class TeamOversight_Not_Selected {
      *   team            the team code,
      *   team_name       its name,
      *   rejected_teams  array(team_name) (kept for wording saved before 1.80.0),
-     *   multi           bool: the player applied for at least one team other
-     *                   than this one (the email then says this message is
-     *                   only about this team). Nothing about any other team's
+     *   applied         bool: the application asked for this team (a notice is
+     *                   only ever sent when it did: block_reason()),
+     *   multi           bool: the player applied for this team AND at least
+     *                   one other (the email then says this message is only
+     *                   about this team). Nothing about any other team's
      *                   verdict or offer is in here,
+     *   placed          bool: they already hold a place this season (an
+     *                   offer they accepted or locked in, or an application
+     *                   the club accepted: placed_map()). The email then
+     *                   suggests no lower division and no pathway, and its
+     *                   more-than-one-team sentence doesn't promise news
+     *                   about the other applications; it never names the team,
      *   suggestions     list of array(label, level, codes): the divisions
      *                   below THIS team they are eligible for (gender, age
      *                   rule, date of birth), leaving out every team they
@@ -1077,8 +1350,8 @@ class TeamOversight_Not_Selected {
      *                   and every team that has them Rejected, highest
      *                   division first, colour variants grouped ("State
      *                   League 2 Men (Blue or White)"). EMPTY unless can_edit
-     *                   is true, so "suggestions, else pathway" is the whole
-     *                   rule,
+     *                   is true and they hold no place, so "suggestions, else
+     *                   pathway" is the whole rule,
      *   eligible        the same list whatever can_edit says (for previews),
      *   can_edit        bool: applications are open for the season and this
      *                   application is still pending (editable),
@@ -1089,7 +1362,7 @@ class TeamOversight_Not_Selected {
      *                   Reds Social League (adults) or the Junior Academy
      *                   (juniors, as extra training), from
      *                   team_oversight_pathway_pages; a page that is missing or
-     *                   not published is left out
+     *                   not published is left out; empty when placed
      * ).
      * An unknown application, or no team, gives an empty array.
      */
@@ -1105,12 +1378,10 @@ class TeamOversight_Not_Selected {
         $applied = self::applied_codes($app);
         $team_name = self::team_name($team, $season, $config);
 
-        $others = array();
-        foreach ($applied as $code) {
-            if ($code !== $team) {
-                $others[] = $code;
-            }
-        }
+        // "You applied for more than one team" only when they did, and only about a team they applied for (1.80.0 review).
+        $applied_here = in_array($team, $applied, true);
+        $placed_map = self::placed_map(array(intval($app->id) => (string) $app->application_status));
+        $placed = !empty($placed_map[intval($app->id)]);
 
         $dob = self::dob_for($app);
         $eligible = self::eligible_lower_divisions($app, $config, $verdicts, $applied, $dob, $team);
@@ -1129,13 +1400,15 @@ class TeamOversight_Not_Selected {
             'team' => $team,
             'team_name' => $team_name,
             'rejected_teams' => array($team_name),
-            'multi' => !empty($others),
-            'suggestions' => $can_edit ? $eligible : array(),
+            'applied' => $applied_here,
+            'multi' => $applied_here && count($applied) > 1,
+            'placed' => $placed,
+            'suggestions' => ($can_edit && !$placed) ? $eligible : array(),
             'eligible' => $eligible,
             'can_edit' => $can_edit,
             'edit_url' => class_exists('TeamOversight_Trial_Emails') ? TeamOversight_Trial_Emails::get_form_url() : home_url('/'),
             'pathway_kind' => $kind,
-            'pathway' => self::pathway_links($kind),
+            'pathway' => $placed ? array() : self::pathway_links($kind),
         );
     }
 

@@ -212,15 +212,50 @@ class TeamOversight_Offer_Emails {
         return array('ok' => true, 'message' => $n . ' held message(s) will be sent now.', 'released' => $n);
     }
 
-    /** Never send the held messages ('held' -> 'skipped', with a note). Returns array(ok, message, discarded). */
+    /** The note discard_held() leaves on a message (TeamOversight_Not_Selected words a discarded "not selected" email from it). */
+    const DISCARD_NOTE = 'Discarded by an administrator';
+
+    /** The note a "not selected" email skipped because it is switched off on the Emails page carries. */
+    const OFF_NOTE = 'This email is switched off on the Emails page.';
+
+    /**
+     * Never send the held messages ('held' -> 'skipped', with a note).
+     * A discarded "not selected" email leaves its player not told: the Not
+     * selected tab and the coach's card list them again, and Send works
+     * again (TeamOversight_Not_Selected::send_for_team() re-opens the row
+     * with rearm_skipped()). Returns array(ok, message, discarded).
+     */
     public static function discard_held($actor_id = 0) {
         global $wpdb;
-        $n = $wpdb->query($wpdb->prepare('UPDATE ' . self::table() . " SET status = 'skipped', note = %s WHERE status = 'held'", 'Discarded by an administrator'));
+        $n = $wpdb->query($wpdb->prepare('UPDATE ' . self::table() . " SET status = 'skipped', note = %s WHERE status = 'held'", self::DISCARD_NOTE));
         $n = $n === false ? 0 : intval($n);
         if ($n > 0 && class_exists('TeamOversight_Log')) {
             TeamOversight_Log::add('email_offer', $n . ' held offer email(s) discarded by an administrator.');
         }
         return array('ok' => true, 'message' => $n . ' held message(s) were discarded and will never be sent.', 'discarded' => $n);
+    }
+
+    /**
+     * Re-open a "not selected" email that was never sent ('skipped': it was
+     * discarded, switched off, or the verdict had changed when it was due)
+     * because someone pressed Send again (1.80.0 review): ONE compare-and-set
+     * 'skipped' -> 'pending' on its dedupe key, with fresh tries, the new
+     * context (who pressed it now) and created_at = now (it is a new press,
+     * so the gate's day-old hold judges it from now). Only the press that
+     * wins this UPDATE sends, so two tabs re-open it once. Only for
+     * not_selected rows. Returns true when this call re-opened it.
+     */
+    public static function rearm_skipped($dedupe_key, array $context) {
+        global $wpdb;
+        $n = $wpdb->query($wpdb->prepare(
+            'UPDATE ' . self::table() . " SET status = 'pending', tries = 0, claimed_at = NULL, sent_at = NULL, note = %s, created_at = %s, context = %s WHERE dedupe_key = %s AND event = 'not_selected' AND status = 'skipped'",
+            'Pressed again after it was not sent', current_time('mysql'), (string) wp_json_encode($context), (string) $dedupe_key
+        ));
+        if ($n === 1) {
+            self::flush_after_request();
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -420,7 +455,7 @@ class TeamOversight_Offer_Emails {
                     . "Your offer page shows your fee and what you'll need to do before the season, including the uniform. You can accept or decline the offer there. " . self::training_line() . "\n\n"
                     . "{extras}\n\n"
                     . "## Locking in your place\n"
-                    . "Accept by {reply_by}. Then pay your deposit of {deposit} by {deposit_due} to lock in your place. It's paid in one payment and comes off your season fee. If it isn't paid by then, your place may be offered to someone else.\n\n"
+                    . "Accept by {reply_by}. Then pay your deposit of {deposit} by {deposit_due} to lock in your place. It's paid in one payment and comes off your season fee. If it isn't paid by then, your place may be offered to someone else. Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
                     . "{terms}\n\n"
                     . self::sign_off(),
             ),
@@ -445,7 +480,7 @@ class TeamOversight_Offer_Emails {
                     . "{button:See your offer}\n\n"
                     . "You can accept or decline on your offer page. " . self::training_line() . "\n\n"
                     . "## Locking in your place\n"
-                    . "{reply_sentence} {deposit_sentence} It's paid in one payment and comes off your season fee. If it isn't paid in time, your place may be offered to someone else.\n\n"
+                    . "{reply_sentence} {deposit_sentence} It's paid in one payment and comes off your season fee. If it isn't paid in time, your place may be offered to someone else. Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
                     . "{terms}\n\n"
                     . self::sign_off(),
             ),
@@ -469,7 +504,7 @@ class TeamOversight_Offer_Emails {
                     . "{early_note}\n\n"
                     . "{button:See your offer}\n\n"
                     . "## Your deposit\n"
-                    . "You've accepted this offer. {deposit_sentence} It's paid in one payment and comes off your season fee. If it isn't paid in time, your place may be offered to someone else.\n\n"
+                    . "You've accepted this offer. {deposit_sentence} It's paid in one payment and comes off your season fee. If it isn't paid in time, your place may be offered to someone else. Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
                     . "{terms}\n\n"
                     . self::sign_off(),
             ),
@@ -575,7 +610,7 @@ class TeamOversight_Offer_Emails {
                 'switch' => true,
                 // 1.80.0 (club decision, 28 Oct 2026): only when someone presses the button, about one team, addressed like the offer emails.
                 'when' => 'Only when someone presses Send "not selected" email: a coach (or committee with edit access) on a Rejected player\'s card in the coach portal, or an administrator on the Offers page, Not selected tab. About ONE team; once per player and team. It does not wait for the player\'s other teams and never mentions their decisions. No committee approval.',
-                'switch_note' => 'While this is unticked the Send "not selected" email buttons are greyed out (the coach portal says the club has switched these emails off), and an email pressed before it was unticked and still waiting is skipped for good.',
+                'switch_note' => 'While this is unticked the Send "not selected" email buttons are greyed out (the coach portal says the club has switched these emails off), and an email pressed before it was unticked and still waiting is skipped: that player goes back to not told yet, and can be sent it once this is ticked again.',
                 'who' => 'To the player\'s account email, from the club\'s sender like every offer email. Reply-To the coach who pressed Send when they are one of this team\'s coaches or assistant coaches; when someone else pressed it (the committee, or an administrator on the Offers page), the team\'s head coach; with no coach on file, the trial applications address. Cc every coach and assistant coach of this team, including the one replies go to (read from the roster when it is sent; never the coaches of the player\'s other teams). Signed by the Reply-To coach, or by the team\'s coaching team when no coach is on file.',
                 'program' => 'Trials · {season}',
                 'subject' => 'Your {season} MURVC trial: {team}',
@@ -745,7 +780,7 @@ class TeamOversight_Offer_Emails {
             'state' => 'sent', 'name' => '', 'first_name' => '', 'trial_number' => '', 'team' => '', 'team_code' => '', 'season' => '',
             'role' => 'playing_member', 'fee' => '', 'deposit' => '', 'reply_by' => '', 'deposit_due' => '', 'paid_cents' => 0, 'left_cents' => 0,
             'coach_name' => '', 'coach_email' => '', 'link' => '', 'training_url' => '', 'reason' => '', 'had_deposit' => false,
-            'held_cents' => 0, 'kind' => '', 'overdue_date' => '', 'rejected_teams' => '', 'multi' => false,
+            'held_cents' => 0, 'kind' => '', 'overdue_date' => '', 'rejected_teams' => '', 'multi' => false, 'placed' => false,
             'early' => false, 'early_note' => '', 'fee_limit' => '',
             'extras' => array(),
         );
@@ -848,7 +883,8 @@ class TeamOversight_Offer_Emails {
             '{season}' => $f['season'],
             '{team}' => $f['team'],
             '{rejected_teams}' => $f['team'],
-            '{other_teams}' => !empty($f['multi']) ? TeamOversight_Offers::wording('ns_other_teams', $team_vars) : '',
+            // A player who already holds a place this season (an offer they accepted) isn't told they'll hear about their other applications.
+            '{other_teams}' => !empty($f['multi']) ? TeamOversight_Offers::wording(!empty($f['placed']) ? 'ns_other_teams_placed' : 'ns_other_teams', $team_vars) : '',
             '{link}' => $f['link'],
             '{reply_line}' => TeamOversight_Offers::wording($named ? 'ns_sign_reply' : 'ns_sign_reply_team', $team_vars),
             '{coach_name}' => $named ? (string) $f['coach_name'] : TeamOversight_Offers::wording('ns_sign_team', $team_vars),
@@ -1021,6 +1057,8 @@ class TeamOversight_Offer_Emails {
                 'multi_adult' => array('Preview: applied for more than one team, adult, nothing lower to try', ' (more than one team, adult, nothing lower)'),
                 'junior' => array('Preview: applied for one team, junior, nothing lower to try', ' (one team, junior, nothing lower)'),
                 'multi_junior' => array('Preview: applied for more than one team, junior, nothing lower to try', ' (more than one team, junior, nothing lower)'),
+                // 1.80.0 review: a player who already holds a place this season (an offer they accepted) gets no other way in.
+                'multi_placed' => array('Preview: applied for more than one team, already has a place this season', ' (more than one team, already has a place)'),
                 // Signed by the coach (Sam Coach) in every shape above; this one shows a team with no coach on file.
                 'no_coach' => array('Preview: applied for one team, no coach on file (signed by the coaching team)', ' (no coach on file)'),
             );
@@ -1085,6 +1123,7 @@ class TeamOversight_Offer_Emails {
             $facts['team'] = 'State League 2 Men';
             $facts['rejected_teams'] = 'State League 2 Men';
             $facts['multi'] = strpos((string) $variant, 'multi') === 0;
+            $facts['placed'] = $variant === 'multi_placed';
             $facts['link'] = TeamOversight_Trial_Emails::get_form_url();
             // Signed by the sample coach, except the shape for a team with no coach on file.
             $facts['coach_name'] = $variant === 'no_coach' ? '' : 'Sam Coach';
@@ -1142,8 +1181,9 @@ class TeamOversight_Offer_Emails {
      * A sample notice_content() result for the shapes of "not selected"
      * (1.80.0: one team each): lower divisions to try, the adult pathway, the
      * junior pathway, each for a player who applied for one team and for one
-     * who applied for more than one ('multi...'), and 'no_coach' (lower
-     * divisions; only its sign-off differs).
+     * who applied for more than one ('multi...'), 'multi_placed' (a player
+     * who already holds a place this season: no next steps at all), and
+     * 'no_coach' (lower divisions; only its sign-off differs).
      */
     private static function sample_notice($variant) {
         $variant = (string) $variant;
@@ -1156,7 +1196,9 @@ class TeamOversight_Offer_Emails {
             'team' => 'SL2M',
             'team_name' => 'State League 2 Men',
             'rejected_teams' => array('State League 2 Men'),
+            'applied' => true,
             'multi' => $multi,
+            'placed' => $shape === 'placed',
             'suggestions' => array(),
             'eligible' => array(),
             'can_edit' => true,
@@ -1169,6 +1211,9 @@ class TeamOversight_Offer_Emails {
                 array('label' => 'State League 3 Men (Red or White)', 'level' => 6, 'codes' => array()),
                 array('label' => 'State League 3 Mixed', 'level' => 6, 'codes' => array()),
             );
+            return $notice;
+        }
+        if ($shape === 'placed') {
             return $notice;
         }
         $kind = $shape === 'junior' ? 'junior' : 'adult';
@@ -1478,7 +1523,7 @@ class TeamOversight_Offer_Emails {
         }
         $settings = self::get_settings();
         if (empty($settings['not_selected']['enabled'])) {
-            return self::skip('This email is switched off on the Emails page.');
+            return self::skip(self::OFF_NOTE);
         }
         $check = TeamOversight_Not_Selected::send_check($app_id, $team);
         if (empty($check['ok'])) {
@@ -1502,9 +1547,10 @@ class TeamOversight_Offer_Emails {
         if (!empty($reply_to)) {
             $headers[] = 'Reply-To: ' . $reply_to[0];
         }
-        $cc = self::clean_addresses(array_map(function ($p) {
+        $cc_list = array_map(function ($p) {
             return $p['email'];
-        }, self::copied_coaches($contacts)), array($to));
+        }, self::copied_coaches($contacts));
+        $cc = self::clean_addresses($cc_list, array($to));
         if (!empty($cc)) {
             $headers[] = 'Cc: ' . implode(', ', $cc);
         }
@@ -1518,6 +1564,7 @@ class TeamOversight_Offer_Emails {
             'team_code' => $team,
             'rejected_teams' => (string) $notice['team_name'],
             'multi' => !empty($notice['multi']),
+            'placed' => !empty($notice['placed']),
             'link' => isset($notice['edit_url']) ? (string) $notice['edit_url'] : TeamOversight_Trial_Emails::get_form_url(),
             // The sign-off: the Reply-To coach by name; '' (signed by the team's coaching team) when no coach is on file.
             'coach_name' => $contacts['primary'] ? (string) $contacts['primary']['name'] : '',
@@ -2300,9 +2347,10 @@ class TeamOversight_Offer_Emails {
      * names, fees and dates, the subject prefixed [TEST] and no real Cc or
      * Reply-To, so a test never reaches a player or a coach. Works on any
      * site (it is the one send the live-site gate does not hold back).
-     * "Not selected" is sent in its seven shapes (one team or more than one
-     * applied for; lower divisions, adult pathway, junior; and a team with no
-     * coach on file, signed by the coaching team). Returns a list of
+     * "Not selected" is sent in its eight shapes (one team or more than one
+     * applied for; lower divisions, adult pathway, junior; a player who
+     * already has a place this season; and a team with no coach on file,
+     * signed by the coaching team). Returns a list of
      * array(key, label, ok).
      */
     public static function send_test_emails($admin_user_id) {

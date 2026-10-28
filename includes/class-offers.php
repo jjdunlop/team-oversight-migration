@@ -756,6 +756,28 @@ class TeamOversight_Offers {
     }
 
     /**
+     * The applications whose player holds a place through an offer (1.80.0,
+     * for the "not selected" email): application id => list of team codes
+     * with a live ACCEPTED or LOCKED-IN offer. The player knows of it (they
+     * accepted it themselves), so TeamOversight_Not_Selected may leave such a
+     * player out of its nagging counts and drop the "other ways in" from the
+     * email; it never names the team. One indexed query; a pure read.
+     */
+    public static function places_held(array $application_ids) {
+        global $wpdb;
+        $ids = array_values(array_unique(array_filter(array_map('intval', $application_ids))));
+        $out = array();
+        if (empty($ids)) {
+            return $out;
+        }
+        $rows = $wpdb->get_results('SELECT application_id, team FROM ' . self::table() . ' WHERE application_id IN (' . implode(',', $ids) . ") AND live = 1 AND state IN ('" . self::ACCEPTED . "', '" . self::LOCKED_IN . "') ORDER BY id");
+        foreach ((array) $rows as $row) {
+            $out[intval($row->application_id)][] = (string) $row->team;
+        }
+        return $out;
+    }
+
+    /**
      * Payment Management's tags for a season (1.77.0), from ONE query:
      * array('by_user' => user id => tags, 'by_email' => lower email => tags),
      * a tag being 'deposit' (a live accepted offer: the invoice is still the
@@ -3588,9 +3610,9 @@ class TeamOversight_Offers {
                 <?php echo $form('emails_on', 'Allow this website to send offer emails', 'Allow ' . $host . ' to send offer emails? Only do this on the live website. Real players and coaches will be emailed. Messages that have waited more than a day are held for you to send or discard. Coaches are emailed a "deadline not met" notice by the next daily check for each offer that is overdue then.', false); ?>
             <?php endif; ?>
             <?php if ($held > 0): ?>
-                <p style="margin: 8px 0 6px;"><strong><?php echo intval($held); ?> message(s) older than a day are being held</strong> (queued during a pause or a long gap). Send them only if they are still wanted. An offer email that is discarded leaves the offer live and its dates running, with the player never emailed: remind them from Waiting on players (Remind), give them more time (+7 days) or withdraw the offer.</p>
+                <p style="margin: 8px 0 6px;"><strong><?php echo intval($held); ?> message(s) older than a day are being held</strong> (queued during a pause or a long gap). Send them only if they are still wanted. An offer email that is discarded leaves the offer live and its dates running, with the player never emailed: remind them from Waiting on players (Remind), give them more time (+7 days) or withdraw the offer. A "not selected" email that is discarded leaves that player not told: they go back on the Offers page's Not selected tab (and their coach's card) as not told yet, where it can be sent again.</p>
                 <?php if ($live) { echo $form('emails_send_held', 'Send the held messages', 'Send ' . intval($held) . ' held message(s) now? They are more than a day old: real players and coaches will receive them, and an offer email gives the reply-by date the offer was approved with (give +7 days on Waiting on players first if that date has passed or is close).', false); } ?>
-                <?php echo $form('emails_discard_held', 'Discard the held messages', 'Discard ' . intval($held) . ' held message(s)? They will never be sent. A discarded offer email leaves the offer live with the player never emailed: Remind or Withdraw it on Waiting on players.', false); ?>
+                <?php echo $form('emails_discard_held', 'Discard the held messages', 'Discard ' . intval($held) . ' held message(s)? They will never be sent. A discarded offer email leaves the offer live with the player never emailed: Remind or Withdraw it on Waiting on players. A discarded "not selected" email leaves that player not told: they go back on the Not selected tab, where it can be sent again.', false); ?>
             <?php endif; ?>
         </div>
         <?php

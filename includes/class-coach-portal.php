@@ -1085,7 +1085,8 @@ class TeamOversight_Coach_Portal {
         // 1.80.0: the team's Rejected players and whether each has been sent the "not selected" email (one query and its outbox read).
         $rejections = class_exists('TeamOversight_Not_Selected') ? TeamOversight_Not_Selected::team_rejections($team, $season) : array();
         foreach ($rejections as $rejection) {
-            if (TeamOversight_Not_Selected::is_untold($rejection)) {
+            // Only the ones the coach can and should send now (1.80.0 review): not those something stops, nor players who already have a place.
+            if (TeamOversight_Not_Selected::is_due($rejection)) {
                 $counts['rejected_untold']++;
             }
         }
@@ -1362,7 +1363,7 @@ class TeamOversight_Coach_Portal {
      * committee). A coach who changes the verdict removes the player from the
      * list. $declined: array of array(selection row, offer).
      */
-    private function render_declined_section($team, $season, $declined, $teams_config, $blocks = array(), $ns_notices = array()) {
+    private function render_declined_section($team, $season, $declined, $teams_config, $blocks = array(), $ns_notices = array(), $ns_facts = array()) {
         if (empty($declined)) {
             return '';
         }
@@ -1397,7 +1398,7 @@ class TeamOversight_Coach_Portal {
             }
             $html .= '</div>';
             // 1.80.0: a "not selected" email sent before the verdict changed, and other teams that told the player.
-            $html .= $this->render_ns_status($team, $season, $member->status, $member->application_status, $member->user_id, isset($ns_notices[intval($member->application_id)]) ? $ns_notices[intval($member->application_id)] : array(), $teams_config);
+            $html .= $this->render_ns_status($team, $season, $member->status, $member->application_status, $member->user_id, isset($ns_notices[intval($member->application_id)]) ? $ns_notices[intval($member->application_id)] : array(), $teams_config, isset($ns_facts[intval($member->application_id)]) ? $ns_facts[intval($member->application_id)] : null);
             $html .= '</div>';
             if (!$this->read_only) {
                 $cell = $this->offer_cell($member->user_id, $season, $team, $member->status);
@@ -1431,40 +1432,51 @@ class TeamOversight_Coach_Portal {
      * sent 28 Oct by Sam Coach", or "waiting to send" while the club's email
      * permission is closed, or that the club chose not to send it); a player
      * whose verdict changed after the email went keeps it as a quiet history
-     * line. Then one quiet line for each OTHER team that has told the
-     * player, so nobody is surprised. '' when there is nothing to say.
-     * $notices: this application's TeamOversight_Not_Selected::
-     * for_applications() entry (team => info).
+     * line. Then one quiet line for each OTHER team whose email has really
+     * gone to the player (never one still waiting, held or not sent: the
+     * player hasn't been told), so nobody is surprised. '' when there is
+     * nothing to say. $notices: this application's TeamOversight_Not_Selected::
+     * for_applications() entry (team => info); $facts: its card_facts()
+     * entry (applied, placed), or null when unknown.
      */
-    private function render_ns_status($team, $season, $status, $application_status, $user_id, $notices, $teams_config) {
+    private function render_ns_status($team, $season, $status, $application_status, $user_id, $notices, $teams_config, $facts = null) {
         if (!self::offers_on($season) || !class_exists('TeamOversight_Not_Selected')) {
             return '';
         }
         $notices = is_array($notices) ? $notices : array();
         $mine = isset($notices[$team]) ? $notices[$team] : null;
         $team_name = isset($teams_config[$team]['name']) ? $teams_config[$team]['name'] : $team;
+        $applied = !is_array($facts) || in_array((string) $team, (array) $facts['applied'], true);
         $html = '';
         if ($status === 'rejected') {
-            $reason = TeamOversight_Not_Selected::block_reason((string) $application_status, intval($user_id), 'rejected', $mine, $team_name);
+            $reason = TeamOversight_Not_Selected::block_reason((string) $application_status, intval($user_id), 'rejected', $mine, $team_name, $applied);
             if ($reason && $reason['code'] === 'sent') {
                 $html .= '<div class="cac-offer-status is-ns-sent"><span class="cos-label">' . esc_html($reason['text']) . '</span></div>';
             } elseif ($reason && $reason['code'] === 'stopped') {
                 $html .= '<div class="cac-offer-status is-ns-stopped"><span class="cos-label">' . esc_html($reason['text']) . '</span></div>';
+            } elseif ($reason && $reason['code'] === 'not_applied') {
+                // They never applied for this team: nothing to tell them about it, so no "not told yet" and no button.
+                $html .= '<div class="cac-offer-status is-ns-note"><span class="cos-sub">' . esc_html($reason['text']) . '</span></div>';
             } else {
                 $html .= '<div class="cac-offer-status is-ns-untold"><span class="cos-label">' . esc_html(TeamOversight_Offers::wording('ns_untold')) . '</span>'
-                    . ($reason ? ' <span class="cos-sub">' . esc_html($reason['text']) . '</span>' : '') . '</div>';
+                    . ($reason ? ' <span class="cos-sub">' . esc_html($reason['text']) . '</span>' : '')
+                    // Pressed before, but the email never went (discarded, switched off, things changed): say so; Send works again.
+                    . (TeamOversight_Not_Selected::dropped($mine) ? ' <span class="cos-sub">' . esc_html(TeamOversight_Not_Selected::status_text($mine)) . '</span>' : '')
+                    . (!$reason && is_array($facts) && !empty($facts['placed']) ? ' <span class="cos-sub">' . esc_html(TeamOversight_Offers::wording('ns_placed')) . '</span>' : '')
+                    . '</div>';
             }
         } elseif ($mine && $mine['state'] === 'sent') {
             $html .= '<div class="cac-offer-status is-ns-note"><span class="cos-sub">' . esc_html(TeamOversight_Offers::wording('ns_history', array('{status}' => TeamOversight_Not_Selected::status_text($mine)))) . '</span></div>';
         }
         foreach ($notices as $code => $info) {
-            if ((string) $code === (string) $team || $info['state'] !== 'sent') {
+            // Another team's notice: only once its email has really gone (the outbox says sent), dated the day it went.
+            if ((string) $code === (string) $team || $info['state'] !== 'sent' || $info['email_status'] !== 'sent') {
                 continue;
             }
-            $when = self::short_date($info['email_sent_at'] !== '' ? $info['email_sent_at'] : $info['at']);
-            $html .= '<div class="cac-offer-status is-ns-note"><span class="cos-sub">' . esc_html(TeamOversight_Offers::wording('ns_other_team', array(
+            $changed = $info['verdict_now'] !== null && $info['verdict_now'] !== 'rejected';
+            $html .= '<div class="cac-offer-status is-ns-note"><span class="cos-sub">' . esc_html(TeamOversight_Offers::wording($changed ? 'ns_other_team_changed' : 'ns_other_team', array(
                 '{team}' => isset($teams_config[$code]['name']) ? $teams_config[$code]['name'] : $code,
-                '{date}' => $when,
+                '{date}' => self::short_date($info['email_sent_at'] !== '' ? $info['email_sent_at'] : $info['at']),
             ))) . '</span></div>';
         }
         return $html;
@@ -1475,18 +1487,22 @@ class TeamOversight_Coach_Portal {
      * this team only; viewers see the status line and nothing to press):
      * secondary, with a data-confirm that says the player is told about THIS
      * team only. Greyed with the reason when something stops it
-     * (block_reason()); gone once it has been sent or the club chose not to.
-     * The server checks everything again.
+     * (block_reason()); gone once it has been sent or the club chose not to,
+     * and never there for a player who didn't apply for this team (nothing
+     * to tell them). Back again when a pressed email was never sent (it was
+     * discarded or skipped). The server checks everything again. $facts:
+     * the application's card_facts() entry, or null when unknown.
      */
-    private function render_ns_controls($application_id, $team, $season, $status, $application_status, $user_id, $player_name, $notices, $teams_config) {
+    private function render_ns_controls($application_id, $team, $season, $status, $application_status, $user_id, $player_name, $notices, $teams_config, $facts = null) {
         if ($this->read_only || $status !== 'rejected' || !self::offers_on($season) || !class_exists('TeamOversight_Not_Selected')) {
             return '';
         }
         $notices = is_array($notices) ? $notices : array();
         $mine = isset($notices[$team]) ? $notices[$team] : null;
         $team_name = isset($teams_config[$team]['name']) ? $teams_config[$team]['name'] : $team;
-        $reason = TeamOversight_Not_Selected::block_reason((string) $application_status, intval($user_id), 'rejected', $mine, $team_name);
-        if ($reason && in_array($reason['code'], array('sent', 'stopped'), true)) {
+        $applied = !is_array($facts) || in_array((string) $team, (array) $facts['applied'], true);
+        $reason = TeamOversight_Not_Selected::block_reason((string) $application_status, intval($user_id), 'rejected', $mine, $team_name, $applied);
+        if ($reason && in_array($reason['code'], array('sent', 'stopped', 'not_applied'), true)) {
             return '';
         }
         $label = TeamOversight_Offers::wording('ns_button');
@@ -1502,8 +1518,10 @@ class TeamOversight_Coach_Portal {
     /**
      * Send "not selected" emails, for the board (editors only, 2027 on): a
      * panel beside Send offers to all listing exactly who on THIS team will
-     * be emailed (Rejected and not told yet, nothing stopping it), and who
-     * can't be with the reason (never posted). A data-confirm asks first;
+     * be emailed (Rejected and not told yet, nothing stopping it), who
+     * can't be with the reason, and who already has a place this season and
+     * is left out (neither is ever posted; with nobody to post the heading
+     * and hint say so). A data-confirm asks first;
      * the server sends each through TeamOversight_Not_Selected::send_many(),
      * which re-checks every id. '' when there is nobody to list.
      */
@@ -1513,23 +1531,30 @@ class TeamOversight_Coach_Portal {
         }
         $candidates = array();
         $cant = array();
+        $placed = array();
         foreach ($snap['rejections'] as $row) {
             if (!TeamOversight_Not_Selected::is_untold($row)) {
                 continue;
             }
             if ($row->reason) {
                 $cant[] = $row;
+            } elseif (!empty($row->placed)) {
+                // Already has a place this season: listed, never posted (the card's own button still works).
+                $placed[] = $row;
             } else {
                 $candidates[] = $row;
             }
         }
-        if (empty($candidates) && empty($cant)) {
+        if (empty($candidates) && empty($cant) && empty($placed)) {
             return '';
         }
         $team_name = TeamOversight_Not_Selected::team_name($team, $season, TeamOversight_Offers::teams_config($season));
         $n = count($candidates);
-        $html = '<details class="coach-app-details coach-bulk-offer coach-bulk-ns"><summary>' . esc_html(TeamOversight_Offers::wording('ns_bulk_title', array('{n}' => (string) $n))) . '</summary><div class="coach-bulk-body">';
-        $html .= '<p class="coach-portal-hint">' . esc_html(TeamOversight_Offers::wording('ns_bulk_hint', array('{team}' => $team_name))) . '</p>';
+        // With nobody to post, the panel says so instead of promising one email each (1.80.0 review).
+        $title = $n ? TeamOversight_Offers::wording('ns_bulk_title', array('{n}' => (string) $n)) : TeamOversight_Offers::wording('ns_bulk_title_none', array('{n}' => (string) (count($cant) + count($placed))));
+        $hint = $n ? TeamOversight_Offers::wording('ns_bulk_hint', array('{team}' => $team_name)) : TeamOversight_Offers::wording('ns_bulk_hint_none', array('{team}' => $team_name));
+        $html = '<details class="coach-app-details coach-bulk-offer coach-bulk-ns"><summary>' . esc_html($title) . '</summary><div class="coach-bulk-body">';
+        $html .= '<p class="coach-portal-hint">' . esc_html($hint) . '</p>';
         if ($n) {
             $html .= '<ul class="coach-bulk-list">';
             foreach ($candidates as $row) {
@@ -1541,6 +1566,13 @@ class TeamOversight_Coach_Portal {
             $html .= '<p class="coach-portal-hint"><strong>' . esc_html(TeamOversight_Offers::wording('ns_bulk_cant')) . '</strong></p><ul class="coach-bulk-list">';
             foreach ($cant as $row) {
                 $html .= '<li>' . esc_html($row->name ?: $row->email) . ' <span class="cos-sub">' . esc_html($row->reason['text']) . '</span></li>';
+            }
+            $html .= '</ul>';
+        }
+        if ($placed) {
+            $html .= '<p class="coach-portal-hint"><strong>' . esc_html(TeamOversight_Offers::wording('ns_bulk_placed')) . '</strong></p><ul class="coach-bulk-list">';
+            foreach ($placed as $row) {
+                $html .= '<li>' . esc_html($row->name ?: $row->email) . ' <span class="cos-sub">#' . intval($row->trial_number) . '</span></li>';
             }
             $html .= '</ul>';
         }
@@ -1643,6 +1675,8 @@ class TeamOversight_Coach_Portal {
         $teams_config = TeamOversight_Offers::teams_config($season);
         $ns_all = class_exists('TeamOversight_Not_Selected') ? TeamOversight_Not_Selected::for_applications(array($application_id)) : array();
         $ns = isset($ns_all[$application_id]) ? $ns_all[$application_id] : array();
+        $ns_facts_all = class_exists('TeamOversight_Not_Selected') ? TeamOversight_Not_Selected::card_facts(array($application_id)) : array();
+        $ns_facts = isset($ns_facts_all[$application_id]) ? $ns_facts_all[$application_id] : null;
         $app_status = $app_row ? (string) $app_row->application_status : '';
         $app_name = $app_row ? (string) $app_row->name : '';
 
@@ -1650,9 +1684,9 @@ class TeamOversight_Coach_Portal {
             'status' => $status,
             'chips' => $chips,
             'offer' => $this->render_offer_controls($application_id, $team, $season, $status, $offer, $pending, $user_id, $paid, $block)
-                . $this->render_ns_controls($application_id, $team, $season, $status, $app_status, $user_id, $app_name, $ns, $teams_config),
+                . $this->render_ns_controls($application_id, $team, $season, $status, $app_status, $user_id, $app_name, $ns, $teams_config, $ns_facts),
             'offer_label' => $this->render_offer_status($team, $season, $status, $offer, $pending, $user_id, $paid, $mail, $block)
-                . $this->render_ns_status($team, $season, $status, $app_status, $user_id, $ns, $teams_config),
+                . $this->render_ns_status($team, $season, $status, $app_status, $user_id, $ns, $teams_config, $ns_facts),
             'verdict_options' => self::render_verdict_select_options($status, $pending, $locked),
             'position' => $this->render_position_control($application_id, $team, $season, $status, $position),
             'meta_position' => self::meta_position_html($status, $position, $this->format_positions($applied)),
@@ -2004,6 +2038,7 @@ class TeamOversight_Coach_Portal {
         }
         // 1.80.0: every "not selected" notice of the players on this page, read once (application id => team => notice).
         $ns_notices = array();
+        $ns_facts = array();
         if ($offers_on && class_exists('TeamOversight_Not_Selected')) {
             $ns_ids = array();
             foreach ($applicants as $a) {
@@ -2016,6 +2051,8 @@ class TeamOversight_Coach_Portal {
                 $ns_ids[] = intval($pair[0]->application_id);
             }
             $ns_notices = TeamOversight_Not_Selected::for_applications($ns_ids);
+            // Which teams each applied for, and who already holds a place this season (1.80.0 review), read once for the page.
+            $ns_facts = TeamOversight_Not_Selected::card_facts($ns_ids);
         }
 
         $base_url = remove_query_arg(array('coach_team', 'coach_season'));
@@ -2310,7 +2347,7 @@ class TeamOversight_Coach_Portal {
                             <?php if ($offers_on): ?>
                             <?php $m_block = isset($snap['blocks'][intval($member->application_id)]) ? $snap['blocks'][intval($member->application_id)] : null; ?>
                             <div class="cac-offer-line"><?php echo $this->render_offer_status($active_team, $season, $member->status, $m_offer, $member_pending, $member->user_id, $m_paid, $m_mail, $m_block)
-                                . $this->render_ns_status($active_team, $season, $member->status, $member->application_status, $member->user_id, isset($ns_notices[intval($member->application_id)]) ? $ns_notices[intval($member->application_id)] : array(), $teams_config); ?></div>
+                                . $this->render_ns_status($active_team, $season, $member->status, $member->application_status, $member->user_id, isset($ns_notices[intval($member->application_id)]) ? $ns_notices[intval($member->application_id)] : array(), $teams_config, isset($ns_facts[intval($member->application_id)]) ? $ns_facts[intval($member->application_id)] : null); ?></div>
                             <?php endif; ?>
                             <?php if (!$this->read_only): ?>
                             <div class="cac-decide">
@@ -2365,7 +2402,7 @@ class TeamOversight_Coach_Portal {
             </div>
 
             <?php if ($offers_on): ?>
-                <?php echo $this->render_declined_section($active_team, $season, $declined_list, $teams_config, $offers_on ? $snap['blocks'] : array(), $ns_notices); ?>
+                <?php echo $this->render_declined_section($active_team, $season, $declined_list, $teams_config, $offers_on ? $snap['blocks'] : array(), $ns_notices, $ns_facts); ?>
             <?php endif; ?>
 
             <div class="coach-team-section">
@@ -2482,8 +2519,9 @@ class TeamOversight_Coach_Portal {
 
                                 <?php if ($offers_on): ?>
                                 <?php $a_ns = isset($ns_notices[intval($a['id'])]) ? $ns_notices[intval($a['id'])] : array(); ?>
+                                <?php $a_facts = isset($ns_facts[intval($a['id'])]) ? $ns_facts[intval($a['id'])] : null; ?>
                                 <div class="cac-offer-line"><?php echo $this->render_offer_status($active_team, $season, $a['my_status'], $a['my_offer'], !empty($a['payment_pending']), $a['user_id'])
-                                    . $this->render_ns_status($active_team, $season, $a['my_status'], $a['application_status'], $a['user_id'], $a_ns, $teams_config); ?></div>
+                                    . $this->render_ns_status($active_team, $season, $a['my_status'], $a['application_status'], $a['user_id'], $a_ns, $teams_config, $a_facts); ?></div>
                                 <?php endif; ?>
 
                                 <?php if (!$this->read_only): ?>
@@ -2508,7 +2546,7 @@ class TeamOversight_Coach_Portal {
                                     </form>
                                     <?php if ($offers_on): ?>
                                     <span class="cac-offer"><?php echo $this->render_offer_controls($a['id'], $active_team, $season, $a['my_status'], $a['my_offer'], !empty($a['payment_pending']), $a['user_id'])
-                                        . $this->render_ns_controls($a['id'], $active_team, $season, $a['my_status'], $a['application_status'], $a['user_id'], $a['name'], $a_ns, $teams_config); ?></span>
+                                        . $this->render_ns_controls($a['id'], $active_team, $season, $a['my_status'], $a['application_status'], $a['user_id'], $a['name'], $a_ns, $teams_config, $a_facts); ?></span>
                                     <?php else: ?>
                                     <span class="cac-offer"></span>
                                     <?php endif; ?>
@@ -4426,9 +4464,11 @@ class TeamOversight_Coach_Portal {
             if (in_array($status, self::OFFER_VERDICTS, true) && ($existing === null || $existing->status !== $status)) {
                 $offer_hint = ' Press <em>Send offer</em> on their card when you want the committee to approve an offer.';
             }
-            // 1.80.0: rejecting tells nobody; the card has the button.
+            // 1.80.0: rejecting tells nobody; the card has the button (not for a player who never applied for this team: nothing to tell them).
             if ($status === 'rejected' && ($existing === null || $existing->status !== $status)) {
-                $offer_hint = ' ' . esc_html(TeamOversight_Offers::wording('ns_hint_rejected'));
+                $offer_hint = ' ' . esc_html(class_exists('TeamOversight_Not_Selected') && !TeamOversight_Not_Selected::applied_for($application, $team)
+                    ? TeamOversight_Offers::wording('ns_not_applied', array('{team}' => TeamOversight_Not_Selected::team_name($team, $season, TeamOversight_Offers::teams_config($season))))
+                    : TeamOversight_Offers::wording('ns_hint_rejected'));
             }
         }
 

@@ -1756,15 +1756,20 @@ class TeamOversight_Offers_Admin {
         $live = TeamOversight_Offers::emails_live();
         echo '<p class="description" style="max-width: 900px;">A "not selected" email is about <strong>one team</strong>: it tells the player they weren\'t selected for that team, says (when they applied for more than one) that their other applications are decided separately, never mentions another team\'s decision, and suggests lower divisions to trial for (or, when there are none, the Mixed Training Program and the Reds Social League, or the Junior Academy for juniors). '
             . 'It is sent <strong>only when someone presses Send</strong>: the team\'s coach on the player\'s card in the coach portal, or you here. Once per player and team. '
-            . 'It is addressed like the offer emails: from the club\'s sender, Reply-To the coach who pressed Send (when you press it here, the team\'s head coach, unless you coach that team yourself; the trial applications address when the team has no coach on file), with the team\'s other coaches and assistant coaches copied, and signed by the Reply-To coach. Coaches of the player\'s other teams are never copied. '
-            . ($live ? 'This website may send offer emails, so a Send goes out within minutes.' : '<strong>This website may not send offer emails yet</strong>, so a Send waits in the queue until that permission is given.') . '</p>';
+            . 'It is addressed like the offer emails: from the club\'s sender, Reply-To the coach who pressed Send (when you press it here, the team\'s head coach, who is then copied in, unless you coach that team yourself; the trial applications address when the team has no coach on file), with the team\'s other coaches and assistant coaches copied, and signed by the Reply-To coach. Coaches of the player\'s other teams are never copied. '
+            . 'Only players who applied for the team are listed (a team can turn down anyone at trials, but the email answers an application). A player who already has a place this season is listed but left out of Send all, and their email suggests no other way in. An email that was pressed but never went (discarded with the held messages, switched off, or things changed) counts as not told and can be sent again. '
+            . ($live ? 'This website may send offer emails, so a Send goes out within minutes.' : '<strong>This website may not send offer emails yet</strong>, so a Send waits in the queue until that permission is given (and if that is more than a day away, it is held for you to send or discard then).') . '</p>';
 
         $untold = TeamOversight_Not_Selected::untold($season);
         echo '<h3 style="margin: 18px 0 4px;">Not told yet (' . count($untold) . ')</h3>';
         $sendable = array();
+        $placed_n = 0;
         foreach ($untold as $row) {
-            if (empty($row['reason'])) {
+            // Send all takes only the ones due (1.80.0 review): nothing stopping it, and no place held this season.
+            if (TeamOversight_Not_Selected::is_due($row)) {
                 $sendable[] = intval($row['selection_id']);
+            } elseif (empty($row['reason']) && !empty($row['placed'])) {
+                $placed_n++;
             }
         }
         if (!empty($sendable)) {
@@ -1776,9 +1781,11 @@ class TeamOversight_Offers_Admin {
             foreach ($sendable as $id) {
                 echo '<input type="hidden" name="ns_sel[]" value="' . intval($id) . '">';
             }
-            echo '<button type="submit" class="button" name="offer_action" value="ns_send_all" onclick="return confirm(' . esc_attr(wp_json_encode('Send ' . $n . ' "not selected" email(s), one for each player and team listed? Each tells the player they weren\'t selected for that one team, with that team\'s head coach as the Reply-To (you, where you coach the team) and its other coaches copied in. This can\'t be undone.')) . ');">Send all ' . intval($n) . '</button>';
-            echo ' <span class="mo-small">Players who can\'t be sent one (the reason is beside them) are left out.</span>';
+            echo '<button type="submit" class="button" name="offer_action" value="ns_send_all" onclick="return confirm(' . esc_attr(wp_json_encode('Send ' . $n . ' "not selected" email(s), one for each player and team listed as ready? Each tells the player they weren\'t selected for that one team, with that team\'s head coach as the Reply-To and copied in (you, where you coach the team) and its other coaches copied in. Players who already have a place this season are left out. This can\'t be undone.')) . ');">Send all ' . intval($n) . '</button>';
+            echo ' <span class="mo-small">Players who can\'t be sent one (the reason is beside them)' . ($placed_n ? ', and ' . intval($placed_n) . ' who already ' . ($placed_n === 1 ? 'has' : 'have') . ' a place this season,' : '') . ' are left out.</span>';
             echo '</form>';
+        } elseif ($placed_n) {
+            echo '<p class="mo-small">Nobody is ready to send all at once: ' . intval($placed_n) . ' already ' . ($placed_n === 1 ? 'has' : 'have') . ' a place this season (Send or Don\'t send each, if you like).</p>';
         }
         self::render_untold_rows($untold, $season);
 
@@ -1796,8 +1803,10 @@ class TeamOversight_Offers_Admin {
     /**
      * The "not told yet" table, from TeamOversight_Not_Selected::untold()
      * shaped rows (selection_id, application_id, team, team_name, name,
-     * trial_number, verdict_at, days, reason). Public so a test can draw rows
-     * it made.
+     * trial_number, verdict_at, days, reason, and optionally placed, dropped
+     * and notice). A player who already has a place this season says so
+     * (and is not in Send all); a notice pressed before whose email never
+     * went says what happened to it. Public so a test can draw rows it made.
      */
     public static function render_untold_rows(array $rows, $season) {
         if (empty($rows)) {
@@ -1814,11 +1823,16 @@ class TeamOversight_Offers_Admin {
             echo '<td>' . self::team_html(isset($row['team']) ? $row['team'] : '', $season) . '</td>';
             echo '<td class="mo-nowrap">' . self::h(self::d(substr(isset($row['verdict_at']) ? (string) $row['verdict_at'] : '', 0, 10))) . '<br><span class="mo-small">'
                 . ($days === 0 ? 'today' : $days . ' day' . ($days === 1 ? '' : 's') . ' ago') . '</span>'
-                . ($days >= TeamOversight_Not_Selected::UNTOLD_FLAG_DAYS ? ' ' . self::chip('over a week', 'amber') : '') . '</td>';
-            echo '<td>' . ($reason ? self::chip('No', 'red') . '<br><span class="mo-small">' . self::h($reason['text']) . '</span>' : self::chip('Yes', 'green')) . '</td>';
+                . ($days >= TeamOversight_Not_Selected::UNTOLD_FLAG_DAYS && TeamOversight_Not_Selected::is_due($row) ? ' ' . self::chip('over a week', 'amber') : '') . '</td>';
+            $placed = !empty($row['placed']);
+            $notice = isset($row['notice']) && is_array($row['notice']) ? $row['notice'] : null;
+            echo '<td>' . ($reason ? self::chip('No', 'red') . '<br><span class="mo-small">' . self::h($reason['text']) . '</span>' : self::chip('Yes', 'green'))
+                . ($placed && !$reason ? '<br><span class="mo-small">Already has a place this season (an offer they accepted, or placed), so not in Send all.</span>' : '')
+                . (!empty($row['dropped']) && $notice ? '<br><span class="mo-small">Pressed before, but never sent: ' . self::h(TeamOversight_Not_Selected::status_text($notice)) . '</span>' : '')
+                . '</td>';
             echo '<td>';
             if (!$reason) {
-                echo self::button('Send', self::row_form('ns_send', $sel, array(), 'Email ' . self::plain_name(isset($row['name']) ? $row['name'] : '') . ' that they weren\'t selected for ' . $team_name . '? The email is only about ' . $team_name . '. Replies go to its head coach (or to you, if you coach it) and its other coaches are copied in. It can only be sent once.'), 'button', false, 'Tell them they weren\'t selected for ' . $team_name . ' only.');
+                echo self::button('Send', self::row_form('ns_send', $sel, array(), 'Email ' . self::plain_name(isset($row['name']) ? $row['name'] : '') . ' that they weren\'t selected for ' . $team_name . '? The email is only about ' . $team_name . '. Replies go to its head coach, who is copied in (or to you, if you coach it), and its other coaches are copied in. It can only be sent once.' . ($placed ? ' They already have a place this season, so the email suggests no other way in.' : '')), 'button', false, 'Tell them they weren\'t selected for ' . $team_name . ' only.');
             }
             echo self::button('Don\'t send', self::row_form('ns_stop', $sel, array(), 'Never send ' . self::plain_name(isset($row['name']) ? $row['name'] : '') . ' a "not selected" email for ' . $team_name . '? It is kept as a record and their coach\'s card will say the club decided not to send it.'), 'button', false, 'Kept as a record; never sent.');
             echo '</td></tr>';
@@ -1843,12 +1857,29 @@ class TeamOversight_Offers_Admin {
             $verdict = isset($row['verdict']) ? (string) $row['verdict'] : '';
             echo '<tr><td>' . self::name_html(isset($row['name']) ? $row['name'] : '') . '<br><span class="mo-small">Application #' . intval($row['application_id']) . (!empty($row['trial_number']) ? ', trial #' . intval($row['trial_number']) : '') . '</span></td>';
             echo '<td>' . self::team_html(isset($row['team']) ? $row['team'] : '', $season) . '</td>';
-            echo '<td>' . self::chip($state === 'stopped' ? 'Don\'t send' : ($state === 'failed' ? 'Not queued' : 'Sent'), $state === 'stopped' ? '' : ($state === 'failed' ? 'red' : 'green'))
+            $email = isset($row['email_status']) ? (string) $row['email_status'] : '';
+            // The chip follows where the email really is (1.80.0 review), never a green Sent beside "not sent".
+            if ($state === 'stopped') {
+                $what = array('Don\'t send', '');
+            } elseif ($state === 'failed') {
+                $what = array('Not queued', 'red');
+            } elseif ($email === 'sent' || ($email === '' && !empty($row['legacy']))) {
+                $what = array('Sent', 'green');
+            } elseif ($email === 'skipped') {
+                $what = array('Not sent', 'red');
+            } elseif ($email === 'failed' || $email === 'unknown') {
+                $what = array('Problem', 'red');
+            } elseif ($email === 'held') {
+                $what = array('Held', 'amber');
+            } else {
+                $what = array('Waiting to send', '');
+            }
+            echo '<td>' . self::chip($what[0], $what[1])
                 . ' ' . self::h(isset($row['text']) ? $row['text'] : '')
+                . ($state === 'sent' && $email === 'skipped' && $verdict === 'rejected' ? '<br><span class="mo-small">The player was never told: while they are still Rejected and their application is open, it is under Not told yet above and can be sent again.</span>' : '')
                 . (!empty($row['legacy']) ? '<br><span class="mo-small">From the one-per-player notice before 1.80.0.</span>' : '')
                 . ($verdict !== 'rejected' && $state !== 'failed' ? '<br><span class="mo-small">' . ($verdict === '' ? 'The team has no verdict on them now.' : 'Their verdict for this team is now ' . self::h(strtolower(str_replace('_', ' ', $verdict))) . '.') . '</span>' : '')
                 . '</td>';
-            $email = isset($row['email_status']) ? (string) $row['email_status'] : '';
             echo '<td>' . ($email !== '' ? self::chip($email, in_array($email, array('failed', 'unknown'), true) ? 'red' : '') : '') . '</td>';
             echo '</tr>';
         }
