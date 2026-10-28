@@ -1007,11 +1007,11 @@ class TeamOversight_Coach_Portal {
                 $label = $phase === 'unsent' ? 'Send offer' : 'Send offer again';
                 $cell = $this->offer_cell($user_id, $season, $team, $status);
                 if ($block) {
-                    $forms .= '<button type="button" class="button coach-offer-btn" disabled title="' . esc_attr($block['message']) . '">' . esc_html($label) . '</button>';
+                    $forms .= '<button type="button" class="button coach-offer-btn coach-offer-blocked" aria-disabled="true" data-why="' . esc_attr($block['message']) . '" title="' . esc_attr($block['message']) . '">' . esc_html($label) . '</button>';
                 } elseif ($cell['ok']) {
                     $forms .= $this->offer_form('offer_request', $label, $app, $team, $season, null, array('primary' => true));
                 } else {
-                    $forms .= '<button type="button" class="button coach-offer-btn" disabled title="' . esc_attr($cell['error_public']) . '">' . esc_html($label) . '</button>';
+                    $forms .= '<button type="button" class="button coach-offer-btn coach-offer-blocked" aria-disabled="true" data-why="' . esc_attr($cell['error_public']) . '" title="' . esc_attr($cell['error_public']) . '">' . esc_html($label) . '</button>';
                 }
                 break;
             case 'awaiting':
@@ -1403,11 +1403,11 @@ class TeamOversight_Coach_Portal {
                 $cell = $this->offer_cell($member->user_id, $season, $team, $member->status);
                 $html .= '<div class="cac-decide"><span class="cac-offer"><div class="coach-offer-actions">';
                 if ($block) {
-                    $html .= '<button type="button" class="button coach-offer-btn" disabled title="' . esc_attr($block['message']) . '">Offer again</button>';
+                    $html .= '<button type="button" class="button coach-offer-btn coach-offer-blocked" aria-disabled="true" data-why="' . esc_attr($block['message']) . '" title="' . esc_attr($block['message']) . '">Offer again</button>';
                 } elseif ($cell['ok']) {
                     $html .= $this->offer_form('offer_request', 'Offer again', $member->application_id, $team, $season, null, array('primary' => true, 'reload' => true));
                 } else {
-                    $html .= '<button type="button" class="button coach-offer-btn" disabled title="' . esc_attr($cell['error_public']) . '">Offer again</button><span class="coach-offer-note">' . esc_html($cell['error_public']) . '</span>';
+                    $html .= '<button type="button" class="button coach-offer-btn coach-offer-blocked" aria-disabled="true" data-why="' . esc_attr($cell['error_public']) . '" title="' . esc_attr($cell['error_public']) . '">Offer again</button><span class="coach-offer-note">' . esc_html($cell['error_public']) . '</span>';
                 }
                 $html .= '</div></span></div>';
             }
@@ -1491,7 +1491,7 @@ class TeamOversight_Coach_Portal {
         }
         $label = TeamOversight_Offers::wording('ns_button');
         if ($reason) {
-            return '<div class="coach-offer-actions"><button type="button" class="button coach-offer-btn coach-btn-secondary" disabled title="' . esc_attr($reason['text']) . '">' . esc_html($label) . '</button></div>';
+            return '<div class="coach-offer-actions"><button type="button" class="button coach-offer-btn coach-btn-secondary coach-offer-blocked" aria-disabled="true" data-why="' . esc_attr($reason['text']) . '" title="' . esc_attr($reason['text']) . '">' . esc_html($label) . '</button></div>';
         }
         return '<div class="coach-offer-actions">' . $this->offer_form('offer_not_selected', $label, $application_id, $team, $season, null, array(
             // Names are stored entity-encoded (& as &amp;): decode once, offer_form() escapes once.
@@ -2589,6 +2589,24 @@ class TeamOversight_Coach_Portal {
                     flash.innerHTML = '';
                 });
             }
+            // A greyed Send offer, Offer again or Send "not selected" email
+            // button says why when tapped: phones show no hover hint, and a
+            // disabled button ignores taps altogether.
+            if (portal) {
+                portal.addEventListener('click', function (event) {
+                    var blocked = event.target.closest('.coach-offer-blocked');
+                    if (!blocked) { return; }
+                    event.preventDefault();
+                    var why = blocked.getAttribute('data-why') || '';
+                    if (why === '') { return; }
+                    var box = document.createElement('div');
+                    box.className = 'coach-portal-notice';
+                    var line = document.createElement('p');
+                    line.textContent = why;
+                    box.appendChild(line);
+                    showFlash(box.outerHTML);
+                });
+            }
 
             // Offers (2027 on): the parts of the page that follow a save. The
             // card's status line and verdict menu, the Players heading, the
@@ -3628,6 +3646,12 @@ class TeamOversight_Coach_Portal {
         }
 
         .coach-portal .coach-offer-btn[disabled] {
+            cursor: not-allowed;
+        }
+
+        /* Greyed but still tappable, so a tap can say why (phones show no hover hint). */
+        .coach-portal .coach-offer-btn[aria-disabled="true"] {
+            opacity: 0.6;
             cursor: not-allowed;
         }
 
