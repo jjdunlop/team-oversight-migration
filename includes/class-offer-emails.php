@@ -402,7 +402,7 @@ class TeamOversight_Offer_Emails {
                 'type' => 'offer',
                 'switch' => false,
                 'when' => 'The committee approves an offer.',
-                'who' => 'To the player\'s account email. Reply-To the team\'s coach (the coach who asked for the offer, else the first head coach on the roster). Cc the team\'s other coaches and assistant coaches.',
+                'who' => 'To the player\'s account email. Reply-To the team\'s coach (the coach who asked for the offer, else the first head coach on the roster). Cc every coach and assistant coach of the team, including the one replies go to.',
                 'program' => 'Offers · {season}',
                 'subject' => 'Your {offer_name} to join {team} for {season}',
                 'heading' => 'Your {offer_name} to join {team}',
@@ -478,7 +478,7 @@ class TeamOversight_Offer_Emails {
                 'type' => 'withdrawn',
                 'switch' => false,
                 'when' => 'A coach or administrator withdraws an offer that was sent.',
-                'who' => 'To the player. Reply-To the team\'s coach. Cc the other coaches.',
+                'who' => 'To the player. Reply-To the team\'s coach. Cc all the team\'s coaches.',
                 'program' => 'Offers · {season}',
                 'subject' => 'Your {team} {offer_name} has been withdrawn',
                 'heading' => 'Your {offer_name} has been withdrawn',
@@ -498,7 +498,7 @@ class TeamOversight_Offer_Emails {
                 'type' => 'locked_in',
                 'switch' => true,
                 'when' => 'The player\'s deposit is complete and they are placed on the team.',
-                'who' => 'To the player. Reply-To the team\'s coach. Cc the other coaches.',
+                'who' => 'To the player. Reply-To the team\'s coach. Cc all the team\'s coaches.',
                 'program' => 'Offers · {season}',
                 'subject' => 'You\'re locked in for {team}, {season}',
                 'heading' => 'You\'re locked in',
@@ -576,7 +576,7 @@ class TeamOversight_Offer_Emails {
                 // 1.80.0 (club decision, 28 Oct 2026): only when someone presses the button, about one team, addressed like the offer emails.
                 'when' => 'Only when someone presses Send "not selected" email: a coach (or committee with edit access) on a Rejected player\'s card in the coach portal, or an administrator on the Offers page, Not selected tab. About ONE team; once per player and team. It does not wait for the player\'s other teams and never mentions their decisions. No committee approval.',
                 'switch_note' => 'While this is unticked the Send "not selected" email buttons are greyed out (the coach portal says the club has switched these emails off), and an email pressed before it was unticked and still waiting is skipped for good.',
-                'who' => 'To the player\'s account email, from the club\'s sender like every offer email. Reply-To the coach who pressed Send when they are one of this team\'s coaches or assistant coaches; when someone else pressed it (the committee, or an administrator on the Offers page), the team\'s head coach; with no coach on file, the trial applications address. Cc this team\'s other coaches and assistant coaches (read from the roster when it is sent; never the coaches of the player\'s other teams). Signed by the Reply-To coach, or by the team\'s coaching team when no coach is on file.',
+                'who' => 'To the player\'s account email, from the club\'s sender like every offer email. Reply-To the coach who pressed Send when they are one of this team\'s coaches or assistant coaches; when someone else pressed it (the committee, or an administrator on the Offers page), the team\'s head coach; with no coach on file, the trial applications address. Cc every coach and assistant coach of this team, including the one replies go to (read from the roster when it is sent; never the coaches of the player\'s other teams). Signed by the Reply-To coach, or by the team\'s coaching team when no coach is on file.',
                 'program' => 'Trials · {season}',
                 'subject' => 'Your {season} MURVC trial: {team}',
                 'heading' => 'Thanks for trialling',
@@ -1215,6 +1215,15 @@ class TeamOversight_Offer_Emails {
         return $out;
     }
 
+    /** The coaches copied on a player email: the primary coach (who replies go to) and every other coach and assistant of the team. */
+    private static function copied_coaches(array $contacts) {
+        $people = isset($contacts['others']) && is_array($contacts['others']) ? $contacts['others'] : array();
+        if (!empty($contacts['primary']) && is_array($contacts['primary'])) {
+            array_unshift($people, $contacts['primary']);
+        }
+        return $people;
+    }
+
     /** Where a coach notice goes when the team has no coach on file: the trial applications address, else the fee reminders' Reply-To. */
     private static function fallback_address() {
         $found = array();
@@ -1395,9 +1404,11 @@ class TeamOversight_Offer_Emails {
             if (!empty($reply_to)) {
                 $headers[] = 'Reply-To: ' . $reply_to[0];
             }
+            // Every coach and assistant of the team is copied, the Reply-To coach
+            // included, so the coach the player replies to also sees what was sent.
             $cc = self::clean_addresses(array_map(function ($p) {
                 return $p['email'];
-            }, $contacts['others']), array($to, !empty($reply_to) ? $reply_to[0] : ''));
+            }, self::copied_coaches($contacts)), array($to));
             if (!empty($cc)) {
                 $headers[] = 'Cc: ' . implode(', ', $cc);
             }
@@ -1450,9 +1461,9 @@ class TeamOversight_Offer_Emails {
      * Reply-To the person who pressed Send (context 'by') when they hold a
      * coach or assistant coach place on this team, else the team's head coach
      * (else its first assistant coach), else, with no coach on file, the
-     * trial applications address as before (trial_reply_to()); Cc this team's
-     * other coaches and assistant coaches, never the player and never the
-     * Reply-To twice. Coaches of the player's other teams are never read. The
+     * trial applications address as before (trial_reply_to()); Cc every
+     * coach and assistant coach of this team, the Reply-To coach included
+     * (copied_coaches()), never the player. Coaches of the player's other teams are never read. The
      * sign-off names the Reply-To coach, or the team's coaching team when no
      * coach is on file.
      */
@@ -1493,7 +1504,7 @@ class TeamOversight_Offer_Emails {
         }
         $cc = self::clean_addresses(array_map(function ($p) {
             return $p['email'];
-        }, $contacts['others']), array($to, !empty($reply_to) ? $reply_to[0] : ''));
+        }, self::copied_coaches($contacts)), array($to));
         if (!empty($cc)) {
             $headers[] = 'Cc: ' . implode(', ', $cc);
         }

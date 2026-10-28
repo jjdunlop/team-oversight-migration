@@ -2525,7 +2525,7 @@ class TeamOversight_Offers {
      * the deposit (percent, target), sent_at, reply_by, deposit_due and the
      * decision. The UPDATE also requires the verdict row to still exist and
      * still match the offer's role. Queues the 'offer' email (To the
-     * player's account email, Reply-To the team's coach, Cc the others).
+     * player's account email, Reply-To the team's coach, Cc all the team's coaches).
      *
      * $opts: shown_quote and shown_target, the figures the approver saw: if
      * the recomputed ones differ (in integer cents) the offer is NOT

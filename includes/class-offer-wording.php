@@ -405,7 +405,7 @@ class TeamOversight_Offer_Wording {
         $c['ns_button'] = self::item('coach', 'The Send "not selected" email button', 'On a Rejected player\'s card (the team\'s coaches and committee with edit access).',
             'Send "not selected" email', array(), 1);
         $c['ns_confirm'] = self::item('coach', 'Confirm: Send "not selected" email', 'The box that asks before that button sends.',
-            'Email {player} that they weren\'t selected for {team}? The email is only about {team}: it says nothing about any other team they applied for. Replies go to you if you coach {team} (else its head coach), and the team\'s other coaches are copied in. It can only be sent once.',
+            'Email {player} that they weren\'t selected for {team}? The email is only about {team}: it says nothing about any other team they applied for. Replies go to you if you coach {team} (else its head coach), and all of {team}\'s coaches are copied in. It can only be sent once.',
             array_merge($team, array('{player}' => 'the player\'s name')), 3);
         $c['ns_hint_list'] = self::item('coach', 'Trial applicants: the hint about Rejected players', 'In the hint above the trial applicants list.',
             'A Rejected player is told nothing until someone presses Send "not selected" email on their card. That email is about your team only and says nothing about any other team they applied for.', array(), 3);
@@ -460,7 +460,7 @@ class TeamOversight_Offer_Wording {
         $c['ns_bulk_button'] = self::item('coach', 'Send "not selected" emails: the button', 'The button in that panel.',
             'Email these {n}', array('{n}' => 'how many'), 1);
         $c['ns_bulk_confirm'] = self::item('coach', 'Confirm: Send "not selected" emails', 'The box that asks before that button sends.',
-            'Email these {n} players that they weren\'t selected for {team}? Each email is only about {team}. Replies go to you if you coach {team} (else its head coach), and the team\'s other coaches are copied in. This can\'t be undone.', array_merge($team, array('{n}' => 'how many')), 3);
+            'Email these {n} players that they weren\'t selected for {team}? Each email is only about {team}. Replies go to you if you coach {team} (else its head coach), and all of {team}\'s coaches are copied in. This can\'t be undone.', array_merge($team, array('{n}' => 'how many')), 3);
         $c['ns_bulk_cant'] = self::item('coach', 'Send "not selected" emails: who can\'t be emailed', 'Above the players in that panel who can\'t be emailed, each with the reason.',
             'Can\'t be emailed:', array(), 1);
         $c['ns_bulk_done'] = self::item('coach', 'After Send "not selected" emails', 'The answer to that button while this website may send offer emails.',
