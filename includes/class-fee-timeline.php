@@ -503,7 +503,7 @@ class TeamOversight_Fee_Timeline {
      * re-price). $fees: the caller's TeamOversight_Fees, if it has one.
      * Returns true when a row was written.
      */
-    public static function record_class($email, $season, $source = '', $fees = null) {
+    public static function record_class($email, $season, $source = '', $fees = null, $recorded_by = null) {
         global $wpdb;
         if (!TeamOversight_Fees::timeline_applies($season)) {
             return false;
@@ -540,7 +540,8 @@ class TeamOversight_Fee_Timeline {
             'new_class' => substr((string) $class, 0, 100),
             'note' => $last === null ? 'fee class first recorded' : 'fee class changed',
             'recorded_at' => current_time('mysql'),
-            'recorded_by' => get_current_user_id(),
+            // 1.76.0: the system (0) when a caller says so, as the offers' lock-in does; the person logged in otherwise.
+            'recorded_by' => $recorded_by === null ? get_current_user_id() : max(0, intval($recorded_by)),
         );
         $formats = array('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d');
         if ($user_id > 0) {
@@ -832,7 +833,7 @@ class TeamOversight_Fee_Timeline {
 
     private static function fees() {
         if (!(self::$fees instanceof TeamOversight_Fees)) {
-            self::$fees = new TeamOversight_Fees();
+            self::$fees = TeamOversight_Fees::shared();
         }
         return self::$fees;
     }
@@ -1158,7 +1159,7 @@ class TeamOversight_Fee_Timeline {
 
     /** Step 10's activity-log line: "2027 SL2M playing member: stopped 1 Jul 2027 (recorded 21 Oct) — fee $1,000.00 → $496.69". */
     private static function log_change($account, $season, $what, $before, $after, $source) {
-        $sources = array('finalise' => 'Finalise', 'accept' => 'Accept', 'bulk_accept' => 'bulk accept', 'add_assignment' => 'Add Assignment', 'undo' => 'Undo Assignment', 'cron' => 'daily job');
+        $sources = array('finalise' => 'Finalise', 'accept' => 'Accept', 'bulk_accept' => 'bulk accept', 'add_assignment' => 'Add Assignment', 'undo' => 'Undo Assignment', 'cron' => 'daily job', 'offer' => 'offer lock-in');
         $line = sprintf('%s %s (recorded %s%s) — fee %s → %s', $season, $what, current_time('j M'),
             isset($sources[$source]) ? ', ' . $sources[$source] : '', self::money($before['fee']), self::money($after['fee']));
         if ($after['invoice'] && intval($after['invoice']->fee_overridden) === 1) {
@@ -1199,9 +1200,19 @@ class TeamOversight_Fee_Timeline {
      * invoice re-priced), manual_kept, not_priced (released, no invoice
      * and no fee could be worked out), released, fee_before, fee_after,
      * due_before, due_after.
+     *
+     * $opts (1.76.0, optional): recorded_by (int, 0 = the system: who the
+     * change rows say placed the person, instead of whoever happened to be
+     * logged in; the offers' lock-in passes 0, source 'offer', so the payer
+     * or the treasurer recording a cash deposit is never named as the one
+     * who placed them) and note (text for the 'added' change row, default
+     * "placed from <date>"). Without it nothing changes.
      */
-    public static function add_stretches($person, $season, $teams, $start, $source) {
+    public static function add_stretches($person, $season, $teams, $start, $source, $opts = array()) {
         global $wpdb;
+        $opts = is_array($opts) ? $opts : array();
+        $recorded_by = array_key_exists('recorded_by', $opts) ? max(0, intval($opts['recorded_by'])) : null;
+        $row_note = (isset($opts['note']) && is_string($opts['note']) && trim($opts['note']) !== '') ? substr(trim($opts['note']), 0, 255) : null;
         $season = (string) $season;
         $result = array(
             'ok' => false, 'error' => '', 'reload' => false, 'added' => 0, 'row_ids' => array(), 'already' => 0, 'skipped' => array(), 'conflicts' => array(),
@@ -1313,12 +1324,16 @@ class TeamOversight_Fee_Timeline {
         $change_ids = array();
         $added_labels = array();
         foreach ($to_add as $w) {
-            $change_id = self::insert_change(array(
+            $change_fields = array(
                 'user_id' => $account['user_id'], 'email' => $account['email'], 'season' => $season,
                 'team' => $w['team'], 'role' => $w['role'], 'action' => 'added', 'source' => $source,
                 'new_start' => $start, 'fee_before' => $before['fee'], 'due_before' => $before['due'],
-                'note' => 'placed from ' . self::format_date($start),
-            ));
+                'note' => $row_note !== null ? $row_note : 'placed from ' . self::format_date($start),
+            );
+            if ($recorded_by !== null) {
+                $change_fields['recorded_by'] = $recorded_by;
+            }
+            $change_id = self::insert_change($change_fields);
             if ($change_id <= 0) {
                 $result['conflicts'][] = array('team' => $w['team'], 'role' => $w['role'], 'message' => 'The change could not be recorded, so this place was not saved.');
                 continue;
@@ -1358,7 +1373,7 @@ class TeamOversight_Fee_Timeline {
         // invoice yet (anyone else is unchanged since the last run).
         if ($result['added'] > 0 || !$result['had_invoice']) {
             $fees = self::fees();
-            self::record_class($account['email'], $season, $source, $fees);
+            self::record_class($account['email'], $season, $source, $fees, $recorded_by);
             if ($fees->generate_invoice($account['email'], $season)) {
                 if ($result['had_invoice'] && $fees->last_kept_manual()) {
                     $result['manual_kept'] = true;
@@ -2629,6 +2644,15 @@ class TeamOversight_Fee_Timeline {
             }
         }
 
+        // 1.76.0: a place that came from an offer quoted on the upper limit is
+        // never charged above the quoted amount; say so when the calculation
+        // went over it (fee_breakdown() annotates the breakdown, it never logs).
+        if (!empty($breakdown['capped'])) {
+            $cap_text = 'Held to the maximum quoted in the offer (' . self::money($breakdown['capped']['amount']) . '): the calculation gave '
+                . self::money(isset($breakdown['uncapped_total']) ? $breakdown['uncapped_total'] : 0) . '.';
+            array_splice($lines, 1, 0, array(array('Cap', '<span class="murvc-muted">' . esc_html($cap_text) . '</span>')));
+        }
+
         $standings = TeamOversight_Payments::get_fee_standings(array('me' => array('user_id' => intval($user->ID), 'email' => (string) $user->user_email)), $season);
         if (isset($standings['me'])) {
             $standing = $standings['me'];
@@ -2716,7 +2740,7 @@ class TeamOversight_Fee_Timeline {
             default:
                 $text = (string) $c->action;
         }
-        $sources = array('finalise' => 'Finalise', 'accept' => 'Accept', 'bulk_accept' => 'bulk accept', 'add_assignment' => 'Add Assignment', 'undo' => 'Undo Assignment', 'cron' => 'daily job', 'reconcile' => 'reconciliation', 'timeline' => 'Fee timeline');
+        $sources = array('finalise' => 'Finalise', 'accept' => 'Accept', 'bulk_accept' => 'bulk accept', 'add_assignment' => 'Add Assignment', 'undo' => 'Undo Assignment', 'cron' => 'daily job', 'reconcile' => 'reconciliation', 'timeline' => 'Fee timeline', 'offer' => 'offer lock-in');
         if (!empty($c->source) && isset($sources[$c->source])) {
             $text .= ' (' . $sources[$c->source] . ')';
         }

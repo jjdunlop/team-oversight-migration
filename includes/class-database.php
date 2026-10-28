@@ -5,9 +5,28 @@ if (!defined('ABSPATH')) {
 }
 
 class TeamOversight_Database {
-    
+
+    private static $shared = null;
+    private static $hooks_registered = false;
+
+    /** The one shared TeamOversight_Database (1.78.0). `new` is harmless anywhere: the constructor adds no hook any more. */
+    public static function shared() {
+        if (!(self::$shared instanceof self)) {
+            self::$shared = new self();
+        }
+        return self::$shared;
+    }
+
+    /** Run the (idempotent, guarded) migration once per request, on init (called from team_oversight_init()). Before 1.78.0 every `new` added its own init hook. */
+    public static function register_hooks() {
+        if (self::$hooks_registered) {
+            return;
+        }
+        self::$hooks_registered = true;
+        add_action('init', array(self::shared(), 'init'));
+    }
+
     public function __construct() {
-        add_action('init', array($this, 'init'));
     }
     
     public function init() {
@@ -530,6 +549,214 @@ class TeamOversight_Database {
             require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
             dbDelta(TeamOversight_Duplicates::decisions_table_sql());
         }
+
+        // 1.76.0: offers and deposits. Four new tables, each created behind
+        // its own SHOW TABLES check so a normal load issues no CREATE or
+        // ALTER, and nothing existing is altered (fee_matrix,
+        // team_trial_selections, team_invoices, team_invoice_payments and
+        // trial_applications keep their columns). Offers are how selection
+        // works from the 2027 season (1.79.0: no switch); earlier seasons
+        // never read these tables.
+        foreach (self::offer_tables_sql() as $short => $sql) {
+            if (!$wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}{$short}'")) {
+                require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+                dbDelta($sql);
+            }
+        }
+
+        // 1.80.0: one "not selected" notice per (application, team), sent
+        // only when someone presses a button. Additive: four new columns
+        // (team, source, acted_by, acted_at; a row from before keeps team ''
+        // and stays readable as history) and a unique key on (application_id,
+        // team) in place of the old unique key on application_id alone (that
+        // key would allow one notice per application; the new one is added
+        // FIRST, so the table is never without a unique rule). No column is
+        // dropped or renamed and no row is deleted. Each step sits behind its
+        // own SHOW check, so a normal load issues no ALTER; the one-off data
+        // step (per-application rows mapped to the teams that rejected them)
+        // is TeamOversight_Not_Selected::migrate_legacy_rows(), behind its
+        // own option flag.
+        $ns_table = $wpdb->prefix . 'team_not_selected';
+        if ($wpdb->get_var("SHOW TABLES LIKE '{$ns_table}'")) {
+            if (empty($wpdb->get_results("SHOW COLUMNS FROM {$ns_table} LIKE 'team'"))) {
+                $wpdb->query("ALTER TABLE {$ns_table} ADD COLUMN team varchar(50) NOT NULL DEFAULT '' AFTER application_id, ADD COLUMN source varchar(10) NOT NULL DEFAULT '', ADD COLUMN acted_by bigint(20) unsigned DEFAULT NULL, ADD COLUMN acted_at datetime DEFAULT NULL");
+            }
+            if (!empty($wpdb->get_results("SHOW INDEX FROM {$ns_table} WHERE Key_name = 'application'"))) {
+                if (empty($wpdb->get_results("SHOW INDEX FROM {$ns_table} WHERE Key_name = 'application_team'"))) {
+                    $wpdb->query("ALTER TABLE {$ns_table} ADD UNIQUE KEY application_team (application_id, team)");
+                }
+                if (!empty($wpdb->get_results("SHOW INDEX FROM {$ns_table} WHERE Key_name = 'application_team'"))) {
+                    $wpdb->query("ALTER TABLE {$ns_table} DROP INDEX application");
+                }
+            }
+            if (class_exists('TeamOversight_Not_Selected') && method_exists('TeamOversight_Not_Selected', 'migrate_legacy_rows')) {
+                TeamOversight_Not_Selected::migrate_legacy_rows();
+            }
+        }
+    }
+
+    /**
+     * 1.76.0: the offers feature's tables, short name => CREATE statement
+     * (migrate_database(), create_tables() and team_oversight_create_tables()
+     * all use this one list). See design/offer-deposit-tech-design.md
+     * section 1 for what each column is for.
+     */
+    public static function offer_tables_sql() {
+        return array(
+            'team_offers' => self::offers_table_sql(),
+            'team_offer_emails' => self::offer_emails_table_sql(),
+            'team_not_selected' => self::not_selected_table_sql(),
+            'fee_matrix_limits' => self::fee_matrix_limits_table_sql(),
+        );
+    }
+
+    /**
+     * One row per offer cycle (a new cycle for the same player and team is
+     * a new row; rows are NEVER deleted). `live` is 1 while the offer is not
+     * finished and NULL after, and the unique key (application_id, team,
+     * live) treats NULLs as distinct, so the database allows one live offer
+     * per application and team. A person table for account merges (user_id,
+     * email, name snapshot, season).
+     */
+    public static function offers_table_sql() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+        return "CREATE TABLE {$wpdb->prefix}team_offers (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                application_id int(11) NOT NULL,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                email varchar(255) NOT NULL DEFAULT '',
+                name varchar(255) NOT NULL DEFAULT '',
+                season varchar(10) NOT NULL,
+                team varchar(50) NOT NULL,
+                role varchar(20) NOT NULL,
+                state varchar(24) NOT NULL,
+                live tinyint(1) DEFAULT NULL,
+                requested_by bigint(20) unsigned DEFAULT NULL,
+                requested_at datetime NOT NULL,
+                decided_by bigint(20) unsigned DEFAULT NULL,
+                decided_at datetime DEFAULT NULL,
+                quote_basis varchar(8) DEFAULT NULL,
+                quote_amount decimal(10,2) DEFAULT NULL,
+                quote_fee_class varchar(100) DEFAULT NULL,
+                quote_start date DEFAULT NULL,
+                deposit_percent decimal(5,2) DEFAULT NULL,
+                deposit_target decimal(10,2) DEFAULT NULL,
+                quote_released decimal(10,2) DEFAULT NULL,
+                target_dropped_at datetime DEFAULT NULL,
+                sent_at datetime DEFAULT NULL,
+                reply_by date DEFAULT NULL,
+                deposit_due date DEFAULT NULL,
+                extended_count tinyint(3) unsigned NOT NULL DEFAULT 0,
+                reminder_count tinyint(3) unsigned NOT NULL DEFAULT 0,
+                last_reminded_at datetime DEFAULT NULL,
+                accepted_at datetime DEFAULT NULL,
+                declined_at datetime DEFAULT NULL,
+                decline_reason varchar(500) DEFAULT NULL,
+                invoice_id int(11) DEFAULT NULL,
+                locked_in_at datetime DEFAULT NULL,
+                place_id int(11) DEFAULT NULL,
+                placed_at datetime DEFAULT NULL,
+                placement_error varchar(255) DEFAULT NULL,
+                pricing_error varchar(255) DEFAULT NULL,
+                last_retry_at datetime DEFAULT NULL,
+                cap_logged decimal(10,2) DEFAULT NULL,
+                closed_by bigint(20) unsigned DEFAULT NULL,
+                closed_at datetime DEFAULT NULL,
+                closed_reason varchar(255) DEFAULT NULL,
+                settlement varchar(10) NOT NULL DEFAULT '',
+                settled_amount decimal(10,2) DEFAULT NULL,
+                settled_by bigint(20) unsigned DEFAULT NULL,
+                settled_at datetime DEFAULT NULL,
+                PRIMARY KEY  (id),
+                UNIQUE KEY live_offer (application_id, team, live),
+                KEY season_state (season, state),
+                KEY user_season (user_id, season),
+                KEY email_season (email(191), season),
+                KEY invoice (invoice_id)
+            ) ENGINE=InnoDB $charset_collate;";
+    }
+
+    /**
+     * The offer email outbox: one row per message ever queued, unique on
+     * dedupe_key so a message is queued once and sent once. Holds no
+     * address, name or account id (resolved from the offer at send time),
+     * so it is not an account-merge table. `context` is a small JSON note
+     * from whoever queued it (see design/offer-api.md).
+     */
+    public static function offer_emails_table_sql() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+        return "CREATE TABLE {$wpdb->prefix}team_offer_emails (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                dedupe_key varchar(80) NOT NULL,
+                event varchar(20) NOT NULL,
+                offer_id int(11) NOT NULL DEFAULT 0,
+                application_id int(11) NOT NULL DEFAULT 0,
+                status varchar(10) NOT NULL,
+                tries tinyint(3) unsigned NOT NULL DEFAULT 0,
+                created_at datetime NOT NULL,
+                claimed_at datetime DEFAULT NULL,
+                sent_at datetime DEFAULT NULL,
+                note varchar(255) DEFAULT NULL,
+                context text DEFAULT NULL,
+                PRIMARY KEY  (id),
+                UNIQUE KEY dedupe (dedupe_key),
+                KEY queue (status, id),
+                KEY offer (offer_id)
+            ) ENGINE=InnoDB $charset_collate;";
+    }
+
+    /**
+     * The "not selected" notices (1.80.0): one row per (application, team)
+     * that someone pressed Send or Don't send for (team = the team code;
+     * a row from before 1.80.0 has team '' and was one per application).
+     * Rows are never deleted. acted_by (who pressed it) is an account id,
+     * registered with the account merge (id_columns()); the application id
+     * leads to the player, so the table holds no other person data.
+     */
+    public static function not_selected_table_sql() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+        return "CREATE TABLE {$wpdb->prefix}team_not_selected (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                application_id int(11) NOT NULL,
+                team varchar(50) NOT NULL DEFAULT '',
+                season varchar(10) NOT NULL,
+                state varchar(10) NOT NULL,
+                since datetime NOT NULL,
+                send_after datetime NOT NULL,
+                queued_at datetime DEFAULT NULL,
+                source varchar(10) NOT NULL DEFAULT '',
+                acted_by bigint(20) unsigned DEFAULT NULL,
+                acted_at datetime DEFAULT NULL,
+                PRIMARY KEY  (id),
+                UNIQUE KEY application_team (application_id, team),
+                KEY due (state, send_after)
+            ) ENGINE=InnoDB $charset_collate;";
+    }
+
+    /**
+     * The second amount in every fee matrix cell: the upper limit the club
+     * guarantees a fee will not exceed. One row per season, fee class and
+     * role; no row = no limit. fee_matrix itself is not altered, so
+     * everything that prices a real fee is untouched and a blank fee is
+     * still simply no fee_matrix row.
+     */
+    public static function fee_matrix_limits_table_sql() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+        return "CREATE TABLE {$wpdb->prefix}fee_matrix_limits (
+                id int(11) NOT NULL AUTO_INCREMENT,
+                season varchar(10) NOT NULL,
+                fee_class varchar(100) NOT NULL,
+                team_role varchar(50) NOT NULL,
+                upper_limit decimal(10,2) NOT NULL,
+                updated_by bigint(20) unsigned DEFAULT NULL,
+                updated_at datetime NOT NULL,
+                PRIMARY KEY  (id),
+                UNIQUE KEY cell (season, fee_class, team_role)
+            ) ENGINE=InnoDB $charset_collate;";
     }
 
     /**
@@ -785,6 +1012,10 @@ class TeamOversight_Database {
             'team_assignment_changes' => self::assignment_changes_table_sql(),
             'team_positions' => self::team_positions_table_sql(),
         );
+        // 1.76.0: offers and deposits.
+        foreach (self::offer_tables_sql() as $short => $sql) {
+            $tables[$short] = $sql;
+        }
         if (class_exists('TeamOversight_Account_Merge')) {
             $tables['team_account_merges'] = TeamOversight_Account_Merge::table_sql();
         }
@@ -804,6 +1035,43 @@ class TeamOversight_Database {
      * gender: mens|womens|mixed. age_rule: see get_age_rules().
      */
     public static function get_default_teams() {
+        $teams = self::default_team_list();
+        // 1.76.0: every default team carries its division level.
+        foreach ($teams as $code => $team) {
+            $teams[$code]['level'] = self::default_level_for_code($code);
+        }
+        return $teams;
+    }
+
+    /**
+     * The division level a team code gets when none is stored (1.76.0):
+     * a pure function of the code. Lower number = higher division; teams
+     * in the same division share a number. PL1 = 1, PL2 = 2, JPL = 3,
+     * SL1 = 4, SL2 = 5, SL3 = 6, YSL17 (U17) = 7, YSL15 (U15) = 8; any
+     * other code = 0, meaning 'not set' (the team is never suggested as a
+     * lower division and Configuration lists it in red). The older code
+     * style (SLD1B-W, JPLD1-B, PLD1-M: the prefix with an optional D) is
+     * read too, so a season seeded from older codes still gets levels.
+     */
+    public static function default_level_for_code($code) {
+        $code = strtoupper(trim((string) $code));
+        if (preg_match('/^JPL/', $code)) {
+            return 3;
+        }
+        if (preg_match('/^YSL(17|15)/', $code, $m)) {
+            return $m[1] === '17' ? 7 : 8;
+        }
+        if (preg_match('/^SLD?([1-3])(?!\d)/', $code, $m)) {
+            return 3 + intval($m[1]);
+        }
+        if (preg_match('/^PLD?([1-2])(?!\d)/', $code, $m)) {
+            return intval($m[1]);
+        }
+        return 0;
+    }
+
+    /** The default club team list without levels (get_default_teams() adds them). */
+    private static function default_team_list() {
         return array(
             'PL1M' => array('name' => 'Premier League 1 Men', 'gender' => 'mens', 'age_rule' => '', 'shirts' => 2),
             'PL1W' => array('name' => 'Premier League 1 Women', 'gender' => 'womens', 'age_rule' => '', 'shirts' => 2),
@@ -1090,6 +1358,7 @@ class TeamOversight_Database {
                     'gender' => $team['gender'],
                     'age_rule' => $team['age_rule'],
                     'shirts' => isset($team['shirts']) ? $team['shirts'] : 1,
+                    'level' => isset($team['level']) ? intval($team['level']) : self::default_level_for_code($code),
                 );
             }
             update_option('team_oversight_teams', $names);
@@ -1135,6 +1404,11 @@ class TeamOversight_Database {
                 // Playing shirts a player must purchase for this team
                 // (Premier teams 2, YSL 0 — supplied; default 1).
                 'shirts' => isset($team_meta['shirts']) ? max(0, intval($team_meta['shirts'])) : 1,
+                // Division level (1.76.0): the stored level, else the
+                // default for the code; 0 = not set. Lower = higher division.
+                'level' => (isset($team_meta['level']) && is_numeric($team_meta['level']))
+                    ? max(0, min(20, intval($team_meta['level'])))
+                    : self::default_level_for_code($code),
             );
         }
         return $config;

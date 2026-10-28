@@ -230,6 +230,38 @@ class TeamOversight_Trials {
     }
 
     /**
+     * The competition an application is for, 'mens' or 'womens', or null when
+     * neither the application nor the account says (1.76.0). The stored
+     * "Trialling For" answer wins (it is what the player was asked, or what
+     * their profile gender gave at submission); an application without one
+     * falls back to the account's profile gender, through
+     * get_competition_from_profile(). $application is a trial_applications
+     * row (form_data and user_id are read). This is the coach portal's own
+     * reading of an applicant's competition, shared so the "not selected"
+     * notice judges a team's gender the same way; the portal keeps its copy.
+     */
+    public static function application_competition($application) {
+        if (!is_object($application)) {
+            return null;
+        }
+        $form_data = !empty($application->form_data) ? json_decode((string) $application->form_data, true) : array();
+        $competition = null;
+        if (is_array($form_data) && !empty($form_data['Trialling For'])) {
+            $answer = (string) $form_data['Trialling For'];
+            if (stripos($answer, 'wom') === 0) {
+                $competition = 'womens';
+            } elseif (stripos($answer, 'men') === 0) {
+                $competition = 'mens';
+            }
+        }
+        if ($competition === null && !empty($application->user_id)) {
+            $profile = self::get_competition_from_profile($application->user_id);
+            $competition = $profile['competition'];
+        }
+        return $competition;
+    }
+
+    /**
      * Account data shown read-only on the trial form. Never taken from the
      * submitted POST — always re-read from the account at submission time.
      */
@@ -471,6 +503,12 @@ class TeamOversight_Trials {
                                 <p class="trial-edit-note">Need to change something? Your answers are below — update them and save until applications close. Your trial number stays the same.</p>
                             <?php endif; ?>
                         <?php endif; ?>
+                        <?php
+                        // 1.76.0: a team offer sent to this player, so one who lost the email can find it. '' for everyone with no offer.
+                        if (class_exists('TeamOversight_Offers_Player')) {
+                            echo TeamOversight_Offers_Player::trial_form_line($user->ID, $my_application->season);
+                        }
+                        ?>
                     </div>
                 </div>
             <?php endif; ?>
@@ -1605,6 +1643,10 @@ class TeamOversight_Trials {
         if (!$application_id) {
             wp_send_json_error(array('message' => 'There was an error submitting your application. Please try again.'));
         }
+
+        // (1.76.0 to 1.79.1 re-checked an automatic "not selected" hold here.
+        // Since 1.80.0 that email is only sent when someone presses Send, for
+        // one team, so an application save has nothing to tell it.)
 
         // Exactly one email per save, describing where the application now
         // stands: fee due, a confirmed application changed, or confirmed

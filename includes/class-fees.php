@@ -5,23 +5,51 @@ if (!defined('ABSPATH')) {
 }
 
 class TeamOversight_Fees {
-    
-    public function __construct() {
-        add_action('wp_ajax_save_fee_matrix', array($this, 'save_fee_matrix'));
-        add_action('wp_ajax_save_version', array($this, 'save_version'));
-        add_action('wp_ajax_restore_version', array($this, 'restore_version'));
-        add_action('wp_ajax_save_team', array($this, 'save_team'));
-        add_action('wp_ajax_update_team', array($this, 'update_team'));
-        add_action('wp_ajax_delete_team', array($this, 'delete_team'));
-        add_action('wp_ajax_reset_default_teams', array($this, 'reset_default_teams'));
+
+    private static $shared = null;
+    private static $hooks_registered = false;
+
+    /**
+     * The one shared TeamOversight_Fees (1.78.0). `new TeamOversight_Fees()` is
+     * harmless anywhere now: its constructor adds no hooks any more (they were
+     * re-added by every `new`, so one request could register the AJAX
+     * handlers dozens of times). Code that wants an instance without making a
+     * new one asks for this.
+     */
+    public static function shared() {
+        if (!(self::$shared instanceof self)) {
+            self::$shared = new self();
+        }
+        return self::$shared;
+    }
+
+    /**
+     * Add the matrix, team and release hooks once per request, against the
+     * shared instance (called from team_oversight_init(), as the Fee timeline
+     * and the offers classes do for theirs).
+     */
+    public static function register_hooks() {
+        if (self::$hooks_registered) {
+            return;
+        }
+        self::$hooks_registered = true;
+        $fees = self::shared();
+        add_action('wp_ajax_save_fee_matrix', array($fees, 'save_fee_matrix'));
+        add_action('wp_ajax_save_team', array($fees, 'save_team'));
+        add_action('wp_ajax_update_team', array($fees, 'update_team'));
+        add_action('wp_ajax_delete_team', array($fees, 'delete_team'));
+        add_action('wp_ajax_reset_default_teams', array($fees, 'reset_default_teams'));
         // Fee release dates are checked once a day, on the membership cron.
         add_action(TeamOversight_Memberships::CRON_HOOK, array(__CLASS__, 'apply_due_releases'));
+    }
+
+    public function __construct() {
     }
 
     /**
      * Sanitized gender + age-limit meta from a team save/update request.
      */
-    private function get_posted_team_meta() {
+    private function get_posted_team_meta($team_code = '', $existing = array()) {
         $gender = isset($_POST['team_gender']) ? sanitize_text_field($_POST['team_gender']) : 'mixed';
         if (!in_array($gender, array('mens', 'womens', 'mixed'), true)) {
             $gender = 'mixed';
@@ -31,7 +59,19 @@ class TeamOversight_Fees {
             $age_rule = '';
         }
         $shirts = isset($_POST['team_shirts']) ? max(0, min(5, intval($_POST['team_shirts']))) : 1;
-        return array('gender' => $gender, 'age_rule' => $age_rule, 'shirts' => $shirts);
+        // Division level (1.76.0): the posted level (0-20, lower = higher
+        // division), else the one already stored, else the default for the
+        // code, so every save writes an explicit level. The Team
+        // Management form's team_level input is built by the division
+        // levels work; until it posts one, a team keeps what it had.
+        if (isset($_POST['team_level']) && is_numeric($_POST['team_level'])) {
+            $level = max(0, min(20, intval($_POST['team_level'])));
+        } elseif (is_array($existing) && isset($existing['level']) && is_numeric($existing['level'])) {
+            $level = max(0, min(20, intval($existing['level'])));
+        } else {
+            $level = TeamOversight_Database::default_level_for_code($team_code);
+        }
+        return array('gender' => $gender, 'age_rule' => $age_rule, 'shirts' => $shirts, 'level' => $level);
     }
     
     /**
@@ -122,6 +162,14 @@ class TeamOversight_Fees {
 
     /** Did the last generate_invoice() keep a fee set with Edit Fee instead of re-pricing it? */
     private $kept_manual = false;
+
+    /**
+     * The cap (1.76.0) the last fee_breakdown() that compute_segment_fee() or
+     * generate_invoice() priced was held to: array(amount, offer_id,
+     * uncapped_total) or null. The invoice writers log it (once per
+     * uncapped amount) and suffix the re-price reason with it.
+     */
+    private $last_cap = null;
 
     /** The season's fee release date ('YYYY-MM-DD'), or '' when none is set. */
     public static function get_fee_release_date($season) {
@@ -250,6 +298,18 @@ class TeamOversight_Fees {
         $applied = is_array($applied) ? $applied : array();
         $applied[$season] = current_time('Y-m-d');
         update_option(self::APPLIED_OPTION, $applied, false);
+
+        // 1.76.0: offers sent or accepted but not locked in drop their deposit
+        // target to the real fee's percent. AFTER the stamp above and caught
+        // here, so nothing in the offer code can abort or re-trigger the
+        // daily release, the plugin's most critical job.
+        if ($timeline && class_exists('TeamOversight_Offers')) {
+            try {
+                TeamOversight_Offers::on_fees_released($season);
+            } catch (\Throwable $e) {
+                TeamOversight_Log::add('offer_alert', $season . ' fee release: the offers\' deposit targets could not be updated (' . get_class($e) . ' in ' . basename($e->getFile()) . ':' . $e->getLine() . '). The release itself went ahead; check the Offers page.');
+            }
+        }
         return $result;
     }
 
@@ -496,26 +556,65 @@ class TeamOversight_Fees {
         return isset(self::CHARGED_AS[$role]) ? self::CHARGED_AS[$role] : $role;
     }
 
-    /** Matrix lookups cached for the request (a page computing many breakdowns). */
+    /**
+     * Where a rate comes from (1.76.0). RATE_FEE is the real matrix amount
+     * and is what every existing caller gets (the default). RATE_UPPER is
+     * the fee matrix's upper limit, the maximum the club guarantees; only
+     * TeamOversight_Offers passes it (quotes for offers sent before fees are
+     * released). A breakdown priced on RATE_UPPER carries
+     * 'rate_source' => 'upper' on every return path and the invoice
+     * writers refuse it (priced_total() returns null for it), so a limit
+     * can never be written as a fee.
+     */
+    const RATE_FEE = 'fee';
+    const RATE_UPPER = 'upper';
+
+    /** Matrix lookups cached for the request (a page computing many breakdowns): season => source => 'class|role' => amount. */
     private $rate_cache = null;
 
     public function enable_rate_cache() {
         $this->rate_cache = array();
     }
 
-    private function rate($fee_class, $role, $season) {
+    /** Anything but RATE_UPPER is RATE_FEE: a fixed two-way choice, never interpolated. */
+    private static function rate_source($source) {
+        return $source === self::RATE_UPPER ? self::RATE_UPPER : self::RATE_FEE;
+    }
+
+    private function rate($fee_class, $role, $season, $source = self::RATE_FEE) {
+        $source = self::rate_source($source);
         if ($this->rate_cache === null) {
-            return $this->get_fee($fee_class, $role, $season);
+            return $this->get_rate($fee_class, $role, $season, $source);
         }
-        if (!isset($this->rate_cache[$season])) {
-            global $wpdb;
-            $this->rate_cache[$season] = array();
-            foreach ($this->get_fee_matrix_for_season($season) as $row) {
-                $this->rate_cache[$season][$row->fee_class . '|' . $row->team_role] = $row->fee_amount;
+        if (!isset($this->rate_cache[$season][$source])) {
+            $this->rate_cache[$season][$source] = array();
+            if ($source === self::RATE_UPPER) {
+                foreach (self::get_limits_for_season($season) as $class => $by_role) {
+                    foreach ($by_role as $team_role => $amount) {
+                        $this->rate_cache[$season][$source][$class . '|' . $team_role] = $amount;
+                    }
+                }
+            } else {
+                foreach ($this->get_fee_matrix_for_season($season) as $row) {
+                    $this->rate_cache[$season][$source][$row->fee_class . '|' . $row->team_role] = $row->fee_amount;
+                }
             }
         }
         $key = $fee_class . '|' . $role;
-        return isset($this->rate_cache[$season][$key]) ? $this->rate_cache[$season][$key] : null;
+        return isset($this->rate_cache[$season][$source][$key]) ? $this->rate_cache[$season][$source][$key] : null;
+    }
+
+    /**
+     * One cell's rate from the chosen source (null = blank): the real fee
+     * through get_fee() exactly as before, or the upper limit. The uncached
+     * path of rate(); the branch is fixed, never built from input.
+     */
+    public function get_rate($fee_class, $team_role, $season, $source = self::RATE_FEE) {
+        if (self::rate_source($source) === self::RATE_UPPER) {
+            $limit = self::get_limit($fee_class, $team_role, $season);
+            return $limit === null ? null : $limit;
+        }
+        return $this->get_fee($fee_class, $team_role, $season);
     }
 
     /** Is this a junior-league (JPL / YSL) team? By its age rule, or its code. */
@@ -572,13 +671,13 @@ class TeamOversight_Fees {
      * the supporter rate, team manager as a player), the highest bucket,
      * and so the rate charged.
      */
-    public function price_buckets($buckets, $season) {
+    public function price_buckets($buckets, $season, $source = self::RATE_FEE) {
         $priced = array();
         $top = null;
         $missing = false;
         foreach ($buckets as $b) {
             $b['charged_as'] = self::charged_as($b['role']);
-            $rate = $this->rate($b['class'], $b['charged_as'], $season);
+            $rate = $this->rate($b['class'], $b['charged_as'], $season, $source);
             $b['rate'] = $rate === null ? null : floatval($rate);
             $priced[] = $b;
             if ($b['rate'] === null) {
@@ -611,15 +710,35 @@ class TeamOversight_Fees {
      * instead of the saved ones, so a Preview prices an edit in memory
      * through the same calculation. Both paths price through
      * price_stretches().
+     *
+     * $source (1.76.0): RATE_FEE (default, every existing caller) prices
+     * the real matrix fee; RATE_UPPER prices the same stretches from the
+     * upper limits (TeamOversight_Offers only). The result carries
+     * 'rate_source' either way, and invoice writers refuse an upper one.
      */
-    public function fee_breakdown($email, $season, $rows = null) {
+    public function fee_breakdown($email, $season, $rows = null, $source = self::RATE_FEE) {
         if (self::timeline_applies($season)) {
             if ($rows === null) {
                 $rows = TeamOversight_Fee_Timeline::rows($email, $season);
             }
-            $result = $this->price_stretches($this->timeline_stretches($email, $season, $rows), $season);
+            $result = $this->price_stretches($this->timeline_stretches($email, $season, $rows), $season, $source);
             $result['engine'] = 'timeline';
             $result['rows'] = $rows;
+            // 1.76.0, the cap: a player whose place came from an offer quoted
+            // on the upper limit is never invoiced above the quoted amount.
+            // Only a breakdown priced on the real fee is capped (never one
+            // priced on the limits), and the offers class returns null at once
+            // for a player with no such offer. The breakdown is annotated, not
+            // logged: this stays a read. Stretch amounts are left as priced so
+            // the working still shows; only the total moves.
+            if ($result['rate_source'] === self::RATE_FEE && !empty($result['stretches']) && class_exists('TeamOversight_Offers')) {
+                $cap = TeamOversight_Offers::cap_for_breakdown($email, $season, $result);
+                if (is_array($cap) && isset($cap['amount'], $cap['offer_id'], $cap['total'])) {
+                    $result['uncapped_total'] = $result['total'];
+                    $result['capped'] = array('amount' => round(floatval($cap['amount']), 2), 'offer_id' => intval($cap['offer_id']));
+                    $result['total'] = round(floatval($cap['total']), 2);
+                }
+            }
             return $result;
         }
 
@@ -684,7 +803,7 @@ class TeamOversight_Fees {
             $stretches[] = array('from' => $from, 'to' => null, 'buckets' => $current, 'legacy' => false);
         }
 
-        return $this->price_stretches($stretches, $season);
+        return $this->price_stretches($stretches, $season, $source);
     }
 
     /**
@@ -801,12 +920,17 @@ class TeamOversight_Fees {
      * and fee calculator price through it. Null for a season before the fee
      * timeline (those seasons price from fee segments, which a hypothetical
      * person has none of).
+     *
+     * $source (1.76.0): RATE_FEE (default) or RATE_UPPER, as fee_breakdown()
+     * takes it. TeamOversight_Offers prices an accepted offer's other places
+     * on the class its quote was made on (a live profile change after
+     * sending must not move the quote), with the same rate source.
      */
-    public function fee_breakdown_for_class($season, $rows, $person_class) {
+    public function fee_breakdown_for_class($season, $rows, $person_class, $source = self::RATE_FEE) {
         if (!self::timeline_applies($season)) {
             return null;
         }
-        $result = $this->price_stretches($this->timeline_stretches('', $season, (array) $rows, (string) $person_class), $season);
+        $result = $this->price_stretches($this->timeline_stretches('', $season, (array) $rows, (string) $person_class), $season, $source);
         $result['engine'] = 'timeline';
         $result['rows'] = $rows;
         return $result;
@@ -822,10 +946,15 @@ class TeamOversight_Fees {
      * array. Reads only. Public so the fee timeline (1.70.1) prices its
      * stretches through exactly the same calculation.
      */
-    public function price_stretches(array $stretches, $season) {
+    public function price_stretches(array $stretches, $season, $source = self::RATE_FEE) {
+        $source = self::rate_source($source);
         $dates = self::get_season_dates($season);
+        // 'rate_source' is stamped here, on the array every return path
+        // below returns, so a limit-priced breakdown is marked on all of
+        // them (the no-stretches and no-dates paths included) and
+        // priced_total() can refuse it.
         $result = array('has_dates' => (bool) $dates, 'season_start' => $dates ? $dates['start'] : '', 'season_end' => $dates ? $dates['end'] : '',
-            'season_days' => 0, 'stretches' => array(), 'total' => 0.0, 'missing' => false);
+            'season_days' => 0, 'stretches' => array(), 'total' => 0.0, 'missing' => false, 'rate_source' => $source);
         if (empty($stretches)) {
             return $result;
         }
@@ -833,7 +962,7 @@ class TeamOversight_Fees {
         if (!$dates || strtotime($dates['end']) <= strtotime($dates['start'])) {
             // No season dates: the latest stretch's full fee (no pro-rata).
             $s = $stretches[count($stretches) - 1];
-            $p = $this->price_buckets($s['buckets'], $season);
+            $p = $this->price_buckets($s['buckets'], $season, $source);
             $result['stretches'][] = array_merge($s, $p, array('days' => 0, 'share' => 1.0, 'amount' => round($p['rate'], 2)));
             $result['total'] = round($p['rate'], 2);
             $result['missing'] = $p['missing'];
@@ -850,7 +979,7 @@ class TeamOversight_Fees {
             if ($to <= $from) {
                 continue; // entirely outside the season (e.g. before it starts)
             }
-            $p = $this->price_buckets($s['buckets'], $season);
+            $p = $this->price_buckets($s['buckets'], $season, $source);
             $share = ($to - $from) / ($season_end - $season_start);
             $amount = $p['rate'] * $share;
             $total += $amount;
@@ -932,6 +1061,9 @@ class TeamOversight_Fees {
                 <?php if (!empty($stretches)): ?>
                     <p class="fee-breakdown-total"><strong>Season fee: <?php echo esc_html($money($breakdown['total'])); ?></strong>
                         <?php if (!$breakdown['has_dates']): ?><span class="description">(no season dates — no pro-rata)</span><?php endif; ?></p>
+                    <?php if (!empty($breakdown['capped'])): ?>
+                        <p class="fee-breakdown-warn">Capped at the maximum quoted in the offer (<?php echo esc_html($money($breakdown['capped']['amount'])); ?>; the calculation gave <?php echo esc_html($money(isset($breakdown['uncapped_total']) ? $breakdown['uncapped_total'] : 0)); ?>).</p>
+                    <?php endif; ?>
                     <?php if ($unreleased): ?>
                         <p class="description"><?php echo esc_html($season); ?> fees aren't released until <?php echo esc_html($date(self::get_fee_release_date($season))); ?> — this is what they'll be charged then<?php echo $invoice_amount !== null && floatval($invoice_amount) < 0.01 ? ', less anything already paid' : ''; ?>.</p>
                     <?php endif; ?>
@@ -1096,7 +1228,39 @@ class TeamOversight_Fees {
      * stretch's full rate applies.
      */
     private function compute_segment_fee($email, $season, $fee_class) {
-        return self::priced_total($this->fee_breakdown($email, $season));
+        $breakdown = $this->fee_breakdown($email, $season);
+        // 1.76.0: remember the cap the fee was held to, for the invoice
+        // writers' log line and re-price reason (null when it wasn't capped).
+        $this->last_cap = self::cap_of($breakdown);
+        return self::priced_total($breakdown);
+    }
+
+    /** The cap a fee_breakdown() was held to, as array(amount, offer_id, uncapped_total), or null. */
+    private static function cap_of($breakdown) {
+        if (!is_array($breakdown) || empty($breakdown['capped']) || !isset($breakdown['uncapped_total'])) {
+            return null;
+        }
+        return array(
+            'amount' => floatval($breakdown['capped']['amount']),
+            'offer_id' => intval($breakdown['capped']['offer_id']),
+            'uncapped_total' => floatval($breakdown['uncapped_total']),
+        );
+    }
+
+    /**
+     * Log the cap an invoice writer just applied, once per uncapped amount
+     * (the offers class compares it with the offer's cap_logged). Never
+     * throws: a logging problem must not stop an invoice being priced.
+     */
+    private function log_cap($user_id, $season, $charged) {
+        if (!$this->last_cap || !class_exists('TeamOversight_Offers')) {
+            return;
+        }
+        try {
+            TeamOversight_Offers::log_cap($this->last_cap['offer_id'], $this->last_cap['uncapped_total'], $charged, intval($user_id), (string) $season);
+        } catch (\Throwable $e) {
+            error_log('Team Oversight: the offer cap could not be logged (' . get_class($e) . ')');
+        }
     }
 
     /**
@@ -1104,6 +1268,12 @@ class TeamOversight_Fees {
      * of them could be priced (no matrix entries for any bucket).
      */
     private static function priced_total($breakdown) {
+        // 1.76.0: only a breakdown priced on the real fee can set a fee.
+        // One priced on the upper limits (or not stamped at all) reads as
+        // "no fee could be worked out", so a limit is never written.
+        if (!isset($breakdown['rate_source']) || $breakdown['rate_source'] !== self::RATE_FEE) {
+            return null;
+        }
         if (empty($breakdown['stretches'])) {
             return null;
         }
@@ -1219,17 +1389,21 @@ class TeamOversight_Fees {
         );
     }
 
-    public function import_price_matrix($season = null) {
+    public function import_price_matrix($season = null, $file = null) {
         global $wpdb;
-        
+
         if (!$season) {
             $season = date('Y');
         }
-        
+
         $price_matrix_file = TEAM_OVERSIGHT_PLUGIN_DIR . 'price-matrix.csv';
-        
+
         if (!file_exists($price_matrix_file)) {
             $price_matrix_file = ABSPATH . 'Price Matrix.csv';
+        }
+        // 1.76.0: an explicit file (tests, a one-off import); the default is unchanged.
+        if (is_string($file) && $file !== '') {
+            $price_matrix_file = $file;
         }
         
         if (file_exists($price_matrix_file)) {
@@ -1267,9 +1441,14 @@ class TeamOversight_Fees {
                             ),
                             array('%s', '%s', '%s', '%s', '%f', '%d')
                         );
+                        // 1.76.0: an optional fourth column, upper_limit, for
+                        // a fee-timeline season (blank or non-numeric: none).
+                        if (isset($data[3]) && trim((string) $data[3]) !== '' && is_numeric($data[3]) && self::timeline_applies($season)) {
+                            self::set_limit($season, $fee_class, $team_role, floatval($data[3]), array('log' => false));
+                        }
                     }
                 }
-                
+
                 fclose($handle);
                 return true;
             }
@@ -1292,37 +1471,72 @@ class TeamOversight_Fees {
         ", $season));
     }
     
-    public function get_saved_versions() {
-        global $wpdb;
-        
-        return $wpdb->get_results("
-            SELECT version, version_name, created_date, COUNT(*) as fee_count
-            FROM {$wpdb->prefix}fee_matrix_versions v
-            LEFT JOIN {$wpdb->prefix}fee_matrix f ON v.version = f.version
-            GROUP BY v.version, v.version_name, v.created_date
-            ORDER BY v.created_date DESC
-        ");
-    }
-    
+    /**
+     * The Configuration page's fee grid save (AJAX). Before the fee
+     * timeline (seasons before 2027) it behaves exactly as it always has:
+     * fee inputs only, a blank input skipped. From 2027 each cell also has
+     * an upper limit input (limit_cells[n][class|role|amount], the shape of
+     * new_fees, so class names with spaces and brackets are plain values):
+     * a blank limit deletes that cell's limit, a number sets it, and a
+     * fee above its limit is saved with a warning naming the cell. Every
+     * fee and limit change is logged (fee_edit). While the season's fees
+     * are not released and it has no invoices, a blank fee input also
+     * clears that fee (back to "unknown"), so a fee filled in by a copy can
+     * be taken back. Nothing is refused, so a save is never half applied.
+     */
     public function save_fee_matrix() {
-        if (!wp_verify_nonce($_POST['fee_nonce'], 'save_fee_matrix')) {
+        if (!isset($_POST['fee_nonce']) || !wp_verify_nonce($_POST['fee_nonce'], 'save_fee_matrix')) {
             wp_die('Security check failed');
         }
-        
+
         if (!current_user_can('manage_options')) {
             wp_die('Insufficient permissions');
         }
-        
+
         global $wpdb;
-        
+
         $fees = isset($_POST['fees']) && is_array($_POST['fees']) ? wp_unslash($_POST['fees']) : array();
         $new_fees = isset($_POST['new_fees']) && is_array($_POST['new_fees']) ? wp_unslash($_POST['new_fees']) : array();
-        $season = sanitize_text_field($_POST['season'] ?? date('Y'));
+        $limit_cells = isset($_POST['limit_cells']) && is_array($_POST['limit_cells']) ? wp_unslash($_POST['limit_cells']) : array();
+        $season = sanitize_text_field(isset($_POST['season']) ? wp_unslash($_POST['season']) : date('Y'));
+        if (preg_match('/^\d{4}$/D', $season) !== 1) {
+            wp_send_json_error('Pick a season (four digits) before saving.');
+        }
         $table = $wpdb->prefix . 'fee_matrix';
+        $timeline = self::timeline_applies($season);
+
+        // For the log lines (fee-timeline seasons): each cell's fee before.
+        $before = array();
+        $by_id = array();
+        if ($timeline) {
+            foreach ($this->get_fee_matrix_for_season($season) as $row) {
+                $before[$row->fee_class . '|' . $row->team_role] = floatval($row->fee_amount);
+                $by_id[intval($row->id)] = $row;
+            }
+        }
+        $log_fee = function ($class, $role, $old, $new) use ($season) {
+            $money = function ($v) {
+                return $v === null ? 'not set' : '$' . number_format($v, 2);
+            };
+            if ($old === null || $new === null || abs($old - $new) >= 0.005) {
+                TeamOversight_Log::add('fee_edit', $season . ' fee ' . $class . ' / ' . strtolower(self::role_label($role)) . ': ' . $money($old) . ' to ' . $money($new));
+            }
+        };
+        // A blank fee input clears the fee only while nothing could rely on
+        // it: fee-timeline season, fees not released, no invoice yet.
+        $may_clear_fees = $timeline && !self::fees_released($season)
+            && intval($wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s", $season))) === 0;
+        $cleared = 0;
 
         // Update fees for the specific season only
         foreach ($fees as $fee_id => $fee_amount) {
             if (trim((string) $fee_amount) === '') {
+                if ($may_clear_fees && isset($by_id[intval($fee_id)])) {
+                    $row = $by_id[intval($fee_id)];
+                    $wpdb->delete($table, array('id' => intval($fee_id), 'season' => $season, 'is_active' => 1), array('%d', '%s', '%d'));
+                    $log_fee($row->fee_class, $row->team_role, floatval($row->fee_amount), null);
+                    $cleared++;
+                }
                 continue;
             }
             $wpdb->update(
@@ -1332,6 +1546,10 @@ class TeamOversight_Fees {
                 array('%f'),
                 array('%d', '%s', '%d')
             );
+            if ($timeline && isset($by_id[intval($fee_id)])) {
+                $row = $by_id[intval($fee_id)];
+                $log_fee($row->fee_class, $row->team_role, floatval($row->fee_amount), round(max(0, floatval($fee_amount)), 2));
+            }
         }
 
         // Grid cells that had no amount yet (a new season, or a class/role
@@ -1350,110 +1568,72 @@ class TeamOversight_Fees {
             $existing = $wpdb->get_var($wpdb->prepare("SELECT id FROM $table WHERE season = %s AND fee_class = %s AND team_role = %s AND is_active = 1", $season, $class, $role));
             if ($existing) {
                 $wpdb->update($table, array('fee_amount' => $amount), array('id' => $existing), array('%f'), array('%d'));
+                if ($timeline) {
+                    $log_fee($class, $role, isset($before[$class . '|' . $role]) ? $before[$class . '|' . $role] : null, round($amount, 2));
+                }
             } else {
                 $wpdb->insert($table, array('version' => $version, 'season' => $season, 'fee_class' => $class, 'team_role' => $role, 'fee_amount' => $amount, 'is_active' => 1),
                     array('%s', '%s', '%s', '%s', '%f', '%d'));
                 $inserted++;
+                if ($timeline) {
+                    $log_fee($class, $role, null, round($amount, 2));
+                }
             }
         }
 
-        wp_send_json_success(array('message' => 'Fees updated successfully for ' . $season . ' season', 'inserted' => $inserted));
+        // Upper limits (fee-timeline seasons only): a number sets the
+        // cell's limit, a blank clears it.
+        $limits_changed = 0;
+        $warnings = array();
+        if ($timeline) {
+            foreach ($limit_cells as $cell) {
+                if (!is_array($cell) || !isset($cell['class'], $cell['role'])) {
+                    continue;
+                }
+                $class = sanitize_text_field($cell['class']);
+                $role = sanitize_key($cell['role']);
+                if ($class === '' || $role === '') {
+                    continue;
+                }
+                $raw = isset($cell['amount']) ? trim((string) $cell['amount']) : '';
+                if ($raw !== '' && !is_numeric($raw)) {
+                    continue; // not a number: leave that limit as it is
+                }
+                $result = self::set_limit($season, $class, $role, $raw === '' ? null : floatval($raw));
+                if ($result['changed']) {
+                    $limits_changed++;
+                    // An offer keeps the quote it was sent with: say how many are in this cell, so changing a limit is never a surprise.
+                    if ($result['old'] !== null && class_exists('TeamOversight_Offers')) {
+                        $kept = TeamOversight_Offers::quoted_on_limit_count($season, $class, $role);
+                        if ($kept > 0) {
+                            $warnings[] = $class . ' / ' . strtolower(self::role_label($role)) . ': ' . $kept . ' offer' . ($kept === 1 ? ' was' : 's were') . ' quoted on the old limit and keep' . ($kept === 1 ? 's' : '') . ' that quote.';
+                        }
+                    }
+                }
+            }
+            // A fee above its limit is allowed (players quoted on the limit
+            // are capped at what they were quoted) but never silent.
+            $report = $this->matrix_report($season);
+            foreach ($report['above'] as $label) {
+                $warnings[] = $label . ': the fee is above the upper limit. Players quoted on the limit are capped at what they were quoted; everyone else pays this fee.';
+            }
+        }
+
+        $message = 'Fees updated successfully for ' . $season . ' season';
+        if ($cleared) {
+            $message .= '; ' . $cleared . ' blank fee' . ($cleared === 1 ? '' : 's') . ' cleared (not released yet, nothing invoiced)';
+        }
+        wp_send_json_success(array(
+            'message' => $message,
+            'inserted' => $inserted,
+            'cleared' => $cleared,
+            'limits_changed' => $limits_changed,
+            'warnings' => $warnings,
+            'reload' => ($inserted > 0 || $cleared > 0),
+        ));
     }
-    
-    public function save_version() {
-        if (!wp_verify_nonce($_POST['version_nonce'], 'save_version')) {
-            wp_die('Security check failed');
-        }
-        
-        if (!current_user_can('manage_options')) {
-            wp_die('Insufficient permissions');
-        }
-        
-        global $wpdb;
-        
-        $version_name = sanitize_text_field(wp_unslash($_POST['version_name']));
-        if (empty($version_name)) {
-            wp_send_json_error('Version name is required');
-        }
-        
-        $version = sanitize_title($version_name) . '-' . time();
-        
-        // Save version metadata
-        $wpdb->insert(
-            $wpdb->prefix . 'fee_matrix_versions',
-            array(
-                'version' => $version,
-                'version_name' => $version_name,
-                'created_by' => wp_get_current_user()->display_name
-            ),
-            array('%s', '%s', '%s')
-        );
-        
-        // Copy current active fees to this version
-        $current_fees = $wpdb->get_results("SELECT * FROM {$wpdb->prefix}fee_matrix WHERE is_active = 1");
-        
-        foreach ($current_fees as $fee) {
-            $wpdb->insert(
-                $wpdb->prefix . 'fee_matrix',
-                array(
-                    'version' => $version,
-                    'fee_class' => $fee->fee_class,
-                    'team_role' => $fee->team_role,
-                    'fee_amount' => $fee->fee_amount,
-                    'is_active' => 0
-                ),
-                array('%s', '%s', '%s', '%f', '%d')
-            );
-        }
-        
-        wp_send_json_success('Version saved successfully');
-    }
-    
-    public function restore_version() {
-        if (!wp_verify_nonce($_POST['version_nonce'], 'restore_version')) {
-            wp_die('Security check failed');
-        }
-        
-        if (!current_user_can('manage_options')) {
-            wp_die('Insufficient permissions');
-        }
-        
-        global $wpdb;
-        
-        $version = sanitize_text_field($_POST['version']);
-        
-        // Deactivate current fees
-        $wpdb->update(
-            $wpdb->prefix . 'fee_matrix',
-            array('is_active' => 0),
-            array('is_active' => 1),
-            array('%d'),
-            array('%d')
-        );
-        
-        // Copy version fees as new active fees
-        $version_fees = $wpdb->get_results($wpdb->prepare("
-            SELECT * FROM {$wpdb->prefix}fee_matrix WHERE version = %s
-        ", $version));
-        
-        $new_version = 'restored-' . time();
-        
-        foreach ($version_fees as $fee) {
-            $wpdb->insert(
-                $wpdb->prefix . 'fee_matrix',
-                array(
-                    'version' => $new_version,
-                    'fee_class' => $fee->fee_class,
-                    'team_role' => $fee->team_role,
-                    'fee_amount' => $fee->fee_amount,
-                    'is_active' => 1
-                ),
-                array('%s', '%s', '%s', '%f', '%d')
-            );
-        }
-        
-        wp_send_json_success('Version restored successfully');
-    }
+
+    // (1.78.0: the retired save_version() / restore_version() AJAX handlers are gone. The fee_matrix_versions table and the version column stay: data is never dropped.)
     
     private function get_remembered_season() {
         $user_id = get_current_user_id();
@@ -1675,17 +1855,63 @@ class TeamOversight_Fees {
         if (isset($_POST['action']) && $_POST['action'] === 'copy_fee_matrix') {
             if (isset($_POST['copy_fees_nonce']) && wp_verify_nonce($_POST['copy_fees_nonce'], 'copy_fee_matrix') && current_user_can('manage_options')) {
                 $from = isset($_POST['copy_from']) ? sanitize_text_field(wp_unslash($_POST['copy_from'])) : '';
-                $copied = $this->copy_fee_matrix($from, $selected_season);
-                echo $copied
-                    ? '<div class="notice notice-success"><p>Copied ' . intval($copied) . ' fees from ' . esc_html($from) . ' into ' . esc_html($selected_season) . ' — update any amounts that change and save.</p></div>'
-                    : '<div class="notice notice-error"><p>Nothing copied — ' . esc_html($selected_season) . ' already has fees, or ' . esc_html($from) . ' has none.</p></div>';
+                if (self::timeline_applies($selected_season)) {
+                    // 2027+: tick boxes choose what is copied (limits by
+                    // default, fees left blank until they are known).
+                    $copied = $this->copy_fee_matrix($from, $selected_season, array(
+                        'copy_fees' => !empty($_POST['copy_fees']),
+                        'copy_limits' => !empty($_POST['copy_limits']),
+                        'limits_from_fees' => !empty($_POST['limits_from_fees']),
+                    ));
+                    $c = $this->last_copy;
+                    $bits = array();
+                    if ($c['fees']) {
+                        $bits[] = intval($c['fees']) . ' fees';
+                    }
+                    if ($c['limits']) {
+                        $bits[] = intval($c['limits']) . ' upper limits';
+                    }
+                    if ($c['limits_from_fees']) {
+                        $bits[] = intval($c['limits_from_fees']) . ' upper limits started from ' . esc_html($from) . "'s fees";
+                    }
+                    echo $copied
+                        ? '<div class="notice notice-success"><p>Copied ' . implode(', ', $bits) . ' from ' . esc_html($from) . ' into ' . esc_html($selected_season) . ($c['fees'] ? '' : ' — fees are left blank until they are known') . '.'
+                            . (!empty($c['limits_kept']) ? ' ' . count($c['limits_kept']) . ' cell(s) already had an upper limit and kept it.' : '') . ' Update any limits that change and save.</p></div>'
+                        : '<div class="notice notice-error"><p>Nothing copied — ' . esc_html($from) . ' has nothing to copy that ' . esc_html($selected_season) . ' lacks (' . esc_html($selected_season) . ' may already have fees and limits).</p></div>';
+                } else {
+                    $copied = $this->copy_fee_matrix($from, $selected_season);
+                    echo $copied
+                        ? '<div class="notice notice-success"><p>Copied ' . intval($copied) . ' fees from ' . esc_html($from) . ' into ' . esc_html($selected_season) . ' — update any amounts that change and save.</p></div>'
+                        : '<div class="notice notice-error"><p>Nothing copied — ' . esc_html($selected_season) . ' already has fees, or ' . esc_html($from) . ' has none.</p></div>';
+                }
             } else {
                 echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
             }
         }
 
+        // 2027+: the season's offer settings (fixed deposit date, deposit
+        // percent, reply days, deposit days).
+        if (isset($_POST['action']) && $_POST['action'] === 'save_offer_settings') {
+            if (isset($_POST['offer_settings_nonce']) && wp_verify_nonce($_POST['offer_settings_nonce'], 'save_offer_settings') && current_user_can('manage_options')) {
+                echo TeamOversight_Offers::settings_notice(TeamOversight_Offers::save_settings($selected_season));
+            } else {
+                echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            }
+        }
+        // Back to the built-in numbers (1.78.0).
+        if (isset($_POST['action']) && $_POST['action'] === 'reset_offer_settings') {
+            if (isset($_POST['offer_settings_reset_nonce']) && wp_verify_nonce($_POST['offer_settings_reset_nonce'], 'reset_offer_settings') && current_user_can('manage_options')) {
+                echo TeamOversight_Offers_Setup::reset_settings($selected_season);
+            } else {
+                echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            }
+        }
+        // The offer-email permission buttons post to admin-post and come back
+        // with a flash notice.
+        echo TeamOversight_Offers::flash_notice();
+
         $fee_matrix = $this->get_fee_matrix_for_season($selected_season);
-        
+
         // Get available seasons for the dropdown
         $available_seasons = $this->get_available_seasons();
         
@@ -1748,7 +1974,7 @@ class TeamOversight_Fees {
 
             <!-- Season Dates -->
             <?php $season_dates = self::get_season_dates($selected_season); ?>
-            <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; margin-bottom: 20px;">
+            <div id="season-dates" style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; margin-bottom: 20px;">
                 <?php if (self::timeline_applies($selected_season)): ?>
                     <?php $this->render_season_config_form($selected_season); ?>
                 <?php else: ?>
@@ -1781,7 +2007,7 @@ class TeamOversight_Fees {
                 $applied_seasons = get_option(self::APPLIED_OPTION, array());
                 $clear_releases = $release_date !== '' && (!is_array($applied_seasons) || empty($applied_seasons[$selected_season]));
                 ?>
-                <h3 style="margin: 18px 0 4px;">Fee release</h3>
+                <h3 id="fee-release" style="margin: 18px 0 4px;">Fee release</h3>
                 <p class="description" style="margin-top: 0;">People can be put on <?php echo esc_html($selected_season); ?> teams before the <?php echo esc_html($selected_season); ?> fees are known. Until the release date nobody is invoiced for <?php echo esc_html($selected_season); ?>; on that date everyone on a team is invoiced automatically, and anyone added afterwards is invoiced straight away. Pro-rata still runs from the season start, so people added before then pay the full season.</p>
                 <form method="post" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px;">
                     <?php wp_nonce_field('fee_release', 'fee_release_nonce'); ?>
@@ -1827,38 +2053,89 @@ class TeamOversight_Fees {
                 </p>
             </div>
 
+            <?php if (self::timeline_applies($selected_season)): ?>
+                <?php // Offers and deposits: the offer emails permission and this season's settings (class-offers.php). ?>
+                <?php TeamOversight_Offers::render_settings_box($selected_season); ?>
+            <?php endif; ?>
+
             <!-- Fee matrix: full width (it's a grid), then teams -->
             <div style="display: flex; flex-wrap: wrap; gap: 30px; align-items: flex-start;">
 
-                <div style="flex: 1 1 100%;">
+                <div id="fee-matrix" style="flex: 1 1 100%;">
                     <h2>Fee Matrix</h2>
                     <?php $grid = $this->get_fee_grid($selected_season); ?>
-
-                    <?php if (empty($fee_matrix)): ?>
-                        <div class="notice notice-warning inline">
-                            <p><strong>No fees set for <?php echo esc_html($selected_season); ?> yet.</strong> Type the amounts into the grid and save, or start from another season's amounts.</p>
-                        </div>
-                        <?php
-                        $copy_sources = array();
+                    <?php
+                    // 1.76.0: from 2027 every cell holds two amounts, the fee
+                    // (blank until it is known) and the upper limit.
+                    $timeline_season = self::timeline_applies($selected_season);
+                    $season_limits = $timeline_season ? self::get_limits_for_season($selected_season) : array();
+                    $matrix_report = $timeline_season ? $this->matrix_report($selected_season) : null;
+                    $copy_sources = array();
+                    if (empty($fee_matrix) || ($timeline_season && empty($season_limits))) {
                         foreach ($available_seasons as $s) {
-                            if ($s !== $selected_season && !empty($this->get_fee_matrix_for_season($s))) {
+                            if ($s !== $selected_season && (!empty($this->get_fee_matrix_for_season($s)) || ($timeline_season && !empty(self::get_limits_for_season($s))))) {
                                 $copy_sources[] = $s;
                             }
                         }
-                        ?>
-                        <?php if (!empty($copy_sources)): ?>
-                            <form method="post" style="margin: 10px 0; display: flex; align-items: center; gap: 8px;">
-                                <?php wp_nonce_field('copy_fee_matrix', 'copy_fees_nonce'); ?>
-                                <input type="hidden" name="action" value="copy_fee_matrix">
-                                <label>Copy amounts from
-                                    <select name="copy_from">
-                                        <?php foreach ($copy_sources as $s): ?>
-                                            <option value="<?php echo esc_attr($s); ?>"><?php echo esc_html($s); ?></option>
-                                        <?php endforeach; ?>
-                                    </select>
-                                </label>
-                                <button type="submit" class="button">Copy</button>
-                            </form>
+                    }
+                    ?>
+
+                    <?php if (empty($fee_matrix)): ?>
+                        <?php if ($timeline_season && !empty($season_limits)): ?>
+                            <div class="notice notice-info inline">
+                                <p><strong>Upper limits are set for <?php echo esc_html($selected_season); ?>.</strong> Fees are left blank until they are known.</p>
+                            </div>
+                        <?php elseif ($timeline_season): ?>
+                            <div class="notice notice-warning inline">
+                                <p><strong>No fees or upper limits set for <?php echo esc_html($selected_season); ?> yet.</strong> Set the upper limits now (offers are quoted on them until fees are released); fees can stay blank until they are known. Or start from another season.</p>
+                            </div>
+                        <?php else: ?>
+                            <div class="notice notice-warning inline">
+                                <p><strong>No fees set for <?php echo esc_html($selected_season); ?> yet.</strong> Type the amounts into the grid and save, or start from another season's amounts.</p>
+                            </div>
+                        <?php endif; ?>
+                    <?php endif; ?>
+                    <?php if (!empty($copy_sources)): ?>
+                        <form method="post" style="margin: 10px 0; display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap;">
+                            <?php wp_nonce_field('copy_fee_matrix', 'copy_fees_nonce'); ?>
+                            <input type="hidden" name="action" value="copy_fee_matrix">
+                            <label><?php echo $timeline_season ? 'Copy from' : 'Copy amounts from'; ?>
+                                <select name="copy_from">
+                                    <?php foreach ($copy_sources as $s): ?>
+                                        <option value="<?php echo esc_attr($s); ?>"><?php echo esc_html($s); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </label>
+                            <?php if ($timeline_season): ?>
+                                <label><input type="checkbox" name="copy_limits" value="1" checked> Copy the upper limits</label>
+                                <label><input type="checkbox" name="limits_from_fees" value="1"> Where there is no limit, start it from last season's fee</label>
+                                <label><input type="checkbox" name="copy_fees" value="1"<?php echo empty($fee_matrix) ? '' : ' disabled'; ?>> Copy the fees too (otherwise left blank until known)</label>
+                            <?php endif; ?>
+                            <button type="submit" class="button">Copy</button>
+                        </form>
+                    <?php endif; ?>
+
+                    <?php if ($timeline_season): ?>
+                        <?php if (!empty($matrix_report['no_limit'])): ?>
+                            <div class="notice notice-error inline">
+                                <p><strong><?php echo count($matrix_report['no_limit']); ?> cell(s) in the <?php echo esc_html($selected_season); ?> matrix have no upper limit, so offers for players in them can't be sent:</strong> <?php echo esc_html(implode(', ', $matrix_report['no_limit'])); ?>. Enter 0 where a role is meant to be free.</p>
+                            </div>
+                        <?php endif; ?>
+                        <?php if (!empty($matrix_report['above'])): ?>
+                            <div class="notice notice-warning inline">
+                                <p><strong>Fee above the upper limit:</strong> <?php echo esc_html(implode(', ', $matrix_report['above'])); ?>. Players quoted on the limit are capped at what they were quoted; everyone else pays the fee.</p>
+                            </div>
+                        <?php endif; ?>
+                        <?php if (!empty($matrix_report['no_fee'])): ?>
+                            <?php if (self::fees_released($selected_season)): ?>
+                                <div class="notice notice-warning inline">
+                                    <p><strong><?php echo count($matrix_report['no_fee']); ?> cell(s) have no fee yet, and <?php echo esc_html($selected_season); ?> fees are released:</strong> <?php echo esc_html(implode(', ', $matrix_report['no_fee'])); ?>. Anyone in one of these is charged the highest of their other roles that has an amount, or isn't invoiced if none has one. Enter 0 where a role is meant to be free.</p>
+                                </div>
+                            <?php else: ?>
+                                <div class="notice notice-info inline">
+                                    <p><?php echo count($matrix_report['no_fee']); ?> cell(s) have no fee yet. That is expected until the fees are set; offers are quoted on the upper limits until then.</p>
+                                </div>
+                            <?php endif; ?>
                         <?php endif; ?>
                     <?php endif; ?>
 
@@ -1866,9 +2143,10 @@ class TeamOversight_Fees {
                     // Blank cells someone can actually land in (every class
                     // but Unknown): a person holding several roles is then
                     // charged the highest role that HAS an amount, and someone
-                    // with no priced role isn't invoiced at all.
+                    // with no priced role isn't invoiced at all. (From 2027 the
+                    // notices above say it, per cell and per amount.)
                     $blank_cells = array();
-                    if (!empty($fee_matrix)) {
+                    if (!empty($fee_matrix) && !$timeline_season) {
                         foreach (array_diff(self::standard_fee_classes(), array('Unknown')) as $class) {
                             foreach ($grid['roles'] as $role) {
                                 if (empty($grid['cells'][$class][$role])) {
@@ -1889,6 +2167,9 @@ class TeamOversight_Fees {
                         <input type="hidden" name="season" value="<?php echo esc_attr($selected_season); ?>">
 
                         <p class="description">Each person pays the <strong>highest</strong> amount across their teams (fees never add up). Coaches and assistant coaches are charged the <strong>supporter</strong> amount for their fee class, and team managers the <strong>playing member</strong> amount. A blank cell has no fee set.</p>
+                        <?php if ($timeline_season): ?>
+                            <p class="description">From <?php echo intval(self::FEE_TIMELINE_FROM); ?> every cell has two amounts. <strong>Fee</strong> is the real amount: leave it blank until it is known (it can be cleared again until fees are released and invoices exist). <strong>Limit</strong> is the upper limit, the most a fee in this cell can be: offers sent before fees are released are quoted on it, and a player quoted on a limit is never invoiced above what they were quoted. Clear a limit to take it away (offers for that cell can't be sent without one). Enter 0 for a free cell.</p>
+                        <?php endif; ?>
                         <div style="overflow-x: auto;">
                             <table class="wp-list-table widefat striped fee-grid">
                                 <thead>
@@ -1900,14 +2181,20 @@ class TeamOversight_Fees {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <?php $n = 0; ?>
+                                    <?php $n = 0; $ln = 0; ?>
                                     <?php foreach ($grid['classes'] as $class): ?>
                                         <tr>
                                             <th scope="row"><strong><?php echo esc_html($class); ?></strong></th>
                                             <?php foreach ($grid['roles'] as $role): ?>
                                                 <?php $cell = isset($grid['cells'][$class][$role]) ? $grid['cells'][$class][$role] : null; ?>
                                                 <td>
-                                                    <span class="fee-cell">$<?php if ($cell): ?><input type="number" name="fees[<?php echo intval($cell->id); ?>]" value="<?php echo esc_attr(number_format($cell->fee_amount, 2, '.', '')); ?>" step="0.01" min="0" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role); ?>"><?php else: ?><input type="hidden" name="new_fees[<?php echo $n; ?>][class]" value="<?php echo esc_attr($class); ?>"><input type="hidden" name="new_fees[<?php echo $n; ?>][role]" value="<?php echo esc_attr($role); ?>"><input type="number" name="new_fees[<?php echo $n; ?>][amount]" value="" step="0.01" min="0" placeholder="—" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role); ?>"><?php $n++; endif; ?></span>
+                                                    <?php if ($timeline_season): ?><span class="fee-cell-name">Fee</span><?php endif; ?>
+                                                    <span class="fee-cell">$<?php if ($cell): ?><input type="number" name="fees[<?php echo intval($cell->id); ?>]" value="<?php echo esc_attr(number_format($cell->fee_amount, 2, '.', '')); ?>" step="0.01" min="0" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role . ($timeline_season ? ', fee' : '')); ?>"><?php else: ?><input type="hidden" name="new_fees[<?php echo $n; ?>][class]" value="<?php echo esc_attr($class); ?>"><input type="hidden" name="new_fees[<?php echo $n; ?>][role]" value="<?php echo esc_attr($role); ?>"><input type="number" name="new_fees[<?php echo $n; ?>][amount]" value="" step="0.01" min="0" placeholder="<?php echo $timeline_season ? 'TBC' : '—'; ?>" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role . ($timeline_season ? ', fee' : '')); ?>"><?php $n++; endif; ?></span>
+                                                    <?php if ($timeline_season): ?>
+                                                        <?php $cell_limit = isset($season_limits[$class][$role]) ? $season_limits[$class][$role] : null; ?>
+                                                        <br><span class="fee-cell-name" title="The upper limit: the most this fee can be. Offers sent before fees are released are quoted on it.">Upper limit</span>
+                                                        <span class="fee-cell fee-cell-limit">$<input type="hidden" name="limit_cells[<?php echo $ln; ?>][class]" value="<?php echo esc_attr($class); ?>"><input type="hidden" name="limit_cells[<?php echo $ln; ?>][role]" value="<?php echo esc_attr($role); ?>"><input type="number" name="limit_cells[<?php echo $ln; ?>][amount]" value="<?php echo $cell_limit === null ? '' : esc_attr(number_format($cell_limit, 2, '.', '')); ?>" step="0.01" min="0" placeholder="set limit" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role . ', upper limit'); ?>"><?php $ln++; ?></span>
+                                                    <?php endif; ?>
                                                 </td>
                                             <?php endforeach; ?>
                                         </tr>
@@ -1925,16 +2212,35 @@ class TeamOversight_Fees {
                         .fee-grid th, .fee-grid td { white-space: nowrap; vertical-align: middle; }
                         .fee-grid .fee-cell { display: inline-flex; align-items: center; gap: 2px; }
                         .fee-grid input[type=number] { width: 84px; text-align: right; }
+                        .fee-grid .fee-cell-name { display: inline-block; width: 74px; font-size: 11px; color: #646970; text-transform: uppercase; letter-spacing: .03em; }
+                        .fee-grid .fee-cell-limit { margin-top: 4px; }
                     </style>
                 </div>
 
                 <!-- Team Management -->
-                <div style="flex: 1; min-width: 500px;">
+                <div id="team-management" style="flex: 1; min-width: 500px;">
                     <h2>Team Management</h2>
                     
                     <div class="team-management-section">
                         <p style="margin-bottom: 15px; color: #666;">Manage team names, codes, and configuration for the <?php echo esc_html($selected_season); ?> season. Teams are configured <strong>per season</strong>: adding, renaming or deleting here changes <?php echo esc_html($selected_season); ?> only, and creating a new season copies the previous season's list forward.</p>
                         
+                        <?php
+                        // Division levels (1.76.0, from the 2027 season): the order
+                        // of the divisions, which the "not selected" email reads to
+                        // suggest lower divisions. A team with level 0 ("not set") is
+                        // never suggested, so the ones without a level are listed.
+                        $levels_on = self::timeline_applies($selected_season);
+                        $level_zero_teams = array();
+                        if ($levels_on) {
+                            $level_database = new TeamOversight_Database();
+                            foreach ($level_database->get_teams_config($selected_season) as $zero_code => $zero_team) {
+                                if (intval($zero_team['level']) === 0) {
+                                    $level_zero_teams[] = $zero_team['name'] . ' (' . $zero_code . ')';
+                                }
+                            }
+                        }
+                        ?>
+
                         <!-- Add New Team Form -->
                         <div style="background: #f9f9f9; padding: 15px; border: 1px solid #ddd; margin-bottom: 20px;">
                             <h3 style="margin-top: 0;">Add New Team</h3>
@@ -1976,6 +2282,15 @@ class TeamOversight_Fees {
                                             <span class="description">Shirts a player must purchase for this team (Premier 2, YSL 0 — supplied).</span>
                                         </td>
                                     </tr>
+                                    <?php if ($levels_on): ?>
+                                    <tr>
+                                        <th><label for="team-level">Division level</label></th>
+                                        <td>
+                                            <input type="number" id="team-level" name="team_level" value="" min="0" max="20" placeholder="auto" style="width: 60px;">
+                                            <span class="description">Lower number = higher division; teams in the same division share a number (0 = not set). Leave blank to use the usual level for the team code.</span>
+                                        </td>
+                                    </tr>
+                                    <?php endif; ?>
                                 </table>
                                 <p style="margin: 15px 0 0 0;">
                                     <button type="button" id="save-team" class="button button-primary" onclick="saveTeam()">Add Team</button>
@@ -1987,6 +2302,15 @@ class TeamOversight_Fees {
                         <!-- Current Teams List -->
                         <div>
                             <h3>Current Teams</h3>
+                            <?php if ($levels_on): ?>
+                                <p class="description">Division level: lower number = higher division (Premier 1, Premier 2, JPL, State League 1, 2, 3, U17, U15). Teams in the same division share a number. The level does <strong>two jobs</strong>. (1) <strong>The higher-team rule for offers:</strong> a coach can't send an offer for a team while the player is Tentative or Selected on a team of a higher division (a smaller number); Training Only and Rejected never hold a player back. JPL (U19) and U17 teams are ignored by this rule on both sides whatever level they have, because juniors can play in two teams. (2) <strong>The "not selected" email:</strong> a team a player was rejected from is followed by the divisions with a higher number than the lowest one they applied for. A team with level 0 ("not set") is never judged by the higher-team rule and never suggested. Leave a level blank when adding a team and it takes the usual level for its team code; the key below says which were set by hand and which are that default.</p>
+                                <?php if (!empty($level_zero_teams)): ?>
+                                    <div class="notice notice-error inline" id="team-level-warning">
+                                        <p><strong>No division level (0) for:</strong> <?php echo esc_html(implode(', ', $level_zero_teams)); ?>. Until you give each a level it is never judged by the higher-team rule for offers and never suggested as a lower division to a player who was not selected.</p>
+                                    </div>
+                                <?php endif; ?>
+                                <?php echo $this->render_division_key($selected_season); ?>
+                            <?php endif; ?>
                             <table class="wp-list-table widefat fixed striped" style="margin-top: 10px;">
                                 <thead>
                                     <tr>
@@ -1995,6 +2319,7 @@ class TeamOversight_Fees {
                                         <th style="width: 90px;">Gender</th>
                                         <th style="width: 80px;">Age</th>
                                         <th style="width: 70px;">Shirts</th>
+                                        <?php if ($levels_on): ?><th style="width: 70px;" title="Lower number = higher division">Level</th><?php endif; ?>
                                         <th style="width: 140px;">Actions</th>
                                     </tr>
                                 </thead>
@@ -2035,6 +2360,12 @@ class TeamOversight_Fees {
                                                 <span class="display-value"><?php echo intval($team['shirts']); ?></span>
                                                 <input type="number" class="edit-value" value="<?php echo intval($team['shirts']); ?>" min="0" max="5" style="display: none; width: 55px;">
                                             </td>
+                                            <?php if ($levels_on): ?>
+                                            <td class="team-level-cell">
+                                                <span class="display-value"><?php echo intval($team['level']); ?></span>
+                                                <input type="number" class="edit-value" value="<?php echo intval($team['level']); ?>" min="0" max="20" aria-label="Division level" style="display: none; width: 55px;">
+                                            </td>
+                                            <?php endif; ?>
                                             <td>
                                                 <button type="button" class="button button-small edit-team-btn" onclick="editTeam('<?php echo esc_js($code); ?>')">Edit</button>
                                                 <button type="button" class="button button-small save-team-btn" onclick="saveTeamEdit('<?php echo esc_js($code); ?>')" style="display: none;">Save</button>
@@ -2060,6 +2391,8 @@ class TeamOversight_Fees {
         let hasChanges = false;
         // Every team action on this page is scoped to the season being viewed.
         const murvcTeamSeason = '<?php echo esc_js($selected_season); ?>';
+        // Seasons with division levels (2027 on) have a Level column and input.
+        const murvcTeamLevels = <?php echo $levels_on ? 'true' : 'false'; ?>;
 
         function markChanged() {
             hasChanges = true;
@@ -2085,10 +2418,18 @@ class TeamOversight_Fees {
                     statusDiv.style.color = '#0073aa';
                     document.getElementById('save-fees').style.background = '';
                     hasChanges = false;
-                    // Newly filled cells become real matrix rows: reload so
-                    // the next save updates them rather than adding again.
-                    if (data.data && data.data.inserted > 0) {
+                    // Newly filled cells become real matrix rows (and a cleared
+                    // fee stops being one): reload so the next save updates
+                    // them rather than adding again. The page repeats any
+                    // fee-above-limit warning itself.
+                    if (data.data && (data.data.inserted > 0 || data.data.reload)) {
                         window.location.reload();
+                        return;
+                    }
+                    if (data.data && data.data.warnings && data.data.warnings.length) {
+                        statusDiv.textContent = '✓ Saved. ' + data.data.warnings.join(' ');
+                        statusDiv.style.color = '#996800';
+                        setTimeout(() => window.location.reload(), 4000);
                         return;
                     }
                 } else {
@@ -2110,6 +2451,10 @@ class TeamOversight_Fees {
             const teamGender = document.getElementById('team-gender').value;
             const teamAgeRule = document.getElementById('team-age-rule').value;
             const teamShirts = document.getElementById('team-shirts').value || '1';
+            // Blank = the usual level for the code (the server works it out).
+            const teamLevelInput = document.getElementById('team-level');
+            const teamLevelRaw = teamLevelInput ? teamLevelInput.value.trim() : '';
+            const teamLevel = teamLevelRaw === '' ? null : Math.max(0, Math.min(20, parseInt(teamLevelRaw, 10) || 0));
 
             if (!teamCode || !teamName) {
                 alert('Please fill in both team code and team name.');
@@ -2124,6 +2469,9 @@ class TeamOversight_Fees {
             formData.append('team_gender', teamGender);
             formData.append('team_age_rule', teamAgeRule);
             formData.append('team_shirts', teamShirts);
+            if (murvcTeamLevels && teamLevel !== null) {
+                formData.append('team_level', String(teamLevel));
+            }
             formData.append('team_nonce', '<?php echo wp_create_nonce('save_team'); ?>');
             
             const statusDiv = document.getElementById('team-save-status');
@@ -2144,9 +2492,21 @@ class TeamOversight_Fees {
                     document.getElementById('team-code').value = '';
                     document.getElementById('team-name').value = '';
                     document.getElementById('team-age-rule').value = '';
+                    if (teamLevelInput) {
+                        teamLevelInput.value = '';
+                    }
+
+                    if (murvcTeamLevels && (teamLevel === null || teamLevel === 0)) {
+                        // The level was left to the code's default (only the server
+                        // knows it) or is 0: reload, so the row shows the real level
+                        // and the list of teams with no level is right.
+                        statusDiv.textContent = '✓ Team added. Reloading…';
+                        setTimeout(() => window.location.reload(), 600);
+                        return;
+                    }
 
                     // Add new row to teams table
-                    addTeamRow(teamCode, teamName, teamGender, teamAgeRule, parseInt(teamShirts, 10) || 0);
+                    addTeamRow(teamCode, teamName, teamGender, teamAgeRule, parseInt(teamShirts, 10) || 0, teamLevel);
                 } else {
                     statusDiv.textContent = '✗ Error: ' + (data.data || 'Unknown error');
                     statusDiv.style.color = '#dc3232';
@@ -2159,7 +2519,7 @@ class TeamOversight_Fees {
             });
         }
         
-        function addTeamRow(code, name, gender, ageRule, shirts) {
+        function addTeamRow(code, name, gender, ageRule, shirts, level) {
             const genderLabels = {mens: "Men's", womens: "Women's", mixed: 'Mixed'};
             const tbody = document.getElementById('teams-tbody');
             const newRow = document.createElement('tr');
@@ -2191,6 +2551,10 @@ class TeamOversight_Fees {
                     <span class="display-value">${shirts}</span>
                     <input type="number" class="edit-value" value="${shirts}" min="0" max="5" style="display: none; width: 55px;">
                 </td>
+                ${murvcTeamLevels ? `<td class="team-level-cell">
+                    <span class="display-value">${parseInt(level, 10) || 0}</span>
+                    <input type="number" class="edit-value" value="${parseInt(level, 10) || 0}" min="0" max="20" aria-label="Division level" style="display: none; width: 55px;">
+                </td>` : ''}
                 <td>
                     <button type="button" class="button button-small edit-team-btn" onclick="editTeam('${escapeHtml(code)}')">Edit</button>
                     <button type="button" class="button button-small save-team-btn" onclick="saveTeamEdit('${escapeHtml(code)}')" style="display: none;">Save</button>
@@ -2226,6 +2590,11 @@ class TeamOversight_Fees {
             const newGender = row.querySelector('.team-gender-cell .edit-value').value;
             const newAgeRule = row.querySelector('.team-age-cell .edit-value').value;
             const newShirts = row.querySelector('.team-shirts-cell .edit-value').value || '0';
+            // A cleared level box keeps the level the team has (the server does).
+            const levelCell = murvcTeamLevels ? row.querySelector('.team-level-cell') : null;
+            const oldLevel = levelCell ? (parseInt(levelCell.querySelector('.display-value').textContent, 10) || 0) : 0;
+            const levelRaw = levelCell ? levelCell.querySelector('.edit-value').value.trim() : '';
+            const newLevel = levelRaw === '' ? oldLevel : Math.max(0, Math.min(20, parseInt(levelRaw, 10) || 0));
 
             if (!newName) {
                 alert('Team name cannot be empty.');
@@ -2240,6 +2609,9 @@ class TeamOversight_Fees {
             formData.append('team_gender', newGender);
             formData.append('team_age_rule', newAgeRule);
             formData.append('team_shirts', newShirts);
+            if (levelCell && levelRaw !== '') {
+                formData.append('team_level', String(newLevel));
+            }
             formData.append('team_nonce', '<?php echo wp_create_nonce('update_team'); ?>');
 
             fetch(ajaxurl, {
@@ -2254,7 +2626,15 @@ class TeamOversight_Fees {
                     row.querySelector('.team-gender-cell .display-value').textContent = genderLabels[newGender] || newGender;
                     row.querySelector('.team-age-cell .display-value').textContent = newAgeRule ? newAgeRule.toUpperCase() : 'Open';
                     row.querySelector('.team-shirts-cell .display-value').textContent = parseInt(newShirts, 10) || 0;
+                    if (levelCell) {
+                        levelCell.querySelector('.display-value').textContent = newLevel;
+                        levelCell.querySelector('.edit-value').value = newLevel;
+                    }
                     cancelTeamEdit(teamCode);
+                    if (levelCell && ((oldLevel === 0) !== (newLevel === 0))) {
+                        // The list of teams with no level changed: show it right.
+                        setTimeout(() => window.location.reload(), 400);
+                    }
                 } else {
                     alert('Error updating team: ' + (data.data || 'Unknown error'));
                 }
@@ -2311,10 +2691,16 @@ class TeamOversight_Fees {
                 if (data.success) {
                     // Remove row from table
                     const row = document.querySelector(`tr[data-team-code="${teamCode}"]`);
+                    // A team with no level leaves the red "no division level" list.
+                    const deletedLevelCell = row ? row.querySelector('.team-level-cell .display-value') : null;
+                    const deletedWasUnranked = !!deletedLevelCell && (parseInt(deletedLevelCell.textContent, 10) || 0) === 0;
                     if (row) {
                         row.remove();
                     }
-                    
+                    if (deletedWasUnranked) {
+                        setTimeout(() => window.location.reload(), 800);
+                    }
+
                     // Show success message temporarily
                     const tempMessage = document.createElement('div');
                     tempMessage.textContent = '✓ Team deleted successfully';
@@ -2666,25 +3052,289 @@ class TeamOversight_Fees {
         return array('classes' => $classes, 'roles' => $roles, 'cells' => $cells);
     }
 
-    /** Copy one season's active fees into a season that has none. Returns rows copied. */
-    public function copy_fee_matrix($from, $to) {
+    /**
+     * Copy one season's fee matrix into another. Returns the number of
+     * amounts written (fees plus limits).
+     *
+     * Fees are copied only into a season that has none, as always. For a
+     * fee-timeline season (2027+) the upper limits are copied too, and only
+     * into cells that have no limit yet (so a second copy never overwrites a
+     * limit typed since); cells that already had one are listed in
+     * $this->last_copy['limits_kept']. $opts:
+     *  - copy_fees (default: true before the fee timeline, false from it):
+     *    copy the fee amounts. Off, the new season's fees stay blank until
+     *    they are known.
+     *  - copy_limits (default true; timeline seasons only): copy the limits.
+     *  - limits_from_fees (default false; timeline seasons only): where the
+     *    source has a fee but no limit, start the limit from that fee (once).
+     * $this->last_copy describes the last call: fees, limits,
+     * limits_from_fees, limits_kept.
+     */
+    public function copy_fee_matrix($from, $to, $opts = array()) {
         global $wpdb;
-        if ($from === '' || $from === $to || !empty($this->get_fee_matrix_for_season($to))) {
+        $this->last_copy = array('fees' => 0, 'limits' => 0, 'limits_from_fees' => 0, 'limits_kept' => array());
+        $valid = function ($s) {
+            return is_string($s) && preg_match('/^\d{4}$/D', $s) === 1;
+        };
+        if (!$valid($from) || !$valid($to) || $from === $to) {
             return 0;
         }
-        $version = 'copied-' . $from . '-' . $to . '-' . time();
+        $timeline = self::timeline_applies($to);
+        $opts = array_merge(array('copy_fees' => !$timeline, 'copy_limits' => true, 'limits_from_fees' => false), (array) $opts);
+
         $n = 0;
-        foreach ($this->get_fee_matrix_for_season($from) as $fee) {
-            $wpdb->insert($wpdb->prefix . 'fee_matrix', array(
-                'version' => $version, 'season' => $to, 'fee_class' => $fee->fee_class,
-                'team_role' => $fee->team_role, 'fee_amount' => $fee->fee_amount, 'is_active' => 1,
-            ), array('%s', '%s', '%s', '%s', '%f', '%d'));
-            $n++;
+        if (!empty($opts['copy_fees']) && empty($this->get_fee_matrix_for_season($to))) {
+            $version = 'copied-' . $from . '-' . $to . '-' . time();
+            foreach ($this->get_fee_matrix_for_season($from) as $fee) {
+                $wpdb->insert($wpdb->prefix . 'fee_matrix', array(
+                    'version' => $version, 'season' => $to, 'fee_class' => $fee->fee_class,
+                    'team_role' => $fee->team_role, 'fee_amount' => $fee->fee_amount, 'is_active' => 1,
+                ), array('%s', '%s', '%s', '%s', '%f', '%d'));
+                $n++;
+            }
+            $this->last_copy['fees'] = $n;
+            if ($n) {
+                TeamOversight_Log::add('fee_edit', 'Fee matrix for ' . $to . ' copied from ' . $from . ' (' . $n . ' amounts)');
+            }
         }
-        if ($n) {
-            TeamOversight_Log::add('fee_edit', 'Fee matrix for ' . $to . ' copied from ' . $from . ' (' . $n . ' amounts)');
+
+        if ($timeline) {
+            self::flush_limits_cache();
+            $have = self::get_limits_for_season($to);
+            $limits = 0;
+            $kept = array();
+            if (!empty($opts['copy_limits'])) {
+                foreach (self::get_limits_for_season($from) as $class => $by_role) {
+                    foreach ($by_role as $role => $amount) {
+                        if (isset($have[$class][$role])) {
+                            $kept[] = $class . ' / ' . strtolower(self::role_label($role));
+                            continue;
+                        }
+                        if (self::set_limit($to, $class, $role, $amount, array('log' => false))['changed']) {
+                            $limits++;
+                            $have[$class][$role] = $amount;
+                        }
+                    }
+                }
+            }
+            $from_fees = 0;
+            if (!empty($opts['limits_from_fees'])) {
+                foreach ($this->get_fee_matrix_for_season($from) as $fee) {
+                    if (isset($have[$fee->fee_class][$fee->team_role])) {
+                        continue;
+                    }
+                    if (self::set_limit($to, $fee->fee_class, $fee->team_role, floatval($fee->fee_amount), array('log' => false))['changed']) {
+                        $from_fees++;
+                        $have[$fee->fee_class][$fee->team_role] = floatval($fee->fee_amount);
+                    }
+                }
+            }
+            $this->last_copy['limits'] = $limits;
+            $this->last_copy['limits_from_fees'] = $from_fees;
+            $this->last_copy['limits_kept'] = $kept;
+            if ($limits || $from_fees) {
+                TeamOversight_Log::add('fee_edit', 'Upper limits for ' . $to . ' copied from ' . $from . ' (' . $limits . ' limits' . ($from_fees ? ', ' . $from_fees . ' started from last season\'s fees' : '') . ($kept ? '; ' . count($kept) . ' already set, kept' : '') . ')');
+            }
+            $n += $limits + $from_fees;
         }
         return $n;
+    }
+
+    /** What the last copy_fee_matrix() call did: fees, limits, limits_from_fees, limits_kept (list of cells). */
+    public $last_copy = array('fees' => 0, 'limits' => 0, 'limits_from_fees' => 0, 'limits_kept' => array());
+
+    // ------------------------------------------------------------------
+    // Upper limits (1.76.0). Every cell of the fee matrix holds two
+    // amounts: the fee (blank until it is known, and then simply no
+    // fee_matrix row) and the upper limit, the maximum the club guarantees
+    // the fee will not exceed (no row in fee_matrix_limits = no limit). A
+    // limit is read only through RATE_UPPER, by TeamOversight_Offers.
+    // ------------------------------------------------------------------
+
+    /** Limits loaded this request: season => class => role => float. */
+    private static $limits_cache = array();
+
+    /** Forget the limits read this request (call after any direct write to fee_matrix_limits). */
+    public static function flush_limits_cache() {
+        self::$limits_cache = array();
+    }
+
+    /**
+     * Every upper limit of a season: fee class => matrix role => float.
+     * One query, cached for the request; set_limit() keeps it current.
+     */
+    public static function get_limits_for_season($season) {
+        global $wpdb;
+        $season = (string) $season;
+        if (!isset(self::$limits_cache[$season])) {
+            self::$limits_cache[$season] = array();
+            $rows = $wpdb->get_results($wpdb->prepare("
+                SELECT fee_class, team_role, upper_limit FROM {$wpdb->prefix}fee_matrix_limits WHERE season = %s ORDER BY fee_class, team_role
+            ", $season));
+            foreach ((array) $rows as $row) {
+                self::$limits_cache[$season][$row->fee_class][$row->team_role] = floatval($row->upper_limit);
+            }
+        }
+        return self::$limits_cache[$season];
+    }
+
+    /** One cell's upper limit, or null when none is set. */
+    public static function get_limit($fee_class, $team_role, $season) {
+        $all = self::get_limits_for_season($season);
+        return isset($all[$fee_class][$team_role]) ? $all[$fee_class][$team_role] : null;
+    }
+
+    /**
+     * Set (or with null clear) one cell's upper limit. $opts: log (default
+     * true: one fee_edit line, "2027 limit Full Adult / playing member:
+     * $600.00 to $650.00"), user_id (who; default the current user).
+     * Returns array(changed, old, new). An unchanged value writes nothing.
+     * A limit is never negative; 0 is a real limit (an exempt cell).
+     */
+    public static function set_limit($season, $fee_class, $team_role, $amount, $opts = array()) {
+        global $wpdb;
+        $season = (string) $season;
+        $old = self::get_limit($fee_class, $team_role, $season);
+        $new = ($amount === null || $amount === '') ? null : round(max(0.0, floatval($amount)), 2);
+        $result = array('changed' => false, 'old' => $old, 'new' => $new);
+        if (preg_match('/^\d{4}$/D', $season) !== 1 || $fee_class === '' || $team_role === '') {
+            return $result;
+        }
+        if (($old === null && $new === null) || ($old !== null && $new !== null && abs($old - $new) < 0.005)) {
+            return $result;
+        }
+        $table = $wpdb->prefix . 'fee_matrix_limits';
+        $who = isset($opts['user_id']) ? intval($opts['user_id']) : get_current_user_id();
+        if ($new === null) {
+            $wpdb->delete($table, array('season' => $season, 'fee_class' => $fee_class, 'team_role' => $team_role), array('%s', '%s', '%s'));
+        } elseif ($old === null) {
+            $wpdb->suppress_errors(true);
+            $ok = $wpdb->insert($table, array(
+                'season' => $season, 'fee_class' => $fee_class, 'team_role' => $team_role, 'upper_limit' => $new,
+                'updated_by' => $who > 0 ? $who : null, 'updated_at' => current_time('mysql'),
+            ), array('%s', '%s', '%s', '%f', '%d', '%s'));
+            $wpdb->suppress_errors(false);
+            if ($ok === false) {
+                // A racing request added the cell first: update it instead.
+                $wpdb->update($table, array('upper_limit' => $new, 'updated_by' => $who > 0 ? $who : null, 'updated_at' => current_time('mysql')),
+                    array('season' => $season, 'fee_class' => $fee_class, 'team_role' => $team_role), array('%f', '%d', '%s'), array('%s', '%s', '%s'));
+            }
+        } else {
+            $wpdb->update($table, array('upper_limit' => $new, 'updated_by' => $who > 0 ? $who : null, 'updated_at' => current_time('mysql')),
+                array('season' => $season, 'fee_class' => $fee_class, 'team_role' => $team_role), array('%f', '%d', '%s'), array('%s', '%s', '%s'));
+        }
+        self::flush_limits_cache();
+        $result['changed'] = true;
+        if (!isset($opts['log']) || $opts['log']) {
+            $money = function ($v) {
+                return $v === null ? 'not set' : '$' . number_format($v, 2);
+            };
+            TeamOversight_Log::add('fee_edit', $season . ' limit ' . $fee_class . ' / ' . strtolower(self::role_label($team_role)) . ': ' . $money($old) . ' to ' . $money($new));
+        }
+        return $result;
+    }
+
+    /**
+     * The cells an offer can land in: every person fee class plus JPL/YSL,
+     * in the playing member and training only columns (the supporter column
+     * and the Unknown row take a limit if typed but never matter to offers).
+     * Returns a list of array(fee_class, role).
+     */
+    public static function offerable_cells() {
+        $cells = array();
+        foreach (array_merge(self::person_fee_classes(), array('JPL/YSL')) as $class) {
+            foreach (array('playing_member', 'training_only') as $role) {
+                $cells[] = array($class, $role);
+            }
+        }
+        return $cells;
+    }
+
+    /**
+     * A fee-timeline season's matrix at a glance, for the Configuration
+     * page and tests: no_limit (offerable cells without an upper limit),
+     * no_fee (offerable cells without a fee), above (cells whose fee is
+     * above their limit), each a list of "Class / role" labels.
+     */
+    public function matrix_report($season) {
+        $fees = array();
+        foreach ($this->get_fee_matrix_for_season($season) as $row) {
+            $fees[$row->fee_class][$row->team_role] = floatval($row->fee_amount);
+        }
+        $limits = self::get_limits_for_season($season);
+        $report = array('no_limit' => array(), 'no_fee' => array(), 'above' => array());
+        foreach (self::offerable_cells() as $cell) {
+            list($class, $role) = $cell;
+            $label = $class . ' / ' . strtolower(self::role_label($role));
+            if (!isset($limits[$class][$role])) {
+                $report['no_limit'][] = $label;
+            }
+            if (!isset($fees[$class][$role])) {
+                $report['no_fee'][] = $label;
+            }
+        }
+        foreach ($fees as $class => $by_role) {
+            foreach ($by_role as $role => $fee) {
+                if (isset($limits[$class][$role]) && round($fee, 2) > round($limits[$class][$role], 2) + 0.004) {
+                    $report['above'][] = $class . ' / ' . strtolower(self::role_label($role));
+                }
+            }
+        }
+        return $report;
+    }
+
+    /**
+     * The division key under Current Teams (1.78.0): each level and the teams
+     * on it, whether the level is saved or the usual one for the team code,
+     * and a warning when a lower number sits on a younger age rule than a
+     * higher number (two levels that look swapped). Reads only.
+     */
+    public function render_division_key($season) {
+        $config = TeamOversight_Offers::teams_config($season);
+        $by_level = array();
+        foreach ($config as $code => $team) {
+            $level = intval(isset($team['level']) ? $team['level'] : 0);
+            // A level equal to the usual one for the code reads as the usual one (a saved level that matches it is the same thing).
+            $saved = $level !== TeamOversight_Database::default_level_for_code($code);
+            $by_level[$level][] = array('name' => isset($team['name']) ? $team['name'] : $code, 'code' => $code, 'saved' => $saved, 'rule' => isset($team['age_rule']) ? (string) $team['age_rule'] : '');
+        }
+        if (empty($by_level)) {
+            return '';
+        }
+        ksort($by_level);
+        $junior_rank = array('u15' => 1, 'u17' => 2, 'u19' => 3);
+        $html = '<div style="background: #f9f9f9; border: 1px solid #ddd; padding: 8px 12px; margin: 8px 0;"><strong>Division key</strong> <span class="description">(level: the teams on it)</span><ul style="margin: 4px 0 0 18px; list-style: disc;">';
+        foreach ($by_level as $level => $teams) {
+            $bits = array();
+            foreach ($teams as $t) {
+                $bits[] = esc_html($t['name'] . ' (' . $t['code'] . ')') . ' <span class="description">' . ($level === 0 ? 'not set' : ($t['saved'] ? 'set by hand' : 'the usual level for its code')) . '</span>';
+            }
+            $html .= '<li><strong>' . ($level === 0 ? '0 (not set)' : intval($level)) . ':</strong> ' . implode('; ', $bits) . '</li>';
+        }
+        $html .= '</ul>';
+        // A younger age rule on a higher division than an older one looks swapped.
+        $warn = array();
+        $seen = array();
+        foreach ($by_level as $level => $teams) {
+            if ($level === 0) {
+                continue;
+            }
+            foreach ($teams as $t) {
+                if (isset($junior_rank[$t['rule']])) {
+                    foreach ($seen as $prev) {
+                        if ($prev['level'] < $level && $junior_rank[$prev['rule']] < $junior_rank[$t['rule']]) {
+                            $warn[] = $prev['name'] . ' (level ' . $prev['level'] . ') is a younger age group than ' . $t['name'] . ' (level ' . $level . ')';
+                        }
+                    }
+                    $seen[] = array('level' => $level, 'name' => $t['name'], 'rule' => $t['rule']);
+                }
+            }
+        }
+        if (!empty($warn)) {
+            $html .= '<p style="color: #996800; margin: 6px 0 0;">Check these levels, they look swapped: ' . esc_html(implode('; ', array_slice($warn, 0, 3))) . '.</p>';
+        }
+        $html .= '<p class="description" style="margin: 6px 0 0;">The usual levels by team code: Premier 1, Premier 2, JPL, State League 1, 2 and 3, U17, U15 in that order (TeamOversight_Database::default_level_for_code).</p></div>';
+        return $html;
     }
 
     public function get_fee_matrix_for_season($season) {
@@ -2803,6 +3453,7 @@ class TeamOversight_Fees {
     public function generate_invoice($email, $season) {
         global $wpdb;
         $this->kept_manual = false;
+        $this->last_cap = null;
 
         // Check if invoice already exists for this user and season
         $uid = self::resolve_user_id($email);
@@ -2840,6 +3491,7 @@ class TeamOversight_Fees {
                 // so no server log or activity-log line.
                 return false;
             }
+            $this->last_cap = self::cap_of($breakdown);
             $minimum_fee = self::priced_total($breakdown);
         } else {
             // Get all active assignments for this user and season
@@ -2879,32 +3531,152 @@ class TeamOversight_Fees {
         $user = $uid > 0 ? get_userdata($uid) : false;
         $name = $user ? $user->display_name : $email;
 
-        // Generate sequential invoice reference: SEASON-MBRFEE-NNNN
-        $invoice_reference = $this->generate_invoice_reference($season);
+        // The one INSERT of a new invoice (1.76.0), under a named lock shared
+        // with the offers' holding invoice: whoever is second finds the
+        // first one's invoice and re-prices it instead of making another.
+        $made = $this->insert_invoice_row($user ? intval($user->ID) : 0, $email, $name, $season, $minimum_fee);
 
-        $result = $wpdb->insert(
-            $wpdb->prefix . 'team_invoices',
-            array(
-                'user_id' => $user ? $user->ID : null,
-                'email' => $email,
-                'name' => $name,
-                'season' => $season,
-                'invoice_amount' => $minimum_fee,
-                'outstanding_amount' => $minimum_fee,
-                'invoice_reference' => $invoice_reference
-            ),
-            array('%d', '%s', '%s', '%s', '%f', '%f', '%s')
-        );
-        
-        if ($result === false) {
+        if ($made['id'] <= 0) {
             // Log error for debugging
-            error_log('Team Oversight: failed to create the ' . $season . ' invoice for ' . ($user ? 'user #' . intval($user->ID) : 'an account-less assignment') . ': ' . $wpdb->last_error);
+            error_log('Team Oversight: failed to create the ' . $season . ' invoice for ' . ($user ? 'user #' . intval($user->ID) : 'an account-less assignment') . ': ' . $made['error']);
             return false;
         }
-        
+        if (!$made['created']) {
+            // A racing request (an offer's holding invoice, a second Accept)
+            // made this person's invoice between the check above and now.
+            return $this->update_existing_invoice($email, $season, $made['id']);
+        }
+        $this->log_cap($user ? $user->ID : 0, $season, $minimum_fee);
+
         return true;
     }
-    
+
+    /**
+     * The person's invoice for a season by the plugin's STRICT identity
+     * rule (the one get_user_invoices() uses): their account's invoice, or
+     * one with no account and their email. Deliberately stricter than the
+     * engine's own (user_id OR email) lookups, which would let a reused
+     * email land on another account's old invoice. Returns the row or null.
+     */
+    public static function find_season_invoice($user_id, $email, $season) {
+        global $wpdb;
+        $user_id = intval($user_id);
+        $email = (string) $email;
+        if ($user_id > 0) {
+            return $wpdb->get_row($wpdb->prepare("
+                SELECT * FROM {$wpdb->prefix}team_invoices
+                WHERE season = %s AND (user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s))
+                ORDER BY id LIMIT 1
+            ", (string) $season, $user_id, $email));
+        }
+        if ($email === '') {
+            return null;
+        }
+        return $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}team_invoices
+            WHERE season = %s AND (user_id IS NULL OR user_id = 0) AND email = %s
+            ORDER BY id LIMIT 1
+        ", (string) $season, $email));
+    }
+
+    /**
+     * The single INSERT of a new season invoice (generate_invoice() and the
+     * offers' holding invoice both use it), under a named lock per person and
+     * season: inside the lock the person's invoice is looked up again
+     * (find_season_invoice()) and, if a racer made one first, that invoice is
+     * returned and nothing is inserted. The reference is generated and the row
+     * inserted under a second short per-season lock, so two people never get
+     * the same SEASON-MBRFEE number. With no named locks (the database can't
+     * do them) it runs unlocked, as the plugin does elsewhere. A new-invoice
+     * INSERT is the documented exception to the fee_rise_fields() rule.
+     * Returns array(id (0 when nothing exists), created (bool), error).
+     */
+    private function insert_invoice_row($user_id, $email, $name, $season, $amount) {
+        global $wpdb;
+        $user_id = intval($user_id);
+        $email = (string) $email;
+        $out = array('id' => 0, 'created' => false, 'error' => '');
+        $lock = 'murvc_invoice_' . md5($wpdb->prefix . '|' . $season . '|' . ($user_id > 0 ? 'u' . $user_id : 'e' . strtolower($email)));
+        $got = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 10)', $lock));
+        if ($got !== null && intval($got) !== 1) {
+            $out['error'] = 'another request holds the invoice lock';
+            return $out;
+        }
+        try {
+            $existing = self::find_season_invoice($user_id, $email, $season);
+            if ($existing) {
+                $out['id'] = intval($existing->id);
+                return $out;
+            }
+            $ref_lock = 'murvc_invref_' . md5($wpdb->prefix . '|' . $season);
+            $ref_got = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 10)', $ref_lock));
+            try {
+                // Generate sequential invoice reference: SEASON-MBRFEE-NNNN
+                $invoice_reference = $this->generate_invoice_reference($season);
+                $result = $wpdb->insert(
+                    $wpdb->prefix . 'team_invoices',
+                    array(
+                        'user_id' => $user_id > 0 ? $user_id : null,
+                        'email' => $email,
+                        'name' => $name,
+                        'season' => $season,
+                        'invoice_amount' => $amount,
+                        'outstanding_amount' => $amount,
+                        'invoice_reference' => $invoice_reference
+                    ),
+                    array('%d', '%s', '%s', '%s', '%f', '%f', '%s')
+                );
+            } finally {
+                if ($ref_got !== null) {
+                    $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $ref_lock));
+                }
+            }
+            if ($result === false) {
+                $out['error'] = (string) $wpdb->last_error;
+                return $out;
+            }
+            $out['id'] = intval($wpdb->insert_id);
+            $out['created'] = $out['id'] > 0;
+        } finally {
+            if ($got !== null) {
+                $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock));
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * The $0 holding invoice an accepted offer's deposit lands on when the
+     * player has no season invoice yet (the shape withdraw_unreleased_invoices()
+     * already leaves behind: fee $0, not a manual fee). Made under the same
+     * invoice lock as generate_invoice(), so it can never become a second
+     * invoice for one person and season. Returns array(id, created, error)
+     * as insert_invoice_row() does (id is the existing invoice when one
+     * already exists).
+     */
+    public function insert_holding_invoice($user_id, $email, $season) {
+        $user = intval($user_id) > 0 ? get_userdata(intval($user_id)) : false;
+        $email = (string) $email;
+        if ($user && $user->user_email) {
+            $email = (string) $user->user_email;
+        }
+        $made = $this->insert_invoice_row($user ? intval($user->ID) : 0, $email, $user ? $user->display_name : $email, (string) $season, 0.0);
+        if ($made['id'] <= 0) {
+            error_log('Team Oversight: failed to create the ' . $season . ' holding invoice for ' . ($user ? 'user #' . intval($user->ID) : 'an account-less offer') . ': ' . $made['error']);
+        }
+        return $made;
+    }
+
+    /**
+     * Can a fee be worked out for the person right now (some stretch priced
+     * on the real fee)? False for a blank fee cell or no place at all. The
+     * offers' lock-in uses it to notice a placed player whose fee cell is
+     * still blank after the release. Reads only.
+     */
+    public function has_priced_fee($email, $season) {
+        return self::priced_total($this->fee_breakdown($email, $season)) !== null;
+    }
+
     public function get_fee($fee_class, $team_role, $season = null) {
         global $wpdb;
         
@@ -2956,7 +3728,14 @@ class TeamOversight_Fees {
         }
 
         if ($segment_fee !== null) {
-            $this->apply_invoice_amount($invoice_id, $segment_fee, 'worked out again from their teams and the fee matrix' . ($this->reprice_context !== '' ? ' (' . $this->reprice_context . ')' : ''));
+            // 1.76.0: a fee held to the maximum quoted in the offer says so in
+            // the re-price reason, and the cap is logged once per uncapped amount.
+            $capped_note = $this->last_cap ? ' (capped at the quoted maximum)' : '';
+            $this->apply_invoice_amount($invoice_id, $segment_fee, 'worked out again from their teams and the fee matrix' . $capped_note . ($this->reprice_context !== '' ? ' (' . $this->reprice_context . ')' : ''));
+            if ($this->last_cap) {
+                $owner = intval($wpdb->get_var($wpdb->prepare("SELECT user_id FROM {$wpdb->prefix}team_invoices WHERE id = %d", $invoice_id)));
+                $this->log_cap($owner, $season, $segment_fee);
+            }
             return true;
         }
 
@@ -3333,7 +4112,7 @@ class TeamOversight_Fees {
         update_option('team_oversight_teams', $teams);
 
         $meta = get_option('team_oversight_team_meta', array());
-        $meta[$key] = $this->get_posted_team_meta();
+        $meta[$key] = $this->get_posted_team_meta($team_code);
         update_option('team_oversight_team_meta', $meta);
 
         wp_send_json_success('Team added to the ' . $season . ' season');
@@ -3366,7 +4145,7 @@ class TeamOversight_Fees {
         update_option('team_oversight_teams', $teams);
 
         $meta = get_option('team_oversight_team_meta', array());
-        $meta[$key] = $this->get_posted_team_meta();
+        $meta[$key] = $this->get_posted_team_meta($team_code, isset($meta[$key]) ? $meta[$key] : array());
         update_option('team_oversight_team_meta', $meta);
 
         wp_send_json_success('Team updated for the ' . $season . ' season');
@@ -3445,6 +4224,7 @@ class TeamOversight_Fees {
                 'gender' => $team['gender'],
                 'age_rule' => $team['age_rule'],
                 'shirts' => isset($team['shirts']) ? $team['shirts'] : 1,
+                'level' => isset($team['level']) ? intval($team['level']) : TeamOversight_Database::default_level_for_code($code),
             );
         }
         update_option('team_oversight_teams', $names);

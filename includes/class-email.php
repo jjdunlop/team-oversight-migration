@@ -58,9 +58,12 @@ class TeamOversight_Email {
 
     /**
      * A block token on a line of its own: {fees}, {details}, {button} or
-     * {button:Label}. Spaces inside the braces and any case are allowed.
+     * {button:Label}, and (1.76.0, the offer emails) {offer}, {terms},
+     * {next_steps} and {extras} (the one extra training / extra games line).
+     * Spaces inside the braces and any case are allowed. An email that has no
+     * block for a token drops it, as it always has.
      */
-    const TOKEN_PATTERN = '/^\{\s*(fees|details|button)\s*(?::\s*([^{}\r\n]{1,60}?)\s*)?\}$/i';
+    const TOKEN_PATTERN = '/^\{\s*(fees|details|button|offer|terms|next_steps|extras)\s*(?::\s*([^{}\r\n]{1,60}?)\s*)?\}$/i';
 
     // ------------------------------------------------------------------
     // Building an email
@@ -209,6 +212,21 @@ class TeamOversight_Email {
             }
             // A block this email has nothing for: left out, never shown as code.
             return array('', '');
+        }
+
+        // A paragraph whose first line starts "## " has that line drawn as a
+        // short bold sub-heading; the rest of the paragraph is normal text.
+        if (preg_match('/^##[ \t]+\S/', $trimmed)) {
+            $lines = explode("\n", $trimmed);
+            $head = trim(preg_replace('/^##[ \t]+/', '', array_shift($lines)));
+            $rest = trim(implode("\n", $lines));
+            $html = self::subheading(esc_html(strtr(self::decode($head), $vars)));
+            $text = strtr(self::decode($head), $vars);
+            if ($rest !== '') {
+                $html .= self::paragraph(self::words_html($rest, $vars));
+                $text .= "\n" . self::words_text($rest, $vars);
+            }
+            return array($html, $text);
         }
 
         if (strpos($trimmed, '>') === 0) {
@@ -452,6 +470,14 @@ class TeamOversight_Email {
         return '<p style="margin:' . $margin . ';font-family:' . self::FONT . ';font-size:' . intval($size) . 'px;line-height:1.55;color:' . ($color ? $color : self::INK) . ';word-break:break-word;">' . $html . '</p>';
     }
 
+    /**
+     * A short bold sub-heading inside the message (the "## " line of an
+     * email text). $html is already escaped.
+     */
+    public static function subheading($html) {
+        return '<p style="margin:8px 0 6px;font-family:' . self::FONT . ';font-size:17px;line-height:1.3;font-weight:800;color:' . self::NAVY . ';">' . $html . '</p>';
+    }
+
     /** A highlighted note (pale yellow, with an amber edge). */
     public static function note($html) {
         return self::box(self::paragraph($html, 15, self::INK, '0'), '#FFF8E6', false, '#f0b429');
@@ -681,11 +707,145 @@ class TeamOversight_Email {
             . 'f.addEventListener("load",fit);var d=f.closest("details");if(d){d.addEventListener("toggle",function(){if(d.open){fit();}});}fit();})();</script>';
     }
 
-    /** The help text admins see beside every email body. */
-    public static function format_help() {
+    /**
+     * The help text admins see beside every email body. $offer_blocks adds
+     * the three blocks only the offer emails have ({offer}, {terms},
+     * {next_steps}); the default text is what every other email shows.
+     */
+    /**
+     * Every email the site sends, as one list for the Emails page's Overview
+     * tab (1.78.0): array of array(group, name, who, when, switch (words: on
+     * or off, and where to change it), url (where its words are edited)).
+     * Built from each family's own get_events() and get_settings(), so a new
+     * email shows here by itself and the table can never disagree with the
+     * cards. Reads only.
+     */
+    public static function catalogue() {
+        $rows = array();
+        $emails = function ($tab, $anchor = '') {
+            return admin_url('admin.php?page=team-oversight-emails&tab=' . $tab) . ($anchor !== '' ? '#' . $anchor : '');
+        };
+        if (class_exists('TeamOversight_Payments')) {
+            $auto = (bool) get_option(TeamOversight_Payments::REMINDERS_ENABLED_OPTION);
+            $days = intval(get_option(TeamOversight_Payments::REMINDER_DAYS_OPTION, 7));
+            $rows[] = array(
+                'group' => 'Fee reminders',
+                'name' => 'Overdue fee reminder',
+                'who' => 'A member who is behind on their fees (never the same person more often than every ' . $days . ' days). Reply-To the fee reminders\' Reply-To.',
+                'when' => 'Every day at the set time when Send automatically is on, or when you press Send reminders now.',
+                'switch' => ($auto ? 'On' : 'Off') . ': the Send automatically tick (Fee reminders tab)',
+                'url' => $emails('reminders'),
+            );
+        }
+        if (class_exists('TeamOversight_Trial_Emails')) {
+            $settings = TeamOversight_Trial_Emails::get_settings();
+            foreach (TeamOversight_Trial_Emails::get_events() as $key => $event) {
+                $rows[] = array(
+                    'group' => 'Trial applicants',
+                    'name' => $event['label'],
+                    'who' => 'The applicant. Reply-To ' . (TeamOversight_Trial_Emails::get_reply_to() !== '' ? TeamOversight_Trial_Emails::get_reply_to() : 'the fee reminders\' Reply-To') . '.',
+                    'when' => $event['when'],
+                    'switch' => (!empty($settings[$key]['enabled']) ? 'On' : 'Off') . ': its tick (Trial applicants tab)',
+                    'url' => $emails('trials'),
+                );
+            }
+        }
+        if (class_exists('TeamOversight_Offer_Emails')) {
+            $settings = TeamOversight_Offer_Emails::get_settings();
+            foreach (TeamOversight_Offer_Emails::get_events() as $key => $event) {
+                $rows[] = array(
+                    'group' => 'Offers and selection',
+                    'name' => $event['label'],
+                    'who' => $event['who'],
+                    'when' => $event['when'],
+                    'switch' => !empty($event['switch'])
+                        ? (!empty($settings[$key]['enabled']) ? 'On' : 'Off') . ': its tick (Offers and selection tab)'
+                        : 'Always on: it is the process',
+                    'url' => $emails('offers', 'offer-emails'),
+                );
+            }
+        }
+        if (class_exists('TeamOversight_Account_Emails') && function_exists('UM')) {
+            $um = get_option('um_options', array());
+            foreach (TeamOversight_Account_Emails::get_events() as $key => $event) {
+                $rows[] = array(
+                    'group' => 'Account (Ultimate Member)',
+                    'name' => $event['label'],
+                    'who' => 'The member. From and Reply-To are Ultimate Member\'s own.',
+                    'when' => $event['when'],
+                    'switch' => (!empty($um[$key . '_on']) ? 'On' : 'Off') . ': Ultimate Member, Settings, Email',
+                    'url' => TeamOversight_Account_Emails::page_url(),
+                );
+            }
+        }
+        return $rows;
+    }
+
+    /**
+     * What every wording card ends with (1.78.0, one copy for the reminder,
+     * trial, account and offer emails): the built-in wording, ALWAYS shown (so
+     * an administrator never has to guess what "put it back" means), and a
+     * "Use the built-in wording" button that fills the card's three boxes with
+     * it (press Save to keep it). Saved identical to the built-in text, the
+     * wording is stored as "built in" (see collect_wording()), so later
+     * improvements still reach it. $names: field name of the subject,
+     * heading and message boxes; $default: array(subject, heading, body).
+     */
+    public static function wording_footer(array $names, array $default, $customised) {
+        $html = '<details style="margin-top: 6px;"><summary style="cursor: pointer;">Built-in wording' . ($customised ? '' : ' (this is what is in use)') . '</summary>'
+            . '<p style="margin: 6px 0 2px;"><strong>Subject:</strong> ' . esc_html($default[0]) . '<br><strong>Heading:</strong> ' . esc_html($default[1]) . '</p>'
+            . '<pre style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 4px; padding: 10px; white-space: pre-wrap; font-size: 12px; margin: 6px 0 0;">' . esc_html($default[2]) . '</pre></details>';
+        if ($customised) {
+            $html .= self::use_builtin_button(array($names[0] => (string) $default[0], $names[1] => (string) $default[1], $names[2] => (string) $default[2]));
+        }
+        return $html;
+    }
+
+    /**
+     * A "Use the built-in wording" button (1.78.0): pressing it fills the named
+     * boxes of its form with the given values (field name => value); the
+     * administrator then presses Save. The one small script is printed once.
+     */
+    public static function use_builtin_button(array $fields, $label = 'Use the built-in wording') {
+        static $script = false;
+        $html = '<p style="margin: 6px 0 0;"><button type="button" class="button murvc-use-builtin" data-fields="' . esc_attr(wp_json_encode($fields)) . '">' . esc_html($label) . '</button> <span class="description">Fills the boxes above; press Save to keep it.</span></p>';
+        if (!$script) {
+            $script = true;
+            $html .= '<script>document.addEventListener("click",function(e){var b=e.target;if(!b||!b.classList||!b.classList.contains("murvc-use-builtin")){return;}'
+                . 'var f=JSON.parse(b.getAttribute("data-fields")||"{}"),form=b.closest("form");if(!form){return;}'
+                . 'Object.keys(f).forEach(function(n){var el=form.elements[n];if(el){el.value=f[n];}});});</script>';
+        }
+        return $html;
+    }
+
+    /**
+     * One email's posted subject, heading and message as they should be
+     * STORED: text identical to the built-in wording becomes '' ("use the
+     * built-in text"), so improvements to the built-in wording reach anyone
+     * who never customised it. $posted: array(subject, heading, body) as
+     * typed (already unslashed); $event: the built-in wording (subject,
+     * heading, body). Returns array(subject, heading, body, warn_body (the
+     * body to check: the typed one, else the built-in one)).
+     */
+    public static function collect_wording(array $posted, array $event) {
+        $subject = isset($posted['subject']) && is_string($posted['subject']) ? sanitize_text_field($posted['subject']) : '';
+        $heading = isset($posted['heading']) && is_string($posted['heading']) ? sanitize_text_field($posted['heading']) : '';
+        $body = isset($posted['body']) && is_string($posted['body']) ? sanitize_textarea_field($posted['body']) : '';
+        return array(
+            trim($subject) === $event['subject'] ? '' : $subject,
+            trim($heading) === $event['heading'] ? '' : $heading,
+            self::normalise($body) === self::normalise($event['body']) ? '' : self::normalise($body),
+            $body !== '' ? $body : $event['body'],
+        );
+    }
+
+    public static function format_help($offer_blocks = false) {
         return 'Write plain text. A blank line starts a new paragraph, and web addresses become links. '
-            . 'Start a paragraph with <code>&gt;</code> to highlight it. '
+            . 'Start a paragraph with <code>&gt;</code> to highlight it, or with <code>##</code> and a space to make its first line a short bold sub-heading. '
             . 'Put <code>{button}</code> on a line of its own for the button, or <code>{button:Your own words}</code> to change what it says. '
+            . ($offer_blocks
+                ? 'The offer emails also have blocks on a line of their own: <code>{offer}</code> (the box with the team, role, fee, deposit and dates), <code>{terms}</code> (the commitments and deposit policy), <code>{extras}</code> (one line about extra training or extra games, chosen by the player\'s age) and, in the "not selected" email, <code>{next_steps}</code> (the suggestions for what to do next). '
+                : '')
             . 'The club logo, heading, layout and footer are added for you, so there\'s no need to sign off.';
     }
 

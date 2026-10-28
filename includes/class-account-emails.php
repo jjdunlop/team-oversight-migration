@@ -332,12 +332,61 @@ class TeamOversight_Account_Emails {
         if (!isset($_GET['page'], $_GET['tab']) || $_GET['page'] !== 'um_options' || $_GET['tab'] !== 'email' || !current_user_can('manage_options')) {
             return;
         }
-        echo '<div class="notice notice-info"><p>The member emails\' wording and look are set on <a href="' . esc_url(admin_url('admin.php?page=team-oversight-emails#account-emails')) . '">VVL Oversight → Emails</a> (Club Manager). The on/off switches here still decide which ones are sent.</p></div>';
+        echo '<div class="notice notice-info"><p>The member emails\' wording and look are set on <a href="' . esc_url(self::page_url()) . '">Club Membership → Account Emails</a> (Club Manager). The on/off switches here still decide which ones are sent.</p></div>';
     }
 
     // ------------------------------------------------------------------
-    // Admin (VVL Oversight → Emails)
+    // Admin (Club Membership → Account Emails; before 1.78.0 these cards sat on VVL Oversight → Emails)
     // ------------------------------------------------------------------
+
+    const PAGE_SLUG = 'club-membership-account-emails';
+    const FLASH_PREFIX = 'murvc_account_email_flash_';
+
+    public static function page_url() {
+        return admin_url('admin.php?page=' . self::PAGE_SLUG);
+    }
+
+    /**
+     * load-{page}: run the page's two POST actions once, keep what they print
+     * and redirect back (Post/Redirect/Get), so refreshing the page never
+     * saves again or sends the test emails again. Each action still checks
+     * its own nonce and manage_options.
+     */
+    public static function load_page() {
+        $action = (isset($_POST['action']) && is_string($_POST['action'])) ? sanitize_key(wp_unslash($_POST['action'])) : '';
+        if (!in_array($action, array('save_account_email_settings', 'send_test_account_emails'), true)) {
+            return;
+        }
+        ob_start();
+        if ($action === 'save_account_email_settings') {
+            self::save_admin_settings();
+        } else {
+            self::send_test_emails();
+        }
+        set_transient(self::FLASH_PREFIX . get_current_user_id(), ob_get_clean(), 300);
+        wp_safe_redirect(self::page_url());
+        exit;
+    }
+
+    /** Club Membership → Account Emails. */
+    public static function render_page() {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html('You do not have permission to view this page.'), '', array('response' => 403));
+        }
+        echo '<div class="wrap"><h1>Account Emails</h1>';
+        $key = self::FLASH_PREFIX . get_current_user_id();
+        $flash = get_transient($key);
+        if (is_string($flash) && $flash !== '') {
+            delete_transient($key);
+            echo wp_kses_post($flash);
+        }
+        if (!function_exists('UM')) {
+            echo '<div class="notice notice-warning inline"><p>Ultimate Member is not active, so there are no account emails to edit here.</p></div></div>';
+            return;
+        }
+        self::render_admin_section();
+        echo '</div>';
+    }
 
     /** Things in an account email's text that won't come out as meant. */
     public static function check_body($body) {
@@ -356,9 +405,9 @@ class TeamOversight_Account_Emails {
         <div id="account-emails" style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; margin-top: 20px;">
             <h2 style="margin-top: 0;">Account emails</h2>
             <p class="description" style="max-width: 900px;">
-                Ultimate Member's emails about a member's account, in the club look. Ultimate Member still sends them: switch each on or off in
+                Ultimate Member's emails about a member's account, in the club look. Ultimate Member still sends them, and its own switches still decide whether each one goes: switch each on or off in
                 <a href="<?php echo esc_url(admin_url('admin.php?page=um_options&tab=email')); ?>">Ultimate Member → Settings → Email</a>, which also sets the From name and address
-                (replies go to that address). Placeholders: <code>{first_name}</code> <code>{name}</code> <code>{email}</code> <code>{username}</code>
+                (replies go to that address). This page only changes the words and the look. Placeholders: <code>{first_name}</code> <code>{name}</code> <code>{email}</code> <code>{username}</code>
                 <code>{link}</code> (the email's link: log in, activate, reset password or your account), and in Approved <code>{reset_link}</code>.
                 <?php echo TeamOversight_Email::format_help(); ?>
                 Clear a subject, heading or message and save to go back to the built-in wording.
@@ -389,12 +438,7 @@ class TeamOversight_Account_Emails {
                             <?php foreach (self::check_body($s['body']) as $warning): ?>
                                 <p style="color: #b32d2e; margin: 4px 0;">&#9888; <?php echo esc_html($warning); ?></p>
                             <?php endforeach; ?>
-                            <?php if (TeamOversight_Email::normalise($s['body']) !== TeamOversight_Email::normalise($event['body'])): ?>
-                                <details style="margin-top: 6px;">
-                                    <summary style="cursor: pointer;">Built-in wording</summary>
-                                    <pre style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 4px; padding: 10px; white-space: pre-wrap; font-size: 12px; margin: 6px 0 0;"><?php echo esc_html($event['body']); ?></pre>
-                                </details>
-                            <?php endif; ?>
+                            <?php echo TeamOversight_Email::wording_footer(array('account_emails[' . $key . '][subject]', 'account_emails[' . $key . '][heading]', 'account_emails[' . $key . '][body]'), array($event['subject'], $event['heading'], $event['body']), $s['customised']); ?>
                             <details style="margin-top: 6px;">
                                 <summary style="cursor: pointer;">Preview</summary>
                                 <p style="background: #f0f0f1; padding: 6px 10px; border-radius: 4px; margin: 6px 0;"><strong>Subject:</strong> <?php echo esc_html($p_subject); ?></p>
@@ -432,16 +476,10 @@ class TeamOversight_Account_Emails {
         $warnings = array();
         foreach (self::get_events() as $key => $event) {
             $mine = isset($posted[$key]) && is_array($posted[$key]) ? $posted[$key] : array();
-            $subject = isset($mine['subject']) ? sanitize_text_field($mine['subject']) : '';
-            $heading = isset($mine['heading']) ? sanitize_text_field($mine['heading']) : '';
-            $body = isset($mine['body']) ? sanitize_textarea_field($mine['body']) : '';
-            // Wording left identical to the default is stored as "default".
-            $texts[$key] = array(
-                'subject' => trim($subject) === $event['subject'] ? '' : $subject,
-                'heading' => trim($heading) === $event['heading'] ? '' : $heading,
-                'body' => TeamOversight_Email::normalise($body) === TeamOversight_Email::normalise($event['body']) ? '' : TeamOversight_Email::normalise($body),
-            );
-            foreach (self::check_body($body !== '' ? $body : $event['body']) as $warning) {
+            // Wording left identical to the default is stored as "default" (one rule for every email: TeamOversight_Email::collect_wording()).
+            list($subject, $heading, $body, $check) = TeamOversight_Email::collect_wording($mine, $event);
+            $texts[$key] = array('subject' => $subject, 'heading' => $heading, 'body' => $body);
+            foreach (self::check_body($check) as $warning) {
                 $warnings[] = $event['label'] . ': ' . $warning;
             }
         }

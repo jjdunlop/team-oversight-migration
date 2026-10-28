@@ -75,6 +75,12 @@ class TeamOversight_Committee_Access {
             <p>Gives club officials access to <strong>every team</strong> in the coach portal, not just the teams they coach.
                 <strong>Edit all teams</strong> gives the same powers a coach has (verdicts, attendance, notes) on every team.
                 <strong>View all teams</strong> is read only. Coaches always keep full access to the teams they coach.</p>
+            <p class="description" style="max-width: 800px;"><strong>Offers:</strong> Edit access lets a person send offers from the coach portal on every team (and cancel, remind and withdraw them). <strong>Approving</strong> an offer needs a WordPress Administrator account, whatever access someone has here<?php
+            if (class_exists('TeamOversight_Offers_Setup')) {
+                $who = TeamOversight_Offers_Setup::approvers();
+                echo '. Right now that is ' . esc_html(empty($who) ? 'nobody' : implode(', ', $who));
+            }
+            ?>.</p>
             <?php echo $notice; ?>
 
             <h2>Give access</h2>

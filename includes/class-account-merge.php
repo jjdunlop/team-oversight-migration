@@ -121,6 +121,9 @@ class TeamOversight_Account_Merge {
             'team_assignment_changes' => array('user_id', 'email', '', 'season'),
             // 1.75.0: confirmed players' team positions.
             'team_positions' => array('user_id', 'email', '', 'season'),
+            // 1.76.0: offers. Rows are never deleted (the only permanent
+            // record of a forfeit, a credit and who approved what).
+            'team_offers' => array('user_id', 'email', 'name', 'season'),
         );
     }
 
@@ -141,6 +144,15 @@ class TeamOversight_Account_Merge {
             array('team_trial_selections', 'offer_accepted_by'),
             array('trial_applications', 'registration_override_by'),
             array('team_positions', 'updated_by'),
+            // 1.76.0: who requested, decided, closed and settled an offer,
+            // and who last set a fee matrix upper limit.
+            array('team_offers', 'requested_by'),
+            array('team_offers', 'decided_by'),
+            array('team_offers', 'closed_by'),
+            array('team_offers', 'settled_by'),
+            array('fee_matrix_limits', 'updated_by'),
+            // 1.80.0: who pressed Send or Don't send on a "not selected" notice.
+            array('team_not_selected', 'acted_by'),
             array('team_invoices', 'fee_overridden_by'),
             array('team_invoices', 'payment_arrangement_by'),
         );
@@ -820,6 +832,7 @@ class TeamOversight_Account_Merge {
             'trial_applications' => 'trial applications',
             'team_assignment_changes' => 'fee timeline changes',
             'team_positions' => 'team positions',
+            'team_offers' => 'offers',
         );
         $all_users = array($keep_id => $keep) + $extras;
         $by_table = array();
@@ -858,6 +871,13 @@ class TeamOversight_Account_Merge {
             }
             foreach ($seasons as $season => $who) {
                 if (count($who) > 1 && !isset($history_clash[$season])) {
+                    if ($short === 'team_offers') {
+                        // Offers are never deleted either (they are the
+                        // record of a forfeit or credit), so no admin page
+                        // can clear this clash: say so.
+                        $blockers[] = 'Both #' . implode(' and #', array_keys($who)) . " have $season offers. Offers are never deleted, so these accounts can't be merged here. Leave them as they are, or have the website maintainer merge them by hand.";
+                        continue;
+                    }
                     $blockers[] = 'Both #' . implode(' and #', array_keys($who)) . " have $season {$labels[$short]}. Sort that season out first (Payment Management, the Fee timeline card or Trial Applications), so only one account holds it.";
                 }
             }
@@ -1879,7 +1899,8 @@ class TeamOversight_Account_Merge {
         // moved, would end up split across two accounts (what plan() refuses).
         $tables = self::person_tables();
         $labels = array('team_assignments' => 'team places', 'team_invoices' => 'club fee invoices', 'team_fee_segments' => 'fee history rows',
-            'trial_applications' => 'trial applications', 'team_assignment_changes' => 'fee timeline changes', 'team_positions' => 'team positions');
+            'trial_applications' => 'trial applications', 'team_assignment_changes' => 'fee timeline changes', 'team_positions' => 'team positions',
+            'team_offers' => 'offers');
         // Every season the merge moved anything in, checked across every
         // club table (a moved trial application can lead to a new team
         // place and invoice on the kept account, for example).

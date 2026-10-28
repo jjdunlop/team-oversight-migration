@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), and casual program attendance (Club Programs).
- * Version: 1.75.3
+ * Version: 1.80.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.75.3');
+define('TEAM_OVERSIGHT_VERSION', '1.80.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -32,6 +32,9 @@ function team_oversight_deactivate() {
     wp_clear_scheduled_hook('team_oversight_membership_sync');
     wp_clear_scheduled_hook('team_oversight_overdue_reminders');
     wp_clear_scheduled_hook('murvc_dup_rescan');
+    // 1.76.0: the offers feature's daily job and its email queue event.
+    wp_clear_scheduled_hook('murvc_offers_daily');
+    wp_clear_scheduled_hook('murvc_offers_email_queue');
 }
 
 function team_oversight_create_tables() {
@@ -237,6 +240,11 @@ function team_oversight_create_tables() {
     $tables['team_assignment_changes'] = TeamOversight_Database::assignment_changes_table_sql();
     // 1.75.0: confirmed players' team positions.
     $tables['team_positions'] = TeamOversight_Database::team_positions_table_sql();
+    // 1.76.0: offers and deposits (offers, the email outbox, the
+    // not-selected hold, and the fee matrix upper limits).
+    foreach (TeamOversight_Database::offer_tables_sql() as $short => $sql) {
+        $tables[$short] = $sql;
+    }
     // 1.71.0: the account-merge journal and the 'not the same person' decisions.
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-merge.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-duplicates.php';
@@ -286,19 +294,31 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-duplicates.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-merge.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-duplicates-page.php';
+    // 1.76.0: offers, committee approval and deposits (2027 season on).
+    // 1.79.0: offers are how selection works from 2027, with no switch; the
+    // one-off upgrade (TeamOversight_Offers::maybe_upgrade()) runs on init.
+    // 1.78.0: the wording of offers that is not an email body (Early Offer, money policy, offer page, coach portal).
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-offer-wording.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-offers.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-offer-emails.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-offers-player.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-offers-admin.php';
+    // 1.78.0: the offers setup checks, the season settings form, the pages panel and the wording editor.
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-offers-setup.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-not-selected.php';
     if (defined('WP_CLI') && WP_CLI) {
         require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-merge-cli.php';
     }
 
-    // Initialize components
-    new TeamOversight_Database();
+    // Initialize components. Fees and Database add their hooks once, statically (1.78.0): `new` of either is harmless anywhere.
+    TeamOversight_Database::register_hooks();
     // Saved email wording moved to the 1.72 email format, once (a cheap
     // option check after that).
     TeamOversight_Email::maybe_upgrade();
     // Ultimate Member's account emails in the club look (added once).
     TeamOversight_Account_Emails::register_hooks();
-    new TeamOversight_Fees();
-    // Static and guarded: hooks added once, not per new TeamOversight_Fees().
+    TeamOversight_Fees::register_hooks();
+    // Static and guarded: hooks added once.
     TeamOversight_Fee_Timeline::register_hooks();
     // VVL Oversight → How it works: the calculator's AJAX hook, added once.
     TeamOversight_Help_Page::register_hooks();
@@ -307,6 +327,16 @@ function team_oversight_init() {
     TeamOversight_Duplicates::register_hooks();
     TeamOversight_Account_Merge::register_hooks();
     TeamOversight_Duplicates_Page::register_hooks();
+    // 1.76.0: offers. Each is static and adds its hooks once per request;
+    // every hook is added only if its method exists, so a class whose
+    // builder has not filled it in yet registers nothing.
+    TeamOversight_Offers::register_hooks();
+    TeamOversight_Offer_Emails::register_hooks();
+    TeamOversight_Offers_Player::register_hooks();
+    TeamOversight_Offers_Admin::register_hooks();
+    // 1.78.0: the setup checklist's "run the daily check now" button and the email-permission warning.
+    TeamOversight_Offers_Setup::register_hooks();
+    TeamOversight_Not_Selected::register_hooks();
     new TeamOversight_Trials();
     new TeamOversight_Imports();
     new TeamOversight_Exports();

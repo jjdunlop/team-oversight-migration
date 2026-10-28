@@ -528,12 +528,67 @@ class TeamOversight_Member_Lookup {
         <?php
     }
 
+    /**
+     * 1.77.0: the person's offers (2027 on), newest first, under the Fees
+     * table: team and role, where the offer is up to, and for an accepted or
+     * locked-in one the deposit target and what is paid. Prints nothing for
+     * a person with no offer (one indexed query).
+     */
+    private function render_offers($user) {
+        if (!class_exists('TeamOversight_Offers') || empty($user->ID)) {
+            return;
+        }
+        $offers = TeamOversight_Offers::for_user(intval($user->ID));
+        if (empty($offers)) {
+            return;
+        }
+        $states = TeamOversight_Offers::states();
+        $money_offers = array();
+        foreach ($offers as $offer) {
+            if ($offer->state === TeamOversight_Offers::ACCEPTED || $offer->state === TeamOversight_Offers::LOCKED_IN) {
+                $money_offers[] = $offer;
+            }
+        }
+        $paid = $money_offers ? TeamOversight_Offers::paid_toward_deposit_map($money_offers) : array();
+        ?>
+        <h4 style="margin: 14px 0 6px;">Offers</h4>
+        <table class="wp-list-table widefat striped murvc-fees">
+            <thead><tr><th>Season</th><th>Team</th><th>State</th><th>Deposit</th><th>Settled</th></tr></thead>
+            <tbody>
+                <?php foreach ($offers as $offer):
+                    $target = TeamOversight_Offers::stored_target_cents($offer);
+                    $deposit = '<span class="murvc-muted">&mdash;</span>';
+                    if ($offer->state === TeamOversight_Offers::ACCEPTED || $offer->state === TeamOversight_Offers::LOCKED_IN) {
+                        $paid_cents = isset($paid[$offer->id]) ? intval($paid[$offer->id]) : 0;
+                        $deposit = esc_html('$' . number_format(min($paid_cents, $target) / 100, 2) . ' of $' . number_format($target / 100, 2));
+                    } elseif ($offer->deposit_target !== null) {
+                        $deposit = esc_html('target $' . number_format($target / 100, 2));
+                    }
+                    $settled = '<span class="murvc-muted">&mdash;</span>';
+                    if (!empty($offer->settlement)) {
+                        $settled = esc_html(ucfirst((string) $offer->settlement) . ($offer->settled_amount !== null ? ' $' . number_format($offer->settled_amount, 2) : ''));
+                    }
+                    ?>
+                    <tr>
+                        <td><strong><?php echo esc_html($offer->season); ?></strong></td>
+                        <td><?php echo esc_html($offer->team . ' ' . TeamOversight_Offers::role_name($offer->role)); ?></td>
+                        <td><?php echo esc_html(isset($states[$offer->state]) ? $states[$offer->state] : $offer->state); ?></td>
+                        <td><?php echo $deposit; ?></td>
+                        <td><?php echo $settled; ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php
+    }
+
     private function render_fees($user) {
         global $wpdb;
 
         $invoices = TeamOversight_Payments::get_user_invoices($user);
         if (empty($invoices)) {
             echo '<p class="murvc-muted">No fees have ever been invoiced to this account.</p>';
+            $this->render_offers($user);
             return;
         }
 
@@ -610,6 +665,7 @@ class TeamOversight_Member_Lookup {
             </tbody>
         </table>
         <?php
+        $this->render_offers($user);
     }
 
     /**

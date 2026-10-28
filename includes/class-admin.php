@@ -70,6 +70,19 @@ class TeamOversight_Admin {
             array($this, 'membership_history_page')
         );
 
+        // 1.78.0: the Ultimate Member account emails' wording (it used to sit on VVL Oversight > Emails).
+        $account_emails_hook = add_submenu_page(
+            'club-membership',
+            'Account Emails',
+            'Account Emails',
+            'manage_options',
+            TeamOversight_Account_Emails::PAGE_SLUG,
+            array('TeamOversight_Account_Emails', 'render_page')
+        );
+        if ($account_emails_hook) {
+            add_action('load-' . $account_emails_hook, array('TeamOversight_Account_Emails', 'load_page'));
+        }
+
         add_submenu_page(
             'club-membership',
             'Stats',
@@ -153,7 +166,7 @@ class TeamOversight_Admin {
             array('TeamOversight_Committee_Access', 'render_admin_page')
         );
 
-        add_submenu_page(
+        $emails_hook = add_submenu_page(
             'team-oversight',
             'Emails',
             'Emails',
@@ -161,6 +174,10 @@ class TeamOversight_Admin {
             'team-oversight-emails',
             array($this, 'emails_page')
         );
+        if ($emails_hook) {
+            // 1.78.0: the page's forms post, run once, and redirect back (Post/Redirect/Get).
+            add_action('load-' . $emails_hook, array($this, 'emails_load'));
+        }
 
         add_submenu_page(
             'team-oversight',
@@ -376,12 +393,16 @@ class TeamOversight_Admin {
     private function run_finalise_selections($season, $start = null) {
         global $wpdb;
 
-        // From 2027 a Selected / Training Only verdict is an offer, and only
-        // offers the coach has marked as accepted by the player are
-        // finalised; the rest wait (listed on the page). Earlier seasons finalise
-        // every Selected / Training Only verdict, as before.
+        // From 2027 a Selected / Training Only verdict is an offer: players
+        // are placed automatically when they lock in, and Finalise places
+        // only locked-in offers whose placement failed (offer_accepted = 1 is
+        // the locked-in mirror). Earlier seasons finalise every Selected /
+        // Training Only verdict, as before.
         $needs_acceptance = TeamOversight_Coach_Portal::offer_acceptance_applies($season);
 
+        // An offer still out (awaiting approval, sent or accepted) is never
+        // placed here: the player is placed when they lock in.
+        // The same condition is on both button counts (render_trials_table()).
         $selected = $wpdb->get_results($wpdb->prepare("
             SELECT s.application_id, s.team, s.status, a.user_id, a.email, a.trial_number, a.name
             FROM {$wpdb->prefix}team_trial_selections s
@@ -389,7 +410,7 @@ class TeamOversight_Admin {
             WHERE s.status IN ('selected', 'training_only')
                 AND a.season = %s
                 AND a.application_status IN ('pending', 'accepted')
-                " . ($needs_acceptance ? 'AND s.offer_accepted = 1' : '') . "
+                " . ($needs_acceptance ? 'AND s.offer_accepted = 1' . self::finalise_offer_guard_sql() : '') . "
             ORDER BY s.application_id, s.team
         ", $season));
 
@@ -411,12 +432,13 @@ class TeamOversight_Admin {
                 . '. They\'ll finalise on the next run once paid — or use <em>Mark as Paid</em> below if they paid another way.</p></div>';
         }
 
-        // Offers it leaves alone (waiting, or withdrawn after an earlier
-        // run) are listed by the Trial Applications page, which renders
-        // straight after this on every load (report_unaccepted_offers).
+        // Where the offers it leaves alone are up to is shown by the Trial
+        // Applications page, which renders straight after this on every load
+        // (report_offers_summary()).
 
         if (empty($selected)) {
-            echo '<div class="notice notice-info"><p>' . ($needs_acceptance ? 'No accepted offers to finalise for ' : 'No confirmed coach selections to finalise for ') . esc_html($season) . '.</p></div>';
+            $none_text = $needs_acceptance ? 'No locked-in players are waiting to be placed for ' : 'No confirmed coach selections to finalise for ';
+            echo '<div class="notice notice-info"><p>' . $none_text . esc_html($season) . '.</p></div>';
             return;
         }
 
@@ -576,7 +598,7 @@ class TeamOversight_Admin {
             }, $placed_teams);
             if ($needs_acceptance) {
                 // Finalise never undoes: a team placed by an earlier run
-                // whose offer is no longer marked accepted stays listed (its
+                // whose offer is no longer locked in stays listed (its
                 // assignment is still there), so Undo Assignment still finds it.
                 $this_run = array_map(function ($t) {
                     return $t['team'];
@@ -636,68 +658,51 @@ class TeamOversight_Admin {
     }
 
     /**
-     * Selected / Training Only offers the player hasn't accepted (2027 on),
-     * on paid applications: by team, those still waiting (not finalised)
-     * and those already on that team whose acceptance was withdrawn after
-     * an earlier Finalise (nothing is undone — the admin decides). Any
-     * active playing row on the team counts as on it, whatever its role:
-     * a verdict changed after Finalise is still a player on the team.
+     * Finalise's offer condition (2027 on), for its $selected query and both
+     * button counts: a locked-in offer behind the verdict
+     * (TeamOversight_Offers::finalise_guard_sql(), the one place that reads
+     * team_offers for it).
      */
-    private function get_unaccepted_offers($season) {
-        global $wpdb;
-        $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT s.team, s.status, a.trial_number, a.name,
-                EXISTS (
-                    SELECT 1 FROM {$wpdb->prefix}team_assignments t
-                    WHERE t.season = a.season AND t.team = s.team AND t.is_active = 1
-                        AND t.role IN ('playing_member', 'training_only')
-                        AND (t.email = a.email OR (a.user_id > 0 AND t.user_id = a.user_id))
-                ) AS placed
-            FROM {$wpdb->prefix}team_trial_selections s
-            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
-            WHERE s.status IN ('selected', 'training_only') AND s.offer_accepted = 0
-                AND a.season = %s AND a.application_status IN ('pending', 'accepted')
-            ORDER BY s.team, a.trial_number
-        ", $season));
-
-        $offers = array('waiting' => array(), 'withdrawn' => array());
-        foreach ($rows as $row) {
-            $offers[intval($row->placed) ? 'withdrawn' : 'waiting'][$row->team][] = '#' . intval($row->trial_number) . ' ' . $row->name
-                . ($row->status === 'training_only' ? ' (Training Only)' : '');
-        }
-        return $offers;
-    }
-
-    /** One notice line per team: "SL2M: #12 Name, #15 Name (Training Only)". */
-    private static function offers_by_team_text($by_team) {
-        $parts = array();
-        foreach ($by_team as $team => $people) {
-            $parts[] = $team . ': ' . implode(', ', $people);
-        }
-        return implode('; ', $parts);
+    private static function finalise_offer_guard_sql() {
+        return class_exists('TeamOversight_Offers') ? TeamOversight_Offers::finalise_guard_sql('s') : '';
     }
 
     /**
-     * Trial Applications notices (2027 on) for offers Finalise leaves alone
-     * because they aren't accepted: shown on every load of the page, after
-     * a Finalise run too, whether or not there's anything to finalise — so
-     * an acceptance withdrawn after Finalise is never missed.
+     * The Trial Applications notice for the offer flow: counts by state with
+     * a link to the Offers page, and a warning for each thing that needs a
+     * person (locked-in players the club has not placed, pricing errors, a
+     * deposit waiting for the treasurer). The problem lines are read live, so
+     * they clear when fixed.
      */
-    private function report_unaccepted_offers($season) {
-        $offers = $this->get_unaccepted_offers($season);
-        $waiting = array_sum(array_map('count', $offers['waiting']));
-        $withdrawn = array_sum(array_map('count', $offers['withdrawn']));
-        if ($waiting) {
-            echo '<div class="notice notice-warning"><p><strong>' . $waiting . ' offer' . ($waiting === 1 ? ' is' : 's are') . ' still waiting for the player to accept — not finalised:</strong> '
-                . esc_html(self::offers_by_team_text($offers['waiting']))
-                . '. They finalise on a later run once a coach marks <em>Offer accepted</em> in the coach portal.</p></div>';
+    private function report_offers_summary($season) {
+        $counts = TeamOversight_Offers::counts_by_state($season);
+        $parts = array();
+        $labels = array(
+            TeamOversight_Offers::AWAITING => 'awaiting committee approval',
+            TeamOversight_Offers::SENT => 'sent, waiting for a reply',
+            TeamOversight_Offers::ACCEPTED => 'accepted, deposit due',
+            TeamOversight_Offers::LOCKED_IN => 'locked in',
+        );
+        foreach ($labels as $state => $text) {
+            if (!empty($counts[$state])) {
+                $parts[] = intval($counts[$state]) . ' ' . $text;
+            }
         }
-        if ($withdrawn) {
-            echo '<div class="notice notice-warning"><p><strong>' . $withdrawn . ' player' . ($withdrawn === 1 ? ' is' : 's are') . ' already on the team without an accepted offer</strong> (acceptance withdrawn or verdict changed after an earlier Finalise, or placed another way): '
-                . esc_html(self::offers_by_team_text($offers['withdrawn']))
-                . '. Nothing was undone. If one isn\'t playing for that team after all, remove just that team on <a href="' . esc_url(admin_url('admin.php?page=team-oversight-assignments&season=' . $season)) . '">Team Assignments</a>. Undo Assignment takes the player off every team on their application, so use it only when they aren\'t playing for any of them.</p></div>';
+        $link = class_exists('TeamOversight_Offers_Admin')
+            ? ' <a href="' . esc_url(TeamOversight_Offers_Admin::page_url(array('tab' => 'approve', 'season' => $season))) . '">Open the Offers page</a>.'
+            : '';
+        echo '<div class="notice notice-info"><p><strong>Offers for ' . esc_html($season) . ':</strong> '
+            . ($parts ? esc_html(implode(', ', $parts)) : 'none yet')
+            . '. Players are placed on their team automatically when they lock in (accept the offer and pay the deposit); Finalise is the retry for any whose placement failed.' . $link . '</p></div>';
+        if (class_exists('TeamOversight_Offers_Admin')) {
+            foreach (TeamOversight_Offers_Admin::problems($season) as $problem) {
+                echo '<div class="notice notice-warning"><p><strong>Needs attention:</strong> ' . esc_html($problem['text'])
+                    . ' <a href="' . esc_url(TeamOversight_Offers_Admin::page_url(array('tab' => $problem['tab'], 'season' => $season))) . '">Open</a>'
+                    . '</p></div>';
+            }
         }
     }
+
 
     private function save_trial_settings() {
         if (!isset($_POST['trial_settings_nonce']) || !wp_verify_nonce($_POST['trial_settings_nonce'], 'save_trial_settings')) {
@@ -762,6 +767,18 @@ class TeamOversight_Admin {
     public function invoices_page() {
         if (isset($_POST['action']) && $_POST['action'] === 'save_payment_settings') {
             $this->save_payment_settings();
+        }
+
+        // 1.77.0: things from the offers flow a person has to put right (a
+        // deposit that arrived after an offer ended, a payment that could
+        // not be applied, a fee that could not be set). Like the refund
+        // banner, each stays listed for 30 days whether or not it has been
+        // dealt with; the Offers page lists the current problems.
+        if (class_exists('TeamOversight_Offers_Admin')) {
+            TeamOversight_Log::render_alert_notice(
+                array('offer_alert'),
+                'Offer and deposit alerts in the last 30 days. Each one stays on this list whether or not it has been dealt with: the Offers page shows what still needs attention right now.'
+            );
         }
 
         $this->render_invoices_table();
@@ -857,6 +874,21 @@ class TeamOversight_Admin {
             array(admin_url('admin.php?page=team-oversight-trials'), number_format($pending_trials), 'Trial apps awaiting action'),
             array(admin_url('admin.php?page=team-oversight-assignments'), number_format($selected), 'People on teams (' . $year . '/' . $next . ')'),
         );
+        // 1.77.0: the committee's queue (the Offers page is always in the
+        // menu since 1.79.0). The count is the badge's own option; only when
+        // something is waiting does one grouped query pick the season the
+        // tile opens (1.79.1: the oldest season with requests waiting).
+        if (class_exists('TeamOversight_Offers_Admin')) {
+            $offer_args = array('tab' => 'approve');
+            if (TeamOversight_Offers::pending_count() > 0) {
+                $offer_args['season'] = TeamOversight_Offers_Admin::default_season();
+            }
+            array_splice($tiles, 4, 0, array(array(
+                TeamOversight_Offers_Admin::page_url($offer_args),
+                number_format(TeamOversight_Offers::pending_count()),
+                'Offers awaiting approval',
+            )));
+        }
 
         ?>
         <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;">
@@ -922,39 +954,212 @@ class TeamOversight_Admin {
         TeamOversight_Log::render_admin_page('membership');
     }
 
-    public function emails_page() {
-        if (isset($_POST['action']) && $_POST['action'] === 'save_email_settings') {
-            $this->save_email_settings();
-        }
-        if (isset($_POST['action']) && $_POST['action'] === 'send_test_reminder') {
-            $this->send_test_reminder();
-        }
-        if (isset($_POST['action']) && in_array($_POST['action'], array('preview_overdue_reminders', 'send_overdue_reminders'), true)) {
-            $this->run_overdue_reminders($_POST['action'] === 'preview_overdue_reminders');
-        }
-        if (isset($_POST['action']) && $_POST['action'] === 'save_trial_email_settings') {
-            TeamOversight_Trial_Emails::save_admin_settings();
-        }
-        if (isset($_POST['action']) && $_POST['action'] === 'send_test_trial_emails') {
-            TeamOversight_Trial_Emails::send_test_emails();
-        }
-        if (isset($_POST['action']) && $_POST['action'] === 'save_account_email_settings') {
-            TeamOversight_Account_Emails::save_admin_settings();
-        }
-        if (isset($_POST['action']) && $_POST['action'] === 'send_test_account_emails') {
-            TeamOversight_Account_Emails::send_test_emails();
-        }
+    /** The Emails page's tabs: slug => label. */
+    private function emails_tabs() {
+        return array(
+            'overview' => 'Overview',
+            'reminders' => 'Fee reminders',
+            'trials' => 'Trial applicants',
+            'offers' => 'Offers and selection',
+        );
+    }
 
+    private function emails_tab() {
+        $tab = isset($_GET['tab']) && is_string($_GET['tab']) ? sanitize_key(wp_unslash($_GET['tab'])) : '';
+        return isset($this->emails_tabs()[$tab]) ? $tab : 'overview';
+    }
+
+    /** The tab a POST action belongs to (where the page returns after it). */
+    private function emails_tab_for_action($action) {
+        if (in_array($action, array('save_email_settings', 'send_test_reminder', 'preview_overdue_reminders', 'send_overdue_reminders'), true)) {
+            return 'reminders';
+        }
+        if (in_array($action, array('save_trial_email_settings', 'send_test_trial_emails'), true)) {
+            return 'trials';
+        }
+        if ($action === 'save_sender_settings') {
+            return 'overview';
+        }
+        return 'offers';
+    }
+
+    /**
+     * load-{page} (1.78.0): run the page's POST action once, keep what it
+     * printed and redirect back (Post/Redirect/Get), so refreshing never sends
+     * the test emails again or saves twice. Every action still checks its own
+     * nonce and manage_options.
+     */
+    public function emails_load() {
+        $action = (isset($_POST['action']) && is_string($_POST['action'])) ? sanitize_key(wp_unslash($_POST['action'])) : '';
+        if ($action === '') {
+            return;
+        }
+        $offer_actions = class_exists('TeamOversight_Offer_Emails') ? TeamOversight_Offer_Emails::SETTINGS_ACTIONS : array();
+        $known = array('save_email_settings', 'save_sender_settings', 'send_test_reminder', 'preview_overdue_reminders', 'send_overdue_reminders', 'save_trial_email_settings', 'send_test_trial_emails');
+        if (!in_array($action, $known, true) && !in_array($action, $offer_actions, true)) {
+            return;
+        }
+        ob_start();
+        switch ($action) {
+            case 'save_email_settings':
+                $this->save_email_settings();
+                break;
+            case 'save_sender_settings':
+                $this->save_sender_settings();
+                break;
+            case 'send_test_reminder':
+                $this->send_test_reminder();
+                break;
+            case 'preview_overdue_reminders':
+            case 'send_overdue_reminders':
+                $this->run_overdue_reminders($action === 'preview_overdue_reminders');
+                break;
+            case 'save_trial_email_settings':
+                TeamOversight_Trial_Emails::save_admin_settings();
+                break;
+            case 'send_test_trial_emails':
+                TeamOversight_Trial_Emails::send_test_emails();
+                break;
+            default:
+                TeamOversight_Offer_Emails::handle_settings_post();
+        }
+        set_transient('murvc_emails_flash_' . get_current_user_id(), ob_get_clean(), 300);
+        $tab = $this->emails_tab_for_action($action);
+        $anchor = '';
+        if ($tab === 'offers') {
+            $anchor = array('save_offer_terms' => '#offer-terms', 'save_offer_links' => '#offer-pages', 'create_offer_page' => '#offer-pages', 'save_offer_wording' => '#offer-wording', 'reset_offer_wording' => '#offer-wording')[$action] ?? '#offer-emails';
+        }
+        wp_safe_redirect(admin_url('admin.php?page=team-oversight-emails&tab=' . $tab) . $anchor);
+        exit;
+    }
+
+    /** Print (once) what the last handled POST printed. */
+    private function emails_flash() {
+        $key = 'murvc_emails_flash_' . get_current_user_id();
+        $flash = get_transient($key);
+        if (is_string($flash) && $flash !== '') {
+            delete_transient($key);
+            echo $flash; // built from escaped notices by the handlers above
+        }
+    }
+
+    public function emails_page() {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html('You do not have permission to view this page.'), '', array('response' => 403));
+        }
+        $tab = $this->emails_tab();
+        ?>
+        <div class="wrap">
+            <h1>Emails</h1>
+            <?php
+            $this->emails_flash();
+            // The email-permission buttons redirect back here with a flash notice.
+            if (class_exists('TeamOversight_Offer_Emails')) {
+                TeamOversight_Offer_Emails::handle_settings_post();
+            }
+            ?>
+            <h2 class="nav-tab-wrapper" style="margin-top: 10px;">
+                <?php foreach ($this->emails_tabs() as $slug => $label): ?>
+                    <a class="nav-tab<?php echo $slug === $tab ? ' nav-tab-active' : ''; ?>" href="<?php echo esc_url(admin_url('admin.php?page=team-oversight-emails&tab=' . $slug)); ?>"><?php echo esc_html($label); ?></a>
+                <?php endforeach; ?>
+            </h2>
+            <?php
+            switch ($tab) {
+                case 'reminders':
+                    $this->render_emails_reminders();
+                    break;
+                case 'trials':
+                    TeamOversight_Trial_Emails::render_admin_section();
+                    break;
+                case 'offers':
+                    if (class_exists('TeamOversight_Offer_Emails')) {
+                        TeamOversight_Offer_Emails::render_settings_section();
+                    }
+                    break;
+                default:
+                    $this->render_emails_overview();
+            }
+            ?>
+        </div>
+        <?php
+    }
+
+    /** The Overview tab: the shared Sender box, what switches an email on or off, and one table of every email the site sends. */
+    private function render_emails_overview() {
+        $rows = TeamOversight_Email::catalogue();
+        $groups = array();
+        foreach ($rows as $row) {
+            $groups[$row['group']][] = $row;
+        }
+        ?>
+        <p class="description" style="max-width: 900px;">Every email the club sends from this website: who gets it, when it goes, what switches it on or off, and where its words are edited. They all share one club look (the logo, the program above the heading, your message and the same footer).</p>
+
+        <div id="sender" style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; margin: 15px 0; max-width: 900px;">
+            <h2 style="margin-top: 0;">Sender</h2>
+            <form method="post">
+                <p style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <label style="flex: 1; min-width: 160px;"><strong>From name</strong><br>
+                        <input type="text" name="email_from_name" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_FROM_NAME_OPTION)); ?>" placeholder="MURVC" style="width: 100%;">
+                    </label>
+                    <label style="flex: 1.4; min-width: 220px;"><strong>From address</strong><br>
+                        <input type="email" name="email_from" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_FROM_OPTION)); ?>" placeholder="<?php echo esc_attr(get_option('woocommerce_email_from_address', get_option('admin_email'))); ?>" style="width: 100%;">
+                    </label>
+                    <label style="flex: 1.4; min-width: 220px;"><strong>Reply-To (fee reminders)</strong><br>
+                        <input type="email" name="email_replyto" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION)); ?>" placeholder="treasurer@renegades.com.au" style="width: 100%;">
+                    </label>
+                </p>
+                <p style="margin: 0 0 8px;"><label><strong>Club contact for offers</strong><br>
+                    <input type="email" name="offer_contact" value="<?php echo esc_attr(get_option(TeamOversight_Offers::CONTACT_OPTION, '')); ?>" placeholder="<?php echo esc_attr((string) TeamOversight_Trial_Emails::get_reply_to()); ?>" style="width: 320px;">
+                </label>
+                <span class="description" style="display: block;">The address a player is pointed to when they can't pay online or have lost an email: write <code>{club_contact}</code> in any offer wording (Offers and selection tab, Offer wording) and it becomes this address. Blank = the trial applications address shown.</span></p>
+                <p class="description">The From name and address are used by <strong>every</strong> email in the table below that this website sends: the fee reminders, the trial emails, the offer emails and the coaches' notices (Ultimate Member's account emails use Ultimate Member's own From). From must be an address the site's mail account may send as; otherwise the mail service swaps in its own address. Leave From blank for the site's default sender. Reply-To here is for the fee reminders only: trial emails have their own (Trial applicants tab), offer emails reply to the team's coach, and so does the "not selected" email (the coach who pressed Send, else the team's head coach; the trial applications address when the team has no coach on file).</p>
+                <p>
+                    <input type="submit" class="button button-primary" value="Save sender settings">
+                    <input type="hidden" name="action" value="save_sender_settings">
+                    <?php wp_nonce_field('email_settings', 'email_settings_nonce'); ?>
+                </p>
+            </form>
+        </div>
+
+        <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; margin: 15px 0; max-width: 900px;">
+            <h2 style="margin-top: 0;">What switches an email on or off</h2>
+            <ul style="list-style: disc; margin-left: 20px;">
+                <li><strong>Fee reminders:</strong> the <em>Send automatically</em> tick on the Fee reminders tab (or the Send reminders now button).</li>
+                <li><strong>Trial emails:</strong> one tick on each, on the Trial applicants tab.</li>
+                <li><strong>Offer emails:</strong> the offer, its two reminders and the withdrawal are always on (they are the process). The coaches' notices, "you're locked in" and "not selected" have a tick each on the Offers and selection tab. Whether anything leaves the website at all is decided by the <em>permission to send offer emails</em> (a stored copy of the website's address, so a test copy of the site sends nothing). There is no offers on/off switch: from 2027 offers are how selection works, and no offer email goes out before an administrator approves the offer.</li>
+                <li><strong>Account emails</strong> (Ultimate Member): switched on or off in Ultimate Member, Settings, Email. Their wording is under <a href="<?php echo esc_url(TeamOversight_Account_Emails::page_url()); ?>">Club Membership, Account Emails</a> (they used to be on this page).</li>
+            </ul>
+        </div>
+
+        <?php foreach ($groups as $group => $list): ?>
+            <h2 style="margin-bottom: 4px;"><?php echo esc_html($group); ?></h2>
+            <table class="widefat striped" style="max-width: 1100px; margin-bottom: 18px;">
+                <thead><tr><th style="width: 22%;">Email</th><th>Who gets it</th><th>Sent when</th><th style="width: 16%;">On or off</th><th style="width: 9%;">Words</th></tr></thead>
+                <tbody>
+                    <?php foreach ($list as $row): ?>
+                        <tr>
+                            <td><strong><?php echo esc_html($row['name']); ?></strong></td>
+                            <td><?php echo esc_html($row['who']); ?></td>
+                            <td><?php echo esc_html($row['when']); ?></td>
+                            <td><?php echo esc_html($row['switch']); ?></td>
+                            <td><a href="<?php echo esc_url($row['url']); ?>">Edit</a></td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        <?php endforeach; ?>
+        <?php
+    }
+
+    /** The Fee reminders tab: the overdue reminder's settings, wording, test send and a live preview. */
+    private function render_emails_reminders() {
         $texts = TeamOversight_Payments::get_reminder_texts();
 
         // Live preview with a made-up member and sample numbers.
         list($sample_person, $sample_cards, $sample_totals) = TeamOversight_Payments::sample_reminder();
         list($preview_subject, $preview_email) = TeamOversight_Payments::render_reminder_email($sample_person, $sample_cards, $sample_totals);
-
         ?>
-        <div class="wrap">
-            <h1>Emails</h1>
-            <p class="description" style="max-width: 900px;">Club emails sent by the plugin: the overdue-fees reminder (below), and the trial application emails (further down). They all share one club look: the logo and club name, the program above the heading, your message, and the same footer. Reminder placeholders: <code>{first_name}</code>, <code>{name}</code>, <code>{overdue}</code>, <code>{outstanding}</code>, <code>{time_overdue}</code> ("a week", "3 weeks"), <code>{days_overdue}</code>, <code>{link}</code> (the fees/checklist page from Player Readiness settings). Put <code>{fees}</code> on a line of its own for their fees with the progress bar, as on the Player Checklist. <?php echo TeamOversight_Email::format_help(); ?></p>
+        <p class="description" style="max-width: 900px;">The overdue-fees reminder. Placeholders: <code>{first_name}</code>, <code>{name}</code>, <code>{overdue}</code>, <code>{outstanding}</code>, <code>{time_overdue}</code> ("a week", "3 weeks"), <code>{days_overdue}</code>, <code>{link}</code> (the fees/checklist page from Player Readiness settings). Put <code>{fees}</code> on a line of its own for their fees with the progress bar, as on the Player Checklist. <?php echo TeamOversight_Email::format_help(); ?></p>
 
             <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start;">
                 <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; min-width: 420px; flex: 1; max-width: 620px;">
@@ -1009,18 +1214,7 @@ class TeamOversight_Admin {
                                 </span>
                             <?php endif; ?>
                         </p>
-                        <p style="display: flex; gap: 10px;">
-                            <label style="flex: 1;"><strong>From name</strong><br>
-                                <input type="text" name="email_from_name" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_FROM_NAME_OPTION)); ?>" placeholder="MURVC" style="width: 100%;">
-                            </label>
-                            <label style="flex: 1.4;"><strong>From address</strong><br>
-                                <input type="email" name="email_from" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_FROM_OPTION)); ?>" placeholder="<?php echo esc_attr(get_option('woocommerce_email_from_address', get_option('admin_email'))); ?>" style="width: 100%;">
-                            </label>
-                            <label style="flex: 1.4;"><strong>Reply-To</strong><br>
-                                <input type="email" name="email_replyto" value="<?php echo esc_attr(get_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION)); ?>" placeholder="treasurer@renegades.com.au" style="width: 100%;">
-                            </label>
-                        </p>
-                        <p class="description">From must be an address the site's mail account may send as (the account the site sends through, or an alias set up on it); otherwise the mail service swaps in its own address. Reply-To can be any real mailbox (that's where member replies land). Leave From blank for the site's default sender. The From name and address are shared with the trial application emails below; those have their own Reply-To.</p>
+                        <p class="description">The From name, From address and Reply-To for these emails are set once for the whole site on the <a href="<?php echo esc_url(admin_url('admin.php?page=team-oversight-emails&tab=overview#sender')); ?>">Overview tab</a>.</p>
                         <?php if ($texts['customised']): ?>
                             <p style="color: #996800; margin-bottom: 0;">The wording below has been customised. Clear a field and save to go back to the built-in wording.</p>
                         <?php endif; ?>
@@ -1042,12 +1236,7 @@ class TeamOversight_Admin {
                         <?php foreach (TeamOversight_Payments::check_reminder_body($texts['body']) as $warning): ?>
                             <p style="color: #b32d2e; margin: 4px 0;">&#9888; <?php echo esc_html($warning); ?></p>
                         <?php endforeach; ?>
-                        <?php if (TeamOversight_Email::normalise($texts['body']) !== TeamOversight_Email::normalise(TeamOversight_Payments::get_default_reminder_body())): ?>
-                            <details style="margin: 6px 0 12px;">
-                                <summary style="cursor: pointer;">Built-in wording</summary>
-                                <pre style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 4px; padding: 10px; white-space: pre-wrap; font-size: 12px; margin: 6px 0 0;"><?php echo esc_html(TeamOversight_Payments::get_default_reminder_body()); ?></pre>
-                            </details>
-                        <?php endif; ?>
+                        <?php echo TeamOversight_Email::wording_footer(array('email_subject', 'email_heading', 'email_body'), array(TeamOversight_Payments::get_default_reminder_subject(), TeamOversight_Payments::get_default_reminder_heading(), TeamOversight_Payments::get_default_reminder_body()), (bool) $texts['customised']); ?>
                         <p>
                             <input type="submit" class="button button-primary" value="Save Email Settings">
                             <input type="hidden" name="action" value="save_email_settings">
@@ -1080,11 +1269,32 @@ class TeamOversight_Admin {
                     <p class="description">Saved changes show here immediately. A real reminder shows each person's own fees, worked out the same way as their Player Checklist. "Send test email to me" delivers this preview to your own address.</p>
                 </div>
             </div>
-
-            <?php TeamOversight_Trial_Emails::render_admin_section(); ?>
-            <?php TeamOversight_Account_Emails::render_admin_section(); ?>
-        </div>
         <?php
+    }
+
+    /** Save the shared From name, From address and the fee reminders' Reply-To (the Overview tab's Sender box). */
+    private function save_sender_settings() {
+        if (!isset($_POST['email_settings_nonce']) || !wp_verify_nonce($_POST['email_settings_nonce'], 'email_settings')) {
+            echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+        update_option(TeamOversight_Payments::EMAIL_FROM_NAME_OPTION, sanitize_text_field(wp_unslash(isset($_POST['email_from_name']) ? $_POST['email_from_name'] : '')));
+        update_option(TeamOversight_Payments::EMAIL_FROM_OPTION, sanitize_email(wp_unslash(isset($_POST['email_from']) ? $_POST['email_from'] : '')));
+        update_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION, sanitize_email(wp_unslash(isset($_POST['email_replyto']) ? $_POST['email_replyto'] : '')));
+        if (isset($_POST['offer_contact'])) {
+            $contact = sanitize_email(wp_unslash($_POST['offer_contact']));
+            if ($contact === '') {
+                delete_option(TeamOversight_Offers::CONTACT_OPTION);
+            } else {
+                update_option(TeamOversight_Offers::CONTACT_OPTION, $contact, false);
+            }
+            TeamOversight_Offers::flush_cache();
+        }
+        echo '<div class="notice notice-success"><p>Sender settings saved.</p></div>';
     }
 
     private function save_email_settings() {
@@ -1136,9 +1346,12 @@ class TeamOversight_Admin {
         if ($warnings) {
             echo '<div class="notice notice-warning"><p>Overdue reminder: ' . implode('<br>', array_map('esc_html', $warnings)) . '</p></div>';
         }
-        update_option(TeamOversight_Payments::EMAIL_FROM_NAME_OPTION, sanitize_text_field(wp_unslash($_POST['email_from_name'])));
-        update_option(TeamOversight_Payments::EMAIL_FROM_OPTION, sanitize_email(wp_unslash($_POST['email_from'])));
-        update_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION, sanitize_email(wp_unslash($_POST['email_replyto'])));
+        // The sender fields live on the Overview tab now (save_sender_settings()); a page opened before 1.78.0 still posts them.
+        if (isset($_POST['email_from_name'], $_POST['email_from'], $_POST['email_replyto'])) {
+            update_option(TeamOversight_Payments::EMAIL_FROM_NAME_OPTION, sanitize_text_field(wp_unslash($_POST['email_from_name'])));
+            update_option(TeamOversight_Payments::EMAIL_FROM_OPTION, sanitize_email(wp_unslash($_POST['email_from'])));
+            update_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION, sanitize_email(wp_unslash($_POST['email_replyto'])));
+        }
 
         echo '<div class="notice notice-success"><p>Email settings saved.</p></div>';
     }
@@ -1598,6 +1811,11 @@ class TeamOversight_Admin {
         foreach ($selection_rows as $selection) {
             $selections_by_app[$selection->application_id][] = $selection;
         }
+        // 1.77.0: from 2027 a Selected / Training Only chip says where the
+        // offer is up to (never a dollar figure). Before 2027 the 1.75.3
+        // chip wording below is unchanged.
+        $chip_offers_on = TeamOversight_Coach_Portal::offers_on($season);
+        $chip_offer_index = ($chip_offers_on && $selections_by_app) ? TeamOversight_Offers::index_for_applications(array_map('intval', array_keys($selections_by_app))) : array();
 
         // Selected / Training Only verdicts awaiting Finalise: any on a
         // pending application, plus those on accepted applications not yet
@@ -1608,10 +1826,11 @@ class TeamOversight_Admin {
         // (not in assigned_team as "TEAM" / "TEAM (T/O)"): one it already
         // placed whose row has since gone (withdrawn on Team Assignments
         // before those edits synced verdicts) must not prompt a re-run that
-        // puts the player back. From 2027 only offers the player has
-        // accepted count — the same ones Finalise places.
+        // puts the player back. From 2027 only locked-in offers count (the
+        // retry for a placement that failed) — the same ones Finalise places.
         $needs_acceptance = TeamOversight_Coach_Portal::offer_acceptance_applies($season);
-        $accepted_only = $needs_acceptance ? 'AND s.offer_accepted = 1' : '';
+        // The same condition as run_finalise_selections()' $selected query (an offer still out is never counted).
+        $accepted_only = $needs_acceptance ? 'AND s.offer_accepted = 1' . self::finalise_offer_guard_sql() : '';
         $awaiting_finalise = intval($wpdb->get_var($wpdb->prepare("
             SELECT COUNT(DISTINCT s.application_id)
             FROM {$wpdb->prefix}team_trial_selections s
@@ -1702,8 +1921,8 @@ class TeamOversight_Admin {
                     </select>
                     <p style="margin: 12px 0 0 0;">
                         <label for="training_info_url"><strong>Training info page URL</strong></label><br>
-                        <input type="url" name="training_info_url" id="training_info_url" value="<?php echo esc_attr(get_option('team_oversight_training_info_url')); ?>" style="width: 420px;" placeholder="https://members.renegades.com.au/training-times/">
-                        <span class="description">Linked at the top of the trial form so players can pick teams by training venue and day. Leave empty to hide the link.</span>
+                        <input type="url" name="training_info_url" id="training_info_url" value="<?php echo esc_attr(get_option('team_oversight_training_info_url')); ?>" style="width: 420px;" placeholder="https://example.com/training-times/">
+                        <span class="description">Linked at the top of the trial form so players can pick teams by training venue and day. Leave empty to hide the link. It is also the Trials &amp; Team Info link in offers for any season that has no page of its own (set a season's page under Emails, Offers and selection, Pages and links).</span>
                     </p>
                     <p>
                         <input type="submit" class="button button-primary" value="Save Trial Settings">
@@ -1714,11 +1933,10 @@ class TeamOversight_Admin {
             </details>
 
             <?php
-            // 2027 on: offers still waiting for the player, and players on a
-            // team whose acceptance was withdrawn after Finalise, by team —
-            // shown whether or not there's anything to finalise.
+            // 2027 on: where the offers are up to, and anything that needs a
+            // person — shown whether or not there's anything to finalise.
             if ($needs_acceptance) {
-                $this->report_unaccepted_offers($season);
+                $this->report_offers_summary($season);
             }
             ?>
 
@@ -1726,16 +1944,20 @@ class TeamOversight_Admin {
                 <div class="notice notice-info" style="padding: 10px 15px; display: flex; align-items: center; gap: 15px;">
                     <span>
                         <?php if ($awaiting_finalise): ?>
-                            <strong><?php echo $awaiting_finalise; ?> application(s)</strong> have <?php echo $needs_acceptance ? 'accepted offers' : 'coach selections'; ?> awaiting finalisation or not yet reflected in their team assignments (team assignment + fee invoice).
+                            <?php if ($needs_acceptance): ?>
+                            <strong><?php echo $awaiting_finalise; ?> application(s)</strong> have locked-in offers whose player is not on the team yet (their automatic placement did not happen).
+                            <?php else: ?>
+                            <strong><?php echo $awaiting_finalise; ?> application(s)</strong> have coach selections awaiting finalisation or not yet reflected in their team assignments (team assignment + fee invoice).
+                            <?php endif; ?>
                         <?php endif; ?>
                         <?php if ($finalised_uninvoiced): ?>
                             <strong><?php echo $finalised_uninvoiced; ?> finalised player(s)</strong> on teams have no <?php echo esc_html($season); ?> invoice; Finalise will create one.
                         <?php endif; ?>
                         <?php if ($needs_acceptance): ?>
-                            <br><small>From <?php echo intval(TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM); ?>, Finalise places only the Selected / Training Only offers the player has accepted. An acceptance withdrawn after Finalise undoes nothing automatically — remove just that team on <a href="<?php echo esc_url(admin_url('admin.php?page=team-oversight-assignments&season=' . $season)); ?>">Team Assignments</a> (Undo Assignment takes the player off every team on their application).</small>
+                            <br><small>From <?php echo intval(TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM); ?>, players are placed automatically when they lock in (accept their offer and pay the deposit). This button only retries a placement that failed (the Offers page says why): it places locked-in players who are not on their team yet, and nobody else. It never removes anyone: to take a player off a team, remove just that team on <a href="<?php echo esc_url(admin_url('admin.php?page=team-oversight-assignments&season=' . $season)); ?>">Team Assignments</a> (Undo Assignment takes the player off every team on their application).</small>
                         <?php endif; ?>
                     </span>
-                    <form method="post" style="margin: 0;" onsubmit="return confirm('Finalise all coach-selected applications for <?php echo esc_attr($season); ?>?\n\nThis creates team assignments for every <?php echo $needs_acceptance ? 'accepted Selected / Training Only offer' : 'Selected verdict'; ?>, generates fee invoices, and marks the applications accepted. Safe to run repeatedly.');">
+                    <form method="post" style="margin: 0;" onsubmit="return confirm('<?php echo $needs_acceptance ? 'Retry the placement of every locked-in player not yet on their team for ' . esc_attr($season) . '?\n\nThis creates their team assignments and fee invoices and marks the applications accepted. Nobody else is placed. Safe to run repeatedly.' : 'Finalise all coach-selected applications for ' . esc_attr($season) . '?\n\nThis creates team assignments for every Selected verdict, generates fee invoices, and marks the applications accepted. Safe to run repeatedly.'; ?>');">
                         <input type="hidden" name="action" value="finalise_selections">
                         <?php wp_nonce_field('finalise_selections', 'finalise_nonce'); ?>
                         <?php if (TeamOversight_Fees::timeline_applies($season)): ?>
@@ -1745,7 +1967,7 @@ class TeamOversight_Admin {
                             </label>
                             <small style="display: block; margin-bottom: 6px;"><?php echo esc_html(TeamOversight_Fee_Timeline::cutoff_note($season)); ?> Players already on a team keep their own start.</small>
                         <?php endif; ?>
-                        <input type="submit" class="button button-primary" value="Finalise Coach Selections">
+                        <input type="submit" class="button button-primary" value="<?php echo $needs_acceptance ? 'Retry failed placements' : 'Finalise Coach Selections'; ?>">
                     </form>
                 </div>
             <?php endif; ?>
@@ -1859,7 +2081,14 @@ class TeamOversight_Admin {
                                             $chip_classes = array('selected' => 'status-accepted', 'training_only' => 'status-awaiting_payment', 'tentative' => 'status-pending', 'rejected' => 'status-rejected');
                                             $chip_class = isset($chip_classes[$selection->status]) ? $chip_classes[$selection->status] : 'status-pending';
                                         ?>
-                                            <span class="<?php echo $chip_class; ?>" style="margin-right: 3px;"><?php echo esc_html($selection->team . ': ' . ucwords(str_replace('_', ' ', $selection->status)) . TeamOversight_Coach_Portal::offer_suffix(TeamOversight_Coach_Portal::offer_state($season, $selection->status, $selection->offer_accepted))); ?></span>
+                                            <span class="<?php echo $chip_class; ?>" style="margin-right: 3px;"><?php
+                                                if ($chip_offers_on) {
+                                                    $chip_offer = isset($chip_offer_index[$trial->id][$selection->team]) ? $chip_offer_index[$trial->id][$selection->team] : null;
+                                                    echo esc_html($selection->team . ': ' . TeamOversight_Offers::chip($chip_offer, $selection->status, array('season' => $season)));
+                                                } else {
+                                                    echo esc_html($selection->team . ': ' . ucwords(str_replace('_', ' ', $selection->status)));
+                                                }
+                                            ?></span>
                                         <?php endforeach; ?>
                                     <?php endif; ?>
                                 </td>
@@ -2311,6 +2540,30 @@ class TeamOversight_Admin {
         
         $database = new TeamOversight_Database();
         $teams = $database->get_teams($season);
+
+        // 1.77.0: Deposit / Held / Forfeited tags from the offers, one query
+        // (empty before 2027 and on a site that never made an offer).
+        $offer_tags = class_exists('TeamOversight_Offers') ? TeamOversight_Offers::invoice_tags($season) : array('by_user' => array(), 'by_email' => array());
+        $offer_tag_html = function ($invoice) use ($offer_tags) {
+            $tags = array();
+            if (intval($invoice->user_id) > 0 && isset($offer_tags['by_user'][intval($invoice->user_id)])) {
+                $tags = $offer_tags['by_user'][intval($invoice->user_id)];
+            } elseif (intval($invoice->user_id) <= 0 && isset($offer_tags['by_email'][strtolower((string) $invoice->email)])) {
+                $tags = $offer_tags['by_email'][strtolower((string) $invoice->email)];
+            }
+            $words = array(
+                'deposit' => array('Deposit', 'An accepted offer: this invoice holds the player\'s deposit until they lock in.'),
+                'held' => array('Held', 'An offer that ended with a deposit held for the player or still to be settled. See Held deposits on the Offers page.'),
+                'forfeited' => array('Forfeited', 'An offer that ended with the deposit kept by the club (a negative forfeit line in the ledger).'),
+            );
+            $out = '';
+            foreach ($words as $key => $word) {
+                if (!empty($tags[$key])) {
+                    $out .= ' <small class="offer-tag" style="background:#eef3fb;border:1px solid #c9d6ee;border-radius:3px;padding:0 5px;white-space:nowrap;" title="' . esc_attr($word[1]) . '">' . esc_html($word[0]) . '</small>';
+                }
+            }
+            return $out;
+        };
         
         // Payments ledger for this season's invoices, keyed by invoice.
         $payments_by_invoice = array();
@@ -2661,9 +2914,9 @@ class TeamOversight_Admin {
                                 }
                                 ?>
                                 <?php if ($timeline_uid > 0): ?>
-                                    <td><a class="fee-timeline-link" href="<?php echo esc_url(TeamOversight_Member_Lookup::profile_url($timeline_uid, '', $invoice->season)); ?>" title="Open their <?php echo esc_attr($invoice->season); ?> fee timeline"><?php echo esc_html($invoice->name !== null && $invoice->name !== '' ? $invoice->name : 'user #' . $timeline_uid); ?></a></td>
+                                    <td><a class="fee-timeline-link" href="<?php echo esc_url(TeamOversight_Member_Lookup::profile_url($timeline_uid, '', $invoice->season)); ?>" title="Open their <?php echo esc_attr($invoice->season); ?> fee timeline"><?php echo esc_html($invoice->name !== null && $invoice->name !== '' ? $invoice->name : 'user #' . $timeline_uid); ?></a><?php echo $offer_tag_html($invoice); ?></td>
                                 <?php else: ?>
-                                    <td><?php echo esc_html($invoice->name); ?></td>
+                                    <td><?php echo esc_html($invoice->name); ?><?php echo $offer_tag_html($invoice); ?></td>
                                 <?php endif; ?>
                                 <td><?php echo esc_html($invoice->email); ?></td>
                                 <td><?php echo esc_html($invoice->team_codes ? str_replace('|', ', ', $invoice->team_codes) : 'N/A'); ?></td>
@@ -2795,7 +3048,7 @@ class TeamOversight_Admin {
             // behind, but the coach portal stops saying they shouldn't train.
             function setPaymentArrangement(button) {
                 const row = button.closest('tr');
-                const name = row.children[1].textContent;
+                const nameCell = row.children[1].cloneNode(true); nameCell.querySelectorAll('.offer-tag').forEach(function (tag) { tag.remove(); }); const name = nameCell.textContent.trim();
                 const ending = button.dataset.mode === 'end';
                 let note = '';
                 if (ending) {
@@ -2883,6 +3136,9 @@ class TeamOversight_Admin {
                 .then(response => response.json())
                 .then(response => {
                     if (response.success) {
+                        if (response.data && response.data.warning) {
+                            alert(response.data.warning);
+                        }
                         location.reload();
                     } else {
                         alert('Error: ' + response.data);
@@ -2921,7 +3177,7 @@ class TeamOversight_Admin {
 
             function recordPayment(button) {
                 const row = button.closest('tr');
-                const name = row.children[1].textContent;
+                const nameCell = row.children[1].cloneNode(true); nameCell.querySelectorAll('.offer-tag').forEach(function (tag) { tag.remove(); }); const name = nameCell.textContent.trim();
                 const amount = prompt('Record a payment for ' + name + ' (amount in dollars; use a negative amount for a refund/correction):');
                 if (amount === null || amount.trim() === '' || isNaN(parseFloat(amount))) {
                     return;
@@ -2944,6 +3200,9 @@ class TeamOversight_Admin {
                 .then(response => response.json())
                 .then(response => {
                     if (response.success) {
+                        if (typeof response.data === 'string' && response.data !== 'Payment recorded') {
+                            alert(response.data);
+                        }
                         location.reload();
                     } else {
                         alert('Error: ' + response.data);
@@ -3461,6 +3720,95 @@ class TeamOversight_Admin {
         <?php
     }
     
+    /**
+     * 1.77.0 (design 7.5): the guards on Accept, bulk accept, Reject and
+     * Delete. An application with a live offer is handled on the Offers page,
+     * so these paths refuse it rather than place, reject or delete a player
+     * out from under an offer (and its deposit). Returns the offending offers
+     * as "TEAM (state: what ends it on the Offers page)" text (1.79.1,
+     * offer_ending(); live_offers_html() is the same with links), or '' when there is nothing to guard: a season
+     * before 2027, an application with no live offer, or (for $team) none
+     * for that team. $team = a team code limits the check to that team; a
+     * locked-in offer is skipped when $skip_locked_in (Accept: the player is
+     * already placed on that team). Accept and bulk accept pass no team, so
+     * a live offer for ANY team refuses them, as it refuses Reject and
+     * Delete (spec: admin Accept refuses a player with a live offer). Costs
+     * one indexed query, and none for a site that never made an offer.
+     */
+    private static function live_offers_text($application_id, $team = null, $skip_locked_in = false) {
+        $parts = array();
+        foreach (self::guarded_offers($application_id, $team, $skip_locked_in) as $offer) {
+            list(, $what) = self::offer_ending($offer);
+            $parts[] = $offer->team . ' (' . str_replace('_', ' ', $offer->state) . ': ' . $what . ' on the Offers page)';
+        }
+        return implode(', ', $parts);
+    }
+
+    /** The live offers live_offers_text() reports on (the same filters), as offer rows. */
+    private static function guarded_offers($application_id, $team = null, $skip_locked_in = false) {
+        if (!class_exists('TeamOversight_Offers') || intval($application_id) <= 0) {
+            return array();
+        }
+        $out = array();
+        foreach (TeamOversight_Offers::live_for_application($application_id) as $offer) {
+            if ($team !== null && (string) $offer->team !== (string) $team) {
+                continue;
+            }
+            if ($skip_locked_in && $offer->state === TeamOversight_Offers::LOCKED_IN) {
+                continue;
+            }
+            $out[] = $offer;
+        }
+        return $out;
+    }
+
+    /**
+     * Where a live offer is ended, by its state (1.79.1): array(Offers tab,
+     * what to press there). A request awaiting approval can't be withdrawn
+     * (it is Declined on To approve); a sent or accepted offer is withdrawn
+     * on Waiting on players; a locked-in one is ended on Locked in.
+     */
+    private static function offer_ending($offer) {
+        switch ($offer->state) {
+            case TeamOversight_Offers::AWAITING:
+                return array('approve', 'decline the request on the To approve tab');
+            case TeamOversight_Offers::LOCKED_IN:
+                return array('locked', 'use Withdraw (club) or Player pulled out on the Locked in tab');
+            default:
+                return array('out', 'withdraw it on the Waiting on players tab');
+        }
+    }
+
+    /**
+     * The guard notices' HTML (1.79.1): one line per live offer with the
+     * button that ends it and a link to that tab of the Offers page, in the
+     * offer's own season. Empty when nothing is guarded.
+     */
+    private static function live_offers_html($application_id, $team = null, $skip_locked_in = false) {
+        $lines = array();
+        foreach (self::guarded_offers($application_id, $team, $skip_locked_in) as $offer) {
+            list($tab, $what) = self::offer_ending($offer);
+            $label = esc_html($offer->team . ' (' . str_replace('_', ' ', $offer->state) . ')');
+            $link = class_exists('TeamOversight_Offers_Admin')
+                ? '<a href="' . esc_url(TeamOversight_Offers_Admin::page_url(array('tab' => $tab, 'season' => (string) $offer->season))) . '">' . esc_html(ucfirst($what)) . '</a>'
+                : esc_html(ucfirst($what));
+            $lines[] = $label . ': ' . $link . '.';
+        }
+        return implode(' ', $lines);
+    }
+
+    /** The Offers page link the guard messages point to (the tab with live offers, in the season given). */
+    private static function offers_page_link($label = 'Offers page', $season = '') {
+        if (class_exists('TeamOversight_Offers_Admin')) {
+            $args = array('tab' => 'out');
+            if (preg_match('/^\d{4}$/D', (string) $season)) {
+                $args['season'] = (string) $season;
+            }
+            return '<a href="' . esc_url(TeamOversight_Offers_Admin::page_url($args)) . '">' . esc_html($label) . '</a>';
+        }
+        return esc_html($label);
+    }
+
     private function process_trial_action() {
         if (!isset($_POST['trial_nonce']) || !wp_verify_nonce($_POST['trial_nonce'], 'process_trial')) {
             echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
@@ -3524,6 +3872,15 @@ class TeamOversight_Admin {
             ", $trial_id));
 
             if ($trial && $trial->application_status === 'pending' && TeamOversight_Fees::timeline_applies($trial->season)) {
+                // 1.77.0: a player with a live offer (for any team, not yet
+                // locked in) is placed by the offer flow (lock-in), not by
+                // hand, as Reject and Delete refuse them too. With no offer
+                // this is the administrator's override, as before.
+                $live_offer = self::live_offers_html($trial_id, null, true);
+                if ($live_offer !== '') {
+                    echo '<div class="notice notice-error"><p><strong>Not accepted.</strong> This player has a live offer, managed on the ' . self::offers_page_link('Offers page', $trial->season) . '. They are placed on that team when they lock in; end the offer first only if you really want to place them by hand. ' . $live_offer . '</p></div>';
+                    return;
+                }
                 // 2027+ (fee timeline): placed from the chosen start date
                 // through add_stretches() (refused after the late-join
                 // cutoff before anything is written); the application is
@@ -3597,6 +3954,14 @@ class TeamOversight_Admin {
             }
             
         } elseif ($action === 'reject_trial') {
+            // 1.77.0: rejecting an application ends every team's chance, so
+            // an offer still live behind it is withdrawn first (its deposit
+            // and the player's email depend on that being a deliberate act).
+            $live_offer = self::live_offers_html($trial_id);
+            if ($live_offer !== '') {
+                echo '<div class="notice notice-error"><p><strong>Not rejected.</strong> This player has a live offer. End it first on the Offers page, then reject the application. ' . $live_offer . '</p></div>';
+                return;
+            }
             $wpdb->update(
                 $wpdb->prefix . 'trial_applications',
                 array('application_status' => 'rejected'),
@@ -3827,6 +4192,25 @@ class TeamOversight_Admin {
                 return;
             }
 
+            // 1.77.0: an application with a live offer is not deleted (the
+            // offer, its deposit and its emails all point at it). Offers
+            // that are finished are kept, never deleted: they are the only
+            // permanent record of a forfeit, a credit and who approved what,
+            // so they are detached from the application and keep their own
+            // name, email, season and team.
+            $live_offer = self::live_offers_html($trial_id);
+            if ($live_offer !== '') {
+                echo '<div class="notice notice-error"><p><strong>Not deleted.</strong> This application has a live offer. End it first on the Offers page, then delete the application. ' . $live_offer . '</p></div>';
+                return;
+            }
+            if (class_exists('TeamOversight_Offers')) {
+                $detached = TeamOversight_Offers::detach_application($trial_id);
+                if (empty($detached['ok'])) {
+                    echo '<div class="notice notice-error"><p><strong>Not deleted.</strong> An offer for this application went live while you were deleting it. Reload the page and try again.</p></div>';
+                    return;
+                }
+            }
+
             // Its trial number is never handed out again (a printed trial
             // book may still show it), even if this was the newest one.
             TeamOversight_Trials::retire_trial_number($trial->season, intval($trial->trial_number));
@@ -3992,6 +4376,19 @@ class TeamOversight_Admin {
                     continue;
                 }
 
+                // 1.77.0: a player with a live offer (for any team, not yet
+                // locked in) is placed by the offer flow, not by a bulk
+                // accept (the whole batch is then rolled back, like any
+                // other refusal).
+                if (TeamOversight_Fees::timeline_applies($trial->season)) {
+                    $live_offer = self::live_offers_text($trial_id, null, true);
+                    if ($live_offer !== '') {
+                        $errors[] = "{$trial->name} has a live offer for $live_offer.";
+                        $error_count++;
+                        continue;
+                    }
+                }
+
                 // Update trial status
                 $update_result = $wpdb->update(
                     $wpdb->prefix . 'trial_applications',
@@ -4136,7 +4533,16 @@ class TeamOversight_Admin {
                     $error_count++;
                     continue;
                 }
-                
+
+                // 1.77.0: an application with a live offer is not rejected
+                // until the offer is withdrawn (the batch is rolled back).
+                $live_offer = self::live_offers_text($trial_id);
+                if ($live_offer !== '') {
+                    $errors[] = "{$trial->name} has a live offer for $live_offer, so it was not rejected.";
+                    $error_count++;
+                    continue;
+                }
+
                 // Update trial status
                 $update_result = $wpdb->update(
                     $wpdb->prefix . 'trial_applications',
@@ -4512,6 +4918,18 @@ class TeamOversight_Admin {
     public static function sync_trial_after_assignment_removal($email, $season, $team, $user_id = 0) {
         global $wpdb;
 
+        // 1.76.0: a locked-in offer for this team ends as "left" when its place
+        // goes (a no-op for a season before 2027, for a player with no such
+        // offer, and for a removal the offers class is making itself). It never
+        // throws: it must not stop the verdict and application sync below.
+        if (class_exists('TeamOversight_Offers')) {
+            try {
+                TeamOversight_Offers::on_place_left(intval($user_id), (string) $email, (string) $season, (string) $team);
+            } catch (\Throwable $e) {
+                error_log('Team Oversight: the offers hook for a removed place failed (' . get_class($e) . ')');
+            }
+        }
+
         // Match the person's application by user_id or email, whatever its
         // status — verdicts can exist without finalisation ever running.
         $applications = $wpdb->get_results($wpdb->prepare("
@@ -4634,8 +5052,27 @@ class TeamOversight_Admin {
             );
         }
 
+        // 1.77.0: a fee set by hand is never capped, so say so when it is above
+        // the maximum a player was quoted in an offer (they may ask for their
+        // deposit back), or when the invoice is the holding invoice for an
+        // accepted offer (lock-in will not re-price a manual fee).
+        $warning = '';
+        if ($result !== false && class_exists('TeamOversight_Offers')) {
+            $inv = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$wpdb->prefix}team_invoices WHERE id = %d", $invoice_id));
+            if ($inv) {
+                $ceiling = TeamOversight_Offers::cap_ceiling_for_invoice($inv);
+                if ($ceiling && $invoice_amount > floatval($ceiling['amount']) + 0.004) {
+                    $warning .= 'This is above the maximum quoted in the offer ($' . number_format($ceiling['amount'], 2) . '): the player may ask for their deposit back. A fee set by hand is not capped. ';
+                }
+                $stage = TeamOversight_Offers::deposit_stage($inv);
+                if (is_array($stage) && isset($stage['stage']) && $stage['stage'] === 'deposit_due') {
+                    $warning .= 'This invoice is holding a deposit for an accepted offer. When the player locks in, a fee set by hand is kept as it is: it is not re-priced.';
+                }
+            }
+        }
+
         if ($result !== false) {
-            wp_send_json_success(array('outstanding' => $outstanding));
+            wp_send_json_success(array('outstanding' => $outstanding, 'warning' => trim($warning)));
         } else {
             wp_send_json_error('Failed to update invoice');
         }
@@ -4719,9 +5156,21 @@ class TeamOversight_Admin {
             wp_send_json_error('Invoice not found — it may have been deleted. Reload the page.');
         }
 
+        // 1.77.0: a refund that takes a locked-in player below their deposit
+        // target leaves them locked in (nothing un-locks by itself); say so,
+        // so the treasurer withdraws the offer if the place is going.
+        $warning = '';
+        if ($amount < 0 && class_exists('TeamOversight_Offers')) {
+            $inv = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$wpdb->prefix}team_invoices WHERE id = %d", $invoice_id));
+            $stake = $inv ? TeamOversight_Offers::locked_in_stake($inv) : array('target_cents' => 0, 'ledger_cents' => 0);
+            if ($stake['target_cents'] > 0 && $stake['ledger_cents'] + TeamOversight_Offers::to_cents($amount) < $stake['target_cents']) {
+                $warning = ' Warning: this leaves the player below their deposit target, but they stay locked in. Withdraw the offer on the Offers page if the place is going.';
+            }
+        }
+
         $note = trim('Recorded by ' . wp_get_current_user()->display_name . ($note !== '' ? ' — ' . $note : ''));
         if (TeamOversight_Payments::record_payment($invoice_id, $amount, 'manual', $note)) {
-            wp_send_json_success('Payment recorded');
+            wp_send_json_success('Payment recorded' . $warning);
         } else {
             wp_send_json_error('The payment could not be saved, so nothing was recorded. Reload the page to check the invoice, then try again.');
         }

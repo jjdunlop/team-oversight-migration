@@ -44,6 +44,17 @@ class TeamOversight_Log {
                 // 1.70.1, which is the first to write them.
                 'team_dates' => 'Team dates changed',
                 'season_config' => 'Season dates / payment window',
+                // Offers and deposits (1.76.0). offer_flow: one line per
+                // offer transition and the one-off reset; offer_money:
+                // routine money facts (holding invoice, forfeit, credit,
+                // target drop, cap); offer_alert: things a person has to put
+                // right (the only type Payment Management's banner lists);
+                // email_offer: an offer-related email queued, sent, skipped,
+                // failed or suppressed (not the live site).
+                'offer_flow' => 'Offer flow',
+                'offer_money' => 'Offer money',
+                'offer_alert' => 'Offer alert',
+                'email_offer' => 'Offer email',
             ),
             'membership' => array(
                 'membership_granted' => 'Granted',

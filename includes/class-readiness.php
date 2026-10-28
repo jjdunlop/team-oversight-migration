@@ -8,9 +8,17 @@ if (!defined('ABSPATH')) {
  * Ready to Play checklist.
  *
  * [ready_to_play] renders, for players on a team (an active playing /
- * training assignment, i.e. after the club's Finalise — never a coach
- * verdict or a recorded acceptance, which are still the club's working
- * shortlist), the steps to complete before playing, in priority order:
+ * training assignment: a locked-in offer, the club's Finalise, Accept or Add
+ * Assignment — never a coach verdict, which is still the club's working
+ * shortlist), the steps to complete before playing, in priority order. Since
+ * 1.76.0 it also learns about selection from an OFFER that has been sent to
+ * the player (a banner above the panels, and a read-only preview of these
+ * same steps on the offer page), and from 2027 an offer the player has
+ * ACCEPTED (or that is locked in and not placed yet) makes that season's
+ * panel the player checklist with the offered team counted, its heading
+ * saying they must pay the deposit to lock the place in and its fees step
+ * pointing at the deposit box (season_panel()); a verdict alone, a sent
+ * offer and an ended offer still show nothing:
  *
  *  1. VV membership — external registration, manual "I've done it" tick
  *  2. Playing kit — shirt(s)/shorts/socks from the club shop. Purchases
@@ -100,10 +108,15 @@ class TeamOversight_Readiness {
      * Teams the user is playing/training for this season: confirmed
      * (active) assignments. $include_verdicts adds coach Selected /
      * Training-Only verdicts — for the admin Player Readiness page only.
-     * What a player sees about their own selection comes from Finalise's
-     * assignments, never a verdict or an offer they accepted.
+     * $extra_teams (1.76.0) adds those bare team codes and nothing else: the
+     * offer page's read-only preview passes the one team an offer was SENT
+     * for, which $include_verdicts could not do (it would show a player every
+     * team a coach has picked them for, whether or not an offer went out).
+     * What a player sees about their own selection comes from assignments
+     * and from an offer that has been sent to them, never from a verdict
+     * alone.
      */
-    public static function get_player_teams($user_id, $email, $season, $include_verdicts = false) {
+    public static function get_player_teams($user_id, $email, $season, $include_verdicts = false, $extra_teams = array()) {
         global $wpdb;
 
         // Team managers count as players: the separate role only exists for
@@ -115,8 +128,16 @@ class TeamOversight_Readiness {
                 AND (user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s))
         ", $season, $user_id, $email));
 
+        $extra = array();
+        foreach ((array) $extra_teams as $code) {
+            $code = is_scalar($code) ? trim(sanitize_text_field((string) $code)) : '';
+            if ($code !== '') {
+                $extra[] = $code;
+            }
+        }
+
         if (!$include_verdicts) {
-            return array_values(array_unique($assigned));
+            return array_values(array_unique(array_merge($assigned, $extra)));
         }
 
         $selected = $wpdb->get_col($wpdb->prepare("
@@ -128,7 +149,7 @@ class TeamOversight_Readiness {
                 AND a.user_id = %d
         ", $season, $user_id));
 
-        return array_values(array_unique(array_merge($assigned, $selected)));
+        return array_values(array_unique(array_merge($assigned, $selected, $extra)));
     }
 
     /**
@@ -212,10 +233,12 @@ class TeamOversight_Readiness {
      * The full checklist for a player, or null if they aren't on any team
      * this season. $include_verdicts: also count coach Selected / Training
      * Only verdicts (the admin Player Readiness page) — never for the
-     * player-facing panel.
+     * player-facing panel. $extra_teams (1.76.0): bare team codes counted
+     * as the player's teams as well (the offer page's read-only preview
+     * passes the team an offer was sent for). Writes nothing.
      */
-    public static function compute($user, $season, $include_verdicts = false) {
-        $teams = self::get_player_teams($user->ID, $user->user_email, $season, $include_verdicts);
+    public static function compute($user, $season, $include_verdicts = false, $extra_teams = array()) {
+        $teams = self::get_player_teams($user->ID, $user->user_email, $season, $include_verdicts, $extra_teams);
 
         // Coaches/staff who aren't also playing get a reduced checklist:
         // VV registration + fees only (no shirt, no shorts & socks).
@@ -330,6 +353,13 @@ class TeamOversight_Readiness {
             SELECT *, UNIX_TIMESTAMP(created_date) AS created_ts FROM {$wpdb->prefix}team_invoices
             WHERE user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s)
         ", $user->ID, $user->user_email));
+        // 1.76.0: a $0 holding invoice that carries deposit money is not a
+        // fee either, whether or not the fees are released. Ask the offers
+        // code what it is (null for everyone with no offer, and always for a
+        // season before 2027, so nothing below changes for them).
+        $stage = self::season_deposit_stage($invoices, $season);
+        $stage_words = $stage ? trim((string) $stage['words']) : '';
+
         // Until the club releases this season's fees, an invoice for it with
         // nothing owing is only a placeholder ($0, or an early payment held
         // as credit): not a fee, so not "paid in full", and left out of the
@@ -396,7 +426,15 @@ class TeamOversight_Readiness {
 
         // Nothing to show but "not released yet": no table of $0 figures.
         $only_not_released = $not_released !== '' && $outstanding <= 0;
-        if ($only_not_released) {
+        // A $0 holding invoice the offers code can describe (deposit paid,
+        // fee not set yet, money held for a refund ...): say that, never
+        // "Paid in full" and never "will come off it" for money that won't.
+        $says_stage = $stage && $stage_words !== '' && $stage['holding'] && $outstanding <= 0;
+        if ($says_stage) {
+            $only_not_released = true;
+            $fees_done = true;
+            $fees_detail = $stage_words;
+        } elseif ($only_not_released) {
             $fees_done = true;
             $fees_detail = $not_released . ' Nothing to pay until then.';
         } elseif (empty($invoices)) {
@@ -422,6 +460,10 @@ class TeamOversight_Readiness {
         if ($not_released !== '' && !$only_not_released) {
             $fees_detail .= ' ' . $not_released;
         }
+        // A real fee invoice that also has an offer's money on it: add what the club says about that money.
+        if ($stage_words !== '' && !$says_stage) {
+            $fees_detail .= ' ' . $stage_words;
+        }
 
         $steps['fees'] = array(
             'title' => 'Stay up to date on your fees',
@@ -446,6 +488,11 @@ class TeamOversight_Readiness {
                 ? $season_schedule['next_due']
                 : (TeamOversight_Fees::timeline_applies($season) ? null : TeamOversight_Payments::get_paid_through_date($season_invoiced, $season_outstanding, $season)),
             'season_progress_html' => $season_schedule ? $season_schedule['progress_html'] : null,
+            // 1.76.0: 'deposit_due' | 'locked_in' | 'fee_not_set' | 'refund_due' | 'under_review', else null.
+            'stage' => $stage ? $stage['stage'] : null,
+            // 1.79.1: the offers sentence added to the end of detail ('' when none), so the Player Checklist of an
+            // accepted offer can keep the deposit's dollar sentence out of the step for other money owed.
+            'stage_words' => ($stage_words !== '' && !$says_stage) ? $stage_words : '',
         );
 
         $ready = true;
@@ -490,37 +537,399 @@ class TeamOversight_Readiness {
         $current_year = intval(date('Y'));
         $seasons = array((string) $current_year, (string) ($current_year + 1));
 
+        // 1.76.0: the offers banner (an offer that was sent to them, the
+        // deposit step for one they accepted) sits above the panels. It is
+        // '' for everyone with no visible offer, so the page is exactly as
+        // before for them.
+        $banner = '';
+        if (class_exists('TeamOversight_Offers_Player')) {
+            try {
+                $banner = TeamOversight_Offers_Player::render_checklist_banner($user);
+            } catch (\Throwable $e) {
+                $banner = '';
+            }
+        }
+
         $output = '';
+        $panels = 0;
         foreach ($seasons as $season) {
-            $checklist = self::compute($user, $season);
-            if ($checklist !== null) {
-                $output .= $this->render_panel($season, $checklist);
+            // 2027 on, an accepted (or locked-in, not yet placed) offer counts its team here: see season_panel().
+            $panel = self::season_panel($user, $season);
+            if ($panel !== '') {
+                $output .= $panel;
+                $panels++;
             }
         }
 
         // Not selected into anything? Fees still always show: someone
         // removed from a team may carry a debt they need to see and pay,
-        // and paid-up members get a "nothing owing" confirmation.
-        if ($output === '') {
+        // and paid-up members get a "nothing owing" confirmation. It is the
+        // PANELS that decide this, not whether any output exists: a player
+        // whose only output is the offers banner still sees their balance.
+        if ($panels === 0) {
             $payments = new TeamOversight_Payments();
             $output = $payments->render_member_fees();
         }
 
-        return $output;
+        return $banner . $output;
     }
 
-    private function render_panel($season, $checklist) {
+    /**
+     * One season's panel on [ready_to_play] for $user (HTML, '' when they
+     * have none that season). Public and static so a test can draw a fixture
+     * season.
+     *
+     * 2027 on (club decision, 28 Oct 2026: the player checklist is there from
+     * the moment they accept, so they can see what kit they need): an offer
+     * the player has ACCEPTED, or one that is LOCKED IN and not placed yet,
+     * counts its team as one of theirs through compute()'s $extra_teams (the
+     * path the offer page's preview uses), so the panel is the player
+     * checklist, kit steps and ticks included, combined with any team they
+     * really hold and any team they coach. The heading never says they are on
+     * the offered team: it says they accepted a place and must pay the
+     * deposit to lock it in (or that they are locked in and the club is
+     * placing them), in the wording registry's words. While a deposit is
+     * still to pay, the fees step is the deposit: it points at the deposit box
+     * in the offers banner above (an anchor link) and draws no pay box or
+     * figure of its own (money owed elsewhere, e.g. an older season, still
+     * shows with its own pay box, as it always has). A sent offer, a coach
+     * verdict alone and every ended offer count for nothing; a season before
+     * 2027, a player with no such offer and a locked-in player who is placed
+     * get exactly the panel they always got. A pure reader.
+     */
+    public static function season_panel($user, $season) {
+        if (!is_object($user) || empty($user->ID)) {
+            return '';
+        }
+        $season = (string) $season;
+        $offers = self::checklist_offers($user, $season);
+        if (empty($offers)) {
+            $checklist = self::compute($user, $season);
+            return $checklist === null ? '' : self::render_panel($season, $checklist);
+        }
+
+        $accepted = array();
+        $locked = array();
+        foreach ($offers as $offer) {
+            $code = (string) $offer->team;
+            if ($offer->state === TeamOversight_Offers::ACCEPTED) {
+                if (!isset($accepted[$code])) {
+                    $accepted[$code] = $offer;
+                }
+            } elseif (!isset($locked[$code])) {
+                $locked[$code] = $offer;
+            }
+        }
+        $locked = array_diff_key($locked, $accepted);
+        $offer_codes = array_merge(array_keys($accepted), array_keys($locked));
+
+        $checklist = self::compute($user, $season, false, $offer_codes);
+        if ($checklist === null) {
+            return '';
+        }
+
+        $lines = array();
+        foreach (array_keys($accepted) as $code) {
+            $lines[] = TeamOversight_Offer_Wording::html('checklist_accepted', array('{team}' => TeamOversight_Offers::team_name($season, $code)));
+        }
+        foreach (array_keys($locked) as $code) {
+            $lines[] = TeamOversight_Offer_Wording::html('checklist_locked', array('{team}' => TeamOversight_Offers::team_name($season, $code)));
+        }
+        if (!empty($accepted)) {
+            $checklist['steps'] = self::with_deposit_step($checklist['steps'], array_values($accepted), $season);
+            $checklist['ready'] = false;
+        }
+
+        return self::render_panel($season, $checklist, array(
+            'offer_lines' => $lines,
+            // The teams they really hold (active places), never the offered ones.
+            'in_teams' => self::get_player_teams($user->ID, $user->user_email, $season),
+            'coaching' => self::get_staff_teams($user->ID, $user->user_email, $season),
+        ));
+    }
+
+    /**
+     * The player's offers that count on the season's checklist (2027 on):
+     * ACCEPTED, and LOCKED IN without a place yet (once placed, the active
+     * team place carries it). Never a sent offer, never an ended one, never
+     * for another account (matched by account id). array() for a season
+     * before 2027 or when the offers code is not there. Never throws.
+     */
+    private static function checklist_offers($user, $season) {
+        if (!class_exists('TeamOversight_Offers') || !class_exists('TeamOversight_Offer_Wording') || !class_exists('TeamOversight_Offers_Player')
+            || !TeamOversight_Offers::applies($season) || intval($user->ID) <= 0) {
+            return array();
+        }
+        try {
+            $rows = TeamOversight_Offers::for_user(intval($user->ID), (string) $season, array(TeamOversight_Offers::ACCEPTED, TeamOversight_Offers::LOCKED_IN));
+        } catch (\Throwable $e) {
+            return array();
+        }
+        $out = array();
+        foreach ((array) $rows as $offer) {
+            if (!is_object($offer) || (string) $offer->season !== (string) $season || (string) $offer->team === '') {
+                continue;
+            }
+            if ($offer->state === TeamOversight_Offers::LOCKED_IN && !empty($offer->placed_at)) {
+                continue;
+            }
+            if ($offer->state === TeamOversight_Offers::ACCEPTED || $offer->state === TeamOversight_Offers::LOCKED_IN) {
+                $out[] = $offer;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * The steps of a season with an accepted offer (1.79.1): the fees step
+     * is replaced by the deposit step (key 'deposit', deposit_step()), and
+     * when the player also owes other money (an older season, a fee already
+     * charged) the plain fees step follows it as its own step, with its
+     * table and pay box, but without the deposit's sentence. So the only
+     * pay box under "Pay your deposit" is the deposit box it links to, and
+     * the oldest-first fee box never sits under a deposit heading (spec:
+     * the deposit step never draws a second pay box).
+     */
+    private static function with_deposit_step(array $steps, array $accepted, $season) {
+        $fees = isset($steps['fees']) ? $steps['fees'] : array();
+        $owing = !empty($fees['has_invoice']) && isset($fees['outstanding']) && floatval($fees['outstanding']) > 0;
+        $out = array();
+        foreach ($steps as $key => $step) {
+            if ($key !== 'fees') {
+                $out[$key] = $step;
+                continue;
+            }
+            $out['deposit'] = self::deposit_step($fees, $accepted, $season);
+            if ($owing) {
+                $other = $fees;
+                $words = isset($fees['stage_words']) ? (string) $fees['stage_words'] : '';
+                if ($words !== '' && substr((string) $other['detail'], -strlen(' ' . $words)) === ' ' . $words) {
+                    $other['detail'] = substr((string) $other['detail'], 0, -strlen(' ' . $words));
+                }
+                $other['stage_words'] = '';
+                $out['fees'] = $other;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * The deposit step while an accepted offer's deposit is still to pay:
+     * the deposit comes first, and it is paid in the deposit box the offers
+     * banner draws above the panels (the step links to it by its anchor). No
+     * pay box, no fee table and no amount of its own: the box is the one
+     * calculation. Other money owing is a separate step after it
+     * (with_deposit_step()).
+     */
+    private static function deposit_step($fees, array $accepted, $season) {
+        $names = array();
+        $target = null;
+        $paid = true;
+        foreach ($accepted as $offer) {
+            $names[] = TeamOversight_Offers::team_name($season, $offer->team);
+            try {
+                $remaining = intval(TeamOversight_Offers::remaining_cents($offer));
+            } catch (\Throwable $e) {
+                $remaining = 1;
+            }
+            if ($remaining > 0) {
+                $paid = false;
+                if ($target === null) {
+                    $target = $offer;
+                }
+            }
+        }
+        if ($target === null) {
+            $target = $accepted[0];
+        }
+        $vars = array('{team}' => implode(' and ', $names));
+        $lead = TeamOversight_Offers::wording($paid ? 'checklist_deposit_paid' : 'checklist_deposit_step', $vars);
+
+        $step = $fees;
+        $step['title'] = TeamOversight_Offers::wording('checklist_deposit_title');
+        $step['done'] = false;
+        $step['manual'] = false;
+        // Paid but not locked in yet: waiting on the club, like a fee not released.
+        $step['waiting'] = $paid;
+        $step['url'] = '#' . TeamOversight_Offers_Player::deposit_anchor($target);
+        $step['url_label'] = TeamOversight_Offers::wording('checklist_deposit_link');
+        // The deposit sentence only: no fee table, no pay box, no dollar figure (1.79.1).
+        $step['detail'] = $lead;
+        $step['has_invoice'] = false;
+        $step['stage_words'] = '';
+        $step['stage'] = 'deposit_due';
+        $step['deposit_offer_id'] = intval($target->id);
+        return $step;
+    }
+
+    /** The admin page's words for a fees step that is waiting on the club (1.76.0: a deposit-stage holding invoice is not "not released"). */
+    private static function waiting_label($fees_step) {
+        $stage = isset($fees_step['stage']) ? $fees_step['stage'] : null;
+        if ($stage === 'fee_not_set') {
+            return 'Fee not set yet (deposit held)';
+        }
+        if ($stage === 'refund_due' || $stage === 'under_review') {
+            return 'Deposit held by the club';
+        }
+        return 'Fee not released yet';
+    }
+
+    /**
+     * What the offers code says about the season invoice among $invoices
+     * (1.76.0): array(stage, words, holding (the invoice's fee is $0)) or
+     * null (no offer, a plain fee invoice, an empty holding invoice, a season
+     * before 2027, or the offers code is not there). Never throws.
+     */
+    private static function season_deposit_stage($invoices, $season) {
+        if (!class_exists('TeamOversight_Offers') || !TeamOversight_Offers::applies($season)) {
+            return null;
+        }
+        foreach ((array) $invoices as $invoice) {
+            if ((string) $invoice->season !== (string) $season) {
+                continue;
+            }
+            try {
+                $stage = TeamOversight_Offers::deposit_stage($invoice);
+            } catch (\Throwable $e) {
+                return null;
+            }
+            if (!is_array($stage) || empty($stage['stage'])) {
+                return null;
+            }
+            return array(
+                'stage' => (string) $stage['stage'],
+                'words' => isset($stage['words']) ? (string) $stage['words'] : '',
+                'holding' => floatval($invoice->invoice_amount) <= 0,
+            );
+        }
+        return null;
+    }
+
+    /**
+     * The page carrying [ready_to_play] (found by its shortcode so a moved
+     * page never breaks a link, as the offer and trial pages are), else
+     * /player-checklist/. For links from the offer page.
+     */
+    public static function checklist_url() {
+        global $wpdb;
+        static $cache = null;
+        if ($cache !== null) {
+            return $cache;
+        }
+        $page_id = $wpdb->get_var("
+            SELECT ID FROM {$wpdb->posts}
+            WHERE post_status = 'publish' AND post_type IN ('page', 'post') AND post_content LIKE '%[ready_to_play%'
+            ORDER BY (post_type = 'page') DESC, ID
+            LIMIT 1
+        ");
+        $cache = $page_id ? (string) get_permalink($page_id) : home_url('/player-checklist/');
+        return $cache;
+    }
+
+    /**
+     * The read-only preview of the Player Checklist for an offer (the offer
+     * page): the same steps and wording a player on the team gets (VV
+     * registration, shirt(s), shorts and socks), computed for the player with
+     * the offered team counted as theirs, and a fees step written from the
+     * offer. No ticks, forms, shop links or pay box. Writes nothing. $target:
+     * the deposit to say (money), else the offer's stored one. Returns HTML
+     * ('' when nothing can be computed).
+     */
+    public static function render_offer_preview($user, $offer, $target = null) {
+        if (!$user || !$offer) {
+            return '';
+        }
+        $season = (string) $offer->season;
+        $checklist = self::compute($user, $season, false, array($offer->team));
+        if ($checklist === null) {
+            return '';
+        }
+        $checklist['steps']['fees'] = self::offer_fees_step($offer, $target);
+        return self::render_panel($season, $checklist, array('read_only' => true, 'only_teams' => array($offer->team)));
+    }
+
+    /**
+     * The fees step of the preview, from the offer: the fee as the player was
+     * told it, the deposit, and that the rest follows their payment schedule
+     * once fees are released. Plain text.
+     */
+    private static function offer_fees_step($offer, $target = null) {
+        $fee = TeamOversight_Offers::fee_words($offer);
+        $target = $target === null ? (($offer->deposit_target !== null) ? floatval($offer->deposit_target) : 0.0) : floatval($target);
+        $upper = ($offer->quote_basis === 'upper' && !TeamOversight_Fees::fees_released($offer->season));
+        if ($fee !== '' && $upper) {
+            $detail = 'Your fee is ' . $fee . '. The club confirms the exact fee in January and it can only be lower than the figure you were quoted.';
+        } elseif ($fee !== '') {
+            $detail = 'Your fee is ' . $fee . '.';
+        } else {
+            $detail = 'Your season fee is confirmed by the club.';
+        }
+        if (TeamOversight_Offers::to_cents($target) > 0) {
+            $detail .= ' You pay a deposit of ' . TeamOversight_Offers::money($target) . ' to lock in your place, and it comes off your fee. The rest is paid as your payment schedule says once fees are released.';
+        } else {
+            $detail .= ' No deposit is needed to lock in your place. The fee is paid as your payment schedule says once fees are released.';
+        }
+        return array(
+            'title' => 'Stay up to date on your fees',
+            'done' => false,
+            'manual' => false,
+            'url' => '',
+            'url_label' => '',
+            'detail' => $detail,
+            'has_invoice' => false,
+            'waiting' => false,
+            'stage' => null,
+        );
+    }
+
+    /**
+     * Draw one season's panel. Public and static since 1.76.0 so the offer
+     * page can draw the same markup read-only. $options: read_only (true
+     * draws what the player will need to do and nothing they can do yet:
+     * no ticks, forms, shop links, pay box or "you're all set"), only_teams
+     * (list of bare codes to name in the "If you accept" line instead of
+     * every team the checklist counted), and for a season where the player
+     * has accepted an offer (season_panel()): offer_lines (HTML lines from
+     * the wording registry, one per accepted or locked-in offer, drawn in
+     * place of "You're in" for those teams), in_teams (the codes they really
+     * hold, named in "You're in" when there are any) and coaching (the codes
+     * they coach, named in "You're coaching"). With no options the markup is
+     * exactly what a player on a team has always seen.
+     */
+    public static function render_panel($season, $checklist, $options = array()) {
+        $read_only = !empty($options['read_only']);
+        $offer_lines = (!$read_only && !empty($options['offer_lines'])) ? array_values((array) $options['offer_lines']) : array();
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config($season);
-        $team_names = array_map(function ($code) use ($teams_config) {
+        $shown_codes = ($read_only && !empty($options['only_teams'])) ? array_values((array) $options['only_teams']) : $checklist['teams'];
+        $name_of = function ($code) use ($teams_config) {
             return isset($teams_config[$code]) ? $teams_config[$code]['name'] : $code;
-        }, $checklist['teams']);
+        };
+        $team_names = array_map($name_of, $shown_codes);
+        $in_names = $offer_lines && !empty($options['in_teams']) ? array_map($name_of, array_values(array_unique((array) $options['in_teams']))) : array();
+        $coach_names = $offer_lines && !empty($options['coaching']) ? array_map($name_of, array_values(array_unique((array) $options['coaching']))) : array();
 
         ob_start();
         ?>
         <div class="rtp-panel">
+            <?php if ($read_only): ?>
+            <h3>What you'll need to do — <?php echo esc_html($season); ?></h3>
+            <p class="rtp-teams">If you accept, you'll be in: <strong><?php echo esc_html(implode(', ', $team_names)); ?></strong></p>
+            <?php elseif ($offer_lines): ?>
+            <h3>Get Ready to Play — <?php echo esc_html($season); ?></h3>
+            <?php if ($in_names): ?>
+            <p class="rtp-teams">You're in: <strong><?php echo esc_html(implode(', ', $in_names)); ?></strong></p>
+            <?php endif; ?>
+            <?php foreach ($offer_lines as $offer_line): ?>
+            <p class="rtp-teams rtp-offer-place" style="background:#e8f1fb;border:1px solid #b7d3ef;border-radius:4px;color:#134e85;padding:8px 12px;"><?php echo $offer_line; ?></p>
+            <?php endforeach; ?>
+            <?php if ($coach_names): ?>
+            <p class="rtp-teams">You're coaching: <strong><?php echo esc_html(implode(', ', $coach_names)); ?></strong></p>
+            <?php endif; ?>
+            <?php else: ?>
             <h3>Get Ready to <?php echo !empty($checklist['staff_only']) ? 'Coach' : 'Play'; ?> — <?php echo esc_html($season); ?></h3>
             <p class="rtp-teams"><?php echo !empty($checklist['staff_only']) ? "You're coaching:" : "You're in:"; ?> <strong><?php echo esc_html(implode(', ', $team_names)); ?></strong></p>
+            <?php endif; ?>
 
             <?php
             // A step that's waiting on the club (fees not released yet)
@@ -532,7 +941,9 @@ class TeamOversight_Readiness {
                 }
             }
             ?>
-            <?php if ($checklist['ready'] && $any_waiting): ?>
+            <?php if ($read_only): ?>
+                <?php /* a preview: nothing to tick off, and never "you're all set" */ ?>
+            <?php elseif ($checklist['ready'] && $any_waiting): ?>
                 <p class="rtp-all-done rtp-nearly">All done for now — just your fee to come once it's released.</p>
             <?php elseif ($checklist['ready']): ?>
                 <p class="rtp-all-done">✔ You're all set — see you on court!</p>
@@ -593,6 +1004,7 @@ class TeamOversight_Readiness {
                             <?php endif; ?>
                         <?php endif; ?>
 
+                        <?php if (!$read_only): ?>
                         <p class="rtp-step-actions">
                             <?php if (!empty($step['url'])): ?>
                                 <a class="button" href="<?php echo esc_url($step['url']); ?>" <?php echo $step_key === 'vv' ? 'target="_blank" rel="noopener"' : ''; ?>><?php echo esc_html($step['url_label']); ?><?php echo ($step_key === 'kit' && $step['done']) ? ' / order more' : ''; ?></a>
@@ -612,6 +1024,7 @@ class TeamOversight_Readiness {
                                 </form>
                             <?php endif; ?>
                         </p>
+                        <?php endif; ?>
                     </div>
                 </div>
             <?php endforeach; ?>
@@ -950,7 +1363,7 @@ class TeamOversight_Readiness {
                                     <?php echo $kit_step['done'] ? '<span style="color:#1a7a2e;">✔' . (empty($kit_step['auto_done']) ? ' (player ticked)' : ' (purchased)') . '</span><br>' : ''; ?>
                                     <?php echo esc_html(implode(' · ', $kit_summary)); ?>
                                 </td>
-                                <td><?php echo !empty($checklist['steps']['fees']['waiting']) ? '<span style="color:#996800;">Fee not released yet</span>' : ($checklist['steps']['fees']['done'] ? '<span style="color:#1a7a2e;">✔</span>' : '<span style="color:#a00;">' . esc_html($checklist['steps']['fees']['detail']) . '</span>'); ?></td>
+                                <td><?php echo !empty($checklist['steps']['fees']['waiting']) ? '<span style="color:#996800;">' . esc_html(self::waiting_label($checklist['steps']['fees'])) . '</span>' : ($checklist['steps']['fees']['done'] ? '<span style="color:#1a7a2e;">✔</span>' : '<span style="color:#a00;">' . esc_html($checklist['steps']['fees']['detail']) . '</span>'); ?></td>
                                 <td><?php echo $checklist['ready'] ? '<strong style="color:#1a7a2e;">✔</strong>' : '—'; ?></td>
                             </tr>
                         <?php endforeach; ?>

@@ -13,9 +13,14 @@ if (!defined('ABSPATH')) {
  * the wording stays plain text, with {details} (the trial number, teams and
  * positions) and {button} drawn by the plugin.
  *
- * Deliberately NOT here: selection outcomes (accepted, rejected, team
- * offers). Those are the club's to communicate personally, so nothing in
- * the plugin emails them.
+ * Not here: selection outcomes. From 1.77.0 the offer, its reminder, the
+ * withdrawal, the coaches' accepted / declined / deadline notices, the
+ * "you're locked in" note and the "not selected" email (1.80.0: only when
+ * someone presses Send, about one team) are sent
+ * by TeamOversight_Offer_Emails (class-offer-emails.php) through the offers
+ * outbox and the live-site gate. This class stays applicant-event-only:
+ * what the applicant did or paid for. Accepting, rejecting and Finalise
+ * themselves still email nobody.
  */
 class TeamOversight_Trial_Emails {
 
@@ -348,8 +353,8 @@ class TeamOversight_Trial_Emails {
         <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px; margin-top: 20px;">
             <h2 style="margin-top: 0;">Trial application emails</h2>
             <p class="description" style="max-width: 900px;">
-                One email per thing the applicant did — never more — sent from the From address above, with their own Reply-To below.
-                <strong>Selection outcomes (accepted, not selected, team offers) are never emailed from here</strong>; the club communicates those personally.
+                One email per thing the applicant did — never more — sent from the From address on the Overview tab, with their own Reply-To below.
+                <strong>Offers and selection outcomes are not sent from here</strong>: the offer, its reminder, the withdrawal, the coaches' notices, "you're locked in" and "not selected" have their own <a href="<?php echo esc_url(admin_url('admin.php?page=team-oversight-emails&tab=offers#offer-emails')); ?>">Offers and selection</a> tab.
                 Placeholders: <code>{first_name}</code> <code>{name}</code> <code>{season}</code> <code>{trial_number}</code>
                 <code>{teams}</code> <code>{positions}</code> <code>{fee}</code> <code>{link}</code>
                 (the trial page: <a href="<?php echo esc_url(self::get_form_url()); ?>" target="_blank"><?php echo esc_html(self::get_form_url()); ?></a>).
@@ -390,12 +395,7 @@ class TeamOversight_Trial_Emails {
                             <?php foreach (self::check_body($s['body']) as $warning): ?>
                                 <p style="color: #b32d2e; margin: 4px 0;">&#9888; <?php echo esc_html($warning); ?></p>
                             <?php endforeach; ?>
-                            <?php if (TeamOversight_Email::normalise($s['body']) !== TeamOversight_Email::normalise($event['body'])): ?>
-                                <details style="margin-top: 6px;">
-                                    <summary style="cursor: pointer;">Built-in wording</summary>
-                                    <pre style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 4px; padding: 10px; white-space: pre-wrap; font-size: 12px; margin: 6px 0 0;"><?php echo esc_html($event['body']); ?></pre>
-                                </details>
-                            <?php endif; ?>
+                            <?php echo TeamOversight_Email::wording_footer(array('trial_emails[' . $key . '][subject]', 'trial_emails[' . $key . '][heading]', 'trial_emails[' . $key . '][body]'), array($event['subject'], $event['heading'], $event['body']), $s['customised']); ?>
                             <details style="margin-top: 6px;">
                                 <summary style="cursor: pointer;">Preview</summary>
                                 <p style="background: #f0f0f1; padding: 6px 10px; border-radius: 4px; margin: 6px 0;"><strong>Subject:</strong> <?php echo esc_html($p_subject); ?></p>

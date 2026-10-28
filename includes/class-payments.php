@@ -217,6 +217,15 @@ class TeamOversight_Payments {
             );
         }
 
+        // 1.76.0: money has just come in on this invoice. An accepted offer
+        // whose deposit it completes locks in. Only positive online and manual
+        // payments count (a refund, a forfeit and a forfeit reversal never
+        // lock anyone in or out), and the hook swallows its own failures: it
+        // can never fail or undo a payment that is already in the books.
+        if (floatval($amount) > 0 && in_array($source, array('online', 'manual'), true) && class_exists('TeamOversight_Offers')) {
+            TeamOversight_Offers::on_payment_recorded($invoice_id);
+        }
+
         return true;
     }
 
@@ -1526,8 +1535,15 @@ class TeamOversight_Payments {
      * a prefilled box reads as fixed — so the choice is now explicit
      * radio options and the button states exactly what it will charge.
      * The chosen option is resolved server-side, so it holds without JS.
+     *
+     * $options (1.76.0) turns it into the DEPOSIT box of an accepted offer,
+     * drawn by render_deposit_pay_box(); empty = the box exactly as it
+     * always was (this function is otherwise unchanged from 1.75.3).
      */
-    public static function render_pay_box($outstanding, $overdue, $class = 'member-fees-pay-form') {
+    public static function render_pay_box($outstanding, $overdue, $class = 'member-fees-pay-form', $options = array()) {
+        if (is_array($options) && !empty($options['action'])) {
+            return self::render_deposit_pay_box($outstanding, $class, $options);
+        }
         $outstanding = round(floatval($outstanding), 2);
         $overdue = round(min(floatval($overdue), $outstanding), 2);
         $show_overdue = ($overdue >= 1 && $overdue < $outstanding);
@@ -1614,6 +1630,56 @@ class TeamOversight_Payments {
         return ob_get_clean();
     }
 
+    /**
+     * The DEPOSIT pay box of an accepted offer
+     * (TeamOversight_Offers_Player::render_deposit_box() calls it through
+     * render_pay_box($outstanding, 0, $class, $options)). The deposit is paid
+     * in ONE payment of one fixed amount (club decision, 28 Oct 2026): no choice of
+     * amount, no part payment, no typed amount. The form is the contract in
+     * design/offer-api.md section 6.11; its receiver is
+     * TeamOversight_Offers::maybe_start_deposit_payment(), which charges
+     * exactly the remaining deposit and refuses any other figure.
+     * Keys of $options: action (the murvc_pay_action value, 'pay_deposit'),
+     * nonce_action (the nonce action for the murvc_pay_nonce field), hidden
+     * (name => value hidden fields, the murvc_offer_id), amount (the remaining
+     * deposit in dollars; $outstanding when absent), heading and intro (plain
+     * text). The amount is posted back as the hidden murvc_pay_amount, so a
+     * stale page is refused rather than charged a figure the player didn't
+     * see.
+     */
+    private static function render_deposit_pay_box($outstanding, $class, array $options) {
+        $amount = round(floatval(isset($options['amount']) ? $options['amount'] : $outstanding), 2);
+        $heading = !empty($options['heading']) ? (string) $options['heading'] : 'Pay your deposit';
+        $intro = !empty($options['intro']) ? (string) $options['intro'] : '';
+
+        ob_start();
+        ?>
+        <form method="post" class="<?php echo esc_attr($class); ?> murvc-pay-box murvc-pay-deposit">
+            <h4><?php echo esc_html($heading); ?></h4>
+            <?php if ($intro !== ''): ?>
+                <p class="murvc-pay-intro"><?php echo esc_html($intro); ?></p>
+            <?php endif; ?>
+            <p class="murvc-pay-fixed">Amount to pay: <strong>$<?php echo number_format($amount, 2); ?></strong></p>
+            <input type="hidden" name="murvc_pay_amount" value="<?php echo esc_attr(number_format($amount, 2, '.', '')); ?>">
+            <input type="hidden" name="murvc_pay_action" value="<?php echo esc_attr($options['action']); ?>">
+            <?php if (!empty($options['hidden']) && is_array($options['hidden'])): ?>
+                <?php foreach ($options['hidden'] as $hidden_name => $hidden_value): ?>
+                    <input type="hidden" name="<?php echo esc_attr($hidden_name); ?>" value="<?php echo esc_attr($hidden_value); ?>">
+                <?php endforeach; ?>
+            <?php endif; ?>
+            <input type="hidden" name="murvc_pay_nonce" value="<?php echo esc_attr(wp_create_nonce(isset($options['nonce_action']) ? (string) $options['nonce_action'] : 'murvc_pay_fees')); ?>">
+            <button type="submit" class="button button-primary murvc-pay-submit">Pay $<?php echo number_format($amount, 2); ?> now</button>
+        </form>
+
+        <style>
+        .murvc-pay-box .murvc-pay-intro { font-size: 13px; color: #555; margin: 0 0 10px 0; }
+        .murvc-pay-box .murvc-pay-fixed { margin: 0 0 10px 0; }
+        .murvc-pay-box .murvc-pay-submit { margin-top: 4px; }
+        </style>
+        <?php
+        return ob_get_clean();
+    }
+
     public static function get_payment_product() {
         if (!function_exists('wc_get_product')) {
             return null;
@@ -1624,6 +1690,24 @@ class TeamOversight_Payments {
         }
         $product = wc_get_product($product_id);
         return $product ? $product : null;
+    }
+
+    /**
+     * What the offers code says about an invoice's money for the player
+     * (1.76.0): TeamOversight_Offers::deposit_stage() (stage, words ...), or
+     * null for an invoice with no offer, a plain fee invoice, an empty holding
+     * invoice, a season before 2027, or if anything goes wrong. A pure read.
+     */
+    private static function deposit_stage_for($invoice) {
+        if (!class_exists('TeamOversight_Offers') || !isset($invoice->season) || !TeamOversight_Offers::applies($invoice->season)) {
+            return null;
+        }
+        try {
+            $stage = TeamOversight_Offers::deposit_stage($invoice);
+        } catch (\Throwable $e) {
+            return null;
+        }
+        return (is_array($stage) && !empty($stage['stage'])) ? $stage : null;
     }
 
     /**
@@ -1718,6 +1802,22 @@ class TeamOversight_Payments {
             <?php foreach ($invoices as $invoice): ?>
                 <?php
                 $paid = self::get_ledger_paid($invoice->id);
+                // 1.76.0: a $0 holding invoice that carries an offer's deposit
+                // is not a fee, before or after the release: say what the
+                // money is (deposit paid, fee not set yet, held for a refund)
+                // instead of $0 figures, "in credit" or "all paid up". Null
+                // for everyone with no offer, so nothing changes for them.
+                $stage = self::deposit_stage_for($invoice);
+                $stage_words = $stage ? trim((string) $stage['words']) : '';
+                if ($stage_words !== '' && floatval($invoice->invoice_amount) <= 0 && floatval($invoice->outstanding_amount) <= 0):
+                    ?>
+                    <div class="member-fees-season">
+                        <h4><?php echo esc_html($invoice->season); ?> Season</h4>
+                        <p class="member-fees-schedule"><?php echo esc_html($stage_words); ?></p>
+                    </div>
+                    <?php
+                    continue;
+                endif;
                 // Before the club releases a season's fees, an invoice with
                 // nothing owing is only a placeholder ($0, or an early
                 // payment held as credit): say when the fee comes instead of
@@ -1768,6 +1868,9 @@ class TeamOversight_Payments {
                         <?php endif; ?>
                     </table>
                     <?php echo $schedule['progress_html']; ?>
+                    <?php if ($stage_words !== ''): ?>
+                        <p class="member-fees-schedule"><?php echo esc_html($stage_words); ?></p>
+                    <?php endif; ?>
                 </div>
             <?php endforeach; ?>
 
@@ -1933,11 +2036,33 @@ class TeamOversight_Payments {
         }
         $amount = min($amount, round($total_outstanding, 2));
 
+        if (self::add_fee_payment_to_cart($user, $amount)) {
+            wp_safe_redirect(wc_get_checkout_url());
+            exit;
+        }
+    }
+
+    /**
+     * Put the fee payment line of $amount in the cart, replacing any fee
+     * payment already there (one at a time), and return whether it was added
+     * (the caller redirects to checkout). The generic pay-any-amount flow and
+     * the offers' deposit payment share it, so the two cannot drift. $extra
+     * (1.76.0) is more keys for the cart line's murvc_fee_payment data: a
+     * deposit carries purpose, offer_id, invoice_id, season, team and expected.
+     * user_id and amount can't be overridden by it. Returns false with no
+     * payment product, no WooCommerce or no cart.
+     */
+    public static function add_fee_payment_to_cart($user, $amount, array $extra = array()) {
+        $product = self::get_payment_product();
+        if (!$product || !function_exists('WC') || !is_object($user)) {
+            return false;
+        }
+
         if (WC()->cart === null && function_exists('wc_load_cart')) {
             wc_load_cart();
         }
         if (WC()->cart === null) {
-            return;
+            return false;
         }
 
         // One fee payment line at a time.
@@ -1948,16 +2073,13 @@ class TeamOversight_Payments {
         }
 
         $added = WC()->cart->add_to_cart($product->get_id(), 1, 0, array(), array(
-            'murvc_fee_payment' => array(
+            'murvc_fee_payment' => array_merge($extra, array(
                 'user_id' => $user->ID,
                 'amount' => $amount,
-            ),
+            )),
         ));
 
-        if ($added) {
-            wp_safe_redirect(wc_get_checkout_url());
-            exit;
-        }
+        return (bool) $added;
     }
 
     public function apply_cart_payment_amount($cart) {
@@ -1973,9 +2095,17 @@ class TeamOversight_Payments {
 
     public function display_payment_in_cart($item_data, $cart_item) {
         if (!empty($cart_item['murvc_fee_payment'])) {
+            $line = $cart_item['murvc_fee_payment'];
+            $applies_to = 'Outstanding club fees';
+            // 1.76.0: a deposit says which offer it is for.
+            if (isset($line['purpose']) && $line['purpose'] === 'deposit') {
+                $season = isset($line['season']) ? (string) $line['season'] : '';
+                $team = isset($line['team']) ? (string) $line['team'] : '';
+                $applies_to = 'Deposit for your ' . $season . ' offer' . ($team !== '' ? ': ' . (class_exists('TeamOversight_Offers') ? TeamOversight_Offers::team_name($season, $team) : $team) : '');
+            }
             $item_data[] = array(
                 'key' => 'Applies to',
-                'value' => 'Outstanding club fees',
+                'value' => $applies_to,
             );
         }
         return $item_data;
@@ -1983,7 +2113,18 @@ class TeamOversight_Payments {
 
     public function attach_payment_to_order_item($item, $cart_item_key, $values) {
         if (!empty($values['murvc_fee_payment'])) {
-            $item->add_meta_data('_murvc_fee_payment_user', intval($values['murvc_fee_payment']['user_id']), true);
+            $line = $values['murvc_fee_payment'];
+            $item->add_meta_data('_murvc_fee_payment_user', intval($line['user_id']), true);
+            // 1.76.0: a deposit names the offer, the invoice and the season it
+            // is for, so the order hook applies it to that season only (never
+            // oldest-first) and can check it against what the cart expected.
+            if (isset($line['purpose']) && $line['purpose'] === 'deposit') {
+                $item->add_meta_data('_murvc_fee_payment_purpose', 'deposit', true);
+                $item->add_meta_data('_murvc_fee_payment_offer', isset($line['offer_id']) ? intval($line['offer_id']) : 0, true);
+                $item->add_meta_data('_murvc_fee_payment_invoice', isset($line['invoice_id']) ? intval($line['invoice_id']) : 0, true);
+                $item->add_meta_data('_murvc_fee_payment_season', isset($line['season']) ? (string) $line['season'] : '', true);
+                $item->add_meta_data('_murvc_fee_payment_expected', isset($line['expected']) ? number_format((float) $line['expected'], 2, '.', '') : '', true);
+            }
         }
     }
 
@@ -2041,30 +2182,51 @@ class TeamOversight_Payments {
             }
 
             $payer = get_userdata($payer_id);
-            $invoices = $payer ? array_reverse(self::get_user_invoices($payer)) : array(); // oldest season first
 
-            // Work out every part before writing any.
-            $remaining = $amount;
-            $parts = array();
-            foreach ($invoices as $invoice) {
-                if ($remaining <= 0) {
-                    break;
+            // 1.76.0: a deposit item (the cart named an offer and its invoice)
+            // goes to that player's invoice for THAT season only, whatever
+            // else they owe: deposit money is never spread over an older
+            // season's balance, and never falls through to the oldest-first
+            // allocation below. Without the offers code, or if it finds
+            // nothing sensible, it has no parts and is flagged unapplied.
+            $is_deposit = (string) $item->get_meta('_murvc_fee_payment_purpose') === 'deposit';
+            if ($is_deposit) {
+                $parts = array();
+                if (class_exists('TeamOversight_Offers')) {
+                    $parts = TeamOversight_Offers::deposit_parts(
+                        $payer_id,
+                        intval($item->get_meta('_murvc_fee_payment_invoice')),
+                        (string) $item->get_meta('_murvc_fee_payment_season'),
+                        $amount,
+                        $item_id
+                    );
                 }
-                $outstanding = floatval($invoice->outstanding_amount);
-                if ($outstanding <= 0) {
-                    continue;
-                }
+            } else {
+                $invoices = $payer ? array_reverse(self::get_user_invoices($payer)) : array(); // oldest season first
 
-                $applied = min($remaining, $outstanding);
-                $parts[] = array('invoice_id' => $invoice->id, 'amount' => $applied, 'over' => false);
-                $remaining = round($remaining - $applied, 2);
-            }
-            // Paid more than is owed (e.g. a cart left over from before a
-            // cash payment or fee change): keep it on the newest invoice,
-            // as credit for the treasurer to offset or refund.
-            if ($remaining >= 0.005 && !empty($invoices)) {
-                $newest = end($invoices);
-                $parts[] = array('invoice_id' => $newest->id, 'amount' => $remaining, 'over' => true);
+                // Work out every part before writing any.
+                $remaining = $amount;
+                $parts = array();
+                foreach ($invoices as $invoice) {
+                    if ($remaining <= 0) {
+                        break;
+                    }
+                    $outstanding = floatval($invoice->outstanding_amount);
+                    if ($outstanding <= 0) {
+                        continue;
+                    }
+
+                    $applied = min($remaining, $outstanding);
+                    $parts[] = array('invoice_id' => $invoice->id, 'amount' => $applied, 'over' => false);
+                    $remaining = round($remaining - $applied, 2);
+                }
+                // Paid more than is owed (e.g. a cart left over from before a
+                // cash payment or fee change): keep it on the newest invoice,
+                // as credit for the treasurer to offset or refund.
+                if ($remaining >= 0.005 && !empty($invoices)) {
+                    $newest = end($invoices);
+                    $parts[] = array('invoice_id' => $newest->id, 'amount' => $remaining, 'over' => true);
+                }
             }
 
             if (empty($parts)) {
@@ -2073,10 +2235,15 @@ class TeamOversight_Payments {
                     TeamOversight_Log::add(
                         'payment_unapplied',
                         'Online fee payment (order #' . intval($order_id) . ') not applied — '
-                            . ($payer ? 'no fee invoice on record' : 'the member account no longer exists')
+                            . ($is_deposit
+                                ? 'a deposit for a ' . (string) $item->get_meta('_murvc_fee_payment_season') . ' offer, and no invoice for that season and player could be found or made (older balances were left alone)'
+                                : ($payer ? 'no fee invoice on record' : 'the member account no longer exists'))
                             . '; offset or refund it',
                         array('user_id' => $payer_id, 'amount' => $amount)
                     );
+                    if ($is_deposit) {
+                        TeamOversight_Log::add('offer_alert', 'A deposit payment (order #' . intval($order_id) . ') could not be applied to the player\'s ' . (string) $item->get_meta('_murvc_fee_payment_season') . ' invoice: the Logs page lists it as an unapplied payment for the treasurer.', array('user_id' => $payer_id, 'amount' => $amount));
+                    }
                 }
                 continue;
             }
@@ -2084,7 +2251,10 @@ class TeamOversight_Payments {
             $count = count($parts);
             foreach ($parts as $n => $part) {
                 $label = ($count > 1 ? 'part ' . ($n + 1) . ' of ' . $count . ' of ' : '') . 'order item #' . intval($item_id);
-                if ($part['over']) {
+                if (!empty($part['note'])) {
+                    // A part that brings its own words (a deposit: "Deposit for 2027 SL2M offer #12, order item #34").
+                    $note = (string) $part['note'];
+                } elseif ($part['over']) {
                     $note = 'Overpayment, ' . $label;
                 } else {
                     $note = $count > 1 ? ucfirst($label) : '';
@@ -2173,6 +2343,44 @@ class TeamOversight_Payments {
     }
 
     /**
+     * 1.76.0: has a deposit paid by this order since been forfeited? The
+     * invoices the order paid into are checked for forfeit lines (the offers
+     * class writes a negative 'forfeit' line when it keeps a deposit, and a
+     * positive 'forfeit_undo' line when that is reversed), netted per offer.
+     * Returns a short sentence for the refund and cancel alerts ("$30.00 was
+     * forfeited under offer #12, so the ledger already nets to $0: refund
+     * only money that really goes back"), or '' when nothing was forfeited.
+     */
+    private static function describe_order_forfeits($order_id) {
+        global $wpdb;
+
+        $invoice_ids = $wpdb->get_col($wpdb->prepare("
+            SELECT DISTINCT invoice_id FROM {$wpdb->prefix}team_invoice_payments WHERE order_id = %d AND source = 'online'
+        ", $order_id));
+        $sentences = array();
+        foreach ($invoice_ids as $invoice_id) {
+            $lines = $wpdb->get_results($wpdb->prepare("
+                SELECT amount, note FROM {$wpdb->prefix}team_invoice_payments
+                WHERE invoice_id = %d AND source IN ('forfeit', 'forfeit_undo') ORDER BY id
+            ", $invoice_id));
+            $net = array();
+            foreach ($lines as $line) {
+                if (preg_match('/offer #(\d+)/', (string) $line->note, $m)) {
+                    $net[$m[1]] = (isset($net[$m[1]]) ? $net[$m[1]] : 0) + floatval($line->amount);
+                }
+            }
+            foreach ($net as $offer_id => $amount) {
+                if ($amount <= -0.005) {
+                    $sentences[] = '$' . number_format(abs($amount), 2) . ' was forfeited under offer #' . intval($offer_id);
+                }
+            }
+        }
+        return empty($sentences)
+            ? ''
+            : ' ' . ucfirst(implode(', ', $sentences)) . ', so the ledger already nets lower: refund only money that really goes back.';
+    }
+
+    /**
      * A fee-payment order refunded in WooCommerce, fully or partly (setting
      * the status to Refunded creates a refund too). Called with the refund,
      * or with just the order on the status change, when every refund on it
@@ -2237,6 +2445,7 @@ class TeamOversight_Payments {
             } else {
                 $message .= ', but its fee payment still counts as paid (' . $recorded . '). Record a negative payment with Record Payment to match.';
             }
+            $message .= self::describe_order_forfeits($order_id);
             TeamOversight_Log::add('payment_refunded', $message, array('user_id' => $fee_items[$first_id]['payer_id'], 'amount' => $refunded));
         }
     }
@@ -2273,7 +2482,8 @@ class TeamOversight_Payments {
         $message = 'Order #' . intval($order_id) . ' was cancelled in WooCommerce after its $' . number_format($amount, 2) . ' fee payment '
             . ($recorded === ''
                 ? 'was logged as unapplied, so the plugin never recorded it: record it only if the club kept the money. If you have since recorded it by hand and the money went back, record a negative payment with Record Payment to match.'
-                : 'was recorded (' . $recorded . '). It still counts as paid: if the money went back, record a negative payment with Record Payment.');
+                : 'was recorded (' . $recorded . '). It still counts as paid: if the money went back, record a negative payment with Record Payment.')
+            . self::describe_order_forfeits($order_id);
         TeamOversight_Log::add('payment_refunded', $message, array('user_id' => $fee_items[$first_id]['payer_id'], 'amount' => $amount));
     }
 

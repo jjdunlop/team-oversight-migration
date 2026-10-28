@@ -60,7 +60,7 @@ class TeamOversight_Help_Page {
     /** The shared TeamOversight_Fees, with a fresh matrix cache (so a matrix saved since the last call is read). */
     private static function fees() {
         if (!(self::$fees instanceof TeamOversight_Fees)) {
-            self::$fees = new TeamOversight_Fees();
+            self::$fees = TeamOversight_Fees::shared();
         }
         self::$fees->enable_rate_cache();
         return self::$fees;
@@ -796,7 +796,7 @@ class TeamOversight_Help_Page {
         echo '<div class="wrap murvc-help">';
         echo '<style>' . self::styles() . '</style>';
         echo '<h1>How it works</h1>';
-        echo '<p class="mh-lead">A plain-English guide to the MURVC Club Manager plugin: what it runs, how fees are worked out and fall due, and what to know before changing it. It is written for the committee checking that it behaves as agreed, and for whoever maintains it next. Sections 2, 6 and 7 read the live settings and work their figures out with the same code that bills members, so they are never out of date. Nothing on this page changes anything.</p>';
+        echo '<p class="mh-lead">A plain-English guide to the MURVC Club Manager plugin: what it runs, how fees are worked out and fall due, and what to know before changing it. It is written for the committee checking that it behaves as agreed, and for whoever maintains it next. Sections 2, 6, 7 and 9 read the live settings and work their figures out with the same code that bills members, so they are never out of date. Section 9 is the committee\'s guide to running offers and deposits through the selection period. Nothing on this page changes anything.</p>';
         self::render_toc();
         self::section_glance();
         self::section_settings($season);
@@ -806,6 +806,7 @@ class TeamOversight_Help_Page {
         self::section_examples($season);
         self::section_calculator($season);
         self::section_trials();
+        self::section_offers($season);
         self::section_maintainers();
         echo '</div>';
         self::render_script();
@@ -821,6 +822,7 @@ class TeamOversight_Help_Page {
             'mh-examples' => 'Worked examples',
             'mh-calculator' => 'Fee calculator',
             'mh-trials' => 'Trials, payments, emails and privacy',
+            'mh-offers' => 'Offers and deposits',
             'mh-maintainers' => 'For whoever maintains this next',
         );
     }
@@ -863,8 +865,8 @@ class TeamOversight_Help_Page {
         $rows = array(
             array('Memberships', 'Time-bound membership grants (Life, Full and Associate) from shop purchases, admin grants and team places (a place makes someone a Full Member until 1 April of the year after its season); the member list, membership history, the MUS and VV reports, stats and the membership log.',
                 array(self::admin_link('club-membership', 'Members'), self::admin_link('club-membership-lookup', 'Member Lookup'), self::admin_link('club-membership-history', 'Membership History'), self::admin_link('club-membership-stats', 'Stats'), self::admin_link('club-membership-logs', 'Logs'))),
-            array('VVL trials and selections', 'The trial application form and trial fee, coach verdicts and (from 2027) offers the player accepts, and Finalise Coach Selections, which turns accepted offers into team places and fees.',
-                array(self::admin_link('team-oversight-trials', 'Trial Applications'), self::admin_link('team-oversight-committee', 'Committee Access'))),
+            array('VVL trials and selections', 'The trial application form and trial fee, coach verdicts, and (from 2027) offers: a coach asks for one, an administrator approves it, the player accepts and pays a deposit and is then put on the team automatically (section 9). Finalise Coach Selections places people for 2026 and earlier, and retries a 2027 placement that failed.',
+                array(self::admin_link('team-oversight-trials', 'Trial Applications'), self::admin_link(TeamOversight_Offers_Admin::SLUG, 'Offers'), self::admin_link('team-oversight-committee', 'Committee Access'))),
             array('Team places', 'Who is on which team, in which role, from and to which dates. From 2027 each place has its own start and stop date and the fee follows them; they are changed on the person\'s Fee timeline card.',
                 array(self::admin_link('team-oversight-assignments', 'Team Assignments'), self::admin_link('club-membership-lookup', 'Member Lookup (Fee timeline card)'))),
             array('Fees and payments', 'The fee matrix and season settings, each person\'s season fee, when it falls due, online pay-any-amount payments, the payments ledger, payment arrangements and overdue reminder emails.',
@@ -902,7 +904,7 @@ class TeamOversight_Help_Page {
             echo '<option value="' . esc_attr($s) . '"' . selected($s, $season, false) . '>' . esc_html($label) . '</option>';
         }
         echo '</select> <button type="submit" class="button">Show</button>';
-        echo '<span class="description">Sections 2 to 6 follow this season. The calculator has its own season list.</span>';
+        echo '<span class="description">Sections 2 to 6 and 9 follow this season. The calculator has its own season list.</span>';
         echo '</form>';
     }
 
@@ -946,7 +948,7 @@ class TeamOversight_Help_Page {
         $config_link = self::admin_link('team-oversight-fees', 'Configuration', array('season' => $season));
         self::open_section('mh-settings');
         self::season_picker($season);
-        echo '<p>Read live for <strong>' . esc_html($season) . '</strong>. Change any of them on ' . $config_link . ' (season dates' . ($timeline ? ' and payment window' : '') . ', fee release, fee matrix).</p>';
+        echo '<p>Read live for <strong>' . esc_html($season) . '</strong>. Change any of them on ' . $config_link . ' (season dates' . ($timeline ? ' and payment window' : '') . ', fee release, fee matrix' . ($timeline ? ', upper limits, the offer settings and team division levels' : '') . ').</p>';
 
         $items = array();
         if ($dates && (string) $dates['end'] > (string) $dates['start']) {
@@ -987,6 +989,16 @@ class TeamOversight_Help_Page {
         }
         $items[] = array('Fee release', self::release_state($season));
         $items[] = array('Invoices so far', sprintf('%d for %s', $counts['invoices'], $season) . ($extra ? ' (' . implode(', ', $extra) . ')' : '') . '.');
+        // 1.76.0: the season's offer and deposit settings and the state of its upper limits, read live (counts and settings only).
+        if ($timeline && class_exists('TeamOversight_Offers')) {
+            $offer_settings = TeamOversight_Offers::settings($season);
+            $percent = rtrim(rtrim(number_format((float) $offer_settings['percent'], 2, '.', ''), '0'), '.');
+            $items[] = array('Offers and deposits', (TeamOversight_Offers::emails_live() ? 'Offer emails may be sent from this website.' : 'Offer emails are not being sent from this website yet (they wait until an administrator gives the permission, on the live website only).')
+                . sprintf(' The deposit is %s%% of the quoted fee. It is due on the later of %s and %d days after the committee approves the offer, and the player has %d days to reply.', $percent, self::d($offer_settings['deposit_date']), intval($offer_settings['deposit_days']), intval($offer_settings['reply_days'])));
+            $report = self::fees()->matrix_report($season);
+            $limit_text = sprintf('%d offerable fee cell(s) have no upper limit yet, so an offer for them can\'t be sent before the fees are released; %d have no fee yet; %d have a fee above their limit.', count($report['no_limit']), count($report['no_fee']), count($report['above']));
+            $items[] = array('Upper limits', $limit_text . ' A player whose place came from an offer quoted on an upper limit is never invoiced above the quoted amount.');
+        }
 
         echo '<dl class="mh-facts">';
         foreach ($items as $item) {
@@ -1008,6 +1020,7 @@ class TeamOversight_Help_Page {
         if (!$any) {
             echo '<p class="mh-warn">The ' . esc_html($season) . ' fee matrix is empty, so nobody can be charged yet. Fill it in on ' . $config_link . ' (it can copy another season\'s amounts as a start).</p>';
         }
+        $limits = $timeline ? TeamOversight_Fees::get_limits_for_season($season) : array();
         echo '<div class="mh-scroll"><table class="widefat striped mh-table mh-matrix"><thead><tr><th scope="col">Fee class</th>';
         foreach ($grid['roles'] as $role) {
             echo '<th scope="col">' . esc_html(TeamOversight_Fees::role_label($role)) . '</th>';
@@ -1017,11 +1030,18 @@ class TeamOversight_Help_Page {
             echo '<tr><th scope="row">' . esc_html($class) . '</th>';
             foreach ($grid['roles'] as $role) {
                 $cell = isset($grid['cells'][$class][$role]) ? $grid['cells'][$class][$role] : null;
-                echo $cell ? '<td>' . esc_html(self::money($cell->fee_amount)) . '</td>' : '<td class="mh-blank">blank</td>';
+                $limit_text = '';
+                if ($timeline) {
+                    $limit_text = isset($limits[$class][$role]) ? '<br><span class="description">upper limit ' . esc_html(self::money($limits[$class][$role])) . '</span>' : '<br><span class="description">no upper limit</span>';
+                }
+                echo $cell ? '<td>' . esc_html(self::money($cell->fee_amount)) . $limit_text . '</td>' : '<td class="mh-blank">blank' . $limit_text . '</td>';
             }
             echo '</tr>';
         }
         echo '</tbody></table></div>';
+        if ($timeline) {
+            echo '<p class="description">From ' . intval(TeamOversight_Fees::FEE_TIMELINE_FROM) . ' each cell has a fee (blank until it is known) and an upper limit (the most that fee can be: offers sent before the fees are released are quoted on it).</p>';
+        }
         $charged = array();
         foreach (TeamOversight_Fees::CHARGED_AS as $role => $as) {
             $charged[] = TeamOversight_Fees::role_label($role) . ' is charged the ' . self::role_text($as) . ' amount';
@@ -1396,15 +1416,18 @@ class TeamOversight_Help_Page {
             . '<li><strong>Apply</strong> on the trial form ([team_trial_form]), logged in. Each applicant gets a trial number for the season.</li>'
             . '<li><strong>Payment pending</strong> until the trial fee is paid (or waived, or marked paid). Coaches can see, note and reject them, but can\'t select them yet.</li>'
             . '<li><strong>Verdicts</strong>: each team\'s coaches mark Tentative, Selected, Training Only or Rejected. A verdict is not a team place.</li>'
-            . '<li><strong>Offer pending → offer accepted</strong> (from ' . intval(TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM) . '): Selected or Training Only is an offer. Once the player says yes, a coach (or committee with edit access) taps Mark offer accepted. Changing the verdict clears the acceptance.</li>'
-            . '<li><strong>Finalise Coach Selections</strong> (Trial Applications) places accepted offers on their teams from the start date given, and invoices them once fees are released. Offers still pending are listed and left alone.</li>'
+            . '<li><strong>Send offer</strong> (from ' . intval(TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM) . '): a coach presses Send offer on a Selected or Training Only player (or Send offers to all); the committee approves it on the Offers page; the site emails the player, who accepts or declines on the website and locks in their place by paying the deposit in one payment. An offer sent before the season\'s fees are released is an <strong>Early Offer</strong>: it is quoted on the fee matrix upper limit, the fee is set later and is never more than that limit. Changing the verdict of an offer that has been sent means withdrawing it first.</li>'
+            . '<li><strong>Locked in</strong>: once the deposit is complete the player is placed on their team automatically, from that day, and is invoiced once fees are released. <strong>Finalise Coach Selections</strong> (Trial Applications) is the retry for a placement that failed. Offers not yet locked in are left alone.</li>'
+            . '<li><strong>Not selected</strong> (from ' . intval(TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM) . '): a Rejected player is told nothing until someone presses <em>Send &quot;not selected&quot; email</em> on their card (the team\'s coaches) or Send on the Offers page, Not selected tab (administrators). The email is about that one team only.</li>'
             . '</ol>';
-        echo '<p>Selection outcomes are never emailed (accepting, rejecting, an accepted offer, Finalise): the club tells players personally. Players learn they are on a team from Ready to Play only once they have a team place (from Finalise, Accept or Add Assignment), never from a verdict or an accepted offer.</p>';
+        // Two statements, one paragraph: which selection notices are emailed, then what players learn from where.
+        echo '<p>Offers and a few selection notices are emailed, from the Offer emails section of Emails: the offer when the committee approves it (and its reminder), a withdrawal, the coaches\' accepted / declined / deadline-not-met notices, the player\'s &quot;you\'re locked in&quot; note, and the &quot;not selected&quot; email for one team when a coach or an administrator presses Send. Each is checked again just before it is sent, so nothing goes out about an offer (or a verdict) that has changed. Nothing leaves a copy of the site: the live site has to be opened for sending first. Accepting, rejecting, a verdict change and Finalise themselves email nobody. ';
+        echo 'Players learn they are on a team from Ready to Play once they have a team place (from a locked-in offer, Finalise, Accept or Add Assignment). Before that they learn about their selection only from an offer that has been sent to them (their offer page, and a banner on Ready to Play), never from a verdict on its own.</p>';
 
         echo '<h3>Payments and the ledger</h3>';
         self::ul(array(
             'The payments ledger is the only record of money received: paid is the sum of an invoice\'s ledger rows, and outstanding is always fee minus paid. Nobody edits outstanding directly, and re-pricing a fee never touches a payment.',
-            'Members pay any amount online, any time ([member_fees] and the Ready to Play fees step): what is overdue, the full balance or an amount they choose. Payments go to the oldest season first; anything above the balance is recorded as credit.',
+            'Members pay any amount online, any time ([member_fees] and the Ready to Play fees step): what is overdue, the full balance or an amount they choose. Payments go to the oldest season first, except an offer deposit, which goes only to its own season; anything above the balance is recorded as credit.',
             'Record Payment on Payment Management adds cash, bank transfers and corrections, stamped with who recorded it.',
             'Refunds are manual: a refund or cancellation in WooCommerce never changes the ledger by itself. It is logged and listed at the top of Payment Management for 30 days, and the treasurer enters it as a negative Record Payment (with the order number in the note).',
         ));
@@ -1423,7 +1446,191 @@ class TeamOversight_Help_Page {
         self::close_section();
     }
 
-    // 9. For whoever maintains this next --------------------------------
+    // 9. Offers and deposits --------------------------------------------
+
+    /**
+     * The committee's guide to running offers (1.78.0). Written in plain
+     * English; every figure, date and setting is read live (never typed in).
+     */
+    private static function section_offers($season) {
+        $applies = TeamOversight_Offers::applies($season);
+        $setup = TeamOversight_Offers_Admin::page_url(array('tab' => 'setup', 'season' => $season));
+        $link = function ($url, $label) {
+            return '<a href="' . esc_url($url) . '">' . esc_html($label) . '</a>';
+        };
+        self::open_section('mh-offers');
+        if (!$applies) {
+            echo '<p>Offers apply from the ' . intval(TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM) . ' season. Pick a later season above to see this section\'s live figures; the guide below still applies.</p>';
+        } else {
+            $settings = TeamOversight_Offers::settings($season);
+            $counts = TeamOversight_Offers::counts_by_state($season);
+            $tally = TeamOversight_Offers_Setup::tally(TeamOversight_Offers_Setup::checks($season));
+            echo '<p><strong>Right now for ' . esc_html($season) . ':</strong> offer emails ' . (TeamOversight_Offers::emails_live() ? 'may be sent from this website' : 'are not being sent from this website yet') . '; '
+                . intval($counts['awaiting_approval']) . ' awaiting approval, ' . intval($counts['sent'] + $counts['accepted']) . ' waiting on players, ' . intval($counts['locked_in']) . ' locked in. '
+                . 'The setup checklist has ' . intval($tally['bad']) . ' thing(s) to fix and ' . intval($tally['warn']) . ' to check (' . $link($setup, 'open the checklist') . ').</p>';
+        }
+
+        echo '<h3>In plain English</h3>';
+        echo '<p>An <strong>offer</strong> is the club asking a player to join a team, sent from the website so the club can see where every offer is up to. The coach still makes the selection call (their verdict). The offer is what happens next: an administrator approves it, the player is emailed and accepts or declines on the website, and they <strong>lock in</strong> their place by paying a <strong>deposit</strong>, a small share of the season fee, in one payment. The moment the deposit is complete they are put on the team automatically and the coach sees them under Confirmed. Nobody has to key anything in by hand.</p>';
+        echo '<p>Offers can go out before the season\'s fees are set. Such an offer is an <strong>Early Offer</strong>: it is quoted on the fee matrix\'s <strong>upper limit</strong> (the most the fee can be), the real fee is set later and is never more than that limit, and the deposit comes off the final fee.</p>';
+        echo '<p><strong>' . esc_html(TeamOversight_Offers::controls_sentence()) . '</strong> Seasons before ' . intval(TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM) . ' have no offers at all: Finalise Coach Selections places their players as it always has.</p>';
+
+        echo '<h3>The flow, step by step</h3>';
+        echo '<ol class="mh-steps">'
+            . '<li><strong>Coach selects.</strong> The verdict is Selected or Training Only (Tentative and Rejected can\'t be offered, and neither can a payment-pending applicant). A player a <em>higher-division</em> team is still deciding about (Tentative or Selected there) can\'t be offered by the team below: that coach decides first.</li>'
+            . '<li><strong>Coach presses Send offer</strong> on a card, or Send offers to all. Nothing is emailed. The offer is now <em>awaiting committee approval</em> and the coach can cancel it.</li>'
+            . '<li><strong>An administrator approves</strong> on the ' . TeamOversight_Offers_Setup::offers_link('Offers') . ' page, To approve tab (singly or in bulk). Approving works out and fixes the quote, the deposit and the two dates (they start that day), makes the offer live on the player\'s own pages, and emails the player and copies the team\'s coaches. The email waits while this website may not send offer emails; the offer and its dates do not, so give that permission before approving. Declining shows the coach <em>Not approved</em> and tells the player nothing.</li>'
+            . '<li><strong>The player opens their offer page</strong> from the email (they must be logged in as the person it was sent to) and chooses Accept or Decline. They can\'t pay anything before accepting.</li>'
+            . '<li><strong>Accepted:</strong> the coaches get an email, and the player pays the deposit in one payment from the offer page or the Player Checklist. From the moment they accept, their Player Checklist counts the team (VV registration, shirt, shorts and socks, with the usual ticks), says they have accepted a place and must pay the deposit to lock it in, and its fees step points to the deposit box. It never says they are on the team before the deposit is paid.</li>'
+            . '<li><strong>Locked in:</strong> when the deposit is complete the player is put on the team from that day, the application is marked accepted, the coach portal lists them under Confirmed, and the player gets a "you\'re locked in" email. From then on they pay the rest of the fee like any other player.</li>'
+            . '<li><strong>Missed dates:</strong> an offer with no reply by the reply-by date, or no deposit by the deposit date, is flagged <em>Overdue</em> on the coach portal and the coaches get one email. Nothing is released automatically: the coach (or an administrator) chooses Remind, +7 days or Move to declined.</li>'
+            . '<li><strong>Rejected players:</strong> nothing is sent to them automatically. The card reads <em>Rejected - not told yet</em> and has a <em>Send &quot;not selected&quot; email</em> button (and the board a <em>Send &quot;not selected&quot; emails</em> panel for all of them at once); anyone with edit access to that team can press it, and it asks first. The email is about that one team: if the player applied for more than one team it says so, says this message is only about that team and that their other applications are decided separately, never mentions another team\'s decision, and suggests lower divisions to trial for (below that team, by age and gender, leaving out teams they already applied for or were turned down by), or else the Mixed Training Program and the Reds Social League (the Junior Academy, as extra training, for juniors). It is addressed like the offer emails: it goes to the player from the club\'s sender, replies go to the coach who pressed Send when they coach that team (when the committee or an administrator presses it, to the team\'s head coach; with no coach on file, to the trial applications address), the team\'s other coaches and assistant coaches are copied, and it is signed by the coach replies go to (or by the team\'s coaching team when no coach is on file). Coaches of the player\'s other teams are never copied. A coach can send it while other teams are still deciding about the player. It goes once per player and team, the card then says when and who sent it (or that it is waiting for the permission to send offer emails), and the flow chart counts the team\'s Rejected players not told yet. Administrators see every rejection nobody has told, with how long ago, on the Offers page, Not selected tab (Send, Send all, or Don\'t send).</li>'
+            . '</ol>';
+
+        echo '<h3>The settings, and where each is changed</h3>';
+        if ($applies) {
+            $pct = rtrim(rtrim(number_format((float) $settings['percent'], 2, '.', ''), '0'), '.');
+            echo '<p>This season\'s numbers, read live: reply within <strong>' . intval($settings['reply_days']) . ' days</strong>; deposit <strong>' . esc_html($pct === '' ? '0' : $pct) . '%</strong> of the quoted fee; the deposit is due on the later of <strong>' . esc_html(self::d($settings['deposit_date'])) . '</strong> and <strong>' . intval($settings['deposit_days']) . ' days</strong> after the offer is sent (never after the late-join cutoff). ' . esc_html(TeamOversight_Offers_Setup::settings_example($season)) . '</p>';
+        }
+        $where = array(
+            array('Permission to send offer emails', 'The safeguard (there is no offers on/off switch): offer emails leave only from the website the permission was given to, so a test copy of the site can never email players, and pausing it holds every offer email. If the website\'s address changes the permission is lost and every offer email waits until you give it again.', 'Emails, Offers and selection (also on Configuration and the Offers page)', TeamOversight_Offers_Setup::emails_url('offers', 'offer-gate')),
+            array('Reply days, deposit days, fixed deposit date, deposit percent', 'The two dates and the deposit on every offer sent from now on. An offer keeps the figures it was sent with.', 'Configuration, Offers and deposits, offer settings', TeamOversight_Offers_Setup::config_url($season, 'offer-settings')),
+            array('Upper limits and fees', 'Every fee cell holds a fee (blank until known) and an upper limit. Before the fees are released an offer can\'t be sent for a player whose cell has no limit; after the release, for one whose cell has no fee.', 'Configuration, Fee Matrix', TeamOversight_Offers_Setup::config_url($season, 'fee-matrix')),
+            array('Fee release date', 'Until it, offers are Early Offers quoted on the upper limit; from it, offers quote the real fee.', 'Configuration, Fee release', TeamOversight_Offers_Setup::config_url($season, 'fee-release')),
+            array('Division levels', 'The order of the divisions (1 is the highest). They decide the higher-team rule and the lower divisions the "not selected" email suggests. A team with level 0 is never judged.', 'Configuration, Team Management', TeamOversight_Offers_Setup::config_url($season, 'team-management')),
+            array('The words', 'Every offer email, the commitments and deposit policy, the Early Offer explanation, the lines on the offer page, the coach portal\'s flow chart. Each has the built-in text beside it and a way to put it back.', 'Emails, Offers and selection', TeamOversight_Offers_Setup::emails_url('offers')),
+            array('Pages the offers link to', 'The offer page, the Player Checklist, the trial form, the coach portal, the Trials & Team Info page and the Academy / Social League pages.', 'Emails, Offers and selection, Pages and links', TeamOversight_Offers_Setup::emails_url('offers', 'offer-pages')),
+            array('The deposit payment product', 'The member payment product deposits are paid through. Without it a player sees "Online payment isn\'t available yet".', 'Payment Management, Payment settings', admin_url('admin.php?page=team-oversight-invoices')),
+        );
+        echo '<div class="mh-scroll"><table class="widefat striped mh-table"><thead><tr><th scope="col">Setting</th><th scope="col">What it does</th><th scope="col">Where</th></tr></thead><tbody>';
+        foreach ($where as $row) {
+            echo '<tr><th scope="row">' . esc_html($row[0]) . '</th><td>' . esc_html($row[1]) . '</td><td>' . $link($row[3], $row[2]) . '</td></tr>';
+        }
+        echo '</tbody></table></div>';
+        echo '<p>The Offers page has a <strong>Setup</strong> tab that checks all of this live (and so does Configuration): every row is ready, worth a look, or needs fixing, with a link to the screen that fixes it. It never blocks anything.</p>';
+
+        echo '<h3>What to do, week by week</h3>';
+        echo '<ol class="mh-steps">'
+            . '<li><strong>Before internal trials.</strong> Open the setup checklist and clear every Fix: season dates, the fee release date, an upper limit in every cell, a division level on every team, the deposit payment product, the offer page. Press Save on the offer settings once, so the numbers are yours. Read the offer wording once and change anything that doesn\'t sound like the club. Test-send the emails to yourself.</li>'
+            . '<li><strong>Before you approve the first offer.</strong> Give the permission to send offer emails (only on the live website). Coaches can send offers before then, and the requests simply wait on To approve. Approving is what starts an offer: it fixes the reply-by and deposit dates from that day and shows the offer on the player\'s own pages, and only the email waits for the permission. An offer approved while emails can\'t be sent loses days from its reply-by date before the player hears about it, and if the permission comes more than a day later its email is held for you to send or discard. Check at least one offer from start to finish with a real coach before the rest go.</li>'
+            . '<li><strong>Every week or so during selection.</strong> Open the Offers page, Not selected tab: every player a team has turned down and nobody has told, with how long ago (players rejected before offers began are there too). Nothing is sent by itself. Remind the coach, or press Send (or Send all), or Don\'t send for a player who should not get one. The status strip flags rejections more than a week old.</li>'
+            . '<li><strong>Every day while offers are going out.</strong> Open the Offers page. Approve what is waiting (check the quote and the "Also holds" and "Earlier balance" columns first). Clear anything under Needs attention. Look at Waiting on players, overdue ones first: Remind, +7 days, or leave them for the coach. The status strip says whether the daily check last ran.</li>'
+            . '<li><strong>Around each reply-by and deposit date.</strong> The coaches get one "deadline not met" email per missed date. They decide; you can do the same from the Offers page.</li>'
+            . '<li><strong>When fees are released (January).</strong> Offers quoted on the limit drop to the real fee automatically if it is lower (a deposit can only go down). Anyone locked in is charged at most what they were quoted. Look at Locked in for anyone Not placed, and at Held deposits for money to settle.</li>'
+            . '<li><strong>During public trials and the season.</strong> Offers carry on the same way, now quoting the real fee. The treasurer works through Held deposits: refunds the credit the club owes back, and decides the few rows waiting for a decision (Refund owed, or Club keeps it). Declines and moves to Declined are kept by the site itself (the Forfeited list).</li>'
+            . '<li><strong>Next season.</strong> Create the season on Configuration, copy the fee matrix (limits are copied, fees left blank), and start the checklist again.</li>'
+            . '</ol>';
+
+        echo '<h3>What each coach portal state means</h3>';
+        $coach = array(
+            array('Selected, offer not sent', 'The coach has made the call and hasn\'t asked for an offer yet.', 'Send offer.'),
+            array('Awaiting committee approval', 'The request is with the administrators. The coach can cancel it.', 'An administrator approves or declines it.'),
+            array('Not approved', 'An administrator declined the request. The player was told nothing.', 'The coach can ask again (Send offer again).'),
+            array('Offer sent, reply by a date', 'Approved and emailed. Waiting for the player.', 'The player accepts or declines. The coach can Withdraw.'),
+            array('Accepted, deposit N% paid', 'The player said yes. The coach sees the percentage of the deposit paid, never dollars.', 'The player pays; at 100% they lock in.'),
+            array('Overdue', 'A reply or deposit date has passed.', 'Remind, +7 days, or Move to declined.'),
+            array('Declined', 'The player said no, or the coach moved them to Declined. They are in their own Declined list.', 'Offer again (goes back through approval), or change the verdict.'),
+            array('Locked in', 'The deposit is complete. The player is being, or has been, put on the team.', 'They move to Confirmed once placed.'),
+            array('Early Offer ...', 'The same states for an offer quoted on the upper limit; the wording just says Early Offer.', 'Nothing different to do.'),
+            array('Rejected - not told yet', 'The team turned the player down and nobody has sent them the "not selected" email. Nothing is sent by itself.', 'A coach presses Send "not selected" email (it asks first), or an administrator sends it (or chooses Don\'t send) on the Not selected tab.'),
+            array('Not selected email sent (date, by whom)', 'The player was told they weren\'t selected for this team only. If the email is still waiting for the permission to send offer emails, the card says so.', 'Nothing: it is sent once per player and team. If the verdict changes later the card keeps it as history.'),
+        );
+        echo '<div class="mh-scroll"><table class="widefat striped mh-table"><thead><tr><th scope="col">The card says</th><th scope="col">What it means</th><th scope="col">What happens next</th></tr></thead><tbody>';
+        foreach ($coach as $row) {
+            echo '<tr><th scope="row">' . esc_html($row[0]) . '</th><td>' . esc_html($row[1]) . '</td><td>' . esc_html($row[2]) . '</td></tr>';
+        }
+        echo '</tbody></table></div>';
+        echo '<p>The words behind each state (as an administrator sees them on the Offers page) are listed under <em>What the states mean</em> at the foot of every Offers tab.</p>';
+        echo '<dl class="mh-facts">';
+        $states = TeamOversight_Offers::states();
+        foreach (TeamOversight_Offers_Setup::glossary() as $state => $sentence) {
+            echo '<div><dt>' . esc_html(isset($states[$state]) ? $states[$state] : $state) . '</dt><dd>' . esc_html($sentence) . '</dd></div>';
+        }
+        echo '</dl>';
+
+        echo '<h3>When something changes after the offer is out</h3>';
+        self::ul(array(
+            'A player pulls out after they are locked in: on the Locked in tab press Player pulled out and choose who broke the commitment. The place comes off the team first, then the offer ends. Nobody is emailed: speak to the player yourself. If the player broke it, the deposit is kept (Club keeps it); if the club did, it stays as credit to refund (Refund owed).',
+            'The club withdraws an offer (or a locked-in player): press Withdraw. The player gets a short email and the coach can then change the verdict. A deposit paid is the player\'s to have back, so it goes on the Held deposits list as credit. A coach can withdraw an offer nothing has been paid on; once money is held only an administrator can.',
+            'The coach picked the wrong team or player: if nothing has been paid, the coach withdraws the offer and sends a new one. If a deposit has been paid, an administrator withdraws it and the money is refunded from Held deposits.',
+            'A player pays and nothing seems to happen: look at the Locked in tab for Not placed and a reason, and press Retry placement (it takes a start date). The daily check also retries.',
+            'A deposit was paid by mistake, or twice: money above what the offer needs shows on Held deposits. The treasurer marks it Refund owed and refunds it from Payment Management with a negative Record Payment.',
+            'The player says they never got the email: the Offers page status strip lists emails that failed or may not have gone out, each with Resend. Check the player\'s account email is right, and that the permission to send is on.',
+        ));
+
+        echo '<h3>How to hold things back</h3>';
+        echo '<p>There is no switch to turn offers off: from ' . intval(TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM) . ' they are how selection works. Two controls remain. <strong>Approval:</strong> no offer reaches a player until an administrator approves it, so leaving requests on the To approve tab holds them. <strong>Pause offer emails:</strong> nothing is sent until you allow the website to send them again, and queued messages wait. When you allow it again, offer emails more than a day old (a "not selected" email pressed during the pause included) are held for you to send or discard rather than mass-sent. Two things are not held back by a pause: an offer approved during it is live at once (its dates run and the player can see it on their own pages; only the email waits), and the coaches\' "deadline not met" email goes out with the next daily check for each offer that is overdue then. Offers already out can still be answered and paid while emails are paused. <strong>Switching an email off</strong> (the tick beside it under Emails, Offers and selection) is not a pause: while it is off, every one of those emails that falls due is skipped for good and is not sent when you switch it back on.</p>';
+
+        echo '<h3>Who can do what</h3>';
+        $roles = array(
+            array('Coach', 'Selects, sends offers (one or all), cancels a request before approval, reminds, gives 7 more days, moves to declined, withdraws an offer nothing has been paid on, and sends a Rejected player the "not selected" email for their own team (one or all). Sees percentages only, never dollars.'),
+            array('Administrator (a WordPress Administrator account)', 'Approves or declines offers, resends failed emails, withdraws any offer, records a pull-out, retries a placement, sends (or chooses Don\'t send for) the "not selected" emails nobody has sent, and changes every setting. Committee Access "Edit" lets someone act like a coach on every team; it does not let them approve.'),
+            array('Treasurer', 'Works the Held deposits list: refunds the credit the club owes back by hand from Payment Management, decides the few deposits waiting for a decision (Refund owed, Club keeps it), and can Reverse a forfeit the site made. Needs an Administrator account.'),
+            array('Player', 'Opens their own offer page, accepts or declines, pays the deposit once. Sees only their own offers.'),
+        );
+        echo '<dl class="mh-facts">';
+        foreach ($roles as $role) {
+            echo '<div><dt>' . esc_html($role[0]) . '</dt><dd>' . esc_html($role[1]) . '</dd></div>';
+        }
+        echo '</dl>';
+        if (class_exists('TeamOversight_Offers_Setup')) {
+            $who = TeamOversight_Offers_Setup::approvers();
+            echo '<p>Right now these people can approve: <strong>' . esc_html(empty($who) ? 'nobody' : implode(', ', $who)) . '</strong>. If they are all away, approvals wait. A developer can widen this with the <code>murvc_offers_can_approve</code> filter.</p>';
+        }
+
+        echo '<h3>The money, in one place</h3>';
+        self::ul(array(
+            'The deposit is a fixed share (' . ($applies ? esc_html(rtrim(rtrim(number_format((float) $settings['percent'], 2, '.', ''), '0'), '.')) . '%' : 'a percentage') . ') of the quoted fee, paid in one payment. If the player also holds another accepted or locked-in place, the fee (and so the deposit) is worked out across both places, so a second offer may only need a top-up.',
+            'Deposit money goes to its own season only; it is never used up on an older balance.',
+            'If the club breaks its commitment (the fee comes in above the quoted maximum, the club withdraws the offer or drops the player), the deposit is the player\'s to have back: the site holds it on their account as credit the moment the offer is withdrawn, and the treasurer refunds it by hand.',
+            'If the player breaks theirs (declines after paying, misses the deposit date and is moved to Declined, or pulls out), the club keeps it: the site writes a negative "forfeit" line to the ledger the moment the offer ends, so the books balance, and the Forfeited list on the Held deposits tab shows what was kept (Reverse forfeit gives it back). Nobody has to decide these by hand.',
+            'Money above the final fee stays on the account as credit.',
+            'The upper limit is a promise: a player whose place came from an offer quoted on the limit is never invoiced more than they were quoted. Where the cap applied it is logged.',
+            'Wording for all of this is editable: Emails, Offers and selection, Offer wording, Money policy.',
+        ));
+
+        echo '<h3>Rules that are fixed in the code</h3>';
+        echo '<p>Not everything is a setting. These numbers are built in; changing one needs a developer.</p>';
+        $fixed = array(
+            array('Extra time when you press +7 days', TeamOversight_Offers::EXTEND_DAYS . ' days, counted from today', 'TeamOversight_Offers (the coach_overdue email also says 7)'),
+            array('When a "not selected" email is sent', 'Only when someone presses Send, never by itself; about one team; once per player and team. Rejections nobody has told for ' . TeamOversight_Not_Selected::UNTOLD_FLAG_DAYS . ' days are flagged on the Offers page', 'TeamOversight_Not_Selected'),
+            array('Who a "not selected" email is from', 'The club\'s sender. Reply-To the coach who pressed Send when they coach that team, else its head coach, else (no coach on file) the trial applications address; that team\'s other coaches and assistant coaches copied, read from the roster when it is sent; signed by the Reply-To coach', 'TeamOversight_Offer_Emails'),
+            array('Reminders to one player', 'At most one in 24 hours', 'TeamOversight_Offers (do_remind)'),
+            array('Email tries', TeamOversight_Offer_Emails::MAX_TRIES . ' tries, ' . TeamOversight_Offer_Emails::RETRY_MINUTES . ' minutes apart; a message stuck ' . TeamOversight_Offer_Emails::STUCK_MINUTES . ' minutes is "not sure if sent" and never retried automatically', 'TeamOversight_Offer_Emails'),
+            array('Teams the higher-team rule ignores', 'Teams whose age rule is ' . implode(' or ', array_map('strtoupper', TeamOversight_Offers::BLOCK_EXEMPT_AGE_RULES)) . ' (JPL and U17), whatever their level', 'TeamOversight_Offers'),
+            array('Who gets the extra training line, and who the extra games line', 'Under ' . TeamOversight_Offers::EXTRAS_ADULT_AGE . ' at the season start gets the Junior Academy line; ' . TeamOversight_Offers::EXTRAS_ADULT_AGE . ' and over the Social League line; no date of birth counts as an adult', 'TeamOversight_Offers'),
+            array('Who counts as a junior in the "not selected" email', 'Born on or after the U19 date-of-birth cut-off for the season, so an 18-year-old can read the Social League line in an offer email and the Junior Academy suggestion in a "not selected" email', 'TeamOversight_Not_Selected'),
+        );
+        echo '<div class="mh-scroll"><table class="widefat striped mh-table"><thead><tr><th scope="col">Rule</th><th scope="col">Value</th><th scope="col">Where it lives</th></tr></thead><tbody>';
+        foreach ($fixed as $row) {
+            echo '<tr><th scope="row">' . esc_html($row[0]) . '</th><td>' . esc_html($row[1]) . '</td><td>' . esc_html($row[2]) . '</td></tr>';
+        }
+        echo '</tbody></table></div>';
+
+        echo '<h3>The daily check and the website\'s scheduler</h3>';
+        list($daily_text, $daily_state) = TeamOversight_Offers_Setup::daily_words();
+        echo '<p>Once a day the site checks for missed dates (and emails the coaches), retries any placement or pricing that failed and tidies the email queue (it never sends a "not selected" email by itself: it only re-queues one someone pressed whose message went missing). It runs on WordPress\'s scheduler, which only fires when someone visits the website, so a quiet weekend can delay it. <strong>' . esc_html($daily_text) . '</strong> The Offers page shows this too and has a Run the daily check now button.</p>';
+
+        echo '<h3>When something looks wrong</h3>';
+        $trouble = array(
+            array('"Needs attention" on the Offers page', 'Each line says what and links to the tab. Locked in but not placed: Retry placement. Could not be priced: check the fee matrix cell for that player. Account that no longer exists: see Member Lookup.'),
+            array('A coach says Send offer is greyed out', 'Hover over it. Before the fees are released, the player\'s fee cell has no upper limit (add one); after they are released, the cell has no fee (add the fee: an offer is then quoted on the real fee). The Setup checklist lists every such cell. Or a higher team is still deciding about them (their coach decides first).'),
+            array('Nothing is being emailed', 'Check the Offers page status strip: "waiting to send" with a red permission box means the website has no permission to send (give it, on the live site only). Failed or "not sure if sent" messages have a Resend button. A message older than a day is held for you to send or discard.'),
+            array('The player sees "Online payment isn\'t available yet"', 'No member payment product is set: Payment Management, Payment settings.'),
+            array('The offer email button goes to the wrong page', 'Setup checklist, pages: the page was guessed. Create or choose the right page under Emails, Offers and selection, Pages and links.'),
+            array('The daily check says it has not run', 'It needs website visits. Press Run the daily check now; if a step failed, Logs has the detail.'),
+            array('A held deposit is on the list and nobody knows why', 'Open the player in Member Lookup: the offers list says how the offer ended. A row marked Credit is a withdrawal: refund it. A row waiting for a decision: the club broke it, Refund owed; the player broke it, Club keeps it. A deposit the site kept is on the Forfeited list instead (Reverse forfeit if that was wrong).'),
+            array('The fee came out higher than the offer said', 'It can\'t, for a place quoted on the upper limit: the cap holds it, and Logs shows when it applied. For an offer quoted on the real fee, the quote is the fee.'),
+        );
+        echo '<dl class="mh-facts">';
+        foreach ($trouble as $row) {
+            echo '<div><dt>' . esc_html($row[0]) . '</dt><dd>' . esc_html($row[1]) . '</dd></div>';
+        }
+        echo '</dl>';
+        self::close_section();
+    }
+
+    // 10. For whoever maintains this next --------------------------------
 
     private static function section_maintainers() {
         self::open_section('mh-maintainers');
