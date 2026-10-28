@@ -51,7 +51,24 @@ class TeamOversight_Trial_Emails {
     const PAYMENT_NUDGE_DELAY = 900;
     const PAYMENT_NUDGE_HOOK = 'murvc_trial_payment_nudge';
 
-    /** Adds the delayed payment email's handler, once per request. */
+    /**
+     * 1.80.5: a check that never ran is still caught. WordPress keeps every
+     * scheduled job in one saved setting, and a long request that saves it
+     * from an older copy (a long outbox flush, a slow scheduled job) can drop
+     * a check another request scheduled meanwhile; deactivating the plugin
+     * clears them too. So each scheduled check also leaves a marker: one
+     * non-autoloaded option per application (this prefix + the application
+     * id) holding when the check is due. The check removes it, and
+     * sweep_missed_nudges() (on the daily membership job, and after every
+     * check) sends Payment needed for a marker more than
+     * PAYMENT_NUDGE_MISSED_AFTER seconds past due whose check is no longer
+     * scheduled: once (removing the marker is the claim), and only while
+     * the trial fee is still unpaid.
+     */
+    const PAYMENT_NUDGE_MARKER = 'team_oversight_trial_nudge_';
+    const PAYMENT_NUDGE_MISSED_AFTER = 1800;
+
+    /** Adds the delayed payment email's handler and its backstop, once per request. */
     public static function register_hooks() {
         static $done = false;
         if ($done) {
@@ -59,12 +76,15 @@ class TeamOversight_Trial_Emails {
         }
         $done = true;
         add_action(self::PAYMENT_NUDGE_HOOK, array(__CLASS__, 'send_payment_nudge'), 10, 1);
+        add_action(TeamOversight_Memberships::CRON_HOOK, array(__CLASS__, 'sweep_missed_nudges'), 20, 0);
     }
 
     /**
      * Check again in 15 minutes instead of emailing now. One check per
-     * application: a second save while one is waiting keeps the first. If
-     * the check can't be scheduled, the email goes now, as before 1.80.3.
+     * application: a second save while one is waiting keeps the first (so
+     * the check runs 15 minutes after the FIRST unpaid save). If the check
+     * can't be scheduled, the email goes now, as before 1.80.3. A scheduled
+     * check leaves its marker (PAYMENT_NUDGE_MARKER) for the backstop.
      */
     public static function schedule_payment_nudge($application_id) {
         $application_id = intval($application_id);
@@ -75,24 +95,89 @@ class TeamOversight_Trial_Emails {
         if (wp_next_scheduled(self::PAYMENT_NUDGE_HOOK, $args)) {
             return true;
         }
-        $scheduled = wp_schedule_single_event(time() + self::PAYMENT_NUDGE_DELAY, self::PAYMENT_NUDGE_HOOK, $args);
+        $due = time() + self::PAYMENT_NUDGE_DELAY;
+        $scheduled = wp_schedule_single_event($due, self::PAYMENT_NUDGE_HOOK, $args);
         if ($scheduled === false || is_wp_error($scheduled)) {
             return self::send_for_id('payment_needed', $application_id);
         }
+        update_option(self::PAYMENT_NUDGE_MARKER . $application_id, (string) $due, false);
         return true;
     }
 
-    /** The delayed check: email only an application that still owes its trial fee (paid, closed or deleted: nothing). */
+    /**
+     * The delayed check: email only an application that still owes its trial
+     * fee (paid, closed or deleted: nothing). It removes its marker first,
+     * then lets the backstop look for checks that never ran.
+     */
     public static function send_payment_nudge($application_id) {
+        $application_id = intval($application_id);
+        delete_option(self::PAYMENT_NUDGE_MARKER . $application_id);
+        $sent = self::nudge_if_unpaid($application_id);
+        self::sweep_missed_nudges();
+        return $sent;
+    }
+
+    /** Payment needed for one application, only while it is still awaiting payment. Returns the send's result (false when nothing is owed). */
+    private static function nudge_if_unpaid($application_id) {
+        $application = self::unpaid_application($application_id);
+        return $application ? self::send('payment_needed', $application) : false;
+    }
+
+    /** The application row while it is still awaiting payment, else null (paid, closed or deleted). */
+    private static function unpaid_application($application_id) {
         global $wpdb;
         $application = $wpdb->get_row($wpdb->prepare(
             "SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d",
             intval($application_id)
         ));
-        if (!$application || $application->application_status !== 'awaiting_payment') {
-            return false;
+        return ($application && $application->application_status === 'awaiting_payment') ? $application : null;
+    }
+
+    /**
+     * The backstop (1.80.5): for every marker more than
+     * PAYMENT_NUDGE_MISSED_AFTER past due whose check is no longer scheduled
+     * (it was lost), remove the marker (the DELETE is the claim, so two
+     * runs never both send) and send Payment needed if the application is
+     * still awaiting payment, with a log line saying it went late. A marker
+     * not yet that late, or whose check is still waiting for the site's
+     * scheduler, is left alone. At most 200 markers a run (one indexed
+     * query). Returns how many emails it sent.
+     */
+    public static function sweep_missed_nudges() {
+        global $wpdb;
+        $late_before = time() - self::PAYMENT_NUDGE_MISSED_AFTER;
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s AND CAST(option_value AS UNSIGNED) <= %d ORDER BY option_id LIMIT 200",
+            $wpdb->esc_like(self::PAYMENT_NUDGE_MARKER) . '%',
+            $late_before
+        ));
+        $sent = 0;
+        foreach ((array) $rows as $row) {
+            $suffix = substr((string) $row->option_name, strlen(self::PAYMENT_NUDGE_MARKER));
+            if (!preg_match('/^[1-9][0-9]*$/D', $suffix)) {
+                continue;
+            }
+            $application_id = intval($suffix);
+            if (intval($row->option_value) > $late_before) {
+                continue; // not missed yet
+            }
+            if (wp_next_scheduled(self::PAYMENT_NUDGE_HOOK, array($application_id))) {
+                continue; // still waiting: the site's scheduler runs it on the next visit
+            }
+            if (!delete_option((string) $row->option_name)) {
+                continue; // another run claimed it
+            }
+            $application = self::unpaid_application($application_id);
+            if ($application && self::send('payment_needed', $application)) {
+                $sent++;
+                TeamOversight_Log::add(
+                    'email_trial',
+                    'The Payment needed email for trial #' . intval($application->trial_number) . ' went late: its 15-minute check never ran, so a later check sent it.',
+                    array('user_id' => !empty($application->user_id) ? intval($application->user_id) : null)
+                );
+            }
         }
-        return self::send('payment_needed', $application);
+        return $sent;
     }
 
     /**
@@ -155,7 +240,7 @@ class TeamOversight_Trial_Emails {
             ),
             'payment_needed' => array(
                 'label' => 'Payment needed',
-                'when' => '15 minutes after an application is saved with the trial fee due (on first submission, or when an edit makes the fee apply), and only if it is still unpaid then. Someone who pays straight away gets Payment received instead.',
+                'when' => '15 minutes after an application is saved with the trial fee due (on first submission, or when an edit makes the fee apply), and only if it is still unpaid then. The 15 minutes count from the first such save (a later save while that check waits doesn\'t restart it), and the site\'s scheduler runs the check on the next visit to the site after that. If the check is ever lost, a later check sends it. Someone who pays straight away gets Payment received instead.',
                 'subject' => 'Action needed: pay your {season} MURVC trial fee',
                 'heading' => 'Pay your trial fee to confirm your application',
                 'preheader' => 'Your application is saved. Pay the trial fee to confirm it.',

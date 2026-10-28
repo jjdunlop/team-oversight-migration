@@ -1667,8 +1667,10 @@ class TeamOversight_Offers {
      * $prefer_roles (the offers: a coach place only; the "not selected"
      * email: coach or assistant coach, so whoever of the team pressed Send
      * is the voice); else the lowest-id coach place; else the lowest-id
-     * assistant coach. Cc: every other coach and assistant. The player's own
-     * account ($exclude_user_id) is never listed.
+     * assistant coach. Others: every other coach and assistant. A player
+     * email's Cc is the primary PLUS these (TeamOversight_Offer_Emails::
+     * copied_coaches(), 1.80.1), so the Reply-To coach is copied too. The
+     * player's own account ($exclude_user_id) is never listed.
      *
      * Returns array(primary (array user_id, email, name, role) or null,
      * others (list of the same), all_emails (deduplicated, primary first),

@@ -10,7 +10,8 @@ if (!defined('ABSPATH')) {
  * when something is being sent. It is addressed like the offer emails
  * (TeamOversight_Offer_Emails::prepare_not_selected()): the coach who
  * pressed Send (when they coach that team, else its head coach) is the
- * Reply-To and the voice, and the team's other coaches are copied.
+ * Reply-To and the voice, and every coach and assistant coach of the team
+ * is copied, the Reply-To coach included (copied_coaches(), 1.80.1).
  *
  * The rules, in one place:
  *  - Nothing is scheduled or sent automatically, ever. There is no hold, no
@@ -50,8 +51,9 @@ if (!defined('ABSPATH')) {
  *    every message: a notice pressed while it is closed waits in the outbox
  *    (the card says so), and the outbox's own hold catches anything more
  *    than a day old when it is opened. At send time the outbox re-checks
- *    the notice (send_check(): still Rejected for that team, application
- *    still live, account still there).
+ *    the notice (send_check(): still Rejected for that team, still a team
+ *    the player applied for (1.80.5), application still live, account
+ *    still there).
  *  - A pressed notice whose email never went (the outbox skipped it: an
  *    administrator discarded the held messages, the email was switched off,
  *    or the verdict had changed when it was due) is NOT a told player
@@ -686,9 +688,12 @@ class TeamOversight_Not_Selected {
     /**
      * The outbox's check just before it sends (TeamOversight_Offer_Emails
      * prepare_not_selected()): the notice still applies when the
-     * application exists and is live, THIS team's verdict is still Rejected
-     * and nobody has chosen Don't send for it since. (The account is checked
-     * by the caller.) Returns array(ok, note, app).
+     * application exists and is live, THIS team's verdict is still Rejected,
+     * the application still asks for THIS team (applied_for(), 1.80.5: the
+     * press-time rule held at send time too, so a press from before that rule,
+     * or one whose player has since taken the team off their application,
+     * tells nobody) and nobody has chosen Don't send for it since. (The
+     * account is checked by the caller.) Returns array(ok, note, app).
      */
     public static function send_check($application_id, $team) {
         $app = self::load_application($application_id);
@@ -701,6 +706,9 @@ class TeamOversight_Not_Selected {
         $verdict = self::verdict_row($app->id, $team);
         if (!$verdict || (string) $verdict->status !== 'rejected') {
             return array('ok' => false, 'note' => 'The verdict for ' . $team . ' is no longer Rejected, so the notice no longer applies.', 'app' => $app);
+        }
+        if (!self::applied_for($app, $team)) {
+            return array('ok' => false, 'note' => 'They did not apply for ' . $team . ' (or have taken it off their application), so no not selected email is sent for it.', 'app' => $app);
         }
         $row = self::row_for($app->id, $team);
         if ($row && $row->state === self::STOPPED) {
