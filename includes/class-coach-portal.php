@@ -1224,8 +1224,8 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
-     * The flow chart at the top of the team: Select > Send offer > Awaiting
-     * approval > Offer emailed > Awaiting reply > Deposit pending > Confirmed,
+     * The flow chart at the top of the team: Select > Send offer > With
+     * committee > Offer emailed > Awaiting reply > Deposit pending > Confirmed,
      * with the side exits Declined, Overdue, Not approved and (1.80.0)
      * Rejected, not told (Rejected players who haven't been sent the "not
      * selected" email) beneath. The

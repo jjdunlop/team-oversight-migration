@@ -361,11 +361,11 @@ class TeamOversight_Offer_Wording {
         // ---- The coach portal (no dollar figure, ever) ----
         // 1.80.6 (club decision, 29 Oct 2026): a step with a number is named for what its players are
         // waiting on ("Awaiting reply"), not for the event that ends the wait ("Player accepts" read as
-        // a count of acceptances).
+        // a count of acceptances). 1.80.7: the approval step names who it is waiting on, the committee.
         $steps = array(
             'select' => array('Select', 'Selected or Training Only, with no offer sent yet'),
             'send' => array('Send offer', 'The coach presses Send offer on the card, or Send offers to all'),
-            'approve' => array('Awaiting approval', 'Waiting for the committee to approve the offer'),
+            'approve' => array('With committee', 'Waiting for the committee to approve the offer'),
             'email' => array('Offer emailed', 'The site emails the offer to the player once it is approved'),
             'accept' => array('Awaiting reply', 'Offer sent, waiting for the player to reply'),
             'deposit' => array('Deposit pending', 'Accepted, waiting for the deposit'),
