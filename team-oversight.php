@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: MURVC Club Manager
- * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), and casual program attendance (Club Programs).
- * Version: 1.80.7
+ * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), and coach profiles (Coaches).
+ * Version: 1.81.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.80.7');
+define('TEAM_OVERSIGHT_VERSION', '1.81.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -255,6 +255,11 @@ function team_oversight_create_tables() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-duplicates.php';
     $tables['team_account_merges'] = TeamOversight_Account_Merge::table_sql();
     $tables['team_duplicate_decisions'] = TeamOversight_Duplicates::decisions_table_sql();
+    // 1.81.0: coach profiles, their team ticks and their history.
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coaches.php';
+    foreach (TeamOversight_Coaches::tables_sql() as $short => $sql) {
+        $tables[$short] = $sql;
+    }
 
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
 
@@ -311,6 +316,10 @@ function team_oversight_init() {
     // 1.78.0: the offers setup checks, the season settings form, the pages panel and the wording editor.
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-offers-setup.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-not-selected.php';
+    // 1.81.0: Coaches, one profile per coach typed by the committee (the
+    // rules, readers and writers; the admin screens).
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coaches.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coaches-admin.php';
     if (defined('WP_CLI') && WP_CLI) {
         require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-merge-cli.php';
     }
@@ -344,6 +353,9 @@ function team_oversight_init() {
     TeamOversight_Not_Selected::register_hooks();
     // 1.80.3: the delayed "pay your trial fee" email (15 minutes, only if still unpaid).
     TeamOversight_Trial_Emails::register_hooks();
+    // 1.81.0: Coaches. Each is static and adds its hooks once per request.
+    TeamOversight_Coaches::register_hooks();
+    TeamOversight_Coaches_Admin::register_hooks();
     new TeamOversight_Trials();
     new TeamOversight_Imports();
     new TeamOversight_Exports();

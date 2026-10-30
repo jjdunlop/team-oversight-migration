@@ -68,6 +68,10 @@ class TeamOversight_Log {
                 'account_merged' => 'Accounts merged',
                 'account_merge_undone' => 'Account merge undone',
                 'duplicate_dismissed' => 'Marked not duplicates',
+                // Coaches (1.81.0): profile changes, the season line-up switch and the daily check, the editor role.
+                'coach_profile' => 'Coach profile',
+                'coach_website' => 'Coaches on the website',
+                'coach_editor' => 'Coach bios editor role',
             ),
         );
 
@@ -164,7 +168,7 @@ class TeamOversight_Log {
         $types = self::get_types($channel);
         $page_slug = $channel === 'membership' ? 'club-membership-logs' : 'team-oversight-logs';
         $intro = $channel === 'membership'
-            ? 'Membership lifecycle: grants, extensions, upgrades, expiries and revocations.'
+            ? 'Membership lifecycle: grants, extensions, upgrades, expiries and revocations; account merges; coach profiles.'
             : 'Payments, reminder emails and fee edits.';
         $type = isset($_GET['log_type']) && isset($types[$_GET['log_type']]) ? $_GET['log_type'] : '';
         $search = isset($_GET['log_search']) ? sanitize_text_field(wp_unslash($_GET['log_search'])) : '';

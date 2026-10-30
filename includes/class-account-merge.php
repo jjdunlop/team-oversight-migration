@@ -155,6 +155,13 @@ class TeamOversight_Account_Merge {
             array('team_not_selected', 'acted_by'),
             array('team_invoices', 'fee_overridden_by'),
             array('team_invoices', 'payment_arrangement_by'),
+            // 1.81.0: coach profiles (one per account: plan() blocks two), who ticked, cleared
+            // and acknowledged a team tick, and who made each history row.
+            array('team_coach_profiles', 'user_id'),
+            array('team_coach_ticks', 'shown_by'),
+            array('team_coach_ticks', 'cleared_by'),
+            array('team_coach_ticks', 'seen_by'),
+            array('team_coach_changes', 'recorded_by'),
         );
     }
 
@@ -898,6 +905,7 @@ class TeamOversight_Account_Merge {
                     'team_program_attendance' => 'Club program ticks',
                     'team_trial_notes' => 'Trial notes written',
                     'team_trial_selections' => 'Trial verdicts recorded',
+                    'team_coach_profiles' => 'Coach profile link',
                 );
                 $key = isset($label[$short]) && $col !== 'granted_by' && $col !== 'actor_id' && $col !== 'marked_by' ? $label[$short] : 'Other club records (staff columns)';
                 $moves[$key] = (isset($moves[$key]) ? $moves[$key] : 0) + $n;
@@ -923,6 +931,17 @@ class TeamOversight_Account_Merge {
                 $n += $mine;
             }
             $moves['VV accreditation rows'] = $n;
+        }
+        // 1.81.0: a coach profile is one per account (unique user_id), so two
+        // can't be re-pointed onto the kept account; say so here, rather than
+        // let the unique key fail the merge with no reason given.
+        $coach = $wpdb->prefix . 'team_coach_profiles';
+        if (self::table_exists($coach)) {
+            $in = implode(',', array_map('intval', array_keys($all_users)));
+            $with = array_map('intval', $wpdb->get_col("SELECT user_id FROM `$coach` WHERE user_id IN ($in)"));
+            if (count($with) > 1) {
+                $blockers[] = 'More than one of these accounts has a coach profile (#' . implode(', #', $with) . '). On Coaches, open the profile that should go, click Unlink account, then merge.';
+            }
         }
         foreach (array('team_oversight_committee_access') as $option) {
             $v = get_option($option);

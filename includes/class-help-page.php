@@ -877,9 +877,11 @@ class TeamOversight_Help_Page {
                 array(self::admin_link('team-oversight-committee', 'Committee Access'))),
             array('Club Programs', 'Attendance for casual programs (Mixed Development and the like), read live from paid shop orders, with supervisors per program.',
                 array(self::admin_link($programs_slug, 'Club Programs'))),
+            array('Coaches', 'One profile per coach, typed by the committee (public name, intro, bio, accreditation, highlights, a vetted photo and a role per program), with the coach\'s consent recorded on it: Publish is refused without it. Administrators and the Coach bios editor role (given on Programs and settings) work here; profiles and their history are never deleted.',
+                array(self::admin_link('club-coaches', 'Coaches'))),
         );
         self::open_section('mh-glance');
-        echo '<p>The plugin runs seven areas. The VVL Oversight ' . self::admin_link('team-oversight', 'Dashboard') . ' (and the WordPress dashboard\'s club overview) shows the headline numbers. Daily jobs (membership sync, fee releases, stops that take effect, reminder emails) run on WordPress\'s scheduler, which needs some site traffic to fire.</p>';
+        echo '<p>The plugin runs eight areas. The VVL Oversight ' . self::admin_link('team-oversight', 'Dashboard') . ' (and the WordPress dashboard\'s club overview) shows the headline numbers. Daily jobs (membership sync, fee releases, stops that take effect, reminder emails) run on WordPress\'s scheduler, which needs some site traffic to fire.</p>';
         echo '<div class="mh-scroll"><table class="widefat striped mh-table"><thead><tr><th scope="col">Area</th><th scope="col">What it does</th><th scope="col">Where</th></tr></thead><tbody>';
         foreach ($rows as $row) {
             echo '<tr><th scope="row">' . esc_html($row[0]) . '</th><td>' . esc_html($row[1]) . '</td><td>' . implode('<br>', $row[2]) . '</td></tr>';

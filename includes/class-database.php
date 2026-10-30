@@ -593,6 +593,18 @@ class TeamOversight_Database {
                 TeamOversight_Not_Selected::migrate_legacy_rows();
             }
         }
+
+        // 1.81.0: coach profiles, their team ticks and their history
+        // (TeamOversight_Coaches::tables_sql()). Each behind its own SHOW TABLES
+        // check; nothing existing is altered.
+        if (class_exists('TeamOversight_Coaches')) {
+            foreach (TeamOversight_Coaches::tables_sql() as $short => $sql) {
+                if (!$wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}{$short}'")) {
+                    require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+                    dbDelta($sql);
+                }
+            }
+        }
     }
 
     /**
@@ -1021,6 +1033,12 @@ class TeamOversight_Database {
         }
         if (class_exists('TeamOversight_Duplicates')) {
             $tables['team_duplicate_decisions'] = TeamOversight_Duplicates::decisions_table_sql();
+        }
+        // 1.81.0: coach profiles, their team ticks and their history.
+        if (class_exists('TeamOversight_Coaches')) {
+            foreach (TeamOversight_Coaches::tables_sql() as $short => $sql) {
+                $tables[$short] = $sql;
+            }
         }
 
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
