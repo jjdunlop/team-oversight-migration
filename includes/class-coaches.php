@@ -890,7 +890,9 @@ class TeamOversight_Coaches {
      * the theme's 404 for anyone without upload_files, its feed and embed
      * included. set_404() keeps is_feed and the photo in the query, so the
      * photo is taken out of the query too: the request then gets the 404
-     * template, never a feed or an embed that prints the file. The
+     * template (an embed request, which core keeps as one on a 404, the
+     * embed's own not-found part), never a feed or an embed that prints the
+     * file. The
      * canonical redirect is switched off for this request, or it would send
      * a 404 reached through ?attachment_id= on to the attachment's address
      * (the file itself where attachment pages are off); it is off too when
