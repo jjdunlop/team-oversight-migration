@@ -57,9 +57,12 @@ if (!defined('ABSPATH')) {
  *    update_profile() when it changed a published profile (photo and
  *    Photo cleared included), save_programs(), a change to the team names
  *    (on_team_config_changed()), a published profile's photo file deleted
- *    in Media (on_attachment_deleted()) and Refresh coach pages now
- *    (refresh_pages()). mark_checked(), saves of drafts and an upload on
- *    its own refresh nothing: no card changes.
+ *    in Media (on_attachment_deleted()), a change to a page holding a
+ *    coach list (forget_pages(): the strips print the Our coaches page's
+ *    address) and Refresh coach pages now (refresh_pages()).
+ *    mark_checked(), saves of drafts and an upload on its own refresh
+ *    nothing: no card changes. The public render never writes, not even
+ *    the pages list's transient (pages() with $store false).
  *
  * Tables: team_coach_profiles (one row per coach, never deleted),
  * team_coach_ticks (used from 1.83.0) and team_coach_changes (the history).
@@ -845,16 +848,23 @@ class TeamOversight_Coaches {
      * forget_pages() drops it whenever a page or post is saved, trashed or
      * deleted); the uses are judged again on each request, so a program,
      * team or season change shows at once. $fresh reads the pages again
-     * and refills the transient. Cached for the request.
+     * and refills the transient. $store false (the public render, through
+     * grid_url()) never writes: with the transient missing it reads the
+     * pages for this request only, and the refill is left to a request
+     * that may write (a Coaches screen's load_page(), run_purge(), and
+     * refill_pages() at the end of the request that changed a page).
+     * Cached for the request.
      */
-    public static function pages($fresh = false) {
+    public static function pages($fresh = false, $store = true) {
         if (!$fresh && self::$pages !== null) {
             return self::$pages;
         }
         $found = $fresh ? false : get_transient(self::PAGES_TRANSIENT);
         if (!is_array($found)) {
             $found = self::read_pages();
-            set_transient(self::PAGES_TRANSIENT, $found, 12 * HOUR_IN_SECONDS);
+            if ($store) {
+                set_transient(self::PAGES_TRANSIENT, $found, 12 * HOUR_IN_SECONDS);
+            }
         }
         $defaults = self::shortcode_defaults();
         $out = array();
@@ -942,6 +952,36 @@ class TeamOversight_Coaches {
         return $uses;
     }
 
+    /**
+     * How many widgets in a sidebar (not among the inactive widgets) hold a
+     * real [club_coaches]: block widgets, Text widgets and Custom HTML
+     * widgets. They are outside every page's text, so no page refresh
+     * reaches them (To do's outside_page row). Reads the widget options
+     * only.
+     */
+    private static function widget_uses() {
+        $placed = array();
+        $sidebars = get_option('sidebars_widgets', array());
+        foreach (is_array($sidebars) ? $sidebars : array() as $sidebar => $ids) {
+            if ($sidebar !== 'wp_inactive_widgets' && is_array($ids)) {
+                foreach ($ids as $id) {
+                    $placed[(string) $id] = true;
+                }
+            }
+        }
+        $n = 0;
+        foreach (array('block' => 'content', 'text' => 'text', 'custom_html' => 'content') as $base => $field) {
+            $instances = get_option('widget_' . $base, array());
+            foreach (is_array($instances) ? $instances : array() as $number => $instance) {
+                if (is_int($number) && isset($placed[$base . '-' . $number]) && is_array($instance) && isset($instance[$field])
+                    && !empty(self::find_uses((string) $instance[$field]))) {
+                    $n++;
+                }
+            }
+        }
+        return $n;
+    }
+
     /** A post title as plain text (titles may be stored entity-encoded, & as &amp;): decoded once, the caller escapes; $untitled when blank. */
     private static function plain_title($title, $untitled) {
         $title = trim(wp_specialchars_decode((string) $title, ENT_QUOTES));
@@ -977,10 +1017,11 @@ class TeamOversight_Coaches {
      * a grid use that names no program, team or group (a filtered grid has
      * no filter buttons, so the strips' #key links would find none), or ''.
      * The strips' Meet all our coaches link and the cards' name links go
-     * here.
+     * here. $store as pages(): the public render passes false, so it never
+     * refills the transient.
      */
-    public static function grid_url() {
-        foreach (self::pages() as $page) {
+    public static function grid_url($store = true) {
+        foreach (self::pages(false, $store) as $page) {
             foreach ($page['uses'] as $use) {
                 if (self::is_grid_use($use)) {
                     return (string) $page['url'];
@@ -993,23 +1034,51 @@ class TeamOversight_Coaches {
     /**
      * save_post_page, save_post_post, deleted_post, trashed_post: forget the
      * pages list, so a coach list placed on a page (or taken off one) is
-     * found at once. The page cache's own purge on that page's save covers
-     * the page itself. Other post types (an attachment, a revision) are
-     * left alone.
+     * found at once, and fill it again at the end of this request
+     * (refill_pages()). The page cache's own purge on that page's save
+     * covers the page itself, but every strip prints the Our coaches page's
+     * address, so a page that held a coach list before this change (the
+     * list this request already knows) or holds one now (the Our coaches
+     * page trashed, unpublished, moved or made) refreshes every coach page
+     * (queue_purge('pages')); an autosave never does. Other post types (an
+     * attachment, a revision) are left alone.
      */
     public static function forget_pages($post_id = 0, $post = null) {
-        $type = $post instanceof WP_Post ? $post->post_type : get_post_type(intval($post_id));
+        $post_id = intval($post_id);
+        $post = $post instanceof WP_Post ? $post : get_post($post_id);
+        $type = $post instanceof WP_Post ? $post->post_type : false;
         if ($type !== false && $type !== 'page' && $type !== 'post') {
             return;
         }
+        // What this request knows without reading the pages again: its own list, else the transient's.
+        $known = self::$pages !== null ? self::$pages : get_transient(self::PAGES_TRANSIENT);
+        $held = (is_array($known) && isset($known[$post_id]))
+            || ($post instanceof WP_Post && !empty(self::find_uses((string) $post->post_content)));
         delete_transient(self::PAGES_TRANSIENT);
         self::$pages = null;
+        add_action('shutdown', array(__CLASS__, 'refill_pages'), 6);
+        if ($held && !(defined('DOING_AUTOSAVE') && DOING_AUTOSAVE)) {
+            self::queue_purge('pages');
+        }
+    }
+
+    /**
+     * shutdown, priority 6, after run_purge() (queued by forget_pages()):
+     * fill the pages list's transient again at the end of the request that
+     * changed a page, a request that may write, so the public render
+     * rarely has to read the pages itself. Nothing when run_purge() or a
+     * Coaches screen has filled it already.
+     */
+    public static function refill_pages() {
+        if (!is_array(get_transient(self::PAGES_TRANSIENT))) {
+            self::pages(true);
+        }
     }
 
     /**
      * Ask for the coach pages to be refreshed at the end of this request.
      * $reason is a short code (published, hidden, profile, programs, teams,
-     * photo, manual) passed on to murvc_coaches_changed. However many
+     * photo, pages, manual) passed on to murvc_coaches_changed. However many
      * writers queue one in a request (a bulk Hide of 20 profiles), each
      * page is refreshed once.
      */
@@ -2546,8 +2615,8 @@ class TeamOversight_Coaches {
                 : $n . ' shown profiles have no program role and no team shown, so they appear on no page.', $n === 1 ? self::profile_url($no_role[0]) : $list('shown'), $n === 1 ? 'Open the profile' : 'Show them');
         }
 
-        // The pages that show coaches (1.82.0): the Our coaches page, code lines that show nothing, synced
-        // patterns (which no page refresh reaches) and whether anything connects the site's page cache.
+        // The pages that show coaches (1.82.0): the Our coaches page, code lines that show nothing, coach lists
+        // outside a page (which no page refresh reaches) and whether anything connects the site's page cache.
         $pages = self::pages();
         $pages_url = self::page_url('club-coaches-settings', array(), 'pages');
         if (self::grid_url() === '') {
@@ -2579,14 +2648,21 @@ class TeamOversight_Coaches {
                 $bad_uses++;
             }
         }
-        $patterns = $wpdb->get_results($wpdb->prepare(
-            "SELECT ID, post_title, post_content FROM {$wpdb->posts} WHERE post_type = 'wp_block' AND post_status = 'publish' AND post_content LIKE %s ORDER BY ID LIMIT 20",
+        // A coach list outside a page's own text (a synced pattern, a template or template part, a widget)
+        // is never in pages(), so no refresh reaches the pages showing it.
+        $outside = $wpdb->get_results($wpdb->prepare(
+            "SELECT ID, post_type, post_title, post_content FROM {$wpdb->posts} WHERE post_type IN ('wp_block', 'wp_template', 'wp_template_part') AND post_status = 'publish' AND post_content LIKE %s ORDER BY ID LIMIT 20",
             '%' . $wpdb->esc_like('[club_coaches') . '%'
         ));
-        foreach (is_array($patterns) ? $patterns : array() as $row) {
-            if (!empty(self::find_uses((string) $row->post_content))) {
-                $rows[] = self::todo_row('synced_pattern', 'bad', 'The synced pattern "' . self::plain_title($row->post_title, '#' . intval($row->ID)) . '" holds [club_coaches]: pages using it won\'t refresh when coaches change, and it isn\'t checked here. Put the code line on the page itself.', $pages_url, 'Coach pages');
+        $kinds = array('wp_block' => 'synced pattern', 'wp_template' => 'template', 'wp_template_part' => 'template part');
+        foreach (is_array($outside) ? $outside : array() as $row) {
+            if (!empty(self::find_uses((string) $row->post_content)) && isset($kinds[$row->post_type])) {
+                $rows[] = self::todo_row($row->post_type === 'wp_block' ? 'synced_pattern' : 'outside_page', 'bad', 'The ' . $kinds[$row->post_type] . ' "' . self::plain_title($row->post_title, '#' . intval($row->ID)) . '" holds [club_coaches]: pages using it won\'t refresh when coaches change, and it isn\'t checked here. Put the code line on the page itself.', $pages_url, 'Coach pages');
             }
+        }
+        $widgets = self::widget_uses();
+        if ($widgets > 0) {
+            $rows[] = self::todo_row('outside_page', 'bad', ($widgets === 1 ? 'A widget holds' : $widgets . ' widgets hold') . ' [club_coaches]: pages showing ' . ($widgets === 1 ? 'it' : 'them') . ' won\'t refresh when coaches change, and ' . ($widgets === 1 ? 'it isn\'t' : 'they aren\'t') . ' checked here. Put the code line on the page itself.', $pages_url, 'Coach pages');
         }
         if (!empty($pages) && !has_action('murvc_coaches_changed')) {
             $rows[] = self::todo_row('page_refresh', 'warn', 'Nothing connects the site\'s page cache to Coaches, so visitors can see an old card until the cache expires on its own. Ask an administrator to set up the coach-pages refresh.', $pages_url, 'Coach pages');

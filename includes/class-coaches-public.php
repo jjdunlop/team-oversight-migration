@@ -268,7 +268,9 @@ class TeamOversight_Coaches_Public {
      * judge ticks, never printed). Consent columns appear in the WHERE
      * clause only and are never selected. Then one _prime_post_caches() over
      * the cleared photos of Full profiles, because building a card asks
-     * wp_attachment_is_image() (the post and its file meta).
+     * wp_attachment_is_image() (the post and its file meta); a cleared photo
+     * no longer in Media is taken off the row there (photo_cleared_id 0),
+     * so no card costs a query of its own.
      */
     private static function published_rows() {
         global $wpdb;
@@ -294,6 +296,16 @@ class TeamOversight_Coaches_Public {
         }
         if (!empty($photos)) {
             _prime_post_caches(array_values($photos), false, true);
+            // A cleared photo deleted in Media (To do's photo_gone) is still missing after the prime, and core
+            // never remembers a missing post, so its card would query again. Take it off this request's row:
+            // the card shows initials, as it would anyway, from the same reads.
+            $cached = wp_cache_get_multiple(array_values($photos), 'posts');
+            foreach ($rows as $row) {
+                $photo = intval($row->photo_id);
+                if (isset($photos[$photo]) && empty($cached[$photo])) {
+                    $row->photo_cleared_id = 0;
+                }
+            }
         }
         self::$rows = $rows;
         return $rows;
@@ -356,10 +368,15 @@ class TeamOversight_Coaches_Public {
         return self::$programs;
     }
 
-    /** The Our coaches page's address ('' when no page has a grid), read once per request. */
+    /**
+     * The Our coaches page's address ('' when no page has a grid), read
+     * once per request and never stored: with the pages list's transient
+     * missing, the render reads the pages for this request only and leaves
+     * the refill to a request that may write.
+     */
     private static function grid_url() {
         if (self::$grid_url === null) {
-            self::$grid_url = (string) TeamOversight_Coaches::grid_url();
+            self::$grid_url = (string) TeamOversight_Coaches::grid_url(false);
         }
         return self::$grid_url;
     }

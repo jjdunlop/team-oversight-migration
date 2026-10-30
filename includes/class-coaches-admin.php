@@ -736,7 +736,7 @@ class TeamOversight_Coaches_Admin {
         echo '<hr class="wp-header-end">';
         self::render_flash();
         echo '<p class="mc-text">Each coach has one profile; every page builds its coach list from these. <strong>What to do here:</strong> work through To do, then open a profile to change it.</p>';
-        echo '<p class="mc-text mc-muted">Shown profiles appear on every page that holds a coach list: the Our coaches page and the program strips. Each profile\'s editor shows its card and the pages it is on; '
+        echo '<p class="mc-text mc-muted">Shown profiles appear on the Our coaches page once they have a role, and on the strip of each program they have a role on. Each profile\'s editor shows its card and the pages it is on; '
             . '<a href="' . esc_url(self::page_url(self::PAGE_SETTINGS) . '#pages') . '">Pages using coach lists</a> has them all.</p>';
 
         self::render_todo(TeamOversight_Coaches::todo($season));
@@ -994,7 +994,7 @@ class TeamOversight_Coaches_Admin {
                 <h3>New season</h3>
                 <p>Work through <a href="<?php echo $check; ?>">Needs checking</a>. Nothing is pre-ticked, so each confirmation is a deliberate click: tick several and choose Still correct, or open a profile and click Update.</p>
                 <h3>New program</h3>
-                <p>On <a href="<?php echo $programs; ?>">Programs and settings</a>, type its name under Add a program and click Save programs. Its key is made from the name and never changes.</p>
+                <p>On <a href="<?php echo $programs; ?>">Programs and settings</a>, type its name under Add a program and click Save programs. Its key is made from the name and never changes. Then copy its line from <a href="<?php echo $code; ?>">Code lines</a> and paste it into a Shortcode block on that program's page, once (as in Put coaches on a page): until then its coaches are on no strip.</p>
                 <h3>Give someone access</h3>
                 <p>An administrator adds them on <a href="<?php echo $editors; ?>">Programs and settings, Coach bios editors</a>. Never use the Role dropdown on the Users screen: it replaces the person's member roles. Keep at least three people holding the role.</p>
                 <h3>The bookmark</h3>
