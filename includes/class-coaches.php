@@ -72,7 +72,7 @@ if (!defined('ABSPATH')) {
  */
 class TeamOversight_Coaches {
 
-    /** The capability every Coaches screen and the handler check. Administrators hold it through grant_admins(). */
+    /** The capability every Coach bios screen and the handler check. Administrators hold it through grant_admins(). */
     const CAP = 'murvc_manage_coaches';
     /** The Coach bios editor role: CAP, read, view_admin_dashboard (WooCommerce's wp-admin gate) and upload_files (the media picker). */
     const ROLE = 'murvc_coach_bios_editor';
@@ -851,7 +851,7 @@ class TeamOversight_Coaches {
      * and refills the transient. $store false (the public render, through
      * grid_url()) never writes: with the transient missing it reads the
      * pages for this request only, and the refill is left to a request
-     * that may write (a Coaches screen's load_page(), run_purge(), and
+     * that may write (a Coach bios screen's load_page(), run_purge(), and
      * refill_pages() at the end of the request that changed a page).
      * Cached for the request.
      */
@@ -1067,7 +1067,7 @@ class TeamOversight_Coaches {
      * fill the pages list's transient again at the end of the request that
      * changed a page, a request that may write, so the public render
      * rarely has to read the pages itself. Nothing when run_purge() or a
-     * Coaches screen has filled it already.
+     * Coach bios screen has filled it already.
      */
     public static function refill_pages() {
         if (!is_array(get_transient(self::PAGES_TRANSIENT))) {
@@ -1129,7 +1129,7 @@ class TeamOversight_Coaches {
         self::log(self::LOG_WEBSITE, 'Coach pages refreshed by hand.');
         $asked = 'Asked for ' . ($n === 1 ? 'the 1 page' : 'the ' . $n . ' pages') . ' showing coaches to be refreshed.';
         if (!has_action('murvc_coaches_changed')) {
-            return self::result(true, 'warning', $asked, array('Nothing connects the site\'s page cache to Coaches yet, so visitors can see an old copy until it expires on its own. Ask an administrator to set up the coach-pages refresh.'));
+            return self::result(true, 'warning', $asked, array('Nothing connects the site\'s page cache to Coach bios yet, so visitors can see an old copy until it expires on its own. Ask an administrator to set up the coach-pages refresh.'));
         }
         return self::result(true, 'success', $asked . ' Visitors see the new cards within a few minutes.');
     }
@@ -2178,7 +2178,7 @@ class TeamOversight_Coaches {
 
     private static function give_role($user, $actor, $log_message) {
         if (user_can($user, 'manage_options')) {
-            return self::result(false, 'error', self::plain_name($user) . ' is an administrator, so already has the Coaches screens.');
+            return self::result(false, 'error', self::plain_name($user) . ' is an administrator, so already has the Coach bios screens.');
         }
         if (in_array(self::ROLE, (array) $user->roles, true)) {
             return self::result(true, 'success', self::plain_name($user) . ' already holds the Coach bios editor role.');
@@ -2665,7 +2665,7 @@ class TeamOversight_Coaches {
             $rows[] = self::todo_row('outside_page', 'bad', ($widgets === 1 ? 'A widget holds' : $widgets . ' widgets hold') . ' [club_coaches]: pages showing ' . ($widgets === 1 ? 'it' : 'them') . ' won\'t refresh when coaches change, and ' . ($widgets === 1 ? 'it isn\'t' : 'they aren\'t') . ' checked here. Put the code line on the page itself.', $pages_url, 'Coach pages');
         }
         if (!empty($pages) && !has_action('murvc_coaches_changed')) {
-            $rows[] = self::todo_row('page_refresh', 'warn', 'Nothing connects the site\'s page cache to Coaches, so visitors can see an old card until the cache expires on its own. Ask an administrator to set up the coach-pages refresh.', $pages_url, 'Coach pages');
+            $rows[] = self::todo_row('page_refresh', 'warn', 'Nothing connects the site\'s page cache to Coach bios, so visitors can see an old card until the cache expires on its own. Ask an administrator to set up the coach-pages refresh.', $pages_url, 'Coach pages');
         }
 
         // The editor role: enough holders, and any lost outside the Editors box.

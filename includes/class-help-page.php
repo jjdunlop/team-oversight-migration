@@ -877,8 +877,8 @@ class TeamOversight_Help_Page {
                 array(self::admin_link('team-oversight-committee', 'Committee Access'))),
             array('Club Programs', 'Attendance for casual programs (Mixed Development and the like), read live from paid shop orders, with supervisors per program.',
                 array(self::admin_link($programs_slug, 'Club Programs'))),
-            array('Coaches', 'One profile per coach, typed by the committee (public name, intro, bio, accreditation, highlights, a vetted photo and a role per program), with the coach\'s consent recorded on it: Publish is refused without it. Administrators and the Coach bios editor role (given on Programs and settings) work here; profiles and their history are never deleted.',
-                array(self::admin_link('club-coaches', 'Coaches'))),
+            array('Coach bios', 'One profile per coach, typed by the committee (public name, intro, bio, accreditation, highlights, a vetted photo and a role per program), with the coach\'s consent recorded on it: Publish is refused without it. Administrators and the Coach bios editor role (given on Programs and settings) work here; profiles and their history are never deleted.',
+                array(self::admin_link('club-coaches', 'Coach bios'))),
         );
         self::open_section('mh-glance');
         echo '<p>The plugin runs eight areas. The VVL Oversight ' . self::admin_link('team-oversight', 'Dashboard') . ' (and the WordPress dashboard\'s club overview) shows the headline numbers. Daily jobs (membership sync, fee releases, stops that take effect, reminder emails) run on WordPress\'s scheduler, which needs some site traffic to fire.</p>';

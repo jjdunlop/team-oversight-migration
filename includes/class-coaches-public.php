@@ -172,7 +172,7 @@ class TeamOversight_Coaches_Public {
         }
         $programs = self::programs();
         if ($program !== '' && !isset($programs[$program])) {
-            return $fail('There is no program ' . self::quoted($program) . ': copy the code line from Coaches → Programs and settings.');
+            return $fail('There is no program ' . self::quoted($program) . ': copy the code line from Coach bios → Programs and settings.');
         }
         if ($group !== '' && !array_key_exists($group, TeamOversight_Coaches::TEAM_GROUPS)) {
             return $fail('There is no team group ' . self::quoted($group) . ': use ' . implode(', ', array_keys(TeamOversight_Coaches::TEAM_GROUPS)) . '.');

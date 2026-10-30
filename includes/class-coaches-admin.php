@@ -116,18 +116,18 @@ class TeamOversight_Coaches_Admin {
     // ------------------------------------------------------------------
 
     /**
-     * Coaches, a top-level menu under TeamOversight_Coaches::CAP: Profiles
+     * Coach bios, a top-level menu under TeamOversight_Coaches::CAP: Profiles
      * (repeating the parent slug, as Club Membership does), Add New and
      * Programs and settings. Each hook suffix WordPress returns is kept for
      * enqueue() and gets load_page().
      */
     public static function add_menu() {
         $cap = TeamOversight_Coaches::CAP;
-        add_menu_page('Coaches', 'Coaches', $cap, self::PAGE_PROFILES, array(__CLASS__, 'render_profiles_page'), 'dashicons-businessperson', 33);
+        add_menu_page('Coach bios', 'Coach bios', $cap, self::PAGE_PROFILES, array(__CLASS__, 'render_profiles_page'), 'dashicons-businessperson', 33);
         $suffixes = array(
-            self::PAGE_PROFILES => add_submenu_page(self::PAGE_PROFILES, 'Coaches', 'Profiles', $cap, self::PAGE_PROFILES, array(__CLASS__, 'render_profiles_page')),
+            self::PAGE_PROFILES => add_submenu_page(self::PAGE_PROFILES, 'Coach bios', 'Profiles', $cap, self::PAGE_PROFILES, array(__CLASS__, 'render_profiles_page')),
             self::PAGE_EDIT => add_submenu_page(self::PAGE_PROFILES, 'Coach profile', 'Add New', $cap, self::PAGE_EDIT, array(__CLASS__, 'render_edit_page')),
-            self::PAGE_SETTINGS => add_submenu_page(self::PAGE_PROFILES, 'Coaches: programs and settings', 'Programs and settings', $cap, self::PAGE_SETTINGS, array(__CLASS__, 'render_settings_page')),
+            self::PAGE_SETTINGS => add_submenu_page(self::PAGE_PROFILES, 'Coach bios: programs and settings', 'Programs and settings', $cap, self::PAGE_SETTINGS, array(__CLASS__, 'render_settings_page')),
         );
         foreach ($suffixes as $slug => $suffix) {
             if (is_string($suffix) && $suffix !== '') {
@@ -152,7 +152,7 @@ class TeamOversight_Coaches_Admin {
         }
     }
 
-    /** The Dashboard sends a Coach bios editor with no other staff access straight to Coaches. Other staff are never redirected. */
+    /** The Dashboard sends a Coach bios editor with no other staff access straight to Coach bios. Other staff are never redirected. */
     public static function dashboard_redirect() {
         if (!current_user_can(TeamOversight_Coaches::CAP) || current_user_can('manage_options') || current_user_can('edit_posts')) {
             return;
@@ -162,7 +162,7 @@ class TeamOversight_Coaches_Admin {
     }
 
     /**
-     * load-<page> for every Coaches screen, before anything is printed: take
+     * load-<page> for every Coach bios screen, before anything is printed: take
      * the flash and (on the editor) the draft, and read the pages holding
      * [club_coaches] once (pages() keeps them in a transient), so the render
      * itself writes nothing. 1.83.0 runs the daily check here too.
@@ -400,7 +400,7 @@ class TeamOversight_Coaches_Admin {
             wp_die('You do not have permission to do that.', '', array('response' => 403));
         }
         if (!isset($_SERVER['REQUEST_METHOD']) || strtoupper((string) $_SERVER['REQUEST_METHOD']) !== 'POST') {
-            wp_die('Use the buttons on the Coaches screens.', '', array('response' => 405));
+            wp_die('Use the buttons on the Coach bios screens.', '', array('response' => 405));
         }
         $data = wp_unslash($_POST);
         $do = isset($data['do']) && is_string($data['do']) ? sanitize_key($data['do']) : '';
@@ -732,7 +732,7 @@ class TeamOversight_Coaches_Admin {
 
         echo '<div class="wrap murvc-coaches-admin">';
         self::styles();
-        echo '<h1 class="wp-heading-inline">Coaches</h1> <a href="' . esc_url(self::page_url(self::PAGE_EDIT)) . '" class="page-title-action">Add New</a>';
+        echo '<h1 class="wp-heading-inline">Coach bios</h1> <a href="' . esc_url(self::page_url(self::PAGE_EDIT)) . '" class="page-title-action">Add New</a>';
         echo '<hr class="wp-header-end">';
         self::render_flash();
         echo '<p class="mc-text">Each coach has one profile; every page builds its coach list from these. <strong>What to do here:</strong> work through To do, then open a profile to change it.</p>';
@@ -1041,7 +1041,7 @@ class TeamOversight_Coaches_Admin {
         $id = self::get_id('profile');
         $profile = $id > 0 ? TeamOversight_Coaches::get_profile($id) : null;
         self::$view = array('page' => self::PAGE_EDIT, 'profile' => $id, 'filter' => '', 's' => '', 'anchor' => '');
-        $back = '<a href="' . esc_url(self::page_url(self::PAGE_PROFILES)) . '">Back to Coaches</a>';
+        $back = '<a href="' . esc_url(self::page_url(self::PAGE_PROFILES)) . '">Back to Coach bios</a>';
 
         echo '<div class="wrap murvc-coaches-admin">';
         self::styles();
@@ -1597,7 +1597,7 @@ class TeamOversight_Coaches_Admin {
 
         echo '<div class="wrap murvc-coaches-admin">';
         self::styles();
-        echo '<h1>Coaches: programs and settings</h1><hr class="wp-header-end">';
+        echo '<h1>Coach bios: programs and settings</h1><hr class="wp-header-end">';
         self::render_flash();
         echo '<p class="mc-text">The programs a coach can have a role on, the code lines that put coach lists on pages, the pages that hold them' . ($editors ? ', and who may edit coach profiles' : '') . '. '
             . '<a href="#programs">Programs</a> · <a href="#code">Code lines</a> · <a href="#pages">Pages using coach lists</a>' . ($editors ? ' · <a href="#editors">Coach bios editors</a>' : '') . '</p>';
@@ -1736,7 +1736,7 @@ class TeamOversight_Coaches_Admin {
         }
         echo '</tbody></table></div>';
         if (!has_action('murvc_coaches_changed')) {
-            echo '<p class="mc-text mc-bad-text">Nothing connects the site\'s page cache to Coaches yet, so visitors can see an old card until the cache expires on its own. An administrator sets up the coach-pages refresh, which listens for the murvc_coaches_changed action.</p>';
+            echo '<p class="mc-text mc-bad-text">Nothing connects the site\'s page cache to Coach bios yet, so visitors can see an old card until the cache expires on its own. An administrator sets up the coach-pages refresh, which listens for the murvc_coaches_changed action.</p>';
         }
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" class="mc-bar">' . self::hidden_fields('purge')
             . '<button type="submit" class="button">Refresh coach pages now</button>'
