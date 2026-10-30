@@ -1369,7 +1369,7 @@ class TeamOversight_Coaches_Admin {
             echo '<p class="mc-muted">As on the ' . self::h($label) . ' strip.</p>'
                 . '<div class="murvc-coaches murvc-coaches--strip"><div class="murvc-coach-strip"><ul class="murvc-coach-list">' . $cards['strip'] . '</ul></div></div>';
         } else {
-            echo '<p class="mc-muted">No program role yet, so no program strip shows this card.</p>';
+            echo '<p class="mc-muted">No program role yet, so no program strip shows this card, and the Our coaches page leaves it out until it has a role.</p>';
         }
         if ($cards['grid'] !== '') {
             echo '<h3 class="mc-preview-label">On Our coaches</h3>'
@@ -1432,7 +1432,7 @@ class TeamOversight_Coaches_Admin {
                 }
                 $reason = 'no page holds the Our coaches list or a strip for ' . (count($labels) === 1 ? 'its program' : 'its programs') . ' (' . implode(', ', $labels) . ')';
             }
-            echo '<p class="mc-text">' . self::h('Not on any page yet' . ($draft ? ', even once published' : '') . ': ' . $reason . '.') . ' ' . $settings . ' lists every page with one.</p>';
+            echo '<p class="mc-text">' . self::h('Not on any page yet' . ($draft ? ', even once published' : '') . ': ' . $reason . '.') . ' Every page with a coach list is under ' . $settings . '.</p>';
             return;
         }
         $problem = TeamOversight_Coaches::publish_problem($profile);
