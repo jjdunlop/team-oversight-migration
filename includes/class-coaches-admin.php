@@ -166,20 +166,36 @@ class TeamOversight_Coaches_Admin {
         self::take_flash();
         if (self::current_page() === self::PAGE_EDIT) {
             self::take_draft(self::get_id('profile'));
+            // Before wp_enqueue_media() writes the uploader's settings (admin_enqueue_scripts runs after this).
+            add_filter('plupload_default_params', array(__CLASS__, 'upload_params'));
         }
+    }
+
+    /**
+     * plupload_default_params, on the profile editor only: every upload from
+     * its media picker carries TeamOversight_Coaches::UPLOAD_PARAM, so
+     * TeamOversight_Coaches::on_photo_uploaded() withholds the file from the
+     * moment it lands, whether or not a profile is ever saved with it.
+     */
+    public static function upload_params($params) {
+        $params = is_array($params) ? $params : array();
+        $params[TeamOversight_Coaches::UPLOAD_PARAM] = 1;
+        return $params;
     }
 
     // ------------------------------------------------------------------
     // The flash summary and the draft (Post/Redirect/Get)
     // ------------------------------------------------------------------
 
-    private static function result($ok, $message, array $lines = array(), $type = '', $id = 0) {
+    /** $open: line => the profile id the flash links that line to (the same-name warning). */
+    private static function result($ok, $message, array $lines = array(), $type = '', $id = 0, array $open = array()) {
         return array(
             'ok' => (bool) $ok,
             'type' => $type !== '' ? $type : ($ok ? 'success' : 'error'),
             'message' => (string) $message,
             'lines' => array_values($lines),
             'id' => (int) $id,
+            'open' => $open,
         );
     }
 
@@ -200,7 +216,18 @@ class TeamOversight_Coaches_Admin {
         if ($message === '') {
             $message = $ok ? 'Done.' : 'Nothing was changed: reload the page and try again.';
         }
-        return self::result($ok, $message, $lines, $type, isset($r['id']) ? intval($r['id']) : $id);
+        return self::result($ok, $message, $lines, $type, isset($r['id']) ? intval($r['id']) : $id, self::open_links(isset($r['open']) ? $r['open'] : array()));
+    }
+
+    /** A result's line => profile id links, keeping only text lines and positive ids. */
+    private static function open_links($open) {
+        $out = array();
+        foreach (is_array($open) ? $open : array() as $line => $profile) {
+            if (is_scalar($profile) && (int) $profile > 0) {
+                $out[(string) $line] = (int) $profile;
+            }
+        }
+        return $out;
     }
 
     /** The summary the last button left for this person (shown once), or null. */
@@ -225,10 +252,13 @@ class TeamOversight_Coaches_Admin {
         $type = isset($flash['type']) && in_array($flash['type'], array('success', 'warning', 'error'), true) ? $flash['type'] : 'error';
         echo '<div class="notice notice-' . esc_attr($type) . ' is-dismissible"><p>' . self::h(isset($flash['message']) ? $flash['message'] : '') . '</p>';
         if (!empty($flash['lines']) && is_array($flash['lines'])) {
+            // A same-name line links to the other profile, so it can be checked straight away.
+            $open = self::open_links(isset($flash['open']) ? $flash['open'] : array());
             echo '<ul class="mc-lines">';
             foreach ($flash['lines'] as $line) {
                 if (is_scalar($line)) {
-                    echo '<li>' . self::h($line) . '</li>';
+                    $other = isset($open[(string) $line]) ? $open[(string) $line] : 0;
+                    echo '<li>' . self::h($line) . ($other > 0 ? ' <a href="' . esc_url(self::edit_url($other)) . '">' . self::h('Open profile #' . $other) . '</a>' : '') . '</li>';
                 }
             }
             echo '</ul>';
@@ -449,8 +479,9 @@ class TeamOversight_Coaches_Admin {
             return self::result(false, 'Nothing was saved. What you typed is still in the form: fix ' . (count($errors) === 1 ? 'this' : 'these') . ' and save again.', $errors, 'error', $id);
         }
 
-        // The writers word the save (Saved as a draft. / Profile updated. / Saved and hidden from the
-        // website: ...) and add the same-name and old-photo lines; a stale update keeps the draft itself.
+        // The writers word the save (Saved as a draft. / Nothing changed. / Profile updated. / Saved and
+        // hidden from the website: ...) and add the same-name and old-photo lines; a stale update keeps
+        // the draft itself.
         if ($id === 0) {
             $r = self::normalise(TeamOversight_Coaches::create_profile($fields, 0, $actor));
             if (!$r['ok'] || $r['id'] <= 0) {
@@ -476,10 +507,11 @@ class TeamOversight_Coaches_Admin {
         $p = self::normalise(TeamOversight_Coaches::set_status($id, 'published', $actor, 'editor'), $id);
         if ($p['ok']) {
             $lines = array_merge($r['lines'], $p['lines']);
-            return self::result(true, 'Profile published. Pages showing it refresh within a few minutes.', $lines, empty($lines) ? 'success' : 'warning', $id);
+            // No page lists coaches yet (the coach pages, and the refresh of them, come in a later update).
+            return self::result(true, 'Profile published. It will show on the website once the coach pages are added.', $lines, empty($lines) ? 'success' : 'warning', $id, $r['open']);
         }
         // set_status() refuses with publish_problem()'s bare sentence.
-        return self::result(true, 'Saved as a draft, not published: ' . $p['message'], $r['lines'], 'warning', $id);
+        return self::result(true, 'Saved as a draft, not published: ' . $p['message'], $r['lines'], 'warning', $id, $r['open']);
     }
 
     /**
@@ -685,6 +717,7 @@ class TeamOversight_Coaches_Admin {
         echo '<hr class="wp-header-end">';
         self::render_flash();
         echo '<p class="mc-text">Each coach has one profile; every page builds its coach list from these. <strong>What to do here:</strong> work through To do, then open a profile to change it.</p>';
+        echo '<p class="mc-text mc-muted">Nothing is on the website yet: the coach pages come in a later update, and published (Shown) profiles appear on them from then.</p>';
 
         self::render_todo(TeamOversight_Coaches::todo($season));
 
@@ -792,15 +825,29 @@ class TeamOversight_Coaches_Admin {
         echo '</form>';
     }
 
-    /** Website column: Shown / Hidden / Hidden: no consent / Hidden: asked not to be shown. */
+    /**
+     * Website column: Shown / Hidden / Hidden: no consent / Hidden: asked not
+     * to be shown, read with the Consent column so the two never disagree.
+     * Consent that is recorded but covers less than Show as reads Hidden:
+     * agreed to Name only (the fix is Show as Name only); anything else that
+     * stops Publish reads Hidden: can't be published yet, and the editor's
+     * status line gives the exact sentence.
+     */
     private static function website_label($row) {
         if (self::v($row, 'status') !== 'draft') {
             return 'Shown';
         }
-        if (self::v($row, 'consent_method') === 'declined') {
+        $consent = self::consent_label($row);
+        if ($consent === 'Asked not to be shown') {
             return 'Hidden: asked not to be shown';
         }
-        return TeamOversight_Coaches::publish_problem($row) !== '' ? 'Hidden: no consent' : 'Hidden';
+        if ($consent !== 'Recorded') {
+            return 'Hidden: no consent';
+        }
+        if (TeamOversight_Coaches::publish_problem($row) === '') {
+            return 'Hidden';
+        }
+        return (self::v($row, 'consent_scope') === 'name_only' && self::v($row, 'display_mode') !== 'name_only') ? 'Hidden: agreed to Name only' : 'Hidden: can\'t be published yet';
     }
 
     /** Consent column, with no date: Recorded / Missing / Parent missing / Asked not to be shown (the No consent filter's conditions). */
@@ -985,12 +1032,14 @@ class TeamOversight_Coaches_Admin {
         echo '<hr class="wp-header-end">';
         self::render_flash();
         echo '<p class="mc-text">' . ($profile ? '<strong>Profile #' . (int) $id . '.</strong> ' : '')
-            . 'Everything here is typed by the committee: nothing is read from the coach\'s account. Nothing shows on the website until the profile is published, and Publish is refused until consent is recorded. ' . $back . '.</p>';
+            . 'Everything here is typed by the committee: nothing is read from the coach\'s account. Nothing shows on the website until the profile is published, and Publish is refused until consent is recorded. ' . $back . '.</p>'
+            . '<p class="mc-text mc-muted">The coach pages themselves come in a later update, so for now a published profile isn\'t on any page yet.</p>';
         if (is_array($draft)) {
             echo '<div class="notice notice-warning inline"><p>The form below holds what you typed, not what is saved. Check it and save again.</p></div>';
         }
 
-        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" id="mc-profile-form" class="mc-form">';
+        // mc-once: the script disables the buttons once it is sent, so a double click saves once (with no delete, a second new profile could never go).
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" id="mc-profile-form" class="mc-form mc-once">';
         echo self::hidden_fields('save', $id);
         echo '<input type="hidden" name="version" value="' . ($profile ? (int) $profile->version : 0) . '">';
         self::render_fields($v);
@@ -1556,13 +1605,22 @@ class TeamOversight_Coaches_Admin {
         <?php
     }
 
-    /** The editor's script: the counters, Other's text box, and the media picker. Values and textContent only. */
+    /** The editor's script: one send per form, the counters, Other's text box, and the media picker. Values and textContent only. */
     private static function edit_script() {
         ?>
         <script>
             (function () {
                 function byId(id) { return document.getElementById(id); }
                 function chars(s) { return Array.from ? Array.from(s).length : s.length; }
+
+                // A form marked mc-once is sent once: its buttons are disabled straight after the submit
+                // (in a timeout, so the pressed button's intent is still posted).
+                document.addEventListener('submit', function (e) {
+                    var form = e.target;
+                    if (!form || !form.classList || !form.classList.contains('mc-once')) { return; }
+                    var buttons = form.querySelectorAll('button[type=submit]');
+                    setTimeout(function () { for (var i = 0; i < buttons.length; i++) { buttons[i].disabled = true; } }, 0);
+                });
 
                 var intro = byId('mc-intro'), introCount = byId('mc-intro-count');
                 if (intro && introCount) {

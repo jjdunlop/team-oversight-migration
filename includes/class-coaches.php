@@ -25,11 +25,14 @@ if (!defined('ABSPATH')) {
  *  - Team coaching is opt-in: one tick per (profile, team place), judged by
  *    tick_problem() wherever a tick is read. The rule is here from 1.81.0 so
  *    every reader shares it; the ticks and their writers come in 1.83.0.
- *  - Every writer validates first, writes with one compare-and-set UPDATE
- *    or INSERT whose affected-row count gates the side effects, adds one
- *    history row (team_coach_changes, never pruned) and one line in the
- *    activity log (the three LOG_* types). Nothing deletes a row, and
- *    nothing here writes team_assignments or team_assignment_changes.
+ *  - Every profile writer validates first, writes with one compare-and-set
+ *    UPDATE or INSERT whose affected-row count gates the side effects, adds
+ *    one history row (team_coach_changes, never pruned) and one line in the
+ *    activity log (the three LOG_* types). save_programs() is held to the
+ *    hash of the list the page was drawn with instead, and the editor-role
+ *    writers are add_role() / remove_role(); both record and log the same
+ *    way. Nothing deletes a row, and nothing here writes team_assignments or
+ *    team_assignment_changes.
  *  - The Coach bios editor role (ROLE) holds CAP directly; administrators
  *    hold CAP through a user_has_cap filter, so nothing is stored for them.
  *    The role is granted only on the Editors box (grant_editor()), because
@@ -37,8 +40,10 @@ if (!defined('ABSPATH')) {
  *    role goes any other way (a save on Users → Edit keeps only the role in
  *    its dropdown) and never puts it back by itself.
  *  - Coach photos no card shows are kept out of the site's public media
- *    listing (REST and attachment pages) for anyone without upload_files
- *    (photo_withheld_ids()). The file itself still opens by its link.
+ *    listing (REST, embeds, and attachment pages with their feeds) for
+ *    anyone without upload_files (photo_withheld_ids()), from the moment
+ *    one is uploaded on the Coaches editor. The file itself still opens by
+ *    its link.
  *
  * Tables: team_coach_profiles (one row per coach, never deleted),
  * team_coach_ticks (used from 1.83.0) and team_coach_changes (the history).
@@ -72,6 +77,8 @@ class TeamOversight_Coaches {
     const SWEPT_TRANSIENT = 'murvc_coaches_swept';
     /** The named lock around making a profile from a team place and linking one (1.83.0). */
     const LINK_LOCK = 'murvc_coach_link';
+    /** Posted with every upload from the Coaches editor's media picker, so the file is withheld before any save. */
+    const UPLOAD_PARAM = 'murvc_coach_photo';
 
     /** Field limits, in characters (mb_strlen). A longer value is refused, never cut short. */
     const NAME_MAX = 80;
@@ -127,7 +134,8 @@ class TeamOversight_Coaches {
     /**
      * Add the Coaches hooks, once per request (team_oversight_init() calls
      * it): the role and the two wp-admin gates, the role watch, and the
-     * three photo-file hooks (9.8). Static and guarded, never from a
+     * photo-file hooks (9.8: REST, embeds, attachment pages, and the
+     * Coaches editor's uploads). Static and guarded, never from a
      * constructor.
      */
     public static function register_hooks() {
@@ -147,7 +155,9 @@ class TeamOversight_Coaches {
         // Coach photos no card shows stay out of the public media listing.
         add_filter('rest_attachment_query', array(__CLASS__, 'rest_media_query'), 10, 2);
         add_filter('rest_prepare_attachment', array(__CLASS__, 'rest_media_item'), 10, 3);
+        add_filter('oembed_request_post_id', array(__CLASS__, 'oembed_post_id'), 10, 2);
         add_action('template_redirect', array(__CLASS__, 'withhold_attachment_page'), 5);
+        add_action('add_attachment', array(__CLASS__, 'on_photo_uploaded'), 10, 1);
     }
 
     /** Forget everything cached this request (tests; every writer does it too). */
@@ -191,8 +201,11 @@ class TeamOversight_Coaches {
      * One row per coach, never deleted. user_id is the linked account (set
      * only from a team place; NULL = none, any number of NULLs under the
      * unique key). No email, phone or name snapshot: everything public is
-     * typed by the committee. version is the edit counter every write to
-     * the row raises.
+     * typed by the committee. version is the edit counter: an editor save
+     * that changes something (or an Update while published), Publish, Hide
+     * and enforce_guard() raise it; Still correct (mark_checked(), which
+     * stamps only checked_at) and an account merge's re-point of user_id
+     * leave it alone.
      */
     public static function profiles_table_sql() {
         global $wpdb;
@@ -779,9 +792,11 @@ class TeamOversight_Coaches {
     /**
      * The attachment ids the site keeps out of its public media listing:
      * every photo a profile holds, plus both ids of every photo_changed
-     * history row (so a removed or swapped photo stays out), minus the ids a
-     * profile shows right now (published, passing guard_sql(), Full profile
-     * and its photo cleared). Two queries, cached for the request.
+     * history row (so a removed or swapped photo stays out) and every
+     * photo_uploaded one (a file uploaded on the Coaches editor, saved on a
+     * profile or not), minus the ids a profile shows right now (published,
+     * passing guard_sql(), Full profile and its photo cleared). Two queries,
+     * cached for the request.
      */
     public static function photo_withheld_ids() {
         global $wpdb;
@@ -801,7 +816,7 @@ class TeamOversight_Coaches {
                 $shown[$id] = true;
             }
         }
-        $details = $wpdb->get_col("SELECT detail FROM " . self::changes_table() . " WHERE event = 'photo_changed'");
+        $details = $wpdb->get_col("SELECT detail FROM " . self::changes_table() . " WHERE event IN ('photo_changed', 'photo_uploaded')");
         foreach (is_array($details) ? $details : array() as $detail) {
             $data = json_decode((string) $detail, true);
             foreach (array('old', 'new') as $side) {
@@ -851,25 +866,79 @@ class TeamOversight_Coaches {
         return new WP_REST_Response(array('code' => 'rest_post_invalid_id', 'message' => 'Invalid post ID.', 'data' => array('status' => 404)), 404);
     }
 
+    /** Is this id a withheld coach photo? Reads photo_withheld_ids() only for an attachment. */
+    private static function is_withheld($id) {
+        $id = intval($id);
+        return $id > 0 && get_post_type($id) === 'attachment' && in_array($id, self::photo_withheld_ids(), true);
+    }
+
+    /**
+     * oembed_request_post_id: the embed endpoint (/oembed/1.0/embed?url=...)
+     * answers a withheld photo's address as an unknown one (404), for anyone
+     * without upload_files. Otherwise it would hand out the file's address,
+     * its title and the uploader's name.
+     */
+    public static function oembed_post_id($post_id, $url = '') {
+        if (intval($post_id) < 1 || current_user_can('upload_files') || !self::is_withheld($post_id)) {
+            return $post_id;
+        }
+        return 0;
+    }
+
     /**
      * template_redirect, priority 5: a withheld photo's attachment page is
-     * the theme's 404 for anyone without upload_files. The canonical
-     * redirect is switched off for this request, or it would send a 404
-     * reached through ?attachment_id= on to the attachment's address (the
-     * file itself where attachment pages are off).
+     * the theme's 404 for anyone without upload_files, its feed and embed
+     * included. set_404() keeps is_feed and the photo in the query, so the
+     * photo is taken out of the query too: the request then gets the 404
+     * template, never a feed or an embed that prints the file. The
+     * canonical redirect is switched off for this request, or it would send
+     * a 404 reached through ?attachment_id= on to the attachment's address
+     * (the file itself where attachment pages are off); it is off too when
+     * ?p= or ?page_id= names a withheld photo, which finds nothing, because
+     * core would redirect that to the photo's address (its file name).
      */
     public static function withhold_attachment_page() {
-        if (!is_attachment() || current_user_can('upload_files')) {
-            return;
-        }
-        $id = intval(get_queried_object_id());
-        if ($id < 1 || !in_array($id, self::photo_withheld_ids(), true)) {
-            return;
-        }
         global $wp_query;
+        $attachment = is_attachment();
+        $missed = is_404() || (is_singular() && $wp_query instanceof WP_Query && empty($wp_query->post_count));
+        if ((!$attachment && !$missed) || current_user_can('upload_files')) {
+            return;
+        }
+        $asked = $missed ? max(intval(get_query_var('p')), intval(get_query_var('page_id')), intval(get_query_var('attachment_id'))) : 0;
+        if ($asked > 0 && self::is_withheld($asked)) {
+            add_filter('redirect_canonical', '__return_false');
+        }
+        $id = $attachment ? intval(get_queried_object_id()) : 0;
+        if ($id < 1 || !self::is_withheld($id)) {
+            return;
+        }
         $wp_query->set_404();
+        $wp_query->posts = array();
+        $wp_query->post = null;
+        $wp_query->post_count = 0;
+        $wp_query->is_feed = false;
+        $wp_query->queried_object = null;
+        $wp_query->queried_object_id = null;
+        $GLOBALS['post'] = null;
         status_header(404);
         add_filter('redirect_canonical', '__return_false');
+    }
+
+    /**
+     * add_attachment: a file uploaded through the Coaches editor's media
+     * picker (the upload carries UPLOAD_PARAM, see
+     * TeamOversight_Coaches_Admin::upload_params()) by someone holding CAP
+     * is recorded as photo_uploaded, so photo_withheld_ids() keeps it out of
+     * the public listing from the moment it lands, saved on a profile or
+     * not. The upload itself is core's, behind its own nonce.
+     */
+    public static function on_photo_uploaded($post_id) {
+        $post_id = intval($post_id);
+        if ($post_id < 1 || empty($_POST[self::UPLOAD_PARAM]) || !current_user_can(self::CAP) || !current_user_can('upload_files') || get_post_type($post_id) !== 'attachment') {
+            return;
+        }
+        self::record_change(0, 'photo_uploaded', array('new' => $post_id), 'editor', get_current_user_id());
+        self::log(self::LOG_PROFILE, 'Coach photo uploaded on the Coaches editor: attachment #' . $post_id . '.');
     }
 
     // ------------------------------------------------------------------
@@ -1159,37 +1228,46 @@ class TeamOversight_Coaches {
     }
 
     /**
-     * Record the photo events of a save: photo_changed (the old and new
-     * attachment ids, 0 = none), then photo_uncleared / photo_cleared when
-     * the cleared photo changed. Returns whether anything was recorded.
+     * The photo events of a save, in order, as array(event, detail):
+     * photo_changed (the old and new attachment ids, 0 = none), then
+     * photo_uncleared / photo_cleared when the cleared photo changed.
      */
-    private static function record_photo($id, array $was, array $now, $actor, $at) {
-        $any = false;
+    private static function photo_events(array $was, array $now) {
+        $events = array();
         if ($was['photo_id'] !== $now['photo_id']) {
-            self::record_change($id, 'photo_changed', array('old' => $was['photo_id'], 'new' => $now['photo_id']), 'editor', $actor, $at);
-            $any = true;
+            $events[] = array('photo_changed', array('old' => $was['photo_id'], 'new' => $now['photo_id']));
         }
         $cleared_before = ($was['photo_id'] > 0 && $was['photo_cleared_id'] === $was['photo_id']) ? $was['photo_id'] : 0;
         $cleared_after = ($now['photo_id'] > 0 && $now['photo_cleared_id'] === $now['photo_id']) ? $now['photo_id'] : 0;
         if ($cleared_before !== $cleared_after) {
             if ($cleared_before > 0) {
-                self::record_change($id, 'photo_uncleared', array('photo' => $cleared_before), 'editor', $actor, $at);
+                $events[] = array('photo_uncleared', array('photo' => $cleared_before));
             }
             if ($cleared_after > 0) {
-                self::record_change($id, 'photo_cleared', array('photo' => $cleared_after), 'editor', $actor, $at);
+                $events[] = array('photo_cleared', array('photo' => $cleared_after));
             }
-            $any = true;
         }
-        return $any;
+        return $events;
     }
 
-    private static function result($ok, $type, $message, array $lines = array(), $id = 0) {
+    /** Record photo_events() for a save. Returns whether anything was recorded. */
+    private static function record_photo($id, array $was, array $now, $actor, $at) {
+        $events = self::photo_events($was, $now);
+        foreach ($events as $event) {
+            self::record_change($id, $event[0], $event[1], 'editor', $actor, $at);
+        }
+        return !empty($events);
+    }
+
+    /** A writer's result. $open: line => the profile id the flash links that line to (the same-name warning). */
+    private static function result($ok, $type, $message, array $lines = array(), $id = 0, array $open = array()) {
         return array(
             'ok' => (bool) $ok,
             'type' => $type,
             'message' => (string) $message,
             'lines' => array_values($lines),
             'id' => intval($id),
+            'open' => $open,
         );
     }
 
@@ -1230,16 +1308,17 @@ class TeamOversight_Coaches {
         self::record_change($id, 'created', self::diff($blank, $clean), 'editor', $actor, $now);
         self::record_photo($id, $blank, $clean, $actor, $now);
         self::log(self::LOG_PROFILE, 'Coach profile #' . $id . ': created (draft).');
-        $lines = self::same_name_lines($id, $clean['public_name']);
-        return self::result(true, empty($lines) ? 'success' : 'warning', 'Saved as a draft.', $lines, $id);
+        $same = self::same_name($id, $clean['public_name']);
+        return self::result(true, empty($same) ? 'success' : 'warning', 'Saved as a draft.', array_keys($same), $id, $same);
     }
 
     /**
      * The save's same-name warning: the other profiles whose public name
      * equals this one (the collation folds case and accents), at most three,
-     * by #id. Plain text; the To do panel lists the pair too.
+     * by #id, as line => that profile's id (the flash links each line to
+     * it). Plain text; the To do panel lists the pair too.
      */
-    private static function same_name_lines($id, $name) {
+    private static function same_name($id, $name) {
         global $wpdb;
         $name = (string) $name;
         if ($name === '') {
@@ -1251,7 +1330,7 @@ class TeamOversight_Coaches {
         ));
         $lines = array();
         foreach (is_array($others) ? $others : array() as $other) {
-            $lines[] = 'Profile #' . intval($other) . ' is also called ' . $name . ': check it isn\'t the same person.';
+            $lines['Profile #' . intval($other) . ' is also called ' . $name . ': check it isn\'t the same person.'] = intval($other);
         }
         return $lines;
     }
@@ -1267,9 +1346,11 @@ class TeamOversight_Coaches {
      * Records updated (field => array(old, new)), the photo events, or
      * checked when a published profile was saved unchanged (the history row
      * and checked_at carry the same time, which is how the editor finds who
-     * last checked it); then enforce_guard() may hide it. Warns when another
-     * profile has the same public name, and when the photo changed while the
-     * old file is still in Media.
+     * last checked it); then enforce_guard() may hide it. A draft saved with
+     * nothing changed writes nothing (Nothing changed.), so every raise of
+     * the version has its history row. Warns when another profile has the
+     * same public name, and when the photo changed while the old file is
+     * still in Media.
      */
     public static function update_profile($id, array $fields, $expect_version, $actor) {
         global $wpdb;
@@ -1287,6 +1368,11 @@ class TeamOversight_Coaches {
         }
         $was = self::row_fields($old);
         $published = (string) $old->status === 'published';
+        $diff = self::diff($was, $clean);
+        if (!$published && empty($diff) && empty(self::photo_events($was, $clean))) {
+            $same = self::same_name($id, $clean['public_name']);
+            return self::result(true, empty($same) ? 'success' : 'warning', 'Nothing changed.', array_keys($same), $id, $same);
+        }
         $now = current_time('mysql');
         $set = array();
         foreach (self::column_sql() as $column => $value_sql) {
@@ -1311,7 +1397,6 @@ class TeamOversight_Coaches {
             return self::stale($id, $clean, $actor);
         }
 
-        $diff = self::diff($was, $clean);
         if (!empty($diff)) {
             self::record_change($id, 'updated', $diff, 'editor', $actor, $now);
         }
@@ -1323,17 +1408,24 @@ class TeamOversight_Coaches {
         self::log(self::LOG_PROFILE, 'Coach profile #' . $id . ': saved' . (empty($words) ? ' with no changes' : ' (' . implode(', ', $words) . ')') . '.', intval($old->user_id));
 
         $guard = self::enforce_guard($id, $actor);
-        $lines = self::same_name_lines($id, $clean['public_name']);
+        $same = self::same_name($id, $clean['public_name']);
+        $lines = array_keys($same);
         if ($was['photo_id'] > 0 && $was['photo_id'] !== $clean['photo_id'] && get_post_type($was['photo_id']) === 'attachment') {
             $lines[] = 'The previous photo file (attachment #' . $was['photo_id'] . ') is still in Media. Remove photo only takes a photo off the profile: if the file shouldn\'t stay, ask an administrator to delete it in Media.';
         }
         if ($guard['type'] === 'warning') {
-            return self::result(true, 'warning', $guard['message'], $lines, $id);
+            return self::result(true, 'warning', $guard['message'], $lines, $id, $same);
         }
-        return self::result(true, empty($lines) ? 'success' : 'warning', $published ? 'Profile updated.' : 'Saved as a draft.', $lines, $id);
+        return self::result(true, empty($lines) ? 'success' : 'warning', $published ? 'Profile updated.' : 'Saved as a draft.', $lines, $id, $same);
     }
 
-    /** A save drawn at an old version: keep what was typed for this editor and say who changed the profile since, and when. */
+    /**
+     * A save drawn at an old version: keep what was typed for this editor
+     * and say who changed the profile since, and when. That is whoever last
+     * raised the version: every writer that raises it stamps updated_at and
+     * its history row with one time, while Still correct (a bulk checked
+     * row) and the ticks leave the version alone, so their rows are skipped.
+     */
     private static function stale($id, array $clean, $actor) {
         global $wpdb;
         $fresh = self::get_profile($id);
@@ -1344,11 +1436,11 @@ class TeamOversight_Coaches {
             set_transient(self::DRAFT_PREFIX . intval($actor) . '_' . intval($id), $clean, 1800);
         }
         $last = $wpdb->get_row($wpdb->prepare(
-            'SELECT recorded_by, recorded_at FROM ' . self::changes_table() . " WHERE profile_id = %d AND event NOT LIKE 'tick\\_%%' ORDER BY id DESC LIMIT 1",
-            intval($id)
+            'SELECT recorded_by FROM ' . self::changes_table() . " WHERE profile_id = %d AND recorded_at = %s AND event NOT LIKE 'tick\\_%%' AND NOT (event = 'checked' AND source = 'bulk') ORDER BY id DESC LIMIT 1",
+            intval($id), (string) $fresh->updated_at
         ));
         $who = $last ? self::person_name($last->recorded_by) : 'someone';
-        $when = mysql2date('j M Y, g:i a', $last ? $last->recorded_at : $fresh->updated_at);
+        $when = mysql2date('j M Y, g:i a', $fresh->updated_at);
         return self::result(false, 'error', 'This profile was changed by ' . $who . ' at ' . $when . ' after you opened it. What you typed is below: check it against the History and save again.', array(), $id);
     }
 
@@ -1506,7 +1598,8 @@ class TeamOversight_Coaches {
      * $expect_hash (programs_hash() when the page was drawn), and refused
      * while a removed program still has a role on any profile. Labels are
      * required and at most 60 characters, accents blue or red, orders 0 to
-     * 999. Records programs_saved and logs.
+     * 999. Records programs_saved (each added and removed program's entry,
+     * each changed one's old and new entry) and logs.
      */
     public static function save_programs(array $rows, $expect_hash, $actor) {
         global $wpdb;
@@ -1603,7 +1696,19 @@ class TeamOversight_Coaches {
             return self::result(true, 'success', 'Nothing changed.');
         }
         update_option(self::PROGRAMS_OPTION, $next, false);
-        self::record_change(0, 'programs_saved', array('added' => $added, 'removed' => $removed, 'changed' => $changed), 'settings', $actor);
+        // The values, not just the keys, so the history alone rebuilds every past list (a removed program's
+        // entry, a renamed one's old label).
+        $detail = array('added' => array(), 'removed' => array(), 'changed' => array());
+        foreach ($added as $key) {
+            $detail['added'][$key] = $next[$key];
+        }
+        foreach ($removed as $key) {
+            $detail['removed'][$key] = $current[$key];
+        }
+        foreach ($changed as $key) {
+            $detail['changed'][$key] = array($current[$key], $next[$key]);
+        }
+        self::record_change(0, 'programs_saved', $detail, 'settings', $actor);
         $parts = array();
         foreach (array('added' => $added, 'removed' => $removed, 'changed' => $changed) as $word => $keys) {
             if (!empty($keys)) {
@@ -1733,7 +1838,10 @@ class TeamOversight_Coaches {
      * editor_added / editor_removed / editor_lost / editor_lost_ok row is
      * editor_added or editor_lost, the account still exists and it doesn't
      * hold the role now. Catches the role going by any route, one that fired
-     * no hook included. One history query plus cache_users(). Writes nothing.
+     * no hook included. An administrator is left out: one made an
+     * administrator on Users → Edit loses the role that way, but holds CAP
+     * anyway and Re-add refuses them. One history query plus cache_users().
+     * Writes nothing.
      */
     public static function lost_editors() {
         return array_keys(self::lost_editor_dates());
@@ -1765,7 +1873,7 @@ class TeamOversight_Coaches {
             cache_users($ids);
             foreach ($ids as $user_id) {
                 $user = get_userdata($user_id);
-                if ($user && !in_array(self::ROLE, (array) $user->roles, true)) {
+                if ($user && !in_array(self::ROLE, (array) $user->roles, true) && !user_can($user, 'manage_options')) {
                     $out[$user_id] = (string) $newest[$user_id]->recorded_at;
                 }
             }
@@ -1826,9 +1934,16 @@ class TeamOversight_Coaches {
         return "({$a}.consent_method <> 'declined' AND {$a}.is_minor = 1 AND {$a}.guardian_date IS NULL)";
     }
 
-    /** A photo that isn't cleared (a declined profile's photo is a file to delete instead: photo_left_over). */
+    /**
+     * A photo that isn't cleared and whose file is still in Media (a
+     * declined profile's photo is a file to delete instead: photo_left_over;
+     * one whose file has gone can't be cleared, and the editor says so
+     * beside the photo).
+     */
     private static function photo_waiting_sql($a) {
-        return "({$a}.photo_id > 0 AND ({$a}.photo_cleared_id IS NULL OR {$a}.photo_cleared_id <> {$a}.photo_id) AND {$a}.consent_method <> 'declined')";
+        global $wpdb;
+        return "({$a}.photo_id > 0 AND ({$a}.photo_cleared_id IS NULL OR {$a}.photo_cleared_id <> {$a}.photo_id) AND {$a}.consent_method <> 'declined'"
+            . " AND EXISTS (SELECT 1 FROM {$wpdb->posts} pw WHERE pw.ID = {$a}.photo_id AND pw.post_type = 'attachment'))";
     }
 
     /** Shown and not checked since check_cutoff(): one %s placeholder. */
@@ -1868,7 +1983,8 @@ class TeamOversight_Coaches {
             return self::$stats;
         }
         $guard = self::guard_sql('p');
-        $gone = "p.photo_id > 0 AND p.photo_cleared_id = p.photo_id AND p.consent_method <> 'declined' AND (a.ID IS NULL OR a.post_type <> 'attachment' OR a.post_mime_type NOT LIKE 'image/%%')";
+        // A cleared photo gone from Media matters only where it would show: a published Full profile.
+        $gone = "p.status = 'published' AND p.display_mode = 'full' AND p.photo_id > 0 AND p.photo_cleared_id = p.photo_id AND p.consent_method <> 'declined' AND (a.ID IS NULL OR a.post_type <> 'attachment' OR a.post_mime_type NOT LIKE 'image/%%')";
         $consent = '(' . self::consent_missing_sql('p') . ' OR ' . self::guardian_missing_sql('p') . ')';
         $row = $wpdb->get_row($wpdb->prepare(
             "SELECT COUNT(*) AS total,
@@ -1993,7 +2109,7 @@ class TeamOversight_Coaches {
                 continue;
             }
             $left_rows[$id] = self::todo_row('photo_left_over', $declined ? 'bad' : 'warn',
-                'Profile #' . $id . ($declined ? ' asked not to be shown' : ' is hidden') . ' but still has a photo file (attachment #' . $photo . '): ask an administrator to delete it in Media' . ($declined ? '' : ' if it shouldn\'t stay') . '. Remove photo alone leaves the file there.',
+                'Profile #' . $id . ($declined ? ' asked not to be shown' : ' is hidden') . ' but still has a photo file (attachment #' . $photo . '): ask an administrator to delete it in Media' . ($declined ? '' : ' if it shouldn\'t stay') . '. Remove photo alone leaves the file there; once the file is deleted, open the profile and click Remove photo.',
                 self::profile_url($id), 'Open the profile', $admin ? admin_url('upload.php?item=' . $photo) : '');
         }
         $stale = $wpdb->get_results($wpdb->prepare(
@@ -2009,7 +2125,7 @@ class TeamOversight_Coaches {
                 continue;
             }
             $days = TeamOversight_Fee_Timeline::days_between(substr((string) $row->changed_at, 0, 10), $today);
-            $rows[] = self::todo_row('photo_stale', 'warn', 'Profile #' . $id . '\'s photo has waited ' . $days . ' days to be cleared. Uploaded files can be opened by their link: clear it, or choose another and ask an administrator to delete this file in Media.', self::profile_url($id), 'Open the profile');
+            $rows[] = self::todo_row('photo_stale', 'warn', 'Profile #' . $id . '\'s photo has waited ' . $days . ' days to be cleared. Uploaded files can be opened by their link: clear it, or choose another (or click Remove photo) and ask an administrator to delete this file in Media.', self::profile_url($id), 'Open the profile');
         }
         foreach (array_slice($left_rows, 0, 20) as $row) {
             $rows[] = $row;
