@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), and coach profiles (Coaches).
- * Version: 1.81.2
+ * Version: 1.82.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.81.2');
+define('TEAM_OVERSIGHT_VERSION', '1.82.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -319,9 +319,11 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-offers-setup.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-not-selected.php';
     // 1.81.0: Coaches, one profile per coach typed by the committee (the
-    // rules, readers and writers; the admin screens).
+    // rules, readers and writers; the admin screens). 1.82.0: the
+    // [club_coaches] shortcode that draws every public coach list.
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coaches.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coaches-admin.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coaches-public.php';
     if (defined('WP_CLI') && WP_CLI) {
         require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-merge-cli.php';
     }
@@ -355,9 +357,11 @@ function team_oversight_init() {
     TeamOversight_Not_Selected::register_hooks();
     // 1.80.3: the delayed "pay your trial fee" email (15 minutes, only if still unpaid).
     TeamOversight_Trial_Emails::register_hooks();
-    // 1.81.0: Coaches. Each is static and adds its hooks once per request.
+    // 1.81.0: Coaches. Each is static and adds its hooks once per request
+    // (1.82.0: the public class adds the shortcode on init).
     TeamOversight_Coaches::register_hooks();
     TeamOversight_Coaches_Admin::register_hooks();
+    TeamOversight_Coaches_Public::register_hooks();
     new TeamOversight_Trials();
     new TeamOversight_Imports();
     new TeamOversight_Exports();

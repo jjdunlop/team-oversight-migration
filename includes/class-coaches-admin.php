@@ -11,11 +11,15 @@ if (!defined('ABSPATH')) {
  * a filter and the Coach bios editor role holds directly.
  *
  * Screens: Profiles (club-coaches: To do, the list, How to, glossary), Add
- * New / Edit (club-coaches-edit) and Programs and settings
- * (club-coaches-settings: #programs, and #editors for administrators).
- * This season (club-coaches-season), the editor's Teams box, Linked
- * account, card preview and Appears on arrive with the public pages
- * (1.82.0) and team coaching (1.83.0).
+ * New / Edit (club-coaches-edit: the form, then from 1.82.0 the card
+ * preview and Appears on) and Programs and settings (club-coaches-settings:
+ * #programs, #code and #pages (1.82.0, with Refresh coach pages now), and
+ * #editors for administrators). This season (club-coaches-season), the
+ * editor's Teams box and Linked account arrive with team coaching (1.83.0).
+ *
+ * The card preview is drawn by TeamOversight_Coaches_Public, the same
+ * card_from_row() and render_card() the site uses, so it can't differ from
+ * the site; Appears on and #pages read TeamOversight_Coaches::pages().
  *
  * Rules (design section 8):
  *  - ONE admin-post action, murvc_coaches, with the button's verb in do.
@@ -42,8 +46,8 @@ class TeamOversight_Coaches_Admin {
     /** The screens a button may send someone back to (1.83.0 adds club-coaches-season). */
     const PAGES = array(self::PAGE_PROFILES, self::PAGE_EDIT, self::PAGE_SETTINGS);
     const ACTION = 'murvc_coaches';
-    /** The buttons of 1.81.0 (the posted do). */
-    const DO_ACTIONS = array('save', 'hide', 'bulk', 'programs', 'editor_add', 'editor_remove', 'editor_readd', 'editor_lost_ok');
+    /** The buttons (the posted do): those of 1.81.0, and purge (Refresh coach pages now) from 1.82.0. */
+    const DO_ACTIONS = array('save', 'hide', 'bulk', 'programs', 'purge', 'editor_add', 'editor_remove', 'editor_readd', 'editor_lost_ok');
     /** The Editors box: administrators only (manage_options and promote_users). */
     const EDITOR_ACTIONS = array('editor_add', 'editor_remove', 'editor_readd', 'editor_lost_ok');
     /** The buttons that act on one account (posted as user). */
@@ -51,7 +55,7 @@ class TeamOversight_Coaches_Admin {
     /** filter => link label above the list ('' = All). */
     const FILTERS = array('' => 'All', 'shown' => 'Shown', 'hidden' => 'Hidden', 'check' => 'Needs checking', 'consent' => 'No consent', 'photo' => 'Photo waiting');
     /** The Programs and settings sections a button may return to. */
-    const ANCHORS = array('programs', 'editors');
+    const ANCHORS = array('programs', 'code', 'pages', 'editors');
     /** The To do panel shows at most this many rows. */
     const TODO_MAX = 20;
 
@@ -159,11 +163,13 @@ class TeamOversight_Coaches_Admin {
 
     /**
      * load-<page> for every Coaches screen, before anything is printed: take
-     * the flash and (on the editor) the draft, so the render itself writes
-     * nothing. 1.83.0 runs the daily check here too.
+     * the flash and (on the editor) the draft, and read the pages holding
+     * [club_coaches] once (pages() keeps them in a transient), so the render
+     * itself writes nothing. 1.83.0 runs the daily check here too.
      */
     public static function load_page() {
         self::take_flash();
+        TeamOversight_Coaches::pages();
         if (self::current_page() === self::PAGE_EDIT) {
             self::take_draft(self::get_id('profile'));
             // Before wp_enqueue_media() writes the uploader's settings (admin_enqueue_scripts runs after this).
@@ -303,6 +309,7 @@ class TeamOversight_Coaches_Admin {
             case 'bulk':
                 return 'murvc_coaches_bulk';
             case 'programs':
+            case 'purge':
             case 'editor_add':
                 return 'murvc_coaches_' . $do . '_0';
             case 'save':
@@ -440,6 +447,8 @@ class TeamOversight_Coaches_Admin {
                 return self::do_bulk($data, $actor);
             case 'programs':
                 return self::do_programs($data, $actor);
+            case 'purge':
+                return self::do_purge($actor);
         }
         return self::do_editor($do, $data, $actor);
     }
@@ -507,8 +516,8 @@ class TeamOversight_Coaches_Admin {
         $p = self::normalise(TeamOversight_Coaches::set_status($id, 'published', $actor, 'editor'), $id);
         if ($p['ok']) {
             $lines = array_merge($r['lines'], $p['lines']);
-            // No page lists coaches yet (the coach pages, and the refresh of them, come in a later update).
-            return self::result(true, 'Profile published. It will show on the website once the coach pages are added.', $lines, empty($lines) ? 'success' : 'warning', $id, $r['open']);
+            // set_status() queued the refresh of the pages that show coaches; the site's page cache takes a few minutes.
+            return self::result(true, 'Profile published. Pages showing it refresh within a few minutes.', $lines, empty($lines) ? 'success' : 'warning', $id, $r['open']);
         }
         // set_status() refuses with publish_problem()'s bare sentence.
         return self::result(true, 'Saved as a draft, not published: ' . $p['message'], $r['lines'], 'warning', $id, $r['open']);
@@ -645,6 +654,16 @@ class TeamOversight_Coaches_Admin {
         return self::normalise(TeamOversight_Coaches::save_programs($rows, $hash, $actor));
     }
 
+    /**
+     * Refresh coach pages now: TeamOversight_Coaches::refresh_pages() queues
+     * the refresh of every page holding [club_coaches] (sent once at the end
+     * of this request through its generic hooks), logs it, and says when
+     * nothing connects the site's page cache to it.
+     */
+    private static function do_purge($actor) {
+        return self::normalise(TeamOversight_Coaches::refresh_pages($actor));
+    }
+
     /** The Editors box's buttons (process() has checked manage_options and promote_users). */
     private static function do_editor($do, array $data, $actor) {
         if ($do === 'editor_add') {
@@ -717,7 +736,8 @@ class TeamOversight_Coaches_Admin {
         echo '<hr class="wp-header-end">';
         self::render_flash();
         echo '<p class="mc-text">Each coach has one profile; every page builds its coach list from these. <strong>What to do here:</strong> work through To do, then open a profile to change it.</p>';
-        echo '<p class="mc-text mc-muted">Nothing is on the website yet: the coach pages come in a later update, and published (Shown) profiles appear on them from then.</p>';
+        echo '<p class="mc-text mc-muted">Shown profiles appear on every page that holds a coach list: the Our coaches page and the program strips. Each profile\'s editor shows its card and the pages it is on; '
+            . '<a href="' . esc_url(self::page_url(self::PAGE_SETTINGS) . '#pages') . '">Pages using coach lists</a> has them all.</p>';
 
         self::render_todo(TeamOversight_Coaches::todo($season));
 
@@ -931,11 +951,13 @@ class TeamOversight_Coaches_Admin {
         echo '</div>';
     }
 
-    /** How to (8.4 item 7): the day-to-day steps, each linking its screen. Team coaching and the website pages come in later updates. */
+    /** How to (8.4 item 7): the day-to-day steps, each linking its screen. Team coaching comes in a later update. */
     private static function render_howto() {
         $add = esc_url(self::page_url(self::PAGE_EDIT));
         $check = esc_url(self::page_url(self::PAGE_PROFILES, array('filter' => 'check')));
         $programs = esc_url(self::page_url(self::PAGE_SETTINGS) . '#programs');
+        $code = esc_url(self::page_url(self::PAGE_SETTINGS) . '#code');
+        $pages = esc_url(self::page_url(self::PAGE_SETTINGS) . '#pages');
         $editors = esc_url(self::page_url(self::PAGE_SETTINGS) . '#editors');
         $bookmark = admin_url('admin.php?page=' . self::PAGE_PROFILES);
         ?>
@@ -949,8 +971,16 @@ class TeamOversight_Coaches_Admin {
                     <li>Under What they coach, set their role on each program they coach.</li>
                     <li>Choose their photo, and tick Photo cleared once it has been checked. Until then the card shows their initials.</li>
                     <li>Record consent: the date they answered, how they agreed and what they agreed to (Full profile, or Name and role only). For a coach under 18, a parent or guardian must agree too.</li>
-                    <li>Choose Full profile or Name only, then click Publish. Publish is refused until consent is recorded; Save draft keeps the profile hidden.</li>
+                    <li>Choose Full profile or Name only and click Save draft. Under the form, the card preview shows the card as the website draws it, and Appears on lists the pages it will be on.</li>
+                    <li>Click Publish. Publish is refused until consent is recorded; Save draft keeps the profile hidden. Pages showing it refresh within a few minutes.</li>
                 </ol>
+                <h3>Put coaches on a page</h3>
+                <ol>
+                    <li>On <a href="<?php echo $code; ?>">Programs and settings, Code lines</a>, copy the line for the list: a program's strip (for example <code>[club_coaches program="academy"]</code> for the Junior Academy) or the Our coaches page (<code>[club_coaches]</code>, on one page only).</li>
+                    <li>Whoever edits the website's pages pastes it into a Shortcode block where the list should go (in the page editor: + then Shortcode) and updates the page. A strip shows nothing until a coach with a role on that program is shown, so it can go in early.</li>
+                    <li><a href="<?php echo $pages; ?>">Pages using coach lists</a> then lists the page, and says if a line has a mistake. Each profile's Appears on, under its form, lists the pages showing it.</li>
+                </ol>
+                <p>Pages refresh within a few minutes of a change. If one still shows an old card after that, press Refresh coach pages now under <a href="<?php echo $pages; ?>">Pages using coach lists</a>.</p>
                 <h3>A coach who has a team place</h3>
                 <p>Add them with <a href="<?php echo $add; ?>">Add New</a> the same way, with their program roles. Showing team coaching (State League and the junior teams) comes in a later update, which links each profile to the coach places Club Manager already holds. Never make a second profile for the same person.</p>
                 <h3>A coach on several programs</h3>
@@ -983,6 +1013,8 @@ class TeamOversight_Coaches_Admin {
             'Shown' => 'Published: the profile appears on every page that lists it.',
             'Hidden' => 'A draft: it appears nowhere on the website. Hidden profiles are kept, never deleted.',
             'Name only' => 'The website shows just their name and role: no photo, intro or bio.',
+            'Strip' => 'A row of compact cards on a program\'s page, one per coach with a role on that program. It swipes sideways on a phone, and its Meet all our coaches link goes to the Our coaches page.',
+            'Our coaches page' => 'The page holding [club_coaches]: every shown coach with a role, with filter buttons and Read more.',
             'Ticked (waiting for the season\'s Show button)' => 'A team place someone chose to show, in a season whose team coaching isn\'t on the website yet. (Team coaching comes in a later update.)',
             'Not ticked' => 'A coach place Club Manager holds that nobody has chosen to show. Nothing is ticked by default. (Team coaching comes in a later update.)',
             'No profile' => 'A coach place whose person has no coach profile yet. (Team coaching comes in a later update.)',
@@ -1033,7 +1065,9 @@ class TeamOversight_Coaches_Admin {
         self::render_flash();
         echo '<p class="mc-text">' . ($profile ? '<strong>Profile #' . (int) $id . '.</strong> ' : '')
             . 'Everything here is typed by the committee: nothing is read from the coach\'s account. Nothing shows on the website until the profile is published, and Publish is refused until consent is recorded. ' . $back . '.</p>'
-            . '<p class="mc-text mc-muted">The coach pages themselves come in a later update, so for now a published profile isn\'t on any page yet.</p>';
+            . '<p class="mc-text mc-muted">' . ($profile
+                ? 'Under the form, the <a href="#preview">card preview</a> shows the saved profile as the website draws it, and <a href="#appears-on">Appears on</a> lists the pages that show it.'
+                : 'Once it is saved, the card preview and the pages it will appear on show under the form.') . '</p>';
         if (is_array($draft)) {
             echo '<div class="notice notice-warning inline"><p>The form below holds what you typed, not what is saved. Check it and save again.</p></div>';
         }
@@ -1057,6 +1091,8 @@ class TeamOversight_Coaches_Admin {
         self::flush_forms();
 
         if ($profile) {
+            self::render_preview($profile);
+            self::render_appears_on($profile);
             self::render_history($history);
         }
         self::edit_script();
@@ -1260,6 +1296,162 @@ class TeamOversight_Coaches_Admin {
     }
 
     /**
+     * The saved profile row as the site's card (drafts and profiles with no
+     * consent included): TeamOversight_Coaches_Public::card_from_row(), the
+     * one card builder, with the linked account's id and email (read only to
+     * judge ticks, never printed) and $assume_announced true. Team lines join
+     * with the ticks (1.83.0); until then there are no tick rows to pass.
+     * null when there is no saved row.
+     */
+    private static function card_of($profile) {
+        if (!is_object($profile) || (int) self::v($profile, 'id', 0) <= 0) {
+            return null;
+        }
+        $row = clone $profile;
+        // 0 and '' when there is no linked account or it has gone.
+        $user = (int) self::v($row, 'user_id', 0) > 0 ? get_userdata((int) $row->user_id) : false;
+        $row->account_id = $user ? (int) $user->ID : 0;
+        $row->account_email = $user ? (string) $user->user_email : '';
+        $card = TeamOversight_Coaches_Public::card_from_row($row, array(), self::focus_season(), true);
+        return is_array($card) ? $card : null;
+    }
+
+    /**
+     * The card preview's cards for a saved profile row: array('strip' => the
+     * strip card's HTML, 'grid' => the grid card's, 'program' => the program
+     * key the strip card is drawn for). card_of()'s card drawn by
+     * TeamOversight_Coaches_Public::render_card() with the context the
+     * shortcode gives it (program, index): the strip card as on the strip of
+     * the first program (in programs() order) it has a role on ('program'
+     * and 'strip' are '' with none), the grid card as the first card on the
+     * Our coaches page. So the preview and the site never differ. Writes
+     * nothing. Public for tests.
+     */
+    public static function preview_cards($profile) {
+        $out = array('strip' => '', 'grid' => '', 'program' => '');
+        $card = self::card_of($profile);
+        if (!$card) {
+            return $out;
+        }
+        $roles = isset($card['programs']) && is_array($card['programs']) ? $card['programs'] : array();
+        foreach (TeamOversight_Coaches::programs() as $key => $program) {
+            if (isset($roles[$key])) {
+                $out['program'] = (string) $key;
+                break;
+            }
+        }
+        if ($out['program'] !== '') {
+            $out['strip'] = (string) TeamOversight_Coaches_Public::render_card($card, array('program' => $out['program'], 'index' => 0), 'strip');
+        }
+        $out['grid'] = (string) TeamOversight_Coaches_Public::render_card($card, array('program' => '', 'index' => 0), 'grid');
+        return $out;
+    }
+
+    /**
+     * Card preview (8.5): the saved profile as a strip card ("On program
+     * pages") and as a grid card ("On Our coaches"), in the site's own
+     * markup and styles, inside a box as wide as the site's content column.
+     */
+    private static function render_preview($profile) {
+        $cards = self::preview_cards($profile);
+        $programs = TeamOversight_Coaches::programs();
+        echo '<h2 id="preview">Card preview</h2>';
+        echo '<p class="mc-text mc-muted">Save to refresh the preview: it draws the saved profile, not what is typed above.</p>';
+        if ($cards['strip'] === '' && $cards['grid'] === '') {
+            echo '<p class="mc-text">The preview could not be drawn. Reload the page.</p>';
+            return;
+        }
+        echo '<div class="mc-box mc-preview">';
+        echo TeamOversight_Coaches_Public::styles();
+        echo '<h3 class="mc-preview-label">On program pages</h3>';
+        if ($cards['strip'] !== '') {
+            $label = isset($programs[$cards['program']]['label']) ? (string) $programs[$cards['program']]['label'] : $cards['program'];
+            echo '<p class="mc-muted">As on the ' . self::h($label) . ' strip.</p>'
+                . '<div class="murvc-coaches murvc-coaches--strip"><div class="murvc-coach-strip"><ul class="murvc-coach-list">' . $cards['strip'] . '</ul></div></div>';
+        } else {
+            echo '<p class="mc-muted">No program role yet, so no program strip shows this card.</p>';
+        }
+        if ($cards['grid'] !== '') {
+            echo '<h3 class="mc-preview-label">On Our coaches</h3>'
+                . '<div class="murvc-coaches murvc-coaches--grid"><div class="murvc-coach-grid">' . $cards['grid'] . '</div></div>';
+        }
+        echo '</div>';
+    }
+
+    /**
+     * Appears on (8.5): each page in TeamOversight_Coaches::pages() with a
+     * coach list that would list this profile, judged by the shortcode's own
+     * TeamOversight_Coaches_Public::card_in_use() on card_of()'s card, and
+     * why: the Our coaches list for any public role, a program's strip (or
+     * grid) for a role on that program. Group, team and line uses list live
+     * team ticks, which come with team coaching (1.83.0), so no profile is on
+     * one yet. A draft reads Once published it will appear on; with no page,
+     * the reason.
+     */
+    private static function render_appears_on($profile) {
+        $pages = TeamOversight_Coaches::pages();
+        $pages = is_array($pages) ? $pages : array();
+        $programs = TeamOversight_Coaches::programs();
+        $card = self::card_of($profile);
+        if (!$card) {
+            return;
+        }
+        $roles = isset($card['programs']) && is_array($card['programs']) ? $card['programs'] : array();
+        $items = array();
+        foreach ($pages as $page) {
+            $why = array();
+            $uses = self::v($page, 'uses', array());
+            foreach (is_array($uses) ? $uses : array() as $use) {
+                if (!is_array($use) || !TeamOversight_Coaches_Public::card_in_use($card, $use)) {
+                    continue;
+                }
+                $program = (string) self::v($use, 'program');
+                if ($program === '') {
+                    $why[] = 'the Our coaches list';
+                } elseif (isset($programs[$program], $roles[$program], TeamOversight_Coaches::PROGRAM_ROLES[$roles[$program]])) {
+                    $why[] = 'the ' . $programs[$program]['label'] . (self::v($use, 'mode') === 'grid' ? ' coaches list' : ' strip') . ', as ' . TeamOversight_Coaches::PROGRAM_ROLES[$roles[$program]];
+                }
+            }
+            if (!empty($why)) {
+                $items[] = array('title' => (string) self::v($page, 'title'), 'url' => (string) self::v($page, 'url'), 'why' => array_values(array_unique($why)));
+            }
+        }
+
+        $draft = (string) self::v($profile, 'status') !== 'published';
+        $settings = '<a href="' . esc_url(self::page_url(self::PAGE_SETTINGS) . '#pages') . '">Pages using coach lists</a>';
+        echo '<h2 id="appears-on">Appears on</h2>';
+        if (empty($items)) {
+            if (empty($pages)) {
+                $reason = 'no published page holds a coach list yet';
+            } elseif (empty($roles)) {
+                $reason = 'it has no program role under What they coach, so no coach list includes it';
+            } else {
+                $labels = array();
+                foreach ($roles as $key => $role) {
+                    $labels[] = isset($programs[$key]['label']) ? $programs[$key]['label'] : $key;
+                }
+                $reason = 'no page holds the Our coaches list or a strip for ' . (count($labels) === 1 ? 'its program' : 'its programs') . ' (' . implode(', ', $labels) . ')';
+            }
+            echo '<p class="mc-text">' . self::h('Not on any page yet' . ($draft ? ', even once published' : '') . ': ' . $reason . '.') . ' ' . $settings . ' lists every page with one.</p>';
+            return;
+        }
+        $problem = TeamOversight_Coaches::publish_problem($profile);
+        if ($draft) {
+            $intro = 'Once published it will appear on:';
+        } elseif ($problem !== '') {
+            $intro = 'The website leaves it out until this is fixed: ' . $problem . ' Then it will appear on:';
+        } else {
+            $intro = 'It appears on:';
+        }
+        echo '<p class="mc-text">' . self::h($intro) . '</p><ul class="mc-lines mc-text">';
+        foreach ($items as $item) {
+            $title = $item['title'] !== '' ? $item['title'] : 'A page with no title';
+            echo '<li>' . ($item['url'] !== '' ? '<a href="' . esc_url($item['url']) . '">' . self::h($title) . '</a>' : self::h($title)) . ': ' . self::h(implode('; ', $item['why'])) . '.</li>';
+        }
+        echo '</ul>';
+    }
+
+    /**
      * History (8.5): the newest 50 changes, each with the date, who
      * ("Daily check" for the daily job) and a plain sentence. Long old values
      * sit in <details>, so an old bio can be copied back.
@@ -1407,9 +1599,11 @@ class TeamOversight_Coaches_Admin {
         self::styles();
         echo '<h1>Coaches: programs and settings</h1><hr class="wp-header-end">';
         self::render_flash();
-        echo '<p class="mc-text">The programs a coach can have a role on' . ($editors ? ', and who may edit coach profiles' : '') . '. '
-            . '<a href="#programs">Programs</a>' . ($editors ? ' · <a href="#editors">Coach bios editors</a>' : '') . '</p>';
+        echo '<p class="mc-text">The programs a coach can have a role on, the code lines that put coach lists on pages, the pages that hold them' . ($editors ? ', and who may edit coach profiles' : '') . '. '
+            . '<a href="#programs">Programs</a> · <a href="#code">Code lines</a> · <a href="#pages">Pages using coach lists</a>' . ($editors ? ' · <a href="#editors">Coach bios editors</a>' : '') . '</p>';
         self::render_programs_section();
+        self::render_code_section();
+        self::render_pages_section();
         if ($editors) {
             self::render_editors_section();
         } else {
@@ -1478,6 +1672,141 @@ class TeamOversight_Coaches_Admin {
     }
 
     /**
+     * #code: the ready-made code lines, each in a readonly box with a Copy
+     * button: the Our coaches page, and a strip per program. The team-group
+     * and per-team lines come with team coaching (1.83.0).
+     */
+    private static function render_code_section() {
+        self::$view['anchor'] = 'code';
+        $lines = array(array('Our coaches page', 'every shown coach with a role, with filter buttons and Read more. Put it on one page only.', '[club_coaches]'));
+        foreach (TeamOversight_Coaches::programs() as $key => $program) {
+            // Program keys match /^[a-z0-9_]{1,30}$/D (programs()), so the line needs no quoting beyond esc_attr().
+            $lines[] = array($program['label'] . ' strip', 'its coaches in a row of cards, for the ' . $program['label'] . ' page.', '[club_coaches program="' . $key . '"]');
+        }
+        echo '<h2 id="code">Code lines to paste</h2>';
+        echo '<p class="mc-text">Paste a line into a Shortcode block where the list should go (in the page editor: + then Shortcode), then update the page. The list draws itself from the shown profiles, so the page never needs editing when a coach changes, and it shows nothing until someone is on it, so it can go in early.</p>';
+        echo '<div class="mc-scroll"><table class="widefat striped mc-code"><thead><tr><th scope="col">List</th><th scope="col">Code line</th></tr></thead><tbody>';
+        foreach ($lines as $i => $line) {
+            $id = 'mc-code-' . (int) $i;
+            echo '<tr><td><strong>' . self::h($line[0]) . '</strong><span class="description mc-hint">' . self::h(ucfirst($line[1])) . '</span></td>'
+                . '<td><div class="mc-bar"><label class="screen-reader-text" for="' . esc_attr($id) . '">' . self::h('Code line: ' . $line[0]) . '</label>'
+                . '<input type="text" class="mc-code-line" id="' . esc_attr($id) . '" value="' . esc_attr($line[2]) . '" readonly>'
+                . '<button type="button" class="button" data-mc-copy="' . esc_attr($id) . '">Copy</button></div></td></tr>';
+        }
+        echo '</tbody></table></div>';
+        echo '<p class="description">Meet all our coaches, under each strip, and the names on the cards link to the first page holding [club_coaches]. Lines for the State League and junior teams, and the coach line on each Trials & Team Info card, come with team coaching in a later update.</p>';
+    }
+
+    /**
+     * #pages: every published page or post holding [club_coaches]
+     * (TeamOversight_Coaches::pages(), at most 50), each coach list on it in
+     * words with its problem if it has one, and Refresh coach pages now
+     * (do=purge). Says when nothing connects the site's page cache to the
+     * coach pages, which is where the To do panel's page rows link.
+     */
+    private static function render_pages_section() {
+        self::$view['anchor'] = 'pages';
+        $pages = TeamOversight_Coaches::pages();
+        $pages = is_array($pages) ? $pages : array();
+        $grid = (string) TeamOversight_Coaches::grid_url();
+        $programs = TeamOversight_Coaches::programs();
+
+        echo '<h2 id="pages">Pages using coach lists</h2>';
+        if (empty($pages)) {
+            echo '<p class="mc-text">No published page holds a coach list yet. Paste a line from <a href="#code">Code lines</a> into a Shortcode block on a page and publish it: the page shows here straight away.</p>';
+            return;
+        }
+        echo '<p class="mc-text">Every published page or post with a coach list on it. A list with a mistake shows nothing; fix its code line on the page.</p>';
+        echo '<div class="mc-scroll"><table class="widefat striped mc-pages"><thead><tr><th scope="col">Page</th><th scope="col">Coach lists on it</th></tr></thead><tbody>';
+        foreach ($pages as $page_id => $page) {
+            $title = (string) self::v($page, 'title');
+            $title = $title !== '' ? $title : 'A page with no title';
+            $url = (string) self::v($page, 'url');
+            // get_edit_post_link() is empty for anyone who can't edit that page (a Coach bios editor can't).
+            $edit = (int) $page_id > 0 ? (string) get_edit_post_link((int) $page_id, 'raw') : '';
+            $uses = self::v($page, 'uses', array());
+            $items = array();
+            foreach (is_array($uses) ? $uses : array() as $use) {
+                $items[] = '<li>' . self::use_html($use, $programs) . '</li>';
+            }
+            echo '<tr><td>' . ($url !== '' ? '<a href="' . esc_url($url) . '" target="_blank" rel="noopener">' . self::h($title) . '</a>' : self::h($title))
+                . ($edit !== '' ? '<span class="mc-hint"><a href="' . esc_url($edit) . '">Edit page</a></span>' : '')
+                . ($grid !== '' && $url === $grid ? '<span class="description mc-hint">Meet all our coaches and the names on the cards link here.</span>' : '') . '</td>'
+                . '<td><ul class="mc-uses">' . implode('', $items) . '</ul></td></tr>';
+        }
+        echo '</tbody></table></div>';
+        if (!has_action('murvc_coaches_changed')) {
+            echo '<p class="mc-text mc-bad-text">Nothing connects the site\'s page cache to Coaches yet, so visitors can see an old card until the cache expires on its own. An administrator sets up the coach-pages refresh, which listens for the murvc_coaches_changed action.</p>';
+        }
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" class="mc-bar">' . self::hidden_fields('purge')
+            . '<button type="submit" class="button">Refresh coach pages now</button>'
+            . '<span class="description">Use this if a page still shows an old card a few minutes after a change.</span></form>';
+    }
+
+    /**
+     * One [club_coaches] use on a page (from pages(): normalise_atts()'s
+     * result, plus code, the line as typed, and unknown, the attribute names
+     * the shortcode ignores) as escaped HTML: the line, what it shows in
+     * words, the problem that makes it show nothing, and what it ignores.
+     */
+    private static function use_html($use, array $programs) {
+        $code = (string) self::v($use, 'code');
+        $html = $code !== '' ? '<code>' . self::h($code) . '</code> ' : '';
+        if (empty(self::v($use, 'ok'))) {
+            $problem = (string) self::v($use, 'problem');
+            $html .= '<span class="mc-bad-text">' . self::h('Shows nothing: ' . ($problem !== '' ? $problem : 'the line has a mistake.')) . '</span>';
+        } else {
+            $html .= self::h(self::use_words($use, $programs));
+        }
+        $unknown = self::v($use, 'unknown', array());
+        $unknown = is_array($unknown) ? array_filter(array_map('strval', array_filter($unknown, 'is_scalar')), 'strlen') : array();
+        if (!empty($unknown)) {
+            $html .= ' <span class="mc-muted">' . self::h('It ignores ' . implode(', ', $unknown) . ': the line takes only program, team, group, season and mode.') . '</span>';
+        }
+        return $html;
+    }
+
+    /** What a working use shows, in words (plain text). */
+    private static function use_words($use, array $programs) {
+        $mode = (string) self::v($use, 'mode');
+        $program = (string) self::v($use, 'program');
+        $group = (string) self::v($use, 'group');
+        $season = (string) self::v($use, 'season');
+        $teams = self::v($use, 'teams', array());
+        $names = array();
+        foreach (is_array($teams) ? $teams : explode(',', (string) $teams) as $team) {
+            if (is_scalar($team) && (string) $team !== '') {
+                $names[] = TeamOversight_Offers::team_name($season, (string) $team);
+            }
+        }
+        if ($program !== '') {
+            $what = isset($programs[$program]['label']) ? (string) $programs[$program]['label'] : $program;
+        } elseif ($group !== '') {
+            $what = isset(TeamOversight_Coaches::TEAM_GROUPS[$group]) ? TeamOversight_Coaches::TEAM_GROUPS[$group][0] : $group;
+        } elseif (!empty($names)) {
+            $what = implode(', ', $names);
+        } else {
+            return 'The Our coaches list, with filter buttons.';
+        }
+        if ($mode === 'line') {
+            $words = 'The coach line for ' . $what;
+        } elseif ($mode === 'grid') {
+            $words = 'A grid of the ' . $what . ' coaches, with no filter buttons';
+        } else {
+            $words = 'The ' . $what . ' strip';
+        }
+        if ($program !== '') {
+            return $words . '.';
+        }
+        // Team lists show one season's team coaching, and only once that season is on the website.
+        $words .= $season !== '' ? ' (' . $season . ').' : '.';
+        if (!TeamOversight_Coaches::is_announced($season)) {
+            $words .= ' It shows nothing until ' . ($season !== '' ? $season . ' team coaching' : 'a season\'s team coaching') . ' is on the website.';
+        }
+        return $words;
+    }
+
+    /**
      * Profiles with a role per program key, for the Remove column, from one
      * list_profiles() read (the first LIST_MAX profiles; the writer counts
      * every profile when it refuses a removal).
@@ -1526,7 +1855,7 @@ class TeamOversight_Coaches_Admin {
         echo self::hidden_fields('editor_add');
         echo '<label for="mc-editor-who">Add by email or login</label> <input type="text" class="regular-text" id="mc-editor-who" name="who" value="" autocomplete="off"> '
             . '<button type="submit" class="button">Add</button></form>';
-        echo '<p class="description">Don\'t use the Role dropdown on the Users screen: it replaces the person\'s member roles. Saving a holder\'s Users → Edit screen for any other reason (fixing an email) drops this role too; it then shows below.</p>';
+        echo '<p class="description">Don\'t use the Role dropdown on the Users screen: it replaces the person\'s member roles. If the role is removed anywhere but this box, the account shows below.</p>';
 
         if (!empty($lost)) {
             echo '<h3>Lost the role outside this box</h3>';
@@ -1601,6 +1930,13 @@ class TeamOversight_Coaches_Admin {
             .murvc-coaches-admin .mc-actions .button { margin: 0 6px 6px 0; }
             .murvc-coaches-admin .mc-history .mc-old { white-space: pre-wrap; margin: 4px 0; }
             .murvc-coaches-admin input.mc-copy { width: 100%; max-width: 520px; }
+            .murvc-coaches-admin input.mc-code-line { width: 24em; max-width: 100%; font-family: Consolas, Monaco, monospace; }
+            .murvc-coaches-admin .mc-code .mc-bar { margin: 0; }
+            .murvc-coaches-admin .mc-uses { margin: 0; }
+            .murvc-coaches-admin .mc-uses li { margin: 0 0 4px; }
+            /* The preview box is as wide as the site's 840px content column inside its padding, so the cards come out the size visitors see. */
+            .murvc-coaches-admin .mc-box.mc-preview { max-width: 870px; }
+            .murvc-coaches-admin .mc-preview-label { margin: 12px 0 2px; font-size: 13px; font-weight: 600; color: #50575e; }
         </style>
         <?php
     }

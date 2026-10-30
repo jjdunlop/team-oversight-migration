@@ -28,28 +28,44 @@ if (!defined('ABSPATH')) {
  *  - Every profile writer validates first, writes with one compare-and-set
  *    UPDATE or INSERT whose affected-row count gates the side effects, adds
  *    one history row (team_coach_changes, never pruned) and one line in the
- *    activity log (the three LOG_* types). save_programs() is held to the
- *    hash of the list the page was drawn with instead, and the editor-role
- *    writers are add_role() / remove_role(); both record and log the same
- *    way. Nothing deletes a row, and nothing here writes team_assignments or
+ *    activity log (the three LOG_* types), and queues a refresh of the coach
+ *    pages when what the website shows may have changed (below).
+ *    save_programs() is held to the hash of the list the page was drawn
+ *    with instead, and the editor-role writers are add_role() /
+ *    remove_role(); both record and log the same way. Nothing deletes a
+ *    row, and nothing here writes team_assignments or
  *    team_assignment_changes.
  *  - The Coach bios editor role (ROLE) holds CAP directly; administrators
  *    hold CAP through a user_has_cap filter, so nothing is stored for them.
  *    The role is granted only on the Editors box (grant_editor()), because
  *    the Users screen keeps one role; the role watch records it when the
- *    role goes any other way (a save on Users → Edit keeps only the role in
- *    its dropdown) and never puts it back by itself.
+ *    role is removed any other way and never puts it back by itself.
  *  - Coach photos no card shows are kept out of the site's public media
  *    listing (REST, embeds, and attachment pages with their feeds) for
  *    anyone without upload_files (photo_withheld_ids()), from the moment
  *    one is uploaded on the Coaches editor. The file itself still opens by
  *    its link.
+ *  - The pages that show coaches (1.82.0): pages() is every published page
+ *    and post holding [club_coaches] (kept in a transient, forgotten when a
+ *    page or post is saved, trashed or deleted) and grid_url() the Our
+ *    coaches page. Coaches asks the site's page cache to refresh them ONLY
+ *    through queue_purge(): one run_purge() at the end of the request
+ *    empties each page's object cache (clean_post_cache()) and fires
+ *    murvc_coaches_changed ($page_ids, $reasons). The cache-specific purge
+ *    is a site snippet on that action, outside this plugin. The callers:
+ *    set_status() both ways, enforce_guard() when it hides,
+ *    update_profile() when it changed a published profile (photo and
+ *    Photo cleared included), save_programs(), a change to the team names
+ *    (on_team_config_changed()), a published profile's photo file deleted
+ *    in Media (on_attachment_deleted()) and Refresh coach pages now
+ *    (refresh_pages()). mark_checked(), saves of drafts and an upload on
+ *    its own refresh nothing: no card changes.
  *
  * Tables: team_coach_profiles (one row per coach, never deleted),
  * team_coach_ticks (used from 1.83.0) and team_coach_changes (the history).
  * All three are InnoDB and registered with the account merge
  * (id_columns()). Contract: design/coach-bios-tech-design.md sections 3 to
- * 8 and 9.8.
+ * 8, 9.8 and 10.
  */
 class TeamOversight_Coaches {
 
@@ -97,6 +113,10 @@ class TeamOversight_Coaches {
     const LIST_MAX = 500;
     /** An uncleared photo, or a hidden profile's photo file, is flagged after this many days. */
     const PHOTO_STALE_DAYS = 14;
+    /** A photo uploaded on the Coaches editor that no profile holds or held is flagged after this many days. */
+    const UPLOAD_UNUSED_DAYS = 1;
+    /** The most pages and posts pages() lists. */
+    const PAGES_MAX = 50;
 
     const ACCREDITATIONS = array('l1' => 'Level 1', 'l2a' => 'Level 2 Associate', 'l2s' => 'Level 2 State',
         'l3a' => 'Level 3 Associate', 'l3n' => 'Level 3 National', 'other' => 'Other');
@@ -130,12 +150,18 @@ class TeamOversight_Coaches {
     private static $stats = null;
     private static $lost = null;
     private static $roles_cache = array();
+    private static $pages = null;
+
+    /** The reasons queued for this request's page refresh (reason => true), sent once by run_purge() at shutdown. */
+    private static $purge_reasons = array();
 
     /**
      * Add the Coaches hooks, once per request (team_oversight_init() calls
-     * it): the role and the two wp-admin gates, the role watch, and the
+     * it): the role and the two wp-admin gates, the role watch, the
      * photo-file hooks (9.8: REST, embeds, attachment pages, and the
-     * Coaches editor's uploads). Static and guarded, never from a
+     * Coaches editor's uploads), the pages list's transient, and the
+     * changes made outside Coaches that alter a card (the team names, a
+     * photo file deleted in Media). Static and guarded, never from a
      * constructor.
      */
     public static function register_hooks() {
@@ -158,14 +184,24 @@ class TeamOversight_Coaches {
         add_filter('oembed_request_post_id', array(__CLASS__, 'oembed_post_id'), 10, 2);
         add_action('template_redirect', array(__CLASS__, 'withhold_attachment_page'), 5);
         add_action('add_attachment', array(__CLASS__, 'on_photo_uploaded'), 10, 1);
+        // The pages holding [club_coaches]: found again once a page or post changes.
+        add_action('save_post_page', array(__CLASS__, 'forget_pages'), 10, 2);
+        add_action('save_post_post', array(__CLASS__, 'forget_pages'), 10, 2);
+        add_action('deleted_post', array(__CLASS__, 'forget_pages'), 10, 2);
+        add_action('trashed_post', array(__CLASS__, 'forget_pages'), 10, 2);
+        // Cards print team names and photo files, which change outside Coaches.
+        add_action('update_option_team_oversight_teams', array(__CLASS__, 'on_team_config_changed'), 10, 0);
+        add_action('update_option_team_oversight_team_meta', array(__CLASS__, 'on_team_config_changed'), 10, 0);
+        add_action('delete_attachment', array(__CLASS__, 'on_attachment_deleted'), 10, 1);
     }
 
-    /** Forget everything cached this request (tests; every writer does it too). */
+    /** Forget everything cached this request (tests; every writer does it too). A queued page refresh is kept. */
     public static function flush_cache() {
         self::$withheld = null;
         self::$stats = null;
         self::$lost = null;
         self::$roles_cache = array();
+        self::$pages = null;
     }
 
     // ------------------------------------------------------------------
@@ -786,6 +822,275 @@ class TeamOversight_Coaches {
     }
 
     // ------------------------------------------------------------------
+    // The pages that show coaches, and asking the site's page cache to
+    // refresh them (section 10)
+    // ------------------------------------------------------------------
+
+    /** The attributes [club_coaches] takes, at their blank values (the shortcode's own shortcode_atts() defaults). */
+    private static function shortcode_defaults() {
+        return array('program' => '', 'team' => '', 'group' => '', 'season' => '', 'mode' => '');
+    }
+
+    /**
+     * The published pages and posts that show coaches: page id => array(
+     * title (plain text: the caller escapes it), url, uses), pages first,
+     * then by id, at most PAGES_MAX. uses lists each [club_coaches] on the
+     * page in order, as TeamOversight_Coaches_Public::normalise_atts()
+     * gives it (ok, problem, mode, program, teams, group, season) plus code
+     * (the code line as typed) and unknown (the attribute names the
+     * shortcode ignores, e.g. a misspelt one). A post whose text only looks
+     * like one ([[club_coaches]], [club_coaches_x]) is left out.
+     *
+     * What was found on the pages is kept in PAGES_TRANSIENT (12 hours;
+     * forget_pages() drops it whenever a page or post is saved, trashed or
+     * deleted); the uses are judged again on each request, so a program,
+     * team or season change shows at once. $fresh reads the pages again
+     * and refills the transient. Cached for the request.
+     */
+    public static function pages($fresh = false) {
+        if (!$fresh && self::$pages !== null) {
+            return self::$pages;
+        }
+        $found = $fresh ? false : get_transient(self::PAGES_TRANSIENT);
+        if (!is_array($found)) {
+            $found = self::read_pages();
+            set_transient(self::PAGES_TRANSIENT, $found, 12 * HOUR_IN_SECONDS);
+        }
+        $defaults = self::shortcode_defaults();
+        $out = array();
+        foreach ($found as $id => $page) {
+            if (!is_array($page) || empty($page['found']) || !is_array($page['found'])) {
+                continue;
+            }
+            $uses = array();
+            foreach ($page['found'] as $item) {
+                $atts = is_array($item) && isset($item['atts']) && is_array($item['atts']) ? $item['atts'] : array();
+                $unknown = array();
+                foreach ($atts as $name => $value) {
+                    // A value typed with no name ([club_coaches academy]) has a numeric key.
+                    if (is_int($name) || !array_key_exists($name, $defaults)) {
+                        $unknown[] = is_int($name) ? (string) $value : (string) $name;
+                    }
+                }
+                $use = self::normalise_use(shortcode_atts($defaults, $atts, 'club_coaches'));
+                $use['code'] = is_array($item) && isset($item['code']) ? (string) $item['code'] : '[club_coaches]';
+                $use['unknown'] = $unknown;
+                $uses[] = $use;
+            }
+            $out[intval($id)] = array(
+                'title' => isset($page['title']) ? (string) $page['title'] : '',
+                'url' => isset($page['url']) ? (string) $page['url'] : '',
+                'uses' => $uses,
+            );
+        }
+        self::$pages = $out;
+        return $out;
+    }
+
+    /**
+     * pages()' read of the database: the published pages and posts whose
+     * text holds [club_coaches (the prepared LIKE of
+     * TeamOversight_Offers_Setup::find_page()), each kept only when the
+     * shortcode's own regex finds a real use. id => array(title, url,
+     * found => list of array(code, atts)).
+     */
+    private static function read_pages() {
+        global $wpdb;
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT ID, post_type, post_title, post_content FROM {$wpdb->posts} WHERE post_status = 'publish' AND post_type IN ('page', 'post') AND post_content LIKE %s ORDER BY (post_type = 'page') DESC, ID LIMIT %d",
+            '%' . $wpdb->esc_like('[club_coaches') . '%', self::PAGES_MAX
+        ));
+        $kept = array();
+        foreach (is_array($rows) ? $rows : array() as $row) {
+            $uses = self::find_uses((string) $row->post_content);
+            if (!empty($uses)) {
+                $kept[intval($row->ID)] = array($row, $uses);
+            }
+        }
+        if (!empty($kept)) {
+            // One query for every get_permalink() below.
+            _prime_post_caches(array_keys($kept), false, false);
+        }
+        $out = array();
+        foreach ($kept as $id => $pair) {
+            $out[$id] = array(
+                'title' => self::plain_title($pair[0]->post_title, $pair[0]->post_type === 'post' ? 'Post #' . $id : 'Page #' . $id),
+                'url' => (string) get_permalink($id),
+                'found' => $pair[1],
+            );
+        }
+        return $out;
+    }
+
+    /**
+     * Every [club_coaches] in a post's text, in order: a list of array(code
+     * (the opening tag as typed), atts (as shortcode_parse_atts() reads
+     * them)). [[club_coaches]] prints the code itself, so it is no use.
+     */
+    private static function find_uses($content) {
+        $uses = array();
+        if (strpos($content, '[club_coaches') === false || !preg_match_all('/' . get_shortcode_regex(array('club_coaches')) . '/', $content, $matches, PREG_SET_ORDER)) {
+            return $uses;
+        }
+        foreach ($matches as $m) {
+            if ($m[1] === '[' && $m[6] === ']') {
+                continue;
+            }
+            $atts = shortcode_parse_atts($m[3]);
+            $uses[] = array('code' => '[' . $m[2] . rtrim($m[3]) . ']', 'atts' => is_array($atts) ? $atts : array());
+        }
+        return $uses;
+    }
+
+    /** A post title as plain text (titles may be stored entity-encoded, & as &amp;): decoded once, the caller escapes; $untitled when blank. */
+    private static function plain_title($title, $untitled) {
+        $title = trim(wp_specialchars_decode((string) $title, ENT_QUOTES));
+        return $title !== '' ? $title : $untitled;
+    }
+
+    /** One use as TeamOversight_Coaches_Public::normalise_atts() judges it, with every key it returns present. */
+    private static function normalise_use(array $atts) {
+        $blank = array('ok' => false, 'problem' => '', 'mode' => '', 'program' => '', 'teams' => array(), 'group' => '', 'season' => '');
+        if (!class_exists('TeamOversight_Coaches_Public')) {
+            $blank['problem'] = 'The coach lists aren\'t available on this site.';
+            return $blank;
+        }
+        $use = TeamOversight_Coaches_Public::normalise_atts($atts);
+        return is_array($use) ? $use + $blank : $blank;
+    }
+
+    /**
+     * Is this use the Our coaches page: a grid that names no program, team
+     * or group (so its filter buttons are there)? A line with a setting the
+     * shortcode ignores (a misspelt program="...") isn't: it draws the whole
+     * grid by mistake, and To do flags it.
+     */
+    private static function is_grid_use(array $use) {
+        return !empty($use['ok']) && empty($use['unknown']) && isset($use['mode']) && $use['mode'] === 'grid'
+            && (string) (isset($use['program']) ? $use['program'] : '') === ''
+            && empty($use['teams'])
+            && (string) (isset($use['group']) ? $use['group'] : '') === '';
+    }
+
+    /**
+     * The address of the Our coaches page: the first page in pages() with
+     * a grid use that names no program, team or group (a filtered grid has
+     * no filter buttons, so the strips' #key links would find none), or ''.
+     * The strips' Meet all our coaches link and the cards' name links go
+     * here.
+     */
+    public static function grid_url() {
+        foreach (self::pages() as $page) {
+            foreach ($page['uses'] as $use) {
+                if (self::is_grid_use($use)) {
+                    return (string) $page['url'];
+                }
+            }
+        }
+        return '';
+    }
+
+    /**
+     * save_post_page, save_post_post, deleted_post, trashed_post: forget the
+     * pages list, so a coach list placed on a page (or taken off one) is
+     * found at once. The page cache's own purge on that page's save covers
+     * the page itself. Other post types (an attachment, a revision) are
+     * left alone.
+     */
+    public static function forget_pages($post_id = 0, $post = null) {
+        $type = $post instanceof WP_Post ? $post->post_type : get_post_type(intval($post_id));
+        if ($type !== false && $type !== 'page' && $type !== 'post') {
+            return;
+        }
+        delete_transient(self::PAGES_TRANSIENT);
+        self::$pages = null;
+    }
+
+    /**
+     * Ask for the coach pages to be refreshed at the end of this request.
+     * $reason is a short code (published, hidden, profile, programs, teams,
+     * photo, manual) passed on to murvc_coaches_changed. However many
+     * writers queue one in a request (a bulk Hide of 20 profiles), each
+     * page is refreshed once.
+     */
+    public static function queue_purge($reason) {
+        $reason = is_scalar($reason) ? sanitize_key((string) $reason) : '';
+        if (empty(self::$purge_reasons)) {
+            add_action('shutdown', array(__CLASS__, 'run_purge'), 5);
+        }
+        self::$purge_reasons[$reason !== '' ? $reason : 'change'] = true;
+    }
+
+    /**
+     * shutdown, priority 5 (and tests): for every page in pages(true),
+     * clean_post_cache() (core: it empties the page's object cache and
+     * fires clean_post_cache, which some page caches listen to), then one
+     * do_action('murvc_coaches_changed', $page_ids, $reasons). That action
+     * is the one way Coaches reaches the site's page cache: the purge
+     * itself is a site snippet hooked on it, outside this plugin. Runs only
+     * when something was queued, and once per queue. Returns the page ids.
+     */
+    public static function run_purge() {
+        if (empty(self::$purge_reasons)) {
+            return array();
+        }
+        $reasons = array_keys(self::$purge_reasons);
+        self::$purge_reasons = array();
+        $ids = array_keys(self::pages(true));
+        foreach ($ids as $id) {
+            clean_post_cache($id);
+        }
+        do_action('murvc_coaches_changed', $ids, $reasons);
+        return $ids;
+    }
+
+    /**
+     * Programs and settings' Refresh coach pages now: refresh every page
+     * that shows coaches at the end of this request (queue_purge('manual')),
+     * for a page that still shows an old card a few minutes after a change.
+     * Logs; records no history, since no coach changed. Refused, with
+     * nothing queued, while no published page shows coaches.
+     */
+    public static function refresh_pages($actor) {
+        $n = count(self::pages(true));
+        if ($n === 0) {
+            return self::result(false, 'warning', 'No published page shows coaches yet, so there was nothing to refresh.');
+        }
+        self::queue_purge('manual');
+        self::log(self::LOG_WEBSITE, 'Coach pages refreshed by hand.');
+        $asked = 'Asked for ' . ($n === 1 ? 'the 1 page' : 'the ' . $n . ' pages') . ' showing coaches to be refreshed.';
+        if (!has_action('murvc_coaches_changed')) {
+            return self::result(true, 'warning', $asked, array('Nothing connects the site\'s page cache to Coaches yet, so visitors can see an old copy until it expires on its own. Ask an administrator to set up the coach-pages refresh.'));
+        }
+        return self::result(true, 'success', $asked . ' Visitors see the new cards within a few minutes.');
+    }
+
+    /** update_option_team_oversight_teams / _team_meta: team names are on the cards, so refresh the coach pages. */
+    public static function on_team_config_changed() {
+        self::queue_purge('teams');
+    }
+
+    /**
+     * delete_attachment: a published profile's photo file is being deleted
+     * in Media, so its card changes (initials instead): refresh the coach
+     * pages. Any other file is left alone.
+     */
+    public static function on_attachment_deleted($post_id) {
+        global $wpdb;
+        $post_id = intval($post_id);
+        if ($post_id < 1) {
+            return;
+        }
+        $held = $wpdb->get_var($wpdb->prepare(
+            'SELECT COUNT(*) FROM ' . self::profiles_table() . " WHERE photo_id = %d AND status = 'published'",
+            $post_id
+        ));
+        if (intval($held) > 0) {
+            self::queue_purge('photo');
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Photo files outside the cards (9.8)
     // ------------------------------------------------------------------
 
@@ -1348,11 +1653,13 @@ class TeamOversight_Coaches {
      * Records updated (field => array(old, new)), the photo events, or
      * checked when a published profile was saved unchanged (the history row
      * and checked_at carry the same time, which is how the editor finds who
-     * last checked it); then enforce_guard() may hide it. A draft saved with
-     * nothing changed writes nothing (Nothing changed.), so every raise of
-     * the version has its history row. Warns when another profile has the
-     * same public name, and when the photo changed while the old file is
-     * still in Media.
+     * last checked it); then enforce_guard() may hide it. A published
+     * profile that changed (photo and Photo cleared included) refreshes the
+     * coach pages; a draft, or an Update that changed nothing, doesn't. A
+     * draft saved with nothing changed writes nothing (Nothing changed.), so
+     * every raise of the version has its history row. Warns when another
+     * profile has the same public name, and when the photo changed while
+     * the old file is still in Media.
      */
     public static function update_profile($id, array $fields, $expect_version, $actor) {
         global $wpdb;
@@ -1408,6 +1715,10 @@ class TeamOversight_Coaches {
         }
         $words = self::field_words(array_merge(array_keys($diff), $photo ? array('photo') : array()));
         self::log(self::LOG_PROFILE, 'Coach profile #' . $id . ': saved' . (empty($words) ? ' with no changes' : ' (' . implode(', ', $words) . ')') . '.', intval($old->user_id));
+        // A shown card changed. A draft's save, and an Update that changed nothing (a check), change no card.
+        if ($published && (!empty($diff) || $photo)) {
+            self::queue_purge('profile');
+        }
 
         $guard = self::enforce_guard($id, $actor);
         $same = self::same_name($id, $clean['public_name']);
@@ -1451,7 +1762,8 @@ class TeamOversight_Coaches {
      * changed its consent or display): one UPDATE ... WHERE published AND
      * NOT guard. Returns a result whose type is 'warning' with "Saved and
      * hidden from the website: <the problem>" when it hid it, else 'success'
-     * with no message. Records hidden_by_guard and logs only when it hid it.
+     * with no message. Records hidden_by_guard, logs and refreshes the coach
+     * pages only when it hid it.
      */
     public static function enforce_guard($id, $actor) {
         global $wpdb;
@@ -1468,6 +1780,7 @@ class TeamOversight_Coaches {
         $problem = $row ? self::publish_problem($row) : '';
         self::record_change($id, 'hidden_by_guard', array('reason' => $problem), 'guard', $actor, $now);
         self::log(self::LOG_PROFILE, 'Coach profile #' . $id . ': saved and hidden (consent no longer covers it).', $row ? intval($row->user_id) : 0);
+        self::queue_purge('hidden');
         return self::result(true, 'warning', 'Saved and hidden from the website: ' . $problem, array(), $id);
     }
 
@@ -1478,7 +1791,8 @@ class TeamOversight_Coaches {
      * WHERE draft AND guard_sql(), stamping checked_at. Hide writes WHERE
      * published; hiding twice changes nothing the second time. $source is
      * where it was pressed (editor, list, bulk). Records published or
-     * hidden and logs.
+     * hidden, logs and refreshes the coach pages, only when it changed the
+     * status.
      */
     public static function set_status($id, $status, $actor, $source) {
         global $wpdb;
@@ -1512,6 +1826,7 @@ class TeamOversight_Coaches {
             }
             self::record_change($id, 'published', array(), $source, $actor, $now);
             self::log(self::LOG_PROFILE, 'Coach profile #' . $id . ': published.', intval($row->user_id));
+            self::queue_purge('published');
             return self::result(true, 'success', 'Profile published.', array(), $id);
         }
         if ($status !== 'draft') {
@@ -1526,6 +1841,7 @@ class TeamOversight_Coaches {
         }
         self::record_change($id, 'hidden', array(), $source, $actor, $now);
         self::log(self::LOG_PROFILE, 'Coach profile #' . $id . ': hidden from the website.', intval($row->user_id));
+        self::queue_purge('hidden');
         return self::result(true, 'success', 'Hidden from the website.', array(), $id);
     }
 
@@ -1578,8 +1894,14 @@ class TeamOversight_Coaches {
     // Writers: programs
     // ------------------------------------------------------------------
 
-    /** A new program's key, made from its label once and never changed: lower-case letters, digits and _, unique with _2, _3... */
+    /**
+     * A new program's key, made from its label once and never changed:
+     * lower-case letters, digits and _, unique with _2, _3... The Our coaches
+     * filter keys all and the TEAM_GROUPS keys count as taken, so a program
+     * called All or State League never shares a filter button with them.
+     */
     private static function program_key($label, array $taken) {
+        $taken += array_fill_keys(array_merge(array('all'), array_keys(self::TEAM_GROUPS)), true);
         $base = preg_replace('/[^a-z0-9_]/', '', str_replace('-', '_', sanitize_title($label)));
         $base = $base === '' || ctype_digit($base) ? 'program' . ($base === '' ? '' : '_' . $base) : $base;
         $base = substr($base, 0, 30);
@@ -1601,7 +1923,8 @@ class TeamOversight_Coaches {
      * while a removed program still has a role on any profile. Labels are
      * required and at most 60 characters, accents blue or red, orders 0 to
      * 999. Records programs_saved (each added and removed program's entry,
-     * each changed one's old and new entry) and logs.
+     * each changed one's old and new entry), logs and refreshes the coach
+     * pages (labels, accents and filter buttons are on them).
      */
     public static function save_programs(array $rows, $expect_hash, $actor) {
         global $wpdb;
@@ -1718,6 +2041,7 @@ class TeamOversight_Coaches {
             }
         }
         self::log(self::LOG_WEBSITE, 'Programs saved: ' . implode('; ', $parts) . '.');
+        self::queue_purge('programs');
         return self::result(true, 'success', 'Programs saved.');
     }
 
@@ -2035,11 +2359,13 @@ class TeamOversight_Coaches {
      * state ('warn' | 'bad'), text, url, label, media_url), the 'bad' rows
      * first. Only what needs doing is listed, so it clears itself when the
      * thing is fixed; it never blocks anything. Text is plain (the caller
-     * escapes it) and names profiles by #id or public name and accounts by
-     * #id, never an email. The Editors links and the Media links are given
-     * to administrators only. $season is the focus season (the website
-     * season, else this year). A fixed number of queries, however many
-     * profiles there are. Writes nothing.
+     * escapes it) and names profiles by #id or public name, accounts by
+     * their display name (decoded once) and pages by their title, never an
+     * email. The Editors links and the Media links are given to
+     * administrators only. $season is the focus season (the website season,
+     * else this year). A fixed number of queries, however many profiles,
+     * pages or uploads there are. Writes nothing (pages() may refill its own
+     * transient).
      */
     public static function todo($season) {
         global $wpdb;
@@ -2133,6 +2459,53 @@ class TeamOversight_Coaches {
             $rows[] = $row;
         }
 
+        // Photos uploaded on the Coaches editor that no profile holds or ever held (never saved on one),
+        // after UPLOAD_UNUSED_DAYS. photo_withheld_ids() keeps them out of the public listing meanwhile.
+        $upload_cutoff = wp_date('Y-m-d H:i:s', time() - self::UPLOAD_UNUSED_DAYS * DAY_IN_SECONDS);
+        $used = array();
+        $uploads = array();
+        $events = $wpdb->get_results("SELECT event, detail, recorded_by, recorded_at FROM $changes WHERE event IN ('photo_uploaded', 'photo_changed') ORDER BY id");
+        foreach (is_array($events) ? $events : array() as $row) {
+            $data = json_decode((string) $row->detail, true);
+            if (!is_array($data)) {
+                continue;
+            }
+            if ($row->event === 'photo_changed') {
+                foreach (array('old', 'new') as $side) {
+                    if (isset($data[$side]) && intval($data[$side]) > 0) {
+                        $used[intval($data[$side])] = true;
+                    }
+                }
+            } elseif (isset($data['new']) && intval($data['new']) > 0 && (string) $row->recorded_at < $upload_cutoff && !isset($uploads[intval($data['new'])])) {
+                $uploads[intval($data['new'])] = $row;
+            }
+        }
+        $held = $wpdb->get_col("SELECT photo_id FROM $profiles WHERE photo_id > 0");
+        foreach (is_array($held) ? $held : array() as $photo) {
+            $used[intval($photo)] = true;
+        }
+        $uploads = array_diff_key($uploads, $used);
+        if (!empty($uploads)) {
+            // Only files still in Media: one deleted there has nothing left to do.
+            $files = $wpdb->get_col("SELECT ID FROM {$wpdb->posts} WHERE post_type = 'attachment' AND ID IN (" . implode(',', array_map('intval', array_keys($uploads))) . ')');
+            $uploads = array_slice(array_intersect_key($uploads, array_flip(array_map('intval', is_array($files) ? $files : array()))), 0, 20, true);
+            $by = array();
+            foreach ($uploads as $row) {
+                if (intval($row->recorded_by) > 0) {
+                    $by[intval($row->recorded_by)] = true;
+                }
+            }
+            if (!empty($by)) {
+                cache_users(array_keys($by));
+            }
+            foreach ($uploads as $photo => $row) {
+                $who = intval($row->recorded_by) > 0 ? ' by ' . self::person_name($row->recorded_by) : '';
+                $rows[] = self::todo_row('photo_unused', 'warn',
+                    'A photo uploaded on the Coaches editor' . $who . ' on ' . mysql2date('j M Y', $row->recorded_at) . ' (attachment #' . intval($photo) . ') isn\'t on any profile. Choose it on a profile, or ask an administrator to delete the file in Media: until then it can be opened by its link.',
+                    '', '', $admin ? admin_url('upload.php?item=' . intval($photo)) : '');
+            }
+        }
+
         // Shown profiles not checked for a while.
         if ($s['needs_check'] > 0) {
             $months = intval(round(self::CHECK_AFTER_DAYS / 30));
@@ -2173,6 +2546,52 @@ class TeamOversight_Coaches {
                 : $n . ' shown profiles have no program role and no team shown, so they appear on no page.', $n === 1 ? self::profile_url($no_role[0]) : $list('shown'), $n === 1 ? 'Open the profile' : 'Show them');
         }
 
+        // The pages that show coaches (1.82.0): the Our coaches page, code lines that show nothing, synced
+        // patterns (which no page refresh reaches) and whether anything connects the site's page cache.
+        $pages = self::pages();
+        $pages_url = self::page_url('club-coaches-settings', array(), 'pages');
+        if (self::grid_url() === '') {
+            $rows[] = self::todo_row('grid_page', 'warn', empty($pages)
+                ? 'No published page shows coaches yet. Next, an administrator makes the Our coaches page: a page with a Shortcode block holding [club_coaches].'
+                : 'No published page holds [club_coaches] on its own (the Our coaches page), so Meet all our coaches has nowhere to go and the names on the cards aren\'t linked. Ask an administrator to make it.', $pages_url, 'Coach pages');
+        }
+        $bad_uses = 0;
+        foreach ($pages as $page) {
+            foreach ($page['uses'] as $use) {
+                if ($bad_uses >= 20) {
+                    break 2;
+                }
+                $unknown = isset($use['unknown']) && is_array($use['unknown']) ? $use['unknown'] : array();
+                if (empty($use['ok'])) {
+                    // normalise_atts()' problem, as a sentence.
+                    $problem = isset($use['problem']) ? trim((string) $use['problem']) : '';
+                    if ($problem !== '' && preg_match('/[.!?]$/', $problem) !== 1) {
+                        $problem .= '.';
+                    }
+                    $text = $page['title'] . ': ' . $use['code'] . ' shows nothing. ' . ($problem !== '' ? ucfirst($problem) : 'Copy the code line again from Programs and settings.');
+                } elseif (!empty($unknown)) {
+                    $text = $page['title'] . ': ' . $use['code'] . (count($unknown) === 1 ? ' has a setting' : ' has settings') . ' the coach lists don\'t know (' . implode(', ', $unknown) . '), so '
+                        . (count($unknown) === 1 ? 'it is' : 'they are') . ' ignored. Check the spelling, or copy the code line again from Programs and settings.';
+                } else {
+                    continue;
+                }
+                $rows[] = self::todo_row('bad_shortcode', 'bad', $text, $pages_url, 'Coach pages');
+                $bad_uses++;
+            }
+        }
+        $patterns = $wpdb->get_results($wpdb->prepare(
+            "SELECT ID, post_title, post_content FROM {$wpdb->posts} WHERE post_type = 'wp_block' AND post_status = 'publish' AND post_content LIKE %s ORDER BY ID LIMIT 20",
+            '%' . $wpdb->esc_like('[club_coaches') . '%'
+        ));
+        foreach (is_array($patterns) ? $patterns : array() as $row) {
+            if (!empty(self::find_uses((string) $row->post_content))) {
+                $rows[] = self::todo_row('synced_pattern', 'bad', 'The synced pattern "' . self::plain_title($row->post_title, '#' . intval($row->ID)) . '" holds [club_coaches]: pages using it won\'t refresh when coaches change, and it isn\'t checked here. Put the code line on the page itself.', $pages_url, 'Coach pages');
+            }
+        }
+        if (!empty($pages) && !has_action('murvc_coaches_changed')) {
+            $rows[] = self::todo_row('page_refresh', 'warn', 'Nothing connects the site\'s page cache to Coaches, so visitors can see an old card until the cache expires on its own. Ask an administrator to set up the coach-pages refresh.', $pages_url, 'Coach pages');
+        }
+
         // The editor role: enough holders, and any lost outside the Editors box.
         $editors_url = $admin ? self::page_url('club-coaches-settings', array(), 'editors') : '';
         $holders = count(get_users(array('role' => self::ROLE, 'fields' => 'ID', 'number' => 3, 'count_total' => false)));
@@ -2183,7 +2602,10 @@ class TeamOversight_Coaches {
                 . ' Keep at least three.', $editors_url, $editors_url !== '' ? 'Editors' : '');
         }
         foreach (self::lost_editors() as $user_id) {
-            $rows[] = self::todo_row('editor_lost', 'warn', 'User #' . intval($user_id) . ' lost the Coach bios editor role outside the Editors box (a save on Users → Edit keeps only the role in its dropdown). Re-add it on the Editors box, or choose Leave off there if that was meant.', $editors_url, $editors_url !== '' ? 'Editors' : '');
+            // lost_editors() has cached these accounts. Named by display name, decoded once (the caller escapes).
+            $user = get_userdata($user_id);
+            $name = $user ? trim(self::plain_name($user)) : '';
+            $rows[] = self::todo_row('editor_lost', 'warn', 'The Coach bios editor role was removed from ' . ($name !== '' ? $name : 'an account with no display name') . ' outside the Editors box. Re-add it on the Editors box, or choose Leave off there if that was meant.', $editors_url, $editors_url !== '' ? 'Editors' : '');
         }
 
         $bad = array();
