@@ -4598,28 +4598,101 @@ class TeamOversight_Coach_Portal {
      * The team list CSV, header first: everyone with a place or a verdict
      * for the team, then everyone who applied for it with no verdict yet,
      * grouped by verdict (Confirmed, Selected, Training Only, Tentative,
-     * Rejected, No verdict) so a coach can filter a group and copy its
-     * emails. Team Position is the coach's choice; Applied Positions the
+     * Declined, Rejected, No verdict) so a coach can filter a group and copy
+     * its emails. Team Position is the coach's choice; Applied Positions the
      * player's own answer.
      *
-     * Names, positions and emails are member-controlled, so they go through
-     * the shared TeamOversight_Exports::csv_cell() (a name like
-     * =HYPERLINK(...) would otherwise be live when a coach opens the list).
-     * Never the mobile column: international numbers start with +.
+     * Columns 1-8 (Name to Mobile) never move: coaches' spreadsheets and
+     * the tests index them, so new columns go on the end. Since 1.81.1
+     * (club decision, 2 Nov 2026), for every season: 9 Date of Birth (the
+     * profile's, dd/mm/yyyy: csv_birth_date()), then 10-14 from the
+     * person's trial application for the season through
+     * application_csv_fields(): Registration (the VV registration type,
+     * the admin's override included), Previous Club, Last VVL Season, Level
+     * Last Played and International, all blank when they have none. A
+     * confirmed player's application is found for the whole roster in one
+     * query (roster_applications()), and the user meta cache is primed once
+     * for every row's date of birth, so the export costs the same number of
+     * queries however long the list is.
+     *
+     * Names, positions, emails and the member-typed application answers are
+     * member-controlled, so they go through the shared
+     * TeamOversight_Exports::csv_cell() (a name like =HYPERLINK(...) would
+     * otherwise be live when a coach opens the list). Never the mobile or
+     * date of birth columns: international numbers start with +, and a date
+     * is written as it is.
      */
     private function roster_export_rows($team, $season) {
         global $wpdb;
         $cell = array('TeamOversight_Exports', 'csv_cell');
-        $rows = array(array('Name', 'Verdict', 'Status', 'Role', 'Team Position', 'Applied Positions', 'Email', 'Mobile'));
+        $rows = array(array(
+            'Name', 'Verdict', 'Status', 'Role', 'Team Position', 'Applied Positions', 'Email', 'Mobile',
+            'Date of Birth', 'Registration', 'Previous Club', 'Last VVL Season', 'Level Last Played', 'International',
+        ));
         $listed = array();
         $unpaid = function ($application_status) {
             return $application_status === 'awaiting_payment' ? ' · trial fee unpaid' : '';
         };
+        // Columns 9-14 for one person: their account's date of birth and
+        // their trial application's answers (null: none this season).
+        $extra = function ($user_id, $application) {
+            return array_merge(array(self::csv_birth_date($user_id)), self::application_csv_fields($application));
+        };
 
         $roster = $this->get_roster($team, $season);
+        $roster_apps = $this->roster_applications($roster, $season);
+        $selection_roster = $this->get_selection_roster($team, $season, $roster);
+
+        // Rejected for this team (by its coaches, or the application by the club).
+        $rejected = $wpdb->get_results($wpdb->prepare("
+            SELECT a.name, a.email, a.preferred_positions, a.application_status, um_mobile.meta_value AS mobile,
+                a.user_id, a.form_data, a.is_transfer_player, a.registration_override
+            FROM {$wpdb->prefix}team_trial_selections s
+            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+            LEFT JOIN {$wpdb->usermeta} um_mobile ON a.user_id = um_mobile.user_id AND um_mobile.meta_key = 'mobile_number'
+            WHERE s.team = %s AND s.season = %s AND s.status = 'rejected'
+                AND a.application_status IN ('pending', 'accepted', 'awaiting_payment', 'rejected')
+            ORDER BY a.trial_number
+        ", $team, $season));
+
+        // Applied for this team, no verdict for it yet.
+        $applied = $wpdb->get_results($wpdb->prepare("
+            SELECT a.name, a.email, a.preferred_positions, a.application_status, um_mobile.meta_value AS mobile,
+                a.user_id, a.form_data, a.is_transfer_player, a.registration_override
+            FROM {$wpdb->prefix}trial_applications a
+            LEFT JOIN {$wpdb->prefix}team_trial_selections s ON s.application_id = a.id AND s.team = %s
+            LEFT JOIN {$wpdb->usermeta} um_mobile ON a.user_id = um_mobile.user_id AND um_mobile.meta_key = 'mobile_number'
+            WHERE a.season = %s AND s.id IS NULL
+                AND a.application_status IN ('pending', 'accepted', 'awaiting_payment')
+                AND a.interested_teams LIKE %s
+            ORDER BY a.trial_number
+        ", $team, $season, '%' . $wpdb->esc_like('"' . $team . '"') . '%'));
+
+        // A confirmed player's date of birth comes from their place's
+        // account, else (a place with no account) their application's.
+        $roster_user_ids = array();
+        foreach ($roster as $i => $member) {
+            $user_id = isset($member->user_id) ? intval($member->user_id) : 0;
+            if ($user_id <= 0 && !empty($roster_apps[$i])) {
+                $user_id = intval($roster_apps[$i]->user_id);
+            }
+            $roster_user_ids[$i] = $user_id;
+        }
+        // One user meta query for every row's date of birth, not one per row.
+        $meta_ids = array_merge(
+            array_values($roster_user_ids),
+            wp_list_pluck($selection_roster, 'user_id'),
+            wp_list_pluck($rejected, 'user_id'),
+            wp_list_pluck($applied, 'user_id')
+        );
+        $meta_ids = array_values(array_unique(array_filter(array_map('intval', $meta_ids))));
+        if (!empty($meta_ids)) {
+            update_meta_cache('user', $meta_ids);
+        }
+
         $position_map = $this->get_team_positions_for_team($team, $season);
-        foreach ($roster as $member) {
-            $rows[] = array(
+        foreach ($roster as $i => $member) {
+            $rows[] = array_merge(array(
                 call_user_func($cell, $member->name ?: $member->email),
                 'Confirmed',
                 'Confirmed',
@@ -4628,7 +4701,7 @@ class TeamOversight_Coach_Portal {
                 call_user_func($cell, $this->format_positions($member->preferred_positions)),
                 call_user_func($cell, $member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
-            );
+            ), $extra($roster_user_ids[$i], isset($roster_apps[$i]) ? $roster_apps[$i] : null));
             $listed[strtolower((string) $member->email)] = true;
         }
 
@@ -4637,7 +4710,7 @@ class TeamOversight_Coach_Portal {
         $offers_on = self::offers_on($season);
         $offer_index = $offers_on ? TeamOversight_Offers::index_for_team($team, $season) : array();
         $declined_rows = array();
-        foreach ($this->get_selection_roster($team, $season, $roster) as $member) {
+        foreach ($selection_roster as $member) {
             $status_labels = array(
                 'selected' => 'Selected (awaiting finalisation)',
                 'training_only' => 'Training Only (awaiting finalisation)',
@@ -4655,7 +4728,7 @@ class TeamOversight_Coach_Portal {
                 // A season before 2027: the 1.75.3 words.
                 $status_text = isset($status_labels[$member->status]) ? $status_labels[$member->status] : ucfirst($member->status);
             }
-            $row = array(
+            $row = array_merge(array(
                 call_user_func($cell, $member->name),
                 $verdict_column,
                 $status_text . $unpaid($member->application_status),
@@ -4664,7 +4737,7 @@ class TeamOversight_Coach_Portal {
                 call_user_func($cell, $this->format_positions($member->preferred_positions)),
                 call_user_func($cell, $member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
-            );
+            ), $extra($member->user_id, $member));
             if ($verdict_column === 'Declined') {
                 $declined_rows[] = $row;
             } else {
@@ -4678,20 +4751,11 @@ class TeamOversight_Coach_Portal {
         }
 
         // Rejected for this team (by its coaches, or the application by the club).
-        $rejected = $wpdb->get_results($wpdb->prepare("
-            SELECT a.name, a.email, a.preferred_positions, a.application_status, um_mobile.meta_value AS mobile
-            FROM {$wpdb->prefix}team_trial_selections s
-            JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
-            LEFT JOIN {$wpdb->usermeta} um_mobile ON a.user_id = um_mobile.user_id AND um_mobile.meta_key = 'mobile_number'
-            WHERE s.team = %s AND s.season = %s AND s.status = 'rejected'
-                AND a.application_status IN ('pending', 'accepted', 'awaiting_payment', 'rejected')
-            ORDER BY a.trial_number
-        ", $team, $season));
         foreach ($rejected as $member) {
             if (isset($listed[strtolower((string) $member->email)])) {
                 continue;
             }
-            $rows[] = array(
+            $rows[] = array_merge(array(
                 call_user_func($cell, $member->name),
                 'Rejected',
                 'Rejected' . $unpaid($member->application_status),
@@ -4700,26 +4764,16 @@ class TeamOversight_Coach_Portal {
                 call_user_func($cell, $this->format_positions($member->preferred_positions)),
                 call_user_func($cell, $member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
-            );
+            ), $extra($member->user_id, $member));
             $listed[strtolower((string) $member->email)] = true;
         }
 
         // Applied for this team, no verdict for it yet.
-        $applied = $wpdb->get_results($wpdb->prepare("
-            SELECT a.name, a.email, a.preferred_positions, a.application_status, um_mobile.meta_value AS mobile
-            FROM {$wpdb->prefix}trial_applications a
-            LEFT JOIN {$wpdb->prefix}team_trial_selections s ON s.application_id = a.id AND s.team = %s
-            LEFT JOIN {$wpdb->usermeta} um_mobile ON a.user_id = um_mobile.user_id AND um_mobile.meta_key = 'mobile_number'
-            WHERE a.season = %s AND s.id IS NULL
-                AND a.application_status IN ('pending', 'accepted', 'awaiting_payment')
-                AND a.interested_teams LIKE %s
-            ORDER BY a.trial_number
-        ", $team, $season, '%' . $wpdb->esc_like('"' . $team . '"') . '%'));
         foreach ($applied as $member) {
             if (isset($listed[strtolower((string) $member->email)])) {
                 continue;
             }
-            $rows[] = array(
+            $rows[] = array_merge(array(
                 call_user_func($cell, $member->name),
                 'No verdict',
                 'Applied, no verdict yet' . $unpaid($member->application_status),
@@ -4728,11 +4782,167 @@ class TeamOversight_Coach_Portal {
                 call_user_func($cell, $this->format_positions($member->preferred_positions)),
                 call_user_func($cell, $member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
-            );
+            ), $extra($member->user_id, $member));
             $listed[strtolower((string) $member->email)] = true;
         }
 
         return $rows;
+    }
+
+    /**
+     * Each confirmed roster member's trial application for the season, for
+     * the team list CSV, in ONE query for the whole roster: keyed by the
+     * roster's index, null when they have none. Matched the way
+     * get_application_context() matches one person (the account when the
+     * place has one, user_id 0 never matching, or the email), preferring an
+     * application on their account over one found only by email; within
+     * each, the newest application (highest id) wins. Returns the columns
+     * application_csv_fields() and registration_type() read, plus id,
+     * user_id and email.
+     */
+    private function roster_applications($roster, $season) {
+        global $wpdb;
+
+        $found = array();
+        $user_ids = array();
+        $emails = array();
+        foreach ($roster as $i => $member) {
+            $found[$i] = null;
+            $user_id = isset($member->user_id) ? intval($member->user_id) : 0;
+            if ($user_id > 0) {
+                $user_ids[$user_id] = $user_id;
+            }
+            $email = (string) $member->email;
+            if ($email !== '') {
+                $emails[strtolower($email)] = $email;
+            }
+        }
+        if (empty($user_ids) && empty($emails)) {
+            return $found;
+        }
+
+        $match = array();
+        $args = array($season);
+        if (!empty($user_ids)) {
+            $match[] = '(user_id > 0 AND user_id IN (' . implode(', ', array_fill(0, count($user_ids), '%d')) . '))';
+            $args = array_merge($args, array_values($user_ids));
+        }
+        if (!empty($emails)) {
+            $match[] = 'email IN (' . implode(', ', array_fill(0, count($emails), '%s')) . ')';
+            $args = array_merge($args, array_values($emails));
+        }
+        $applications = $wpdb->get_results($wpdb->prepare("
+            SELECT id, user_id, email, form_data, is_transfer_player, registration_override
+            FROM {$wpdb->prefix}trial_applications
+            WHERE season = %s AND (" . implode(' OR ', $match) . ")
+            ORDER BY id DESC
+        ", $args));
+
+        // Newest first, so the first one seen for an account or an email wins.
+        $by_user = array();
+        $by_email = array();
+        foreach ($applications as $application) {
+            $user_id = intval($application->user_id);
+            if ($user_id > 0 && isset($user_ids[$user_id]) && !isset($by_user[$user_id])) {
+                $by_user[$user_id] = $application;
+            }
+            $email = strtolower((string) $application->email);
+            if ($email !== '' && !isset($by_email[$email])) {
+                $by_email[$email] = $application;
+            }
+        }
+        foreach ($roster as $i => $member) {
+            $user_id = isset($member->user_id) ? intval($member->user_id) : 0;
+            $email = strtolower((string) $member->email);
+            if ($user_id > 0 && isset($by_user[$user_id])) {
+                $found[$i] = $by_user[$user_id];
+            } elseif ($email !== '' && isset($by_email[$email])) {
+                $found[$i] = $by_email[$email];
+            }
+        }
+        return $found;
+    }
+
+    /**
+     * Columns 10-14 of the team list CSV from one trial application (a
+     * trial_applications row carrying form_data, is_transfer_player and
+     * registration_override), in order:
+     *  - Registration: TeamOversight_Trials::registration_type(), the admin's
+     *    override included, so the CSV says what the card's chip says
+     *    (ITC, Club Transfer, Free Agent, Returning, New). A fixed
+     *    vocabulary, written as it is.
+     *  - Previous Club and Last VVL Season: a transfer's answers.
+     *  - Level Last Played: a returning player's answer (Last Level
+     *    Played), else a transfer's (Transfer: Level Played).
+     *  - International: blank unless they answered Yes to International
+     *    Player; then their Country of Origin, plus '; registered abroad'
+     *    when they are registered in another country, with that country in
+     *    brackets when they named it: Italy; registered abroad (Italy).
+     * Null (no application this season) gives five blanks; a legacy
+     * application without these answers gives blanks for them. The four
+     * answers are member-typed, so each goes through
+     * TeamOversight_Exports::csv_cell().
+     */
+    private static function application_csv_fields($application) {
+        if (empty($application)) {
+            return array('', '', '', '', '');
+        }
+        $application = (object) $application;
+        $form_data = isset($application->form_data) ? $application->form_data : null;
+        $form_data = is_array($form_data) ? $form_data : ($form_data ? json_decode((string) $form_data, true) : array());
+        $form_data = is_array($form_data) ? $form_data : array();
+        $get = function ($key) use ($form_data) {
+            return (isset($form_data[$key]) && is_scalar($form_data[$key])) ? (string) $form_data[$key] : '';
+        };
+
+        $level = $get('Last Level Played');
+        if ($level === '') {
+            $level = $get('Transfer: Level Played');
+        }
+
+        $international = '';
+        if ($get('International Player') === 'Yes') {
+            $international = $get('Country of Origin');
+            // The trial form stores 'Yes', 'Yes — <country>' or 'No'
+            // (read back the same way by TeamOversight_Trials::get_form_input()).
+            $registered = $get('Registered Player In Another Country');
+            if (strpos($registered, 'Yes') === 0) {
+                $international .= '; registered abroad';
+                $dash = strpos($registered, ' — ');
+                $country = $dash !== false ? trim(substr($registered, $dash + strlen(' — '))) : '';
+                if ($country !== '') {
+                    $international .= ' (' . $country . ')';
+                }
+            }
+        }
+
+        $cell = array('TeamOversight_Exports', 'csv_cell');
+        return array(
+            (string) TeamOversight_Trials::registration_type($application),
+            call_user_func($cell, $get('Transfer: Previous Club')),
+            call_user_func($cell, $get('Transfer: Last VVL Season')),
+            call_user_func($cell, $level),
+            call_user_func($cell, $international),
+        );
+    }
+
+    /**
+     * Column 9 of the team list CSV: the account's profile birth_date as
+     * dd/mm/yyyy, '' with no account, no date or one that doesn't parse.
+     * Stored as YYYY/MM/DD on most accounts and YYYY-MM-DD on newer ones,
+     * so '/' becomes '-' before strtotime(), as the cards' age checks do.
+     * A date column: never through csv_cell(). The caller primes the user
+     * meta cache for the whole list first.
+     */
+    private static function csv_birth_date($user_id) {
+        $user_id = intval($user_id);
+        if ($user_id <= 0) {
+            return '';
+        }
+        $birth_date = get_user_meta($user_id, 'birth_date', true);
+        $birth_date = is_scalar($birth_date) ? trim((string) $birth_date) : '';
+        $birth_ts = $birth_date !== '' ? strtotime(str_replace('/', '-', $birth_date)) : false;
+        return $birth_ts !== false ? date('d/m/Y', $birth_ts) : '';
     }
 
     // ------------------------------------------------------------------
@@ -5581,6 +5791,13 @@ class TeamOversight_Coach_Portal {
         $teams_config = $database->get_teams_config($season);
         $age_rule = isset($teams_config[$team_code]) ? $teams_config[$team_code]['age_rule'] : '';
         $cutoff = $age_rule ? TeamOversight_Database::get_dob_cutoff($age_rule, $season) : null;
+        if ($cutoff && !empty($rows)) {
+            // One user meta query for the age check below, not one per player.
+            $meta_ids = array_values(array_unique(array_filter(array_map('intval', wp_list_pluck($rows, 'user_id')))));
+            if (!empty($meta_ids)) {
+                update_meta_cache('user', $meta_ids);
+            }
+        }
 
         foreach ($rows as $row) {
             $row->age_flag = false;
