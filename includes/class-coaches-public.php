@@ -659,7 +659,7 @@ class TeamOversight_Coaches_Public {
             $html .= '</ul>';
         }
         if (!empty($card['background'])) {
-            $html .= '<p class="murvc-coach-played">' . esc_html('Played: ' . $card['background']) . '</p>';
+            $html .= '<p class="murvc-coach-background">' . esc_html($card['background']) . '</p>';
         }
         return $html === '' ? '' : '<details class="murvc-coach-more"><summary>' . esc_html('Read more') . '</summary>' . $html . '</details>';
     }
@@ -731,7 +731,7 @@ class TeamOversight_Coaches_Public {
         .murvc-coach-more summary{cursor:pointer;color:var(--cc-blue);font-weight:600}
         .murvc-coach-more p{margin:6px 0}
         .murvc-coaches .murvc-coach-highlights{list-style:disc;margin:6px 0;padding-left:1.2em}
-        .murvc-coach-played{color:var(--cc-muted)}
+        .murvc-coach-background{color:var(--cc-muted)}
         .murvc-coaches p.murvc-coach-more{margin:6px 0 0;font-size:14px}
         .murvc-coach-all a{display:inline-block;padding:8px 16px;border:2px solid var(--cc-blue);border-radius:6px;color:var(--cc-blue);font-weight:700;text-decoration:none}
         </style>';

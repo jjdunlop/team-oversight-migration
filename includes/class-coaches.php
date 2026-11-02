@@ -1374,7 +1374,7 @@ class TeamOversight_Coaches {
         $fields['bio'] = sanitize_textarea_field($bio);
         $public[] = array('The short bio', $fields['bio'], self::BIO_MAX);
         $fields['playing_background'] = $line('playing_background');
-        $public[] = array('The playing background', $fields['playing_background'], self::BACKGROUND_MAX);
+        $public[] = array('The background', $fields['playing_background'], self::BACKGROUND_MAX);
 
         // Highlights: the first HIGHLIGHTS boxes; blanks are dropped.
         $posted = isset($data['highlights']) ? $data['highlights'] : array();

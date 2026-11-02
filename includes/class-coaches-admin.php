@@ -79,7 +79,7 @@ class TeamOversight_Coaches_Admin {
         'accreditation' => 'Accreditation',
         'accreditation_other' => 'Accreditation (Other)',
         'highlights' => 'Highlights',
-        'playing_background' => 'Playing background',
+        'playing_background' => 'Background',
         'program_roles' => 'What they coach',
         'program_details' => 'Which team',
         'display_mode' => 'Show as',
@@ -1226,9 +1226,9 @@ class TeamOversight_Coaches_Admin {
         self::field_row('Highlights', 'mc-highlight-1', $highlights,
             'Up to ' . TeamOversight_Coaches::HIGHLIGHTS . '. Facts or numbers, not adjectives, e.g. Coached State League for 4 seasons.');
 
-        self::field_row('Playing background', 'mc-background',
+        self::field_row('Background', 'mc-background',
             '<input type="text" class="large-text" id="mc-background" name="playing_background" value="' . esc_attr($v['playing_background']) . '">',
-            'One line about where they played, e.g. Played State League for the club for six seasons.');
+            'One line of background, playing or coaching, e.g. Played State League for the club for six seasons, or Coached junior state teams for five years. The card prints it as typed, with no label.');
 
         $programs = TeamOversight_Coaches::programs();
         $roles = '';
