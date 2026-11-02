@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), and coach profiles (Coaches).
- * Version: 1.81.1
+ * Version: 1.81.2
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.81.1');
+define('TEAM_OVERSIGHT_VERSION', '1.81.2');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -285,6 +285,8 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-email.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-emails.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-admin.php';
+    // 1.81.2: pure profile rules (the MU Sport category's meanings and the 2027+ fee class adapter).
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-profile-rules.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-fees.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-fee-timeline.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-trials.php';

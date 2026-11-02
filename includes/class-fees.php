@@ -3363,17 +3363,21 @@ class TeamOversight_Fees {
         $degree1_type = get_user_meta($user->ID, 'degree1type', true);
         $institution1 = get_user_meta($user->ID, 'institution1', true);
         $degree1_enddate = get_user_meta($user->ID, 'degree1enddate', true);
+        $mus_category = get_user_meta($user->ID, 'MUSEligibilityCategory', true);
+        $confirmed_year = get_user_meta($user->ID, 'profile_confirmed_year', true);
 
         // 2027 on (SEASON_CLASS_RULES_FROM) the class is judged at a fixed
         // point for the season, so the day it's worked out never matters:
         // junior = born on or after VV's U19 cutoff for the season (no 19th
         // birthday during it), and alumni = degree ended before their fee
         // was first recorded for the season (fee_class_reference_time()).
-        // The profile is still read each time, so a later edit to it
-        // (institution, staff, degree end date) changes the class from the
-        // next re-price — corrected data, not the date passing. 2026 and
-        // earlier, and callers that give no season (a display), keep the
-        // original rule: age and degree end as at today.
+        // The student classes follow the MU Sport category when it is
+        // current (1.81.2; see below). The profile is still read each time,
+        // so a later edit to it (MU Sport category, institution, staff,
+        // degree end date) changes the class from the next re-price —
+        // corrected data, not the date passing. 2026 and earlier, and
+        // callers that give no season (a display), keep the original rule:
+        // age and degree end as at today, and institution1 alone.
         $season_rules = $season_given && intval($season) >= self::SEASON_CLASS_RULES_FROM;
         $is_junior = false;
         if ($season_rules) {
@@ -3408,10 +3412,22 @@ class TeamOversight_Fees {
             return 'Full Adult';
         }
         
-        // Check education status for current students only
-        if ($institution1 === 'Melbourne University') {
+        // Check education status for current students only. From 2027
+        // (1.81.2) the institution comes from TeamOversight_Profile_Rules::
+        // fee_institution(): the MU Sport category when it is trusted
+        // (confirmed for the season or the year before, or a course end
+        // date given), else institution1, which only the old registration
+        // forms wrote. 2026 and earlier, and calls with no season, read
+        // institution1 alone, exactly as before.
+        $institution = $season_rules ? TeamOversight_Profile_Rules::fee_institution(array(
+            'MUSEligibilityCategory' => $mus_category,
+            'institution1' => $institution1,
+            'degree1enddate' => $degree1_enddate,
+            'profile_confirmed_year' => $confirmed_year,
+        ), $season) : $institution1;
+        if ($institution === 'Melbourne University') {
             return 'Melb Uni Student'; // Current Melbourne Uni students
-        } elseif ($institution1 === 'Other University') {
+        } elseif ($institution === 'Other University') {
             return 'Other Student'; // Current other university students
         }
         

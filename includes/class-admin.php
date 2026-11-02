@@ -2835,7 +2835,28 @@ class TeamOversight_Admin {
                                 }
                                 
                                 $institution_short = '';
-                                if ($institution1 === 'Melbourne University') {
+                                if ($season_rules) {
+                                    // 1.81.2: the institution the fee class follows
+                                    // (TeamOversight_Profile_Rules, as
+                                    // determine_fee_class()) and where it came from.
+                                    $inst = TeamOversight_Profile_Rules::fee_institution_source(array(
+                                        'MUSEligibilityCategory' => get_user_meta($user->ID, 'MUSEligibilityCategory', true),
+                                        'institution1' => $institution1,
+                                        'degree1enddate' => $degree1_enddate,
+                                        'profile_confirmed_year' => get_user_meta($user->ID, 'profile_confirmed_year', true),
+                                    ), $invoice->season);
+                                    $inst_names = array('Melbourne University' => 'Melb Uni', 'Other University' => 'Other Uni');
+                                    $inst_name = isset($inst_names[$inst['institution']]) ? $inst_names[$inst['institution']] : '';
+                                    if ($inst['source'] === 'category') {
+                                        $institution_short = ($inst_name !== '' ? $inst_name : 'Not student') . ' (category)';
+                                    } elseif ($inst['source'] === 'institution1') {
+                                        $institution_short = $inst_name . ' (old institution)';
+                                    } elseif ($inst['meaning'] !== '') {
+                                        // A student category that isn't confirmed for
+                                        // the season and no old institution to fall back on.
+                                        $institution_short = 'Category not confirmed';
+                                    }
+                                } elseif ($institution1 === 'Melbourne University') {
                                     $institution_short = 'Melb Uni';
                                 } elseif ($institution1 === 'Other University') {
                                     $institution_short = 'Other Uni';
