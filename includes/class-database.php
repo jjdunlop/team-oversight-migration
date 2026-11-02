@@ -594,15 +594,23 @@ class TeamOversight_Database {
             }
         }
 
-        // 1.81.0: coach profiles, their team ticks and their history
+        // 1.81.0: coach profiles, their team ticks (unused) and their history
         // (TeamOversight_Coaches::tables_sql()). Each behind its own SHOW TABLES
-        // check; nothing existing is altered.
+        // check.
         if (class_exists('TeamOversight_Coaches')) {
             foreach (TeamOversight_Coaches::tables_sql() as $short => $sql) {
                 if (!$wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}{$short}'")) {
                     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
                     dbDelta($sql);
                 }
+            }
+            // 1.82.0: which team each program role is for (program_details, JSON program key => text). A
+            // column of its own, so a rollback to 1.81.x still reads program_roles and ignores it. Added once,
+            // behind a SHOW COLUMNS check (a fresh table already has it from tables_sql()); nothing is
+            // backfilled.
+            $cp_table = $wpdb->prefix . 'team_coach_profiles';
+            if ($wpdb->get_var("SHOW TABLES LIKE '{$cp_table}'") && empty($wpdb->get_results("SHOW COLUMNS FROM {$cp_table} LIKE 'program_details'"))) {
+                $wpdb->query("ALTER TABLE {$cp_table} ADD COLUMN program_details text DEFAULT NULL AFTER program_roles");
             }
         }
     }

@@ -32,25 +32,32 @@ if (!defined('ABSPATH')) {
  *    esc_attr() and every URL through esc_url(); card ids and filter keys
  *    come from integers and validated keys. The filter script uses
  *    textContent only.
- *  - Program strips and the Our coaches grid come in 1.82.0. Team coaching
- *    (group and team strips, the Trials page's Coach line, team parts in
- *    the role lines, team groups among the filter buttons) needs the ticks
- *    and the season switch of 1.83.0: until then those uses show nothing.
+ *  - Team lists are programs (club decision, 2 Nov 2026): a team such as
+ *    State League is a program the committee adds, with a strip like any
+ *    other. A role's Which team (program_details) is printed in place of
+ *    the program's name ("Head coach, State League 2 Women"), and the top
+ *    role's word comes from the program (TeamOversight_Coaches::
+ *    role_label()). The shortcode takes program and mode only: team,
+ *    group, season and mode="line" are refused with a sentence.
  *
  * Contract: design/coach-bios-tech-design.md sections 5.3 to 5.5 and 9.
  */
 class TeamOversight_Coaches_Public {
 
     const SHORTCODE = 'club_coaches';
-    /** The shortcode's attributes and their defaults (shortcode_atts()). */
+    /**
+     * The shortcode's attributes and their defaults (shortcode_atts()):
+     * program and mode, plus team, group and season, which are read only so
+     * that normalise_atts() can refuse them (team lists are programs now).
+     */
     const ATTS = array('program' => '', 'team' => '', 'group' => '', 'season' => '', 'mode' => '');
-    const MODES = array('strip', 'grid', 'line');
-    /** Role => rank in every ordering: Lead coach first, then Coach or Head coach, then assistants. */
-    const RANKS = array('lead' => 0, 'coach' => 1, 'assistant' => 2, 'assistant_coach' => 2);
+    const MODES = array('strip', 'grid');
+    /** Role => rank in every ordering: the top role (Lead coach or Head coach) first, then Coach, then assistants. */
+    const RANKS = array('lead' => 0, 'coach' => 1, 'assistant' => 2);
 
     /** Request caches; flush_cache() resets them (tests). */
     private static $rows = null;
-    private static $data = array();
+    private static $data = null;
     private static $programs = null;
     private static $grid_url = null;
     /** What has been printed this request (styles, script): once each. flush_cache() leaves it alone. */
@@ -74,10 +81,10 @@ class TeamOversight_Coaches_Public {
         add_shortcode(self::SHORTCODE, array(__CLASS__, 'render_shortcode'));
     }
 
-    /** Forget everything read this request (tests, and 1.83.0's line fingerprint). The print-once flags are kept. */
+    /** Forget everything read this request (tests). The print-once flags are kept. */
     public static function flush_cache() {
         self::$rows = null;
-        self::$data = array();
+        self::$data = null;
         self::$programs = null;
         self::$grid_url = null;
     }
@@ -90,9 +97,9 @@ class TeamOversight_Coaches_Public {
      * [club_coaches]: a program strip ([club_coaches program="academy"]) or
      * the Our coaches grid ([club_coaches], filter buttons included). Returns
      * the HTML and never echoes; '' for a render inside wp_head (so it can't
-     * use up the print-once styles), for any attribute problem and for an
-     * empty list. Group, team and line uses are '' until 1.83.0. Writes
-     * nothing, and nothing in it depends on who is looking.
+     * use up the print-once styles), for any attribute problem (a team,
+     * group or season attribute or mode="line" included) and for an empty
+     * list. Writes nothing, and nothing in it depends on who is looking.
      */
     public static function render_shortcode($atts = array()) {
         if (doing_action('wp_head')) {
@@ -102,11 +109,7 @@ class TeamOversight_Coaches_Public {
         if (!$use['ok']) {
             return '';
         }
-        // Team coaching (group and team strips, the Trials line) arrives with the ticks and the season switch in 1.83.0.
-        if ($use['mode'] === 'line' || $use['group'] !== '' || !empty($use['teams'])) {
-            return '';
-        }
-        $data = self::data($use['season']);
+        $data = self::data();
         $cards = array();
         foreach ($data['cards'] as $card) {
             if (self::card_in_use($card, $use)) {
@@ -123,83 +126,55 @@ class TeamOversight_Coaches_Public {
     /**
      * The one reading of a [club_coaches] use: shortcode_atts()' output, or
      * shortcode_parse_atts()' (a missing attribute is '', an unknown one is
-     * ignored). Returns array(ok, problem, mode, program, teams (a list of
-     * codes), group, season). ok is false with one plain sentence in
-     * problem (no page title in it; the To do panel adds that) when:
-     * more than one of program, team and group is given; season isn't four
-     * digits; program isn't a key of programs(); group isn't a key of
-     * TEAM_GROUPS; a team code isn't /^[A-Za-z0-9_-]{1,50}$/D or isn't one
-     * of the season's teams (checked only while there is a season: one
-     * given, else the website season); mode isn't strip, grid or line; a
-     * line has no team; a strip has nothing to show (no program, group or
-     * team). An empty season is the website season ('' while none is
-     * announced); an empty mode is strip with a program, group or team,
-     * else grid (a grid with one of them has no filter buttons). Program,
-     * group and mode are read case-insensitively; team codes as typed. A
-     * failed use still carries what was typed, for the Pages list.
+     * ignored). Returns array(ok, problem, mode, program). ok is false with
+     * one plain sentence in problem (no page title in it; the To do panel
+     * adds that) when: it has a team, group or season attribute, or
+     * mode="line" (team lists are programs now: each sentence says so and
+     * gives the fix); program isn't a key of programs(); mode isn't strip
+     * or grid; a strip names no program. An empty mode is strip with a
+     * program, else grid (a grid with a program has no filter buttons).
+     * Program and mode are read case-insensitively. A failed use still
+     * carries what was typed, for the Pages list.
      */
     public static function normalise_atts(array $atts) {
         $read = function ($key) use ($atts) {
             return isset($atts[$key]) && is_scalar($atts[$key]) ? trim((string) $atts[$key]) : '';
         };
         $program = strtolower($read('program'));
-        $group = strtolower($read('group'));
-        $season = $read('season');
         $mode = strtolower($read('mode'));
-        $teams = array();
-        foreach (explode(',', $read('team')) as $code) {
-            $code = trim($code);
-            if ($code !== '' && !in_array($code, $teams, true)) {
-                $teams[] = $code;
-            }
-        }
-        $out = array('ok' => false, 'problem' => '', 'mode' => $mode, 'program' => $program, 'teams' => $teams, 'group' => $group, 'season' => $season);
+        $out = array('ok' => false, 'problem' => '', 'mode' => $mode, 'program' => $program);
         $fail = function ($problem) use (&$out) {
             $out['problem'] = $problem;
             return $out;
         };
 
-        $selectors = ($program !== '' ? 1 : 0) + (empty($teams) ? 0 : 1) + ($group !== '' ? 1 : 0);
-        if ($selectors > 1) {
-            return $fail('It names more than one of program, team and group: use one.');
+        // Team lists are programs (2 Nov 2026), so the team-coaching settings are refused, each with its fix.
+        $fix = 'use program=KEY from Coach bios → Programs and settings.';
+        if ($read('team') !== '') {
+            return $fail('There is no team attribute any more: teams are programs, ' . $fix);
         }
-        if ($season !== '' && !TeamOversight_Coaches::valid_season($season)) {
-            return $fail('Its season ' . self::quoted($season) . ' isn\'t a four-digit year.');
+        if ($read('group') !== '') {
+            return $fail('There is no group attribute any more: teams are programs, ' . $fix);
         }
-        if ($season === '') {
-            $season = (string) TeamOversight_Coaches::website_season();
-            $out['season'] = $season;
+        if ($read('season') !== '') {
+            return $fail('There is no season attribute any more: teams are programs, which always show their current coaches, so take season out.');
+        }
+        if ($mode === 'line') {
+            return $fail('There is no line mode any more: teams are programs, so use a strip or a grid with program=KEY from Coach bios → Programs and settings.');
         }
         $programs = self::programs();
         if ($program !== '' && !isset($programs[$program])) {
             return $fail('There is no program ' . self::quoted($program) . ': copy the code line from Coach bios → Programs and settings.');
         }
-        if ($group !== '' && !array_key_exists($group, TeamOversight_Coaches::TEAM_GROUPS)) {
-            return $fail('There is no team group ' . self::quoted($group) . ': use ' . implode(', ', array_keys(TeamOversight_Coaches::TEAM_GROUPS)) . '.');
-        }
-        if (!empty($teams)) {
-            $config = $season !== '' ? TeamOversight_Offers::teams_config($season) : null;
-            foreach ($teams as $code) {
-                if (preg_match('/^[A-Za-z0-9_-]{1,50}$/D', $code) !== 1) {
-                    return $fail('Team code ' . self::quoted($code) . ' isn\'t a team code.');
-                }
-                if (is_array($config) && !isset($config[$code])) {
-                    return $fail('Team code ' . $code . ' isn\'t in ' . $season . '\'s teams.');
-                }
-            }
-        }
         if ($mode === '') {
-            $mode = $selectors > 0 ? 'strip' : 'grid';
+            $mode = $program !== '' ? 'strip' : 'grid';
             $out['mode'] = $mode;
         }
         if (!in_array($mode, self::MODES, true)) {
-            return $fail('Its mode ' . self::quoted($mode) . ' isn\'t strip, grid or line.');
+            return $fail('Its mode ' . self::quoted($mode) . ' isn\'t strip or grid.');
         }
-        if ($mode === 'line' && empty($teams)) {
-            return $fail('A line (mode="line") needs team="CODE".');
-        }
-        if ($mode === 'strip' && $selectors === 0) {
-            return $fail('A strip (mode="strip") needs a program, group or team.');
+        if ($mode === 'strip' && $program === '') {
+            return $fail('A strip (mode="strip") needs a program.');
         }
         $out['ok'] = true;
         return $out;
@@ -214,23 +189,18 @@ class TeamOversight_Coaches_Public {
     /**
      * Does this use list this card? (A normalise_atts() result that is ok,
      * and a card from card_from_row().) A program use: a role on that
-     * program. No selector (the grid): any public role, a program role or a
-     * shown team. Group and team uses list nobody until 1.83.0. The
-     * shortcode selects with this, and the editor's Appears on can too.
+     * program. No program (the grid): a role on any program. The shortcode
+     * selects with this, and so does the editor's Appears on.
      */
     public static function card_in_use(array $card, array $use) {
         if (empty($use['ok'])) {
             return false;
         }
         $programs = isset($card['programs']) && is_array($card['programs']) ? $card['programs'] : array();
-        $teams = isset($card['teams']) && is_array($card['teams']) ? $card['teams'] : array();
         if (isset($use['program']) && $use['program'] !== '') {
             return isset($programs[$use['program']]);
         }
-        if ((isset($use['group']) && $use['group'] !== '') || !empty($use['teams'])) {
-            return false;
-        }
-        return !empty($programs) || !empty($teams);
+        return !empty($programs);
     }
 
     // ------------------------------------------------------------------
@@ -238,35 +208,29 @@ class TeamOversight_Coaches_Public {
     // ------------------------------------------------------------------
 
     /**
-     * What every [club_coaches] on the page draws from, cached for the
-     * request under (season, assume_announced), so the editor's preview and
-     * a public render in one request never hand each other their result:
-     * array(cards => profile id => card (card_from_row()), teams_with_place
-     * => code => true, shown => profile id => list of (team, role)). Query A
-     * (the published, guarded profiles) runs once per request whatever the
-     * key, with the cleared photos primed before any card is built. The
-     * places (Query B), teams_with_place and shown come with team coaching
-     * in 1.83.0; until then both are empty.
+     * What every [club_coaches] on the page draws from, read once per
+     * request: array(cards => profile id => card (card_from_row())), from
+     * Query A (the published, guarded profiles), with the cleared photos
+     * primed before any card is built. The editor's preview never reads
+     * it: it builds its card from the form.
      */
-    public static function data($season, $assume_announced = false) {
-        $season = is_scalar($season) && TeamOversight_Coaches::valid_season((string) $season) ? (string) $season : '';
-        $key = $season . '|' . ($assume_announced ? 1 : 0);
-        if (isset(self::$data[$key])) {
-            return self::$data[$key];
+    public static function data() {
+        if (self::$data !== null) {
+            return self::$data;
         }
         $cards = array();
         foreach (self::published_rows() as $row) {
-            $cards[intval($row->id)] = self::card_from_row($row, array(), $season, $assume_announced);
+            $cards[intval($row->id)] = self::card_from_row($row);
         }
-        self::$data[$key] = array('cards' => $cards, 'teams_with_place' => array(), 'shown' => array());
-        return self::$data[$key];
+        self::$data = array('cards' => $cards);
+        return self::$data;
     }
 
     /**
      * Query A, once per request: every published profile that passes
-     * guard_sql(), with the linked account's id and email (used only to
-     * judge ticks, never printed). Consent columns appear in the WHERE
-     * clause only and are never selected. Then one _prime_post_caches() over
+     * guard_sql(), with only the columns a card is built from (no account
+     * is joined). Consent columns appear in the WHERE clause only and are
+     * never selected. Then one _prime_post_caches() over
      * the cleared photos of Full profiles, because building a card asks
      * wp_attachment_is_image() (the post and its file meta); a cleared photo
      * no longer in Media is taken off the row there (photo_cleared_id 0),
@@ -278,11 +242,9 @@ class TeamOversight_Coaches_Public {
             return self::$rows;
         }
         $rows = $wpdb->get_results(
-            'SELECT p.id, p.user_id, p.display_mode, p.public_name, p.intro, p.bio, p.accreditation, p.accreditation_other,
-                    p.highlights, p.playing_background, p.program_roles, p.photo_id, p.photo_cleared_id,
-                    u.ID AS account_id, u.user_email AS account_email
+            'SELECT p.id, p.display_mode, p.public_name, p.intro, p.bio, p.accreditation, p.accreditation_other,
+                    p.highlights, p.playing_background, p.program_roles, p.program_details, p.photo_id, p.photo_cleared_id
              FROM ' . TeamOversight_Coaches::profiles_table() . " p
-             LEFT JOIN {$wpdb->users} u ON u.ID = p.user_id
              WHERE p.status = 'published' AND " . TeamOversight_Coaches::guard_sql('p') . '
              ORDER BY p.id LIMIT ' . intval(TeamOversight_Coaches::LIST_MAX)
         );
@@ -314,23 +276,24 @@ class TeamOversight_Coaches_Public {
     /**
      * The one function that turns a profile row into a card, so the
      * editor's preview and the site never differ. $row carries Query A's
-     * columns (a full profile row from get_profile() does too, plus
-     * account_id / account_email). It checks neither status nor consent:
-     * data() passes only published, guarded rows, and the preview
-     * deliberately draws a draft. The card is a whitelist:
+     * columns (a full profile row from get_profile() does too, and the
+     * editor's preview passes one built from the form). It checks neither
+     * status nor consent: data() passes only published, guarded rows, and
+     * the preview deliberately draws a draft. The card is a whitelist:
      *   id, name, display (full | name_only),
      *   intro, bio, chip (the accreditation chip's text, '' when not set),
      *   chip_title, highlights (a list), background,
      *   photo_id (0 unless it is the cleared photo and an image),
      *   programs (program key => lead | coach | assistant, programs that
-     *   exist only), teams (a list of array(code, role, name, level, group)).
-     * A Name only card keeps only id, name, display and the roles: its
-     * other fields are blank, so no renderer can print them. $tick_rows
-     * ($season, $assume_announced) give a card its shown teams from 1.83.0,
-     * when ticks exist; until then teams is empty and they are not read.
+     *   exist only), details (program key => Which team, only where the
+     *   card has a role on that program).
+     * A Name only card keeps only id, name, display and the roles with
+     * their teams: its other fields are blank, so no renderer can print
+     * them.
      */
-    public static function card_from_row($row, array $tick_rows, $season, $assume_announced) {
+    public static function card_from_row($row) {
         $row = (object) $row;
+        $roles = TeamOversight_Coaches::program_roles_of($row);
         $full = isset($row->display_mode) && (string) $row->display_mode === 'full';
         $photo = intval(isset($row->photo_id) ? $row->photo_id : 0);
         $cleared = intval(isset($row->photo_cleared_id) ? $row->photo_cleared_id : 0);
@@ -355,8 +318,8 @@ class TeamOversight_Coaches_Public {
             'highlights' => $full ? TeamOversight_Coaches::highlights_of($row) : array(),
             'background' => $full ? trim(isset($row->playing_background) ? (string) $row->playing_background : '') : '',
             'photo_id' => ($full && $photo > 0 && $cleared === $photo && wp_attachment_is_image($photo)) ? $photo : 0,
-            'programs' => TeamOversight_Coaches::program_roles_of($row),
-            'teams' => array(),
+            'programs' => $roles,
+            'details' => array_intersect_key(TeamOversight_Coaches::program_details_of($row), $roles),
         );
     }
 
@@ -408,9 +371,6 @@ class TeamOversight_Coaches_Public {
                 foreach ($programs as $role) {
                     $rank = min($rank, self::rank($role));
                 }
-                foreach (isset($card['teams']) && is_array($card['teams']) ? $card['teams'] : array() as $team) {
-                    $rank = min($rank, self::rank(isset($team['role']) ? $team['role'] : ''));
-                }
             }
             $list[] = array($rank, remove_accents(isset($card['name']) ? (string) $card['name'] : ''), intval(isset($card['id']) ? $card['id'] : 0), $card);
         }
@@ -432,49 +392,39 @@ class TeamOversight_Coaches_Public {
     }
 
     /**
-     * A card's roles as parts, each array(text, accent): its program roles
-     * in programs() order ("Lead coach, Junior Academy"), then its shown
-     * teams ("Head coach, State League 2 Women", from 1.83.0), with the
-     * $first program's part moved to the front.
+     * A card's roles as parts, each array(text, accent), in programs()
+     * order with the $first program's part moved to the front. The text is
+     * the role's word (TeamOversight_Coaches::role_label(): the program's
+     * top role is Lead coach or Head coach), then the role's Which team
+     * when one is set ("Head coach, State League 2 Women"), else the
+     * program's name ("Lead coach, Junior Academy"). The program decides
+     * the accent either way.
      */
     private static function role_parts(array $card, $first = '') {
         $parts = array();
         $roles = isset($card['programs']) && is_array($card['programs']) ? $card['programs'] : array();
+        $details = isset($card['details']) && is_array($card['details']) ? $card['details'] : array();
         foreach (self::programs() as $key => $program) {
-            if (isset($roles[$key]) && array_key_exists($roles[$key], TeamOversight_Coaches::PROGRAM_ROLES)) {
-                $parts[$key] = array('text' => TeamOversight_Coaches::PROGRAM_ROLES[$roles[$key]] . ', ' . $program['label'], 'accent' => $program['accent']);
+            $word = isset($roles[$key]) ? TeamOversight_Coaches::role_label($program, $roles[$key]) : '';
+            if ($word === '') {
+                continue;
             }
+            $detail = isset($details[$key]) && is_scalar($details[$key]) ? trim((string) $details[$key]) : '';
+            $parts[$key] = array('text' => $word . ', ' . ($detail !== '' ? $detail : $program['label']), 'accent' => $program['accent']);
         }
         if ($first !== '' && isset($parts[$first])) {
             $parts = array($first => $parts[$first]) + $parts;
         }
-        $parts = array_values($parts);
-        foreach (isset($card['teams']) && is_array($card['teams']) ? $card['teams'] : array() as $team) {
-            $role = isset($team['role']) ? (string) $team['role'] : '';
-            $group = isset($team['group']) ? (string) $team['group'] : '';
-            if (array_key_exists($role, TeamOversight_Coaches::TEAM_ROLES)) {
-                $parts[] = array(
-                    'text' => TeamOversight_Coaches::TEAM_ROLES[$role] . ', ' . (isset($team['name']) ? (string) $team['name'] : ''),
-                    'accent' => array_key_exists($group, TeamOversight_Coaches::TEAM_GROUPS) ? TeamOversight_Coaches::TEAM_GROUPS[$group][2] : 'blue',
-                );
-            }
-        }
-        return $parts;
+        return array_values($parts);
     }
 
-    /** The grid filter keys a card answers to: its program keys and (1.83.0) its teams' groups. Never 'all', which is the All button. */
+    /** The grid filter keys a card answers to: its program keys. Never 'all', which is the All button. */
     private static function filter_keys(array $card) {
         $keys = array();
         foreach (array_keys(isset($card['programs']) && is_array($card['programs']) ? $card['programs'] : array()) as $key) {
             $key = (string) $key;
             if ($key !== 'all' && preg_match('/^[a-z0-9_]{1,30}$/D', $key) === 1) {
                 $keys[$key] = true;
-            }
-        }
-        foreach (isset($card['teams']) && is_array($card['teams']) ? $card['teams'] : array() as $team) {
-            $group = isset($team['group']) ? (string) $team['group'] : '';
-            if (array_key_exists($group, TeamOversight_Coaches::TEAM_GROUPS)) {
-                $keys[$group] = true;
             }
         }
         return array_keys($keys);
@@ -505,7 +455,7 @@ class TeamOversight_Coaches_Public {
 
     /**
      * The grid (Our coaches): the filter bar and the count line (only with
-     * no selector, and only when a filter button would match a card), then
+     * no program, and only when a filter button would match a card), then
      * every card with Read more. The filter script follows the bar, once.
      */
     private static function render_grid(array $cards, array $use) {
@@ -517,15 +467,15 @@ class TeamOversight_Coaches_Public {
                 $have[$key] = true;
             }
         }
-        $bar = ($use['program'] === '' && $use['group'] === '' && empty($use['teams'])) ? self::filter_bar($have) : '';
+        $bar = $use['program'] === '' ? self::filter_bar($have) : '';
         $html = '<div class="murvc-coaches murvc-coaches--grid">' . $bar . '<div class="murvc-coach-grid">' . $items . '</div></div>';
         return self::styles() . $html . ($bar !== '' ? self::filter_script() : '');
     }
 
     /**
-     * All, then one button per program with its filter on and (from 1.83.0)
-     * per team group, in their order, leaving out any that would match no
-     * card ($have: filter key => true); '' when only All would be left. The
+     * All, then one button per program with its filter on, in their order,
+     * leaving out any that would match no card ($have: filter key =>
+     * true); '' when only All would be left. The
      * bar stays hidden until the script shows it, so without JavaScript
      * every card shows and nobody sees buttons that do nothing.
      */
@@ -534,11 +484,6 @@ class TeamOversight_Coaches_Public {
         foreach (self::programs() as $key => $program) {
             if (!empty($program['filter']) && isset($have[$key])) {
                 $buttons[$key] = array(intval($program['order']), $key, $program['label']);
-            }
-        }
-        foreach (TeamOversight_Coaches::TEAM_GROUPS as $key => $group) {
-            if (isset($have[$key]) && !isset($buttons[$key])) {
-                $buttons[$key] = array(intval($group[1]), $key, $group[0]);
             }
         }
         if (empty($buttons)) {
@@ -573,7 +518,7 @@ class TeamOversight_Coaches_Public {
      * the intro; a grid card has every role on its role line and, for a Full
      * profile with a bio, highlights or background, Read more. A Name only
      * card (--min) is the role and the name only. --red when the first role
-     * shown is a red program or a junior team. The editor's preview calls
+     * shown is on a red program. The editor's preview calls
      * this with card_from_row()'s card and wraps it as the site does: a
      * strip card inside .murvc-coaches.murvc-coaches--strip >
      * .murvc-coach-strip > ul.murvc-coach-list, a grid card inside
@@ -755,7 +700,6 @@ class TeamOversight_Coaches_Public {
         .murvc-coaches .murvc-coach-highlights{list-style:disc;margin:6px 0;padding-left:1.2em}
         .murvc-coach-played{color:var(--cc-muted)}
         .murvc-coach-all a{display:inline-block;padding:8px 16px;border:2px solid var(--cc-blue);border-radius:6px;color:var(--cc-blue);font-weight:700;text-decoration:none}
-        .murvc-coach-line a{color:inherit;text-decoration:underline}
         </style>';
     }
 

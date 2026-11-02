@@ -11,15 +11,19 @@ if (!defined('ABSPATH')) {
  * a filter and the Coach bios editor role holds directly.
  *
  * Screens: Profiles (club-coaches: To do, the list, How to, glossary), Add
- * New / Edit (club-coaches-edit: the form, then from 1.82.0 the card
- * preview and Appears on) and Programs and settings (club-coaches-settings:
- * #programs, #code and #pages (1.82.0, with Refresh coach pages now), and
- * #editors for administrators). This season (club-coaches-season), the
- * editor's Teams box and Linked account arrive with team coaching (1.83.0).
+ * New / Edit (club-coaches-edit: the form with, from 1.82.0, the live card
+ * preview beside or under it, then Appears on) and Programs and settings
+ * (club-coaches-settings: #programs, #code and #pages (1.82.0, with Refresh
+ * coach pages now), and #editors for administrators). Team coaching is
+ * typed by hand, as programs (2 Nov 2026): a program per team list, a role
+ * on it per coach, and the role's Which team on the profile.
  *
  * The card preview is drawn by TeamOversight_Coaches_Public, the same
  * card_from_row() and render_card() the site uses, so it can't differ from
- * the site; Appears on and #pages read TeamOversight_Coaches::pages().
+ * the site. It draws the form, not the saved row: on page load from the
+ * form's values, and as the editor types through the AJAX action
+ * murvc_coaches_preview (ajax_preview()), both by preview_build(). Appears
+ * on and #pages read TeamOversight_Coaches::pages().
  *
  * Rules (design section 8):
  *  - ONE admin-post action, murvc_coaches, with the button's verb in do.
@@ -31,21 +35,28 @@ if (!defined('ABSPATH')) {
  *    writes no Coaches table or option (only the flash and draft
  *    transients), runs no SQL, and a page render writes nothing:
  *    load_page() takes the one-shot flash and draft before the page is
- *    drawn.
+ *    drawn. The preview's AJAX writes nothing either.
  *  - Each editor save posts the version it was drawn with; a stale save
  *    stores nothing and keeps what was typed, so the editor refills once.
  *  - Display names are member-controlled text: decoded once and escaped
  *    once, never put into a script. Profile text is the committee's, escaped
- *    on the page. The scripts set values and textContent only.
+ *    on the page. The scripts set values and textContent only, with ONE
+ *    exception: the live preview puts the cards ajax_preview() answers with
+ *    into the page as HTML. That HTML is the plugin's own render_card()
+ *    output, every value in it escaped; it is parsed with DOMParser, any
+ *    script element is dropped, and the parsed nodes are adopted (never
+ *    innerHTML on a string). The problems beside it use textContent.
  */
 class TeamOversight_Coaches_Admin {
 
     const PAGE_PROFILES = 'club-coaches';
     const PAGE_EDIT = 'club-coaches-edit';
     const PAGE_SETTINGS = 'club-coaches-settings';
-    /** The screens a button may send someone back to (1.83.0 adds club-coaches-season). */
+    /** The screens a button may send someone back to. */
     const PAGES = array(self::PAGE_PROFILES, self::PAGE_EDIT, self::PAGE_SETTINGS);
     const ACTION = 'murvc_coaches';
+    /** The editor's live card preview (1.82.0): its AJAX action (wp_ajax_<this>) and its nonce action. */
+    const PREVIEW_ACTION = 'murvc_coaches_preview';
     /** The buttons (the posted do): those of 1.81.0, and purge (Refresh coach pages now) from 1.82.0. */
     const DO_ACTIONS = array('save', 'hide', 'bulk', 'programs', 'purge', 'editor_add', 'editor_remove', 'editor_readd', 'editor_lost_ok');
     /** The Editors box: administrators only (manage_options and promote_users). */
@@ -69,6 +80,7 @@ class TeamOversight_Coaches_Admin {
         'highlights' => 'Highlights',
         'playing_background' => 'Playing background',
         'program_roles' => 'What they coach',
+        'program_details' => 'Which team',
         'display_mode' => 'Show as',
         'photo_id' => 'Photo',
         'photo_cleared_id' => 'Photo cleared',
@@ -102,6 +114,7 @@ class TeamOversight_Coaches_Admin {
         }
         $done = true;
         add_action('admin_post_' . self::ACTION, array(__CLASS__, 'handle'));
+        add_action('wp_ajax_' . self::PREVIEW_ACTION, array(__CLASS__, 'ajax_preview'));
         if (is_admin()) {
             // After TeamOversight_Admin::add_admin_menu() (priority 10) has made Club Programs (position 32).
             add_action('admin_menu', array(__CLASS__, 'add_menu'), 20);
@@ -165,7 +178,7 @@ class TeamOversight_Coaches_Admin {
      * load-<page> for every Coach bios screen, before anything is printed: take
      * the flash and (on the editor) the draft, and read the pages holding
      * [club_coaches] once (pages() keeps them in a transient), so the render
-     * itself writes nothing. 1.83.0 runs the daily check here too.
+     * itself writes nothing.
      */
     public static function load_page() {
         self::take_flash();
@@ -492,7 +505,7 @@ class TeamOversight_Coaches_Admin {
         // hidden from the website: ...) and add the same-name and old-photo lines; a stale update keeps
         // the draft itself.
         if ($id === 0) {
-            $r = self::normalise(TeamOversight_Coaches::create_profile($fields, 0, $actor));
+            $r = self::normalise(TeamOversight_Coaches::create_profile($fields, $actor));
             if (!$r['ok'] || $r['id'] <= 0) {
                 self::keep_draft($actor, 0, $input);
                 return self::result(false, $r['message'], $r['lines'], 'error');
@@ -527,8 +540,11 @@ class TeamOversight_Coaches_Admin {
      * The editor's fields as posted, keyed by profile column, for
      * clean_fields() and for the draft: free text through the sanitisers
      * (never clipped), keys through sanitize_key(), highlights a list with
-     * blanks dropped (at most HIGHLIGHTS), program_roles key => role (blank
-     * left out), photo_id and the Photo cleared box's photo_cleared.
+     * blanks dropped (at most HIGHLIGHTS), program_roles key => role and
+     * program_details key => which team (blanks left out), photo_id and the
+     * Photo cleared box's photo_cleared. The save (do_save()) and the live
+     * preview (ajax_preview()) both read the form with this, after
+     * wp_unslash().
      */
     private static function posted_fields(array $data) {
         $text = function ($name) use ($data) {
@@ -555,6 +571,16 @@ class TeamOversight_Coaches_Admin {
                 }
             }
         }
+        $details = array();
+        if (isset($data['program_details']) && is_array($data['program_details'])) {
+            foreach ($data['program_details'] as $program => $detail) {
+                $program = (string) $program;
+                $detail = is_scalar($detail) ? sanitize_text_field((string) $detail) : '';
+                if (preg_match('/^[a-z0-9_]{1,30}$/D', $program) === 1 && $detail !== '') {
+                    $details[$program] = $detail;
+                }
+            }
+        }
         $photo = self::posted_id($data, 'photo_id');
         $photo = $photo === null ? 0 : $photo;
         $cleared = self::posted_id($data, 'photo_cleared');
@@ -568,6 +594,7 @@ class TeamOversight_Coaches_Admin {
             'highlights' => array_slice($highlights, 0, TeamOversight_Coaches::HIGHLIGHTS),
             'playing_background' => $text('playing_background'),
             'program_roles' => $roles,
+            'program_details' => $details,
             'display_mode' => $key('display_mode'),
             'photo_id' => $photo,
             // The photo id the box was drawn for: clean_fields() clears the photo only when it equals photo_id (8.5).
@@ -613,7 +640,7 @@ class TeamOversight_Coaches_Admin {
 
     /**
      * Save programs. save_programs() gets the posted rows keyed by program
-     * key (label, accent, filter 0|1, order, remove 0|1) and, when a name was
+     * key (label, accent, filter 0|1, order, lead, remove 0|1) and, when a name was
      * typed under Add a program, the new one under the key '' (never a real
      * key: the writer makes its key from the label).
      */
@@ -632,6 +659,7 @@ class TeamOversight_Coaches_Admin {
                     'accent' => isset($row['accent']) && is_string($row['accent']) ? sanitize_key($row['accent']) : '',
                     'filter' => !empty($row['filter']) ? 1 : 0,
                     'order' => $order,
+                    'lead' => isset($row['lead']) && is_string($row['lead']) ? sanitize_key($row['lead']) : '',
                     'remove' => !empty($row['remove']) ? 1 : 0,
                 );
                 $last = max($last, $order);
@@ -644,6 +672,7 @@ class TeamOversight_Coaches_Admin {
                 'accent' => isset($data['new_accent']) && is_string($data['new_accent']) ? sanitize_key($data['new_accent']) : '',
                 'filter' => 1,
                 'order' => min(999, $last + 10),
+                'lead' => isset($data['new_lead']) && is_string($data['new_lead']) ? sanitize_key($data['new_lead']) : '',
                 'remove' => 0,
             );
         }
@@ -728,7 +757,6 @@ class TeamOversight_Coaches_Admin {
         $filter = self::get_filter();
         $search = self::get_search();
         self::$view = array('page' => self::PAGE_PROFILES, 'profile' => 0, 'filter' => $filter, 's' => $search, 'anchor' => '');
-        $season = self::focus_season();
 
         echo '<div class="wrap murvc-coaches-admin">';
         self::styles();
@@ -739,7 +767,7 @@ class TeamOversight_Coaches_Admin {
         echo '<p class="mc-text mc-muted">Shown profiles appear on the Our coaches page once they have a role, and on the strip of each program they have a role on. Each profile\'s editor shows its card and the pages it is on; '
             . '<a href="' . esc_url(self::page_url(self::PAGE_SETTINGS) . '#pages') . '">Pages using coach lists</a> has them all.</p>';
 
-        self::render_todo(TeamOversight_Coaches::todo($season));
+        self::render_todo(TeamOversight_Coaches::todo());
 
         echo '<h2 class="mc-heading">Profiles</h2>';
         echo '<div class="mc-listbar">';
@@ -749,7 +777,7 @@ class TeamOversight_Coaches_Admin {
         if ($search !== '') {
             echo '<p class="mc-text">Names containing &ldquo;' . self::h($search) . '&rdquo;. <a href="' . esc_url(self::page_url(self::PAGE_PROFILES, $filter !== '' ? array('filter' => $filter) : array())) . '">Show all</a></p>';
         }
-        self::render_list((array) TeamOversight_Coaches::list_profiles($filter, $search), $season, $filter !== '' || $search !== '');
+        self::render_list((array) TeamOversight_Coaches::list_profiles($filter, $search), $filter !== '' || $search !== '');
 
         self::render_howto();
         self::render_glossary();
@@ -789,7 +817,7 @@ class TeamOversight_Coaches_Admin {
      * come from one list_role_lines() call for the whole page; nothing is
      * read per row. Hide from website is its own queued form.
      */
-    private static function render_list(array $rows, $season, $narrowed) {
+    private static function render_list(array $rows, $narrowed) {
         if (empty($rows)) {
             echo '<p class="mc-text">' . ($narrowed
                 ? 'No profile matches.'
@@ -800,7 +828,7 @@ class TeamOversight_Coaches_Admin {
         foreach ($rows as $row) {
             $ids[] = (int) self::v($row, 'id', 0);
         }
-        $lines = TeamOversight_Coaches::list_role_lines($ids, $season);
+        $lines = TeamOversight_Coaches::list_role_lines($ids);
         $lines = is_array($lines) ? $lines : array();
         $lookup = current_user_can('manage_options');
 
@@ -951,7 +979,7 @@ class TeamOversight_Coaches_Admin {
         echo '</div>';
     }
 
-    /** How to (8.4 item 7): the day-to-day steps, each linking its screen. Team coaching comes in a later update. */
+    /** How to (8.4 item 7): the day-to-day steps, each linking its screen. */
     private static function render_howto() {
         $add = esc_url(self::page_url(self::PAGE_EDIT));
         $check = esc_url(self::page_url(self::PAGE_PROFILES, array('filter' => 'check')));
@@ -968,10 +996,10 @@ class TeamOversight_Coaches_Admin {
                 <ol>
                     <li>Click <a href="<?php echo $add; ?>">Add New</a> and type their public name: how the website names them. Nothing is taken from their account.</li>
                     <li>Fill in the one-line intro, the short bio, the highlights and the playing background from what they sent. Every box has a hint under it.</li>
-                    <li>Under What they coach, set their role on each program they coach.</li>
+                    <li>Under What they coach, set their role on each program they coach and, on a team program, which team (for example State League 2 Women).</li>
                     <li>Choose their photo, and tick Photo cleared once it has been checked. Until then the card shows their initials.</li>
                     <li>Record consent: the date they answered, how they agreed and what they agreed to (Full profile, or Name and role only). For a coach under 18, a parent or guardian must agree too.</li>
-                    <li>Choose Full profile or Name only and click Save draft. Under the form, the card preview shows the card as the website draws it, and Appears on lists the pages it will be on.</li>
+                    <li>Choose Full profile or Name only. The card preview shows the card as the website will draw it, updating as you type. Click Save draft: Appears on, under the form, then lists the pages it will be on.</li>
                     <li>Click Publish. Publish is refused until consent is recorded; Save draft keeps the profile hidden. Pages showing it refresh within a few minutes.</li>
                 </ol>
                 <h3>Put coaches on a page</h3>
@@ -981,20 +1009,20 @@ class TeamOversight_Coaches_Admin {
                     <li><a href="<?php echo $pages; ?>">Pages using coach lists</a> then lists the page, and says if a line has a mistake. Each profile's Appears on, under its form, lists the pages showing it.</li>
                 </ol>
                 <p>Pages refresh within a few minutes of a change. If one still shows an old card after that, press Refresh coach pages now under <a href="<?php echo $pages; ?>">Pages using coach lists</a>.</p>
-                <h3>A coach who has a team place</h3>
-                <p>Add them with <a href="<?php echo $add; ?>">Add New</a> the same way, with their program roles. Showing team coaching (State League and the junior teams) comes in a later update, which links each profile to the coach places Club Manager already holds. Never make a second profile for the same person.</p>
+                <h3>Team coaches (State League, Premier League, junior teams)</h3>
+                <p>Teams are programs. Add the program once on <a href="<?php echo $programs; ?>">Programs and settings</a> (for example State League, with Top role is called set to Head coach). Then on each coach's profile set their role on it and type their team under Which team (for example State League 2 Women): the card names the team in place of the program. Paste the program's line from <a href="<?php echo $code; ?>">Code lines</a> on the team's page. Never make a second profile for the same person.</p>
                 <h3>A coach on several programs</h3>
-                <p>Keep one profile. In What they coach, set their role for each program: blank, Lead coach, Coach or Assistant coach.</p>
+                <p>Keep one profile. In What they coach, set their role for each program: blank, the top role (Lead coach or Head coach, as the program calls it), Coach or Assistant coach.</p>
                 <h3>Update a bio or photo</h3>
                 <p>Open the profile from the list, change it and click Update. The History under the form shows who changed what, with the old text, so a mistake can be copied back.</p>
                 <h3>Retire or hide a coach</h3>
                 <p>For a program coach, set that program back to blank. To hide someone straight away, point at their name in the list (or Tab to it) and click Hide from website, or use Hide from website on their profile. Never delete a profile: there is no delete. To get rid of a photo file, ask an administrator to delete it in Media: Remove photo only takes it off the profile, and the file stays.</p>
                 <h3>Reorder</h3>
-                <p>You don't need to. Lead coaches come first, then head coaches before assistants, then A to Z. To put someone first, make them Lead coach.</p>
+                <p>You don't need to. The top role (Lead coach or Head coach) comes first, then coaches, then assistants, then A to Z. To put someone first, give them the program's top role.</p>
                 <h3>New season</h3>
                 <p>Work through <a href="<?php echo $check; ?>">Needs checking</a>. Nothing is pre-ticked, so each confirmation is a deliberate click: tick several and choose Still correct, or open a profile and click Update.</p>
                 <h3>New program</h3>
-                <p>On <a href="<?php echo $programs; ?>">Programs and settings</a>, type its name under Add a program and click Save programs. Its key is made from the name and never changes. Then copy its line from <a href="<?php echo $code; ?>">Code lines</a> and paste it into a Shortcode block on that program's page, once (as in Put coaches on a page): until then its coaches are on no strip.</p>
+                <p>On <a href="<?php echo $programs; ?>">Programs and settings</a>, type its name under Add a program, choose what its top role is called and click Save programs. Its key is made from the name and never changes. Then copy its line from <a href="<?php echo $code; ?>">Code lines</a> and paste it into a Shortcode block on that program's page, once (as in Put coaches on a page): until then its coaches are on no strip.</p>
                 <h3>Give someone access</h3>
                 <p>An administrator adds them on <a href="<?php echo $editors; ?>">Programs and settings, Coach bios editors</a>. Never use the Role dropdown on the Users screen: it replaces the person's member roles. Keep at least three people holding the role.</p>
                 <h3>The bookmark</h3>
@@ -1015,9 +1043,7 @@ class TeamOversight_Coaches_Admin {
             'Name only' => 'The website shows just their name and role: no photo, intro or bio.',
             'Strip' => 'A row of compact cards on a program\'s page, one per coach with a role on that program. It swipes sideways on a phone, and its Meet all our coaches link goes to the Our coaches page.',
             'Our coaches page' => 'The page holding [club_coaches]: every shown coach with a role, with filter buttons and Read more.',
-            'Ticked (waiting for the season\'s Show button)' => 'A team place someone chose to show, in a season whose team coaching isn\'t on the website yet. (Team coaching comes in a later update.)',
-            'Not ticked' => 'A coach place Club Manager holds that nobody has chosen to show. Nothing is ticked by default. (Team coaching comes in a later update.)',
-            'No profile' => 'A coach place whose person has no coach profile yet. (Team coaching comes in a later update.)',
+            'Which team' => 'On a team program, the team a coach coaches (for example State League 2 Women). Their card shows it in place of the program name.',
             'Photo waiting' => 'A photo has been chosen but Photo cleared isn\'t ticked, so the card shows their initials.',
             'Needs checking' => 'A shown profile nobody has confirmed for ' . $months . ' months. Open it and click Update, or tick it in the list and choose Still correct.',
             'Asked not to be shown' => 'They answered that they don\'t want to be on the website. The profile is kept, so nobody asks them again, and it can\'t be published.',
@@ -1066,12 +1092,14 @@ class TeamOversight_Coaches_Admin {
         echo '<p class="mc-text">' . ($profile ? '<strong>Profile #' . (int) $id . '.</strong> ' : '')
             . 'Everything here is typed by the committee: nothing is read from the coach\'s account. Nothing shows on the website until the profile is published, and Publish is refused until consent is recorded. ' . $back . '.</p>'
             . '<p class="mc-text mc-muted">' . ($profile
-                ? 'Under the form, the <a href="#preview">card preview</a> shows the saved profile as the website draws it, and <a href="#appears-on">Appears on</a> lists the pages that show it.'
-                : 'Once it is saved, the card preview and the pages it will appear on show under the form.') . '</p>';
+                ? 'The <a href="#preview">card preview</a> shows the card as the website will draw it and updates as you type; <a href="#appears-on">Appears on</a>, under the form, lists the pages that show it.'
+                : 'The <a href="#preview">card preview</a> shows the card as the website will draw it and updates as you type. Once the profile is saved, the pages it will appear on show under the form.') . '</p>';
         if (is_array($draft)) {
             echo '<div class="notice notice-warning inline"><p>The form below holds what you typed, not what is saved. Check it and save again.</p></div>';
         }
 
+        // The form, with the card preview beside it from 1500px (a sticky column) and under it on narrower screens.
+        echo '<div class="mc-edit-layout"><div class="mc-edit-main">';
         // mc-once: the script disables the buttons once it is sent, so a double click saves once (with no delete, a second new profile could never go).
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" id="mc-profile-form" class="mc-form mc-once">';
         echo self::hidden_fields('save', $id);
@@ -1089,9 +1117,11 @@ class TeamOversight_Coaches_Admin {
         }
         echo '</p></form>';
         self::flush_forms();
+        echo '</div><div class="mc-edit-side">';
+        self::render_preview($v, $id);
+        echo '</div></div>';
 
         if ($profile) {
-            self::render_preview($profile);
             self::render_appears_on($profile);
             self::render_history($history);
         }
@@ -1108,7 +1138,7 @@ class TeamOversight_Coaches_Admin {
     private static function form_values($profile, $draft) {
         $v = array(
             'public_name' => '', 'intro' => '', 'bio' => '', 'accreditation' => '', 'accreditation_other' => '',
-            'highlights' => array(), 'playing_background' => '', 'program_roles' => array(), 'display_mode' => 'full',
+            'highlights' => array(), 'playing_background' => '', 'program_roles' => array(), 'program_details' => array(), 'display_mode' => 'full',
             'photo_id' => 0, 'photo_cleared' => false,
             'consent_date' => '', 'consent_method' => '', 'consent_scope' => '', 'is_minor' => 0, 'guardian_date' => '',
         );
@@ -1119,6 +1149,7 @@ class TeamOversight_Coaches_Admin {
             }
             $v['highlights'] = TeamOversight_Coaches::highlights_of($profile);
             $v['program_roles'] = TeamOversight_Coaches::program_roles_of($profile);
+            $v['program_details'] = TeamOversight_Coaches::program_details_of($profile);
             $v['photo_id'] = (int) $profile->photo_id;
             $v['photo_cleared'] = $v['photo_id'] > 0 && (int) $profile->photo_cleared_id === $v['photo_id'];
             $v['is_minor'] = (int) $profile->is_minor;
@@ -1131,6 +1162,7 @@ class TeamOversight_Coaches_Admin {
             }
             $v['highlights'] = isset($draft['highlights']) && is_array($draft['highlights']) ? array_values(array_map('strval', $draft['highlights'])) : array();
             $v['program_roles'] = isset($draft['program_roles']) && is_array($draft['program_roles']) ? $draft['program_roles'] : array();
+            $v['program_details'] = isset($draft['program_details']) && is_array($draft['program_details']) ? $draft['program_details'] : array();
             $v['photo_id'] = isset($draft['photo_id']) ? (int) $draft['photo_id'] : 0;
             // posted_fields() keeps the posted photo_cleared; a stale update's draft (the writer's cleaned fields) has photo_cleared_id.
             $cleared = isset($draft['photo_cleared']) ? $draft['photo_cleared'] : (isset($draft['photo_cleared_id']) ? $draft['photo_cleared_id'] : 0);
@@ -1158,7 +1190,7 @@ class TeamOversight_Coaches_Admin {
         return $html;
     }
 
-    /** The profile's fields (8.5 items 1 to 10, without the 1.83.0 Teams box). */
+    /** The profile's fields (8.5 items 1 to 10). */
     private static function render_fields(array $v) {
         $intro_n = mb_strlen($v['intro']);
         $words = preg_split('/\s+/u', trim($v['bio']), -1, PREG_SPLIT_NO_EMPTY);
@@ -1201,14 +1233,22 @@ class TeamOversight_Coaches_Admin {
             $key = (string) $key;
             $label = is_array($program) && isset($program['label']) ? (string) $program['label'] : $key;
             $current = isset($v['program_roles'][$key]) && is_string($v['program_roles'][$key]) ? $v['program_roles'][$key] : '';
+            $detail = isset($v['program_details'][$key]) && is_scalar($v['program_details'][$key]) ? (string) $v['program_details'][$key] : '';
+            // The top role's word is the program's (Lead coach or Head coach); the stored key stays lead.
+            $choices = array();
+            foreach (array_keys(TeamOversight_Coaches::PROGRAM_ROLES) as $role) {
+                $choices[$role] = TeamOversight_Coaches::role_label(is_array($program) ? $program : $key, $role);
+            }
             $roles .= '<div class="mc-program"><label for="' . esc_attr('mc-role-' . $key) . '">' . self::h($label) . '</label> '
-                . '<select id="' . esc_attr('mc-role-' . $key) . '" name="' . esc_attr('program_roles[' . $key . ']') . '">' . self::options(TeamOversight_Coaches::PROGRAM_ROLES, $current, '(blank)') . '</select></div>';
+                . '<select id="' . esc_attr('mc-role-' . $key) . '" name="' . esc_attr('program_roles[' . $key . ']') . '">' . self::options($choices, $current, '(blank)') . '</select>'
+                . '<span class="mc-program-team"><label for="' . esc_attr('mc-team-' . $key) . '">Which team (optional)</label> '
+                . '<input type="text" class="regular-text" id="' . esc_attr('mc-team-' . $key) . '" name="' . esc_attr('program_details[' . $key . ']') . '" value="' . esc_attr($detail) . '"></span></div>';
         }
         if ($roles === '') {
             $roles = '<p>No programs yet: add one on <a href="' . esc_url(self::page_url(self::PAGE_SETTINGS) . '#programs') . '">Programs and settings</a>.</p>';
         }
         self::field_row('What they coach', '', $roles,
-            'Lead coaches come first on every page. Teams will come from Club Manager\'s coach places in a later update, so never make a second profile.');
+            'The top role (Lead coach, or Head coach where the program calls it that) comes first on every page. Which team is optional, at most ' . TeamOversight_Coaches::DETAIL_MAX . ' characters, e.g. State League 2 Women: shown on the card instead of the program name. Keep one profile per person, whatever they coach.');
 
         self::field_row('Show as', '',
             '<fieldset><legend class="screen-reader-text">Show as</legend>'
@@ -1297,46 +1337,85 @@ class TeamOversight_Coaches_Admin {
 
     /**
      * The saved profile row as the site's card (drafts and profiles with no
-     * consent included): TeamOversight_Coaches_Public::card_from_row(), the
-     * one card builder, with the linked account's id and email (read only to
-     * judge ticks, never printed) and $assume_announced true. Team lines join
-     * with the ticks (1.83.0); until then there are no tick rows to pass.
-     * null when there is no saved row.
+     * consent included), through TeamOversight_Coaches_Public::card_from_row(),
+     * the one card builder, for Appears on. null when there is no saved row.
      */
     private static function card_of($profile) {
         if (!is_object($profile) || (int) self::v($profile, 'id', 0) <= 0) {
             return null;
         }
-        $row = clone $profile;
-        // 0 and '' when there is no linked account or it has gone.
-        $user = (int) self::v($row, 'user_id', 0) > 0 ? get_userdata((int) $row->user_id) : false;
-        $row->account_id = $user ? (int) $user->ID : 0;
-        $row->account_email = $user ? (string) $user->user_email : '';
-        $card = TeamOversight_Coaches_Public::card_from_row($row, array(), self::focus_season(), true);
+        $card = TeamOversight_Coaches_Public::card_from_row($profile);
         return is_array($card) ? $card : null;
     }
 
     /**
-     * The card preview's cards for a saved profile row: array('strip' => the
-     * strip card's HTML, 'grid' => the grid card's, 'program' => the program
-     * key the strip card is drawn for). card_of()'s card drawn by
-     * TeamOversight_Coaches_Public::render_card() with the context the
-     * shortcode gives it (program, index): the strip card as on the strip of
-     * the first program (in programs() order) it has a role on ('program'
-     * and 'strip' are '' with none), the grid card as the first card on the
-     * Our coaches page. So the preview and the site never differ. Writes
-     * nothing. Public for tests.
+     * The form's values (form_values()) in posted_fields()' shape, so the
+     * preview drawn on page load takes the AJAX's path: Photo cleared is
+     * the photo's id when the box is ticked, else 0.
      */
-    public static function preview_cards($profile) {
-        $out = array('strip' => '', 'grid' => '', 'program' => '');
-        $card = self::card_of($profile);
-        if (!$card) {
+    private static function input_from_values(array $v) {
+        $input = $v;
+        $input['photo_cleared'] = !empty($v['photo_cleared']) ? (int) $v['photo_id'] : 0;
+        return $input;
+    }
+
+    /**
+     * The card preview's cards from the editor's fields as posted
+     * (posted_fields()' shape: ajax_preview() passes the posted form, the
+     * page load input_from_values()): array('strip' => the strip card's
+     * HTML, 'grid' => the grid card's, 'program' => the key of the program
+     * the strip card is drawn for, 'label' => its label ('' and no strip
+     * card with no role), 'problems' => clean_fields()' errors, the
+     * sentences a save would be refused with). The fields go through
+     * TeamOversight_Coaches::clean_fields(), and when it refuses them the
+     * card is still drawn from what it cleaned, so the editor sees the card
+     * and the problem together. The row is built in memory: id is the
+     * profile being edited (0 for a new one), Show as is the posted one as
+     * clean_fields() reads it, photo_cleared_id is the photo when the Photo
+     * cleared box is ticked for it, else 0. Nothing else is read from the
+     * database: only programs(), the photo's attachment check and, for the
+     * strip card's name link, the Our coaches page's address. The cards are
+     * TeamOversight_Coaches_Public::card_from_row() drawn by render_card()
+     * with the context the shortcode gives it: the strip card as on the
+     * strip of the first program (in programs() order) it has a role on,
+     * the grid card as the first card on the Our coaches page. So the
+     * preview and the site never differ. Writes nothing.
+     */
+    private static function preview_build(array $input, $id) {
+        $out = array('strip' => '', 'grid' => '', 'program' => '', 'label' => '', 'problems' => array());
+        $clean = TeamOversight_Coaches::clean_fields($input);
+        $fields = is_array($clean) && isset($clean[0]) && is_array($clean[0]) ? $clean[0] : array();
+        foreach (is_array($clean) && isset($clean[1]) && is_array($clean[1]) ? $clean[1] : array() as $problem) {
+            if (is_scalar($problem) && (string) $problem !== '') {
+                $out['problems'][] = (string) $problem;
+            }
+        }
+        $photo = (int) self::v($fields, 'photo_id', 0);
+        $cleared = isset($input['photo_cleared']) && is_scalar($input['photo_cleared']) ? (int) $input['photo_cleared'] : 0;
+        $row = (object) array(
+            'id' => max(0, (int) $id),
+            'display_mode' => (string) self::v($fields, 'display_mode', 'full'),
+            'public_name' => (string) self::v($fields, 'public_name'),
+            'intro' => (string) self::v($fields, 'intro'),
+            'bio' => (string) self::v($fields, 'bio'),
+            'accreditation' => (string) self::v($fields, 'accreditation'),
+            'accreditation_other' => (string) self::v($fields, 'accreditation_other'),
+            'highlights' => (array) self::v($fields, 'highlights', array()),
+            'playing_background' => (string) self::v($fields, 'playing_background'),
+            'program_roles' => (array) self::v($fields, 'program_roles', array()),
+            'program_details' => (array) self::v($fields, 'program_details', array()),
+            'photo_id' => $photo,
+            'photo_cleared_id' => ($photo > 0 && $cleared === $photo) ? $photo : 0,
+        );
+        $card = TeamOversight_Coaches_Public::card_from_row($row);
+        if (!is_array($card)) {
             return $out;
         }
         $roles = isset($card['programs']) && is_array($card['programs']) ? $card['programs'] : array();
         foreach (TeamOversight_Coaches::programs() as $key => $program) {
             if (isset($roles[$key])) {
                 $out['program'] = (string) $key;
+                $out['label'] = (string) $program['label'];
                 break;
             }
         }
@@ -1348,33 +1427,76 @@ class TeamOversight_Coaches_Admin {
     }
 
     /**
-     * Card preview (8.5): the saved profile as a strip card ("On program
-     * pages") and as a grid card ("On Our coaches"), in the site's own
-     * markup and styles, inside a box as wide as the site's content column.
+     * The card preview's cards for a saved profile row, through the same
+     * preview_build() the editor uses (form_values() of the row, as the
+     * page draws it): array(strip, grid, program (the key the strip card is
+     * drawn for, '' with no role), label, problems). Blank cards for no
+     * row. Writes nothing. Public for tests.
      */
-    private static function render_preview($profile) {
-        $cards = self::preview_cards($profile);
-        $programs = TeamOversight_Coaches::programs();
-        echo '<h2 id="preview">Card preview</h2>';
-        echo '<p class="mc-text mc-muted">Save to refresh the preview: it draws the saved profile, not what is typed above.</p>';
-        if ($cards['strip'] === '' && $cards['grid'] === '') {
-            echo '<p class="mc-text">The preview could not be drawn. Reload the page.</p>';
-            return;
+    public static function preview_cards($profile) {
+        if (!is_object($profile) || (int) self::v($profile, 'id', 0) <= 0) {
+            return array('strip' => '', 'grid' => '', 'program' => '', 'label' => '', 'problems' => array());
         }
-        echo '<div class="mc-box mc-preview">';
+        return self::preview_build(self::input_from_values(self::form_values($profile, null)), (int) $profile->id);
+    }
+
+    /**
+     * wp_ajax_murvc_coaches_preview (1.82.0): the editor's live card
+     * preview. Refuses without TeamOversight_Coaches::CAP (403) and without
+     * the nonce PREVIEW_ACTION, posted as _ajax_nonce (check_ajax_referer()
+     * answers -1 with a 403). Reads the form exactly as the save posts it
+     * (wp_unslash(), then posted_fields()) and the profile id (0 for a new
+     * one), and answers preview_build()'s cards: success with strip, grid,
+     * program (the label of the program the strip card is drawn for, ''
+     * with no role) and problems (clean_fields()' sentences, what a save
+     * would be refused with). Writes nothing: no option, transient, history
+     * row or log line.
+     */
+    public static function ajax_preview() {
+        if (!current_user_can(TeamOversight_Coaches::CAP)) {
+            wp_send_json_error(array('message' => 'You do not have permission to do that.'), 403);
+        }
+        check_ajax_referer(self::PREVIEW_ACTION, '_ajax_nonce');
+        $data = wp_unslash($_POST);
+        $data = is_array($data) ? $data : array();
+        $id = self::posted_id($data, 'id');
+        $cards = self::preview_build(self::posted_fields($data), $id === null ? 0 : $id);
+        wp_send_json_success(array(
+            'strip' => $cards['strip'],
+            'grid' => $cards['grid'],
+            'program' => $cards['label'],
+            'problems' => $cards['problems'],
+        ));
+    }
+
+    /**
+     * Card preview (8.5): the card as the website will draw it, from the
+     * form's values ($v: the draft, the saved row or the blank form) by
+     * preview_build(), the path the AJAX takes too: a strip card ("On
+     * program pages") and a grid card ("On Our coaches") in the site's own
+     * markup and styles, inside a box as wide as the site's content column,
+     * with what a save would be refused with above them. edit_script()
+     * redraws both cards and the problems as the editor types; the nonce,
+     * the address and the no-role sentence are on the box.
+     */
+    private static function render_preview(array $v, $id) {
+        $cards = self::preview_build(self::input_from_values($v), $id);
+        $none = 'No program role yet, so no program strip shows this card, and the Our coaches page leaves it out until it has a role.';
+        echo '<h2 id="preview">Card preview</h2>';
+        echo '<p class="mc-text mc-muted">Updates as you type: this is the card as the website will draw it once the profile is saved and published.</p>';
+        echo '<div class="mc-box mc-preview" id="mc-preview" data-url="' . esc_url(admin_url('admin-ajax.php')) . '" data-nonce="' . esc_attr(wp_create_nonce(self::PREVIEW_ACTION)) . '" data-none="' . esc_attr($none) . '">';
+        echo '<p class="mc-bad-text" id="mc-preview-status" role="status" hidden></p>';
+        echo '<div id="mc-preview-problems" aria-live="polite"' . (empty($cards['problems']) ? ' hidden' : '') . '><p class="mc-bad-text"><strong>Would be refused on save:</strong></p><ul class="mc-lines" id="mc-preview-problem-list">';
+        foreach ($cards['problems'] as $problem) {
+            echo '<li>' . self::h($problem) . '</li>';
+        }
+        echo '</ul></div>';
         echo TeamOversight_Coaches_Public::styles();
         echo '<h3 class="mc-preview-label">On program pages</h3>';
-        if ($cards['strip'] !== '') {
-            $label = isset($programs[$cards['program']]['label']) ? (string) $programs[$cards['program']]['label'] : $cards['program'];
-            echo '<p class="mc-muted">As on the ' . self::h($label) . ' strip.</p>'
-                . '<div class="murvc-coaches murvc-coaches--strip"><div class="murvc-coach-strip"><ul class="murvc-coach-list">' . $cards['strip'] . '</ul></div></div>';
-        } else {
-            echo '<p class="mc-muted">No program role yet, so no program strip shows this card, and the Our coaches page leaves it out until it has a role.</p>';
-        }
-        if ($cards['grid'] !== '') {
-            echo '<h3 class="mc-preview-label">On Our coaches</h3>'
-                . '<div class="murvc-coaches murvc-coaches--grid"><div class="murvc-coach-grid">' . $cards['grid'] . '</div></div>';
-        }
+        echo '<p class="mc-muted" id="mc-preview-strip-note">' . self::h($cards['strip'] !== '' ? 'As on the ' . $cards['label'] . ' strip.' : $none) . '</p>';
+        echo '<div class="murvc-coaches murvc-coaches--strip" id="mc-preview-strip-box"' . ($cards['strip'] === '' ? ' hidden' : '') . '><div class="murvc-coach-strip"><ul class="murvc-coach-list" id="mc-preview-strip">' . $cards['strip'] . '</ul></div></div>';
+        echo '<h3 class="mc-preview-label">On Our coaches</h3>';
+        echo '<div class="murvc-coaches murvc-coaches--grid"><div class="murvc-coach-grid" id="mc-preview-grid">' . $cards['grid'] . '</div></div>';
         echo '</div>';
     }
 
@@ -1383,10 +1505,8 @@ class TeamOversight_Coaches_Admin {
      * coach list that would list this profile, judged by the shortcode's own
      * TeamOversight_Coaches_Public::card_in_use() on card_of()'s card, and
      * why: the Our coaches list for any public role, a program's strip (or
-     * grid) for a role on that program. Group, team and line uses list live
-     * team ticks, which come with team coaching (1.83.0), so no profile is on
-     * one yet. A draft reads Once published it will appear on; with no page,
-     * the reason.
+     * grid) for a role on that program. A draft reads Once published it will
+     * appear on; with no page, the reason.
      */
     private static function render_appears_on($profile) {
         $pages = TeamOversight_Coaches::pages();
@@ -1409,7 +1529,7 @@ class TeamOversight_Coaches_Admin {
                 if ($program === '') {
                     $why[] = 'the Our coaches list';
                 } elseif (isset($programs[$program], $roles[$program], TeamOversight_Coaches::PROGRAM_ROLES[$roles[$program]])) {
-                    $why[] = 'the ' . $programs[$program]['label'] . (self::v($use, 'mode') === 'grid' ? ' coaches list' : ' strip') . ', as ' . TeamOversight_Coaches::PROGRAM_ROLES[$roles[$program]];
+                    $why[] = 'the ' . $programs[$program]['label'] . (self::v($use, 'mode') === 'grid' ? ' coaches list' : ' strip') . ', as ' . TeamOversight_Coaches::role_label($programs[$program], $roles[$program]);
                 }
             }
             if (!empty($why)) {
@@ -1509,7 +1629,12 @@ class TeamOversight_Coaches_Admin {
         return self::h(ucfirst(str_replace('_', ' ', $event)) . '.');
     }
 
-    /** An updated row's field => array(old, new), one line a field; long values in <details>. */
+    /**
+     * An updated row's field => array(old, new), one line a field; long
+     * values in <details>. Since 1.82.0 a role and its Which team are
+     * recorded together, and show as one line: What they coach: State
+     * League: Head coach (State League 2 Women).
+     */
     private static function diff_html(array $detail) {
         $parts = array();
         foreach ($detail as $field => $pair) {
@@ -1517,8 +1642,12 @@ class TeamOversight_Coaches_Admin {
                 continue;
             }
             $field = (string) $field;
-            $old = self::value_text($field, array_key_exists(0, $pair) ? $pair[0] : (isset($pair['old']) ? $pair['old'] : ''));
-            $new = self::value_text($field, array_key_exists(1, $pair) ? $pair[1] : (isset($pair['new']) ? $pair['new'] : ''));
+            if ($field === 'program_details' && isset($detail['program_roles']) && is_array($detail['program_roles'])) {
+                continue;
+            }
+            $teams = ($field === 'program_roles' && isset($detail['program_details']) && is_array($detail['program_details'])) ? $detail['program_details'] : array();
+            $old = self::value_text($field, array_key_exists(0, $pair) ? $pair[0] : (isset($pair['old']) ? $pair['old'] : ''), array_key_exists(0, $teams) ? $teams[0] : null);
+            $new = self::value_text($field, array_key_exists(1, $pair) ? $pair[1] : (isset($pair['new']) ? $pair['new'] : ''), array_key_exists(1, $teams) ? $teams[1] : null);
             $label = isset(self::FIELD_LABELS[$field]) ? self::FIELD_LABELS[$field] : ucfirst(str_replace('_', ' ', $field));
             if (mb_strlen($old) + mb_strlen($new) > 100 || strpos($old . $new, "\n") !== false) {
                 $parts[] = '<details><summary>' . self::h($label) . ' changed</summary>'
@@ -1531,8 +1660,13 @@ class TeamOversight_Coaches_Admin {
         return empty($parts) ? self::h('Saved, with no field changed.') : self::h('Changed:') . '<br>' . implode('<br>', $parts);
     }
 
-    /** A stored value in words (keys as their labels, lists joined). */
-    private static function value_text($field, $value) {
+    /**
+     * A stored value in words (keys as their labels, lists joined). For
+     * program_roles, $teams is the same side's Which team map, so a role
+     * reads Head coach (State League 2 Women); the top role's word is the
+     * program's (role_label()).
+     */
+    private static function value_text($field, $value, $teams = null) {
         if (is_string($value) && $value !== '' && ($value[0] === '[' || $value[0] === '{')) {
             $decoded = json_decode($value, true);
             if (is_array($decoded)) {
@@ -1540,16 +1674,27 @@ class TeamOversight_Coaches_Admin {
             }
         }
         if (is_array($value)) {
-            if ($field === 'program_roles') {
+            if ($field === 'program_roles' || $field === 'program_details') {
                 $programs = TeamOversight_Coaches::programs();
+                $teams = is_string($teams) ? json_decode($teams, true) : $teams;
+                $teams = is_array($teams) ? $teams : array();
                 $out = array();
-                foreach ($value as $key => $role) {
-                    if (!is_scalar($role)) {
+                foreach ($value as $key => $item) {
+                    if (!is_scalar($item)) {
                         continue;
                     }
-                    $role = (string) $role;
+                    $item = (string) $item;
                     $label = isset($programs[$key]['label']) ? (string) $programs[$key]['label'] : (string) $key;
-                    $out[] = $label . ': ' . (isset(TeamOversight_Coaches::PROGRAM_ROLES[$role]) ? TeamOversight_Coaches::PROGRAM_ROLES[$role] : $role);
+                    if ($field === 'program_details') {
+                        $out[] = $label . ': ' . $item;
+                        continue;
+                    }
+                    $word = isset($programs[$key]) ? TeamOversight_Coaches::role_label($programs[$key], $item) : '';
+                    if ($word === '') {
+                        $word = isset(TeamOversight_Coaches::PROGRAM_ROLES[$item]) ? TeamOversight_Coaches::PROGRAM_ROLES[$item] : $item;
+                    }
+                    $team = isset($teams[$key]) && is_scalar($teams[$key]) ? trim((string) $teams[$key]) : '';
+                    $out[] = $label . ': ' . $word . ($team !== '' ? ' (' . $team . ')' : '');
                 }
                 return implode(', ', $out);
             }
@@ -1622,17 +1767,14 @@ class TeamOversight_Coaches_Admin {
         $defaults = TeamOversight_Coaches::DEFAULT_PROGRAMS;
         $counts = self::program_counts();
         $accents = array('blue' => 'Blue', 'red' => 'Red');
-        $groups = array();
-        foreach (TeamOversight_Coaches::TEAM_GROUPS as $group) {
-            $groups[] = $group[0] . ' ' . (int) $group[1];
-        }
+        $leads = TeamOversight_Coaches::LEAD_WORDS;
 
         echo '<h2 id="programs">Programs</h2>';
-        echo '<p class="mc-text">Each program gets a role select on every profile (Lead coach, Coach, Assistant coach). Accent is the colour of its cards; Filter button gives it a button on the Our coaches page; Order sets where it sits (the team groups use ' . self::h(implode(', ', $groups)) . ').</p>';
+        echo '<p class="mc-text">Each program gets a role select on every profile (its top role, Coach, Assistant coach) and a strip of its coaches for its page. Teams are programs too: for State League or a junior team, add a program, give each coach a role on it, and type their team under Which team on their profile. Top role is called is the word its cards use for the top role: Lead coach, or Head coach for a team. Accent is the colour of its cards; Filter button gives it a button on the Our coaches page; Order sets where it sits.</p>';
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
         echo self::hidden_fields('programs');
         echo '<input type="hidden" name="shown_hash" value="' . esc_attr(TeamOversight_Coaches::programs_hash()) . '">';
-        echo '<div class="mc-scroll"><table class="widefat striped mc-programs"><thead><tr><th scope="col">Program</th><th scope="col">Accent</th><th scope="col">Filter button</th><th scope="col">Order</th><th scope="col">Profiles with a role</th><th scope="col">Remove</th></tr></thead><tbody>';
+        echo '<div class="mc-scroll"><table class="widefat striped mc-programs"><thead><tr><th scope="col">Program</th><th scope="col">Top role is called</th><th scope="col">Accent</th><th scope="col">Filter button</th><th scope="col">Order</th><th scope="col">Profiles with a role</th><th scope="col">Remove</th></tr></thead><tbody>';
         foreach ($programs as $key => $program) {
             $key = (string) $key;
             $program = is_array($program) ? $program : array();
@@ -1640,12 +1782,14 @@ class TeamOversight_Coaches_Admin {
             $accent = isset($program['accent']) ? (string) $program['accent'] : 'blue';
             $filter = !empty($program['filter']);
             $order = isset($program['order']) ? (int) $program['order'] : 0;
+            $lead = isset($program['lead']) && isset($leads[$program['lead']]) ? (string) $program['lead'] : 'lead';
             $n = isset($counts[$key]) ? (int) $counts[$key] : 0;
             $name = 'rows[' . $key . ']';
             if (isset($defaults[$key]) && is_array($defaults[$key])) {
                 $d = $defaults[$key];
                 $builtin = 'Built-in: ' . (isset($d['label']) ? $d['label'] : $key) . ', ' . (isset($d['accent']) ? $d['accent'] : 'blue')
-                    . ', filter button ' . (!empty($d['filter']) ? 'on' : 'off') . ', order ' . (isset($d['order']) ? (int) $d['order'] : 0) . '.';
+                    . ', filter button ' . (!empty($d['filter']) ? 'on' : 'off') . ', order ' . (isset($d['order']) ? (int) $d['order'] : 0)
+                    . ', top role ' . (isset($d['lead'], $leads[$d['lead']]) ? $leads[$d['lead']] : $leads['lead']) . '.';
             } else {
                 $builtin = 'Added on this site.';
             }
@@ -1655,6 +1799,7 @@ class TeamOversight_Coaches_Admin {
             echo '<tr>'
                 . '<td><label class="screen-reader-text" for="' . esc_attr('mc-prog-' . $key) . '">Program name</label><input type="text" class="regular-text" id="' . esc_attr('mc-prog-' . $key) . '" name="' . esc_attr($name . '[label]') . '" value="' . esc_attr($label) . '" required>'
                 . '<span class="description mc-hint">Key ' . self::h($key) . '. ' . self::h($builtin) . '</span></td>'
+                . '<td><select name="' . esc_attr($name . '[lead]') . '" aria-label="Top role is called">' . self::options($leads, $lead) . '</select></td>'
                 . '<td><select name="' . esc_attr($name . '[accent]') . '" aria-label="Accent">' . self::options($accents, $accent) . '</select></td>'
                 . '<td><select name="' . esc_attr($name . '[filter]') . '" aria-label="Filter button">' . self::options(array('1' => 'Yes', '0' => 'No'), $filter ? '1' : '0') . '</select></td>'
                 . '<td><input type="number" class="small-text" min="0" max="999" name="' . esc_attr($name . '[order]') . '" value="' . $order . '" aria-label="Order"></td>'
@@ -1665,6 +1810,7 @@ class TeamOversight_Coaches_Admin {
         echo '</tbody></table></div>';
         echo '<h3>Add a program</h3>';
         echo '<p class="mc-bar"><label for="mc-new-label">Name</label> <input type="text" class="regular-text" id="mc-new-label" name="new_label" value=""> '
+            . '<label for="mc-new-lead">Top role is called</label> <select id="mc-new-lead" name="new_lead">' . self::options($leads, 'lead') . '</select> '
             . '<label for="mc-new-accent">Accent</label> <select id="mc-new-accent" name="new_accent">' . self::options($accents, 'blue') . '</select></p>';
         echo '<p class="description">Its key is made from the name and never changes. A program can be removed only while no profile has a role on it.</p>';
         echo '<p><button type="submit" class="button button-primary">Save programs</button></p>';
@@ -1673,8 +1819,8 @@ class TeamOversight_Coaches_Admin {
 
     /**
      * #code: the ready-made code lines, each in a readonly box with a Copy
-     * button: the Our coaches page, and a strip per program. The team-group
-     * and per-team lines come with team coaching (1.83.0).
+     * button: the Our coaches page, and a strip per program (a team list is
+     * a program, so it has a line here like any other).
      */
     private static function render_code_section() {
         self::$view['anchor'] = 'code';
@@ -1694,7 +1840,7 @@ class TeamOversight_Coaches_Admin {
                 . '<button type="button" class="button" data-mc-copy="' . esc_attr($id) . '">Copy</button></div></td></tr>';
         }
         echo '</tbody></table></div>';
-        echo '<p class="description">Meet all our coaches, under each strip, and the names on the cards link to the first page holding [club_coaches]. Lines for the State League and junior teams, and the coach line on each Trials & Team Info card, come with team coaching in a later update.</p>';
+        echo '<p class="description">Meet all our coaches, under each strip, and the names on the cards link to the first page holding [club_coaches]. Team lists are programs: add one under Programs (for example State League) and its strip line appears here.</p>';
     }
 
     /**
@@ -1761,7 +1907,7 @@ class TeamOversight_Coaches_Admin {
         $unknown = self::v($use, 'unknown', array());
         $unknown = is_array($unknown) ? array_filter(array_map('strval', array_filter($unknown, 'is_scalar')), 'strlen') : array();
         if (!empty($unknown)) {
-            $html .= ' <span class="mc-muted">' . self::h('It ignores ' . implode(', ', $unknown) . ': the line takes only program, team, group, season and mode.') . '</span>';
+            $html .= ' <span class="mc-muted">' . self::h('It ignores ' . implode(', ', $unknown) . ': the line takes only program and mode.') . '</span>';
         }
         return $html;
     }
@@ -1770,40 +1916,11 @@ class TeamOversight_Coaches_Admin {
     private static function use_words($use, array $programs) {
         $mode = (string) self::v($use, 'mode');
         $program = (string) self::v($use, 'program');
-        $group = (string) self::v($use, 'group');
-        $season = (string) self::v($use, 'season');
-        $teams = self::v($use, 'teams', array());
-        $names = array();
-        foreach (is_array($teams) ? $teams : explode(',', (string) $teams) as $team) {
-            if (is_scalar($team) && (string) $team !== '') {
-                $names[] = TeamOversight_Offers::team_name($season, (string) $team);
-            }
-        }
-        if ($program !== '') {
-            $what = isset($programs[$program]['label']) ? (string) $programs[$program]['label'] : $program;
-        } elseif ($group !== '') {
-            $what = isset(TeamOversight_Coaches::TEAM_GROUPS[$group]) ? TeamOversight_Coaches::TEAM_GROUPS[$group][0] : $group;
-        } elseif (!empty($names)) {
-            $what = implode(', ', $names);
-        } else {
+        if ($program === '') {
             return 'The Our coaches list, with filter buttons.';
         }
-        if ($mode === 'line') {
-            $words = 'The coach line for ' . $what;
-        } elseif ($mode === 'grid') {
-            $words = 'A grid of the ' . $what . ' coaches, with no filter buttons';
-        } else {
-            $words = 'The ' . $what . ' strip';
-        }
-        if ($program !== '') {
-            return $words . '.';
-        }
-        // Team lists show one season's team coaching, and only once that season is on the website.
-        $words .= $season !== '' ? ' (' . $season . ').' : '.';
-        if (!TeamOversight_Coaches::is_announced($season)) {
-            $words .= ' It shows nothing until ' . ($season !== '' ? $season . ' team coaching' : 'a season\'s team coaching') . ' is on the website.';
-        }
-        return $words;
+        $what = isset($programs[$program]['label']) ? (string) $programs[$program]['label'] : $program;
+        return $mode === 'grid' ? 'A grid of the ' . $what . ' coaches, with no filter buttons.' : 'The ' . $what . ' strip.';
     }
 
     /**
@@ -1925,6 +2042,7 @@ class TeamOversight_Coaches_Admin {
             .murvc-coaches-admin .mc-highlight { display: block; margin-bottom: 6px; }
             .murvc-coaches-admin .mc-program { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 6px; }
             .murvc-coaches-admin .mc-program label { min-width: 180px; }
+            .murvc-coaches-admin .mc-program-team { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 4px; }
             .murvc-coaches-admin .mc-photo img { width: 96px; height: 96px; object-fit: cover; border-radius: 50%; display: block; background: #f0f0f1; }
             .murvc-coaches-admin .mc-status { margin: 14px 0 2px; font-weight: 600; }
             .murvc-coaches-admin .mc-actions .button { margin: 0 6px 6px 0; }
@@ -1937,11 +2055,26 @@ class TeamOversight_Coaches_Admin {
             /* The preview box is as wide as the site's 840px content column inside its padding, so the cards come out the size visitors see. */
             .murvc-coaches-admin .mc-box.mc-preview { max-width: 870px; }
             .murvc-coaches-admin .mc-preview-label { margin: 12px 0 2px; font-size: 13px; font-weight: 600; color: #50575e; }
+            /* 1500px and wider: the preview sits beside the form in a sticky column, which keeps the 870px box (the cards come out the size visitors see), so the form's labels go above their fields. Narrower screens have it under the form. */
+            @media (min-width: 1500px) {
+                .murvc-coaches-admin .mc-edit-layout { display: flex; gap: 24px; align-items: flex-start; }
+                .murvc-coaches-admin .mc-edit-main { flex: 1 1 auto; min-width: 0; }
+                .murvc-coaches-admin .mc-edit-side { flex: 0 0 870px; max-width: 870px; position: sticky; top: 42px; max-height: calc(100vh - 52px); overflow-y: auto; }
+                .murvc-coaches-admin .mc-edit-side h2 { margin-top: 0; }
+                .murvc-coaches-admin .mc-edit-main .form-table th, .murvc-coaches-admin .mc-edit-main .form-table td { display: block; width: auto; padding: 6px 0; }
+            }
         </style>
         <?php
     }
 
-    /** The editor's script: one send per form, the counters, Other's text box, and the media picker. Values and textContent only. */
+    /**
+     * The editor's script: one send per form, the counters, Other's text
+     * box, the live card preview and the media picker. Values and
+     * textContent only, except the preview's cards: ajax_preview() answers
+     * with the plugin's own escaped render_card() HTML, which is parsed
+     * with DOMParser, has any script element dropped and is adopted node by
+     * node (never innerHTML on a string). The problems use textContent.
+     */
     private static function edit_script() {
         ?>
         <script>
@@ -1989,6 +2122,70 @@ class TeamOversight_Coaches_Admin {
                     showOther();
                 }
 
+                // The live card preview: 500 ms after the last change anywhere in the form, the form goes (without
+                // the save's action and nonce) to murvc_coaches_preview, and only the newest answer is drawn. While
+                // a request is out the cards stay as they are; a failed one says Preview unavailable and keeps them.
+                var form = byId('mc-profile-form'), box = byId('mc-preview'), refresh = function () {};
+                if (form && box && window.fetch && window.FormData && window.DOMParser) {
+                    var url = window.ajaxurl || box.getAttribute('data-url'), nonce = box.getAttribute('data-nonce') || '',
+                        stripList = byId('mc-preview-strip'), stripBox = byId('mc-preview-strip-box'), stripNote = byId('mc-preview-strip-note'),
+                        grid = byId('mc-preview-grid'), problems = byId('mc-preview-problems'), problemList = byId('mc-preview-problem-list'),
+                        status = byId('mc-preview-status'), timer = null, latest = 0;
+                    // The plugin's own escaped card HTML, parsed and adopted node by node.
+                    var put = function (target, html) {
+                        var doc = new DOMParser().parseFromString('<!DOCTYPE html><html><head></head><body>' + String(html) + '</body></html>', 'text/html');
+                        var scripts = doc.body.querySelectorAll('script');
+                        for (var i = 0; i < scripts.length; i++) { scripts[i].parentNode.removeChild(scripts[i]); }
+                        while (target.firstChild) { target.removeChild(target.firstChild); }
+                        while (doc.body.firstChild) { target.appendChild(document.adoptNode(doc.body.firstChild)); }
+                    };
+                    var show = function (data) {
+                        var list = Array.isArray(data.problems) ? data.problems : [];
+                        while (problemList.firstChild) { problemList.removeChild(problemList.firstChild); }
+                        list.forEach(function (text) {
+                            var li = document.createElement('li');
+                            li.textContent = String(text);
+                            problemList.appendChild(li);
+                        });
+                        problems.hidden = list.length === 0;
+                        var strip = typeof data.strip === 'string' ? data.strip : '';
+                        put(stripList, strip);
+                        stripBox.hidden = strip === '';
+                        stripNote.textContent = strip === '' ? (box.getAttribute('data-none') || '') : 'As on the ' + String(data.program || '') + ' strip.';
+                        put(grid, typeof data.grid === 'string' ? data.grid : '');
+                        status.textContent = '';
+                        status.hidden = true;
+                    };
+                    var send = function () {
+                        timer = null;
+                        var mine = ++latest;
+                        var body = new FormData(form);
+                        body.delete('action');
+                        body.delete('do');
+                        body.delete('_wpnonce');
+                        body.append('action', 'murvc_coaches_preview');
+                        body.append('_ajax_nonce', nonce);
+                        fetch(url, { method: 'POST', body: body, credentials: 'same-origin' })
+                            .then(function (r) { if (!r.ok) { throw new Error('preview'); } return r.json(); })
+                            .then(function (res) {
+                                if (mine !== latest) { return; }
+                                if (!res || !res.success || !res.data) { throw new Error('preview'); }
+                                show(res.data);
+                            })
+                            .catch(function () {
+                                if (mine !== latest) { return; }
+                                status.textContent = 'Preview unavailable';
+                                status.hidden = false;
+                            });
+                    };
+                    refresh = function () {
+                        if (timer) { clearTimeout(timer); }
+                        timer = setTimeout(send, 500);
+                    };
+                    form.addEventListener('input', refresh);
+                    form.addEventListener('change', refresh);
+                }
+
                 var choose = byId('mc-photo-choose'), remove = byId('mc-photo-remove'), field = byId('mc-photo-id'),
                     img = byId('mc-photo-img'), none = byId('mc-photo-none'), cleared = byId('mc-photo-cleared'), frame = null;
                 if (!choose || !field) { return; }
@@ -2004,6 +2201,8 @@ class TeamOversight_Coaches_Admin {
                     if (remove) { remove.hidden = !id; }
                     var gone = byId('mc-photo-gone');
                     if (gone) { gone.hidden = true; }
+                    // Setting the fields fires no event, so the preview is asked for here.
+                    refresh();
                 };
                 choose.addEventListener('click', function (e) {
                     e.preventDefault();
@@ -2109,12 +2308,6 @@ class TeamOversight_Coaches_Admin {
     private static function can_manage_editors($user_id = 0) {
         $user_id = $user_id ? (int) $user_id : get_current_user_id();
         return $user_id > 0 && user_can($user_id, 'manage_options') && user_can($user_id, 'promote_users');
-    }
-
-    /** The season the To do panel and the role lines look at: the website season, else this year. */
-    private static function focus_season() {
-        $season = (string) TeamOversight_Coaches::website_season();
-        return TeamOversight_Coaches::valid_season($season) ? $season : current_time('Y');
     }
 
     /** A posted id ('0' allowed) checked with /^\d{1,10}$/D, or null. */

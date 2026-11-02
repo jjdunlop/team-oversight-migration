@@ -19,12 +19,15 @@ if (!defined('ABSPATH')) {
  *    guard_sql(); enforce_guard() hides a published profile a save took out
  *    of it; the public read applies guard_sql() again. publish_problem() is
  *    the same rule in PHP, worded for the editor.
- *  - Nothing on a card is read from the coach's account. The account link
- *    (user_id) is used only to suggest team places and to check ticks, and
- *    is set only from a team place (1.83.0).
- *  - Team coaching is opt-in: one tick per (profile, team place), judged by
- *    tick_problem() wherever a tick is read. The rule is here from 1.81.0 so
- *    every reader shares it; the ticks and their writers come in 1.83.0.
+ *  - Nothing on a card is read from the coach's account. The profiles'
+ *    user_id column (1.81.0) is never written here (only an account merge
+ *    re-points one), and nothing on the website reads it.
+ *  - Team coaching is typed by hand, as programs (club decision, 2 Nov
+ *    2026): the committee adds a program such as State League on Programs
+ *    and settings and gives each coach a role on it. A role's Which team
+ *    (program_details, 1.82.0) is the team the card names in place of the
+ *    program, and each program says what its top role is called (Lead
+ *    coach or Head coach: role_label()).
  *  - Every profile writer validates first, writes with one compare-and-set
  *    UPDATE or INSERT whose affected-row count gates the side effects, adds
  *    one history row (team_coach_changes, never pruned) and one line in the
@@ -55,17 +58,18 @@ if (!defined('ABSPATH')) {
  *    is a site snippet on that action, outside this plugin. The callers:
  *    set_status() both ways, enforce_guard() when it hides,
  *    update_profile() when it changed a published profile (photo and
- *    Photo cleared included), save_programs(), a change to the team names
- *    (on_team_config_changed()), a published profile's photo file deleted
- *    in Media (on_attachment_deleted()), a change to a page holding a
- *    coach list (forget_pages(): the strips print the Our coaches page's
+ *    Photo cleared included), save_programs(), a published profile's
+ *    photo file deleted in Media (on_attachment_deleted()), a change to a
+ *    page holding a coach list (forget_pages(): the strips print the Our
+ *    coaches page's
  *    address) and Refresh coach pages now (refresh_pages()).
  *    mark_checked(), saves of drafts and an upload on its own refresh
  *    nothing: no card changes. The public render never writes, not even
  *    the pages list's transient (pages() with $store false).
  *
  * Tables: team_coach_profiles (one row per coach, never deleted),
- * team_coach_ticks (used from 1.83.0) and team_coach_changes (the history).
+ * team_coach_ticks (created in 1.81.0 and unused) and team_coach_changes
+ * (the history).
  * All three are InnoDB and registered with the account merge
  * (id_columns()). Contract: design/coach-bios-tech-design.md sections 3 to
  * 8, 9.8 and 10.
@@ -77,25 +81,18 @@ class TeamOversight_Coaches {
     /** The Coach bios editor role: CAP, read, view_admin_dashboard (WooCommerce's wp-admin gate) and upload_files (the media picker). */
     const ROLE = 'murvc_coach_bios_editor';
 
-    /** key => array(label, accent, filter, order). Absent = DEFAULT_PROGRAMS. Non-autoloaded. */
+    /** key => array(label, accent, filter, order, lead). Absent = DEFAULT_PROGRAMS. Non-autoloaded. */
     const PROGRAMS_OPTION = 'team_oversight_coach_programs';
-    /** season => array(at, by): the seasons whose team coaching is on the website (1.83.0). Non-autoloaded. */
-    const ANNOUNCED_OPTION = 'team_oversight_coach_announced';
-    /** The fingerprint of the public team lines (1.83.0). Non-autoloaded. */
-    const LINE_STATE_OPTION = 'team_oversight_coach_line_state';
 
     /** The three log types Coaches writes (membership channel). */
     const LOG_PROFILE = 'coach_profile';
     const LOG_WEBSITE = 'coach_website';
     const LOG_EDITOR = 'coach_editor';
 
-    /** Transients: the handler's flash (+ user id, 300 s), a stale save's typed fields (+ user id _ profile id, 1800 s), the pages using the shortcode (12 h), the last page-load sweep (60 s). */
+    /** Transients: the handler's flash (+ user id, 300 s), a stale save's typed fields (+ user id _ profile id, 1800 s), the pages using the shortcode (12 h). */
     const FLASH_PREFIX = 'murvc_coaches_flash_';
     const DRAFT_PREFIX = 'murvc_coaches_draft_';
     const PAGES_TRANSIENT = 'murvc_coaches_pages';
-    const SWEPT_TRANSIENT = 'murvc_coaches_swept';
-    /** The named lock around making a profile from a team place and linking one (1.83.0). */
-    const LINK_LOCK = 'murvc_coach_link';
     /** Posted with every upload from the Coaches editor's media picker, so the file is withheld before any save. */
     const UPLOAD_PARAM = 'murvc_coach_photo';
 
@@ -108,6 +105,8 @@ class TeamOversight_Coaches {
     const HIGHLIGHT_MAX = 100;
     const BACKGROUND_MAX = 120;
     const OTHER_MAX = 60;
+    /** A program role's Which team (program_details), which the card shows in place of the program's name. */
+    const DETAIL_MAX = 60;
 
     /** A shown profile not checked for this many days "needs checking". */
     const CHECK_AFTER_DAYS = 300;
@@ -128,19 +127,18 @@ class TeamOversight_Coaches {
     // The methods that count as consent: every CONSENT_METHODS key except declined (test A checks this).
     const CONSENT_GIVEN = array('email', 'form', 'in_person', 'message');
     const CONSENT_SCOPES = array('full' => 'Full profile', 'name_only' => 'Name and role only');
+    /** The stored role keys and their words. The word for lead comes from its program (role_label()). */
     const PROGRAM_ROLES = array('lead' => 'Lead coach', 'coach' => 'Coach', 'assistant' => 'Assistant coach');
-    const TEAM_ROLES = array('coach' => 'Head coach', 'assistant_coach' => 'Assistant coach');
-    // key => array(label, filter order, accent)
-    const TEAM_GROUPS = array('state_league' => array('State League', 20, 'blue'),
-        'junior' => array('Junior teams', 30, 'red'), 'premier' => array('Premier League', 40, 'blue'));
+    /** A program's lead => what its top role is called. The stored role key stays lead either way. */
+    const LEAD_WORDS = array('lead' => 'Lead coach', 'head' => 'Head coach');
 
-    /** The programs while PROGRAMS_OPTION has never been saved. The orders interleave with TEAM_GROUPS for the /coaches/ filter buttons. */
+    /** The programs while PROGRAMS_OPTION has never been saved. */
     const DEFAULT_PROGRAMS = array(
-        'academy' => array('label' => 'Junior Academy', 'accent' => 'red', 'filter' => 1, 'order' => 10),
-        'mixed' => array('label' => 'Mixed Training Program', 'accent' => 'blue', 'filter' => 1, 'order' => 50),
-        'social' => array('label' => 'Reds Social League', 'accent' => 'blue', 'filter' => 1, 'order' => 60),
-        'post_season' => array('label' => 'Post-Season', 'accent' => 'blue', 'filter' => 1, 'order' => 70),
-        'pathway' => array('label' => 'Pathway', 'accent' => 'blue', 'filter' => 0, 'order' => 80),
+        'academy' => array('label' => 'Junior Academy', 'accent' => 'red', 'filter' => 1, 'order' => 10, 'lead' => 'lead'),
+        'mixed' => array('label' => 'Mixed Training Program', 'accent' => 'blue', 'filter' => 1, 'order' => 50, 'lead' => 'lead'),
+        'social' => array('label' => 'Reds Social League', 'accent' => 'blue', 'filter' => 1, 'order' => 60, 'lead' => 'lead'),
+        'post_season' => array('label' => 'Post-Season', 'accent' => 'blue', 'filter' => 1, 'order' => 70, 'lead' => 'lead'),
+        'pathway' => array('label' => 'Pathway', 'accent' => 'blue', 'filter' => 0, 'order' => 80, 'lead' => 'lead'),
     );
 
     /** Set by revoke_editor() around its own remove_role(), so the role watch doesn't report the Editors box. */
@@ -163,9 +161,8 @@ class TeamOversight_Coaches {
      * it): the role and the two wp-admin gates, the role watch, the
      * photo-file hooks (9.8: REST, embeds, attachment pages, and the
      * Coaches editor's uploads), the pages list's transient, and the
-     * changes made outside Coaches that alter a card (the team names, a
-     * photo file deleted in Media). Static and guarded, never from a
-     * constructor.
+     * change made outside Coaches that alters a card (a photo file deleted
+     * in Media). Static and guarded, never from a constructor.
      */
     public static function register_hooks() {
         static $done = false;
@@ -192,9 +189,7 @@ class TeamOversight_Coaches {
         add_action('save_post_post', array(__CLASS__, 'forget_pages'), 10, 2);
         add_action('deleted_post', array(__CLASS__, 'forget_pages'), 10, 2);
         add_action('trashed_post', array(__CLASS__, 'forget_pages'), 10, 2);
-        // Cards print team names and photo files, which change outside Coaches.
-        add_action('update_option_team_oversight_teams', array(__CLASS__, 'on_team_config_changed'), 10, 0);
-        add_action('update_option_team_oversight_team_meta', array(__CLASS__, 'on_team_config_changed'), 10, 0);
+        // Cards print photo files, which can be deleted outside Coaches.
         add_action('delete_attachment', array(__CLASS__, 'on_attachment_deleted'), 10, 1);
     }
 
@@ -227,7 +222,12 @@ class TeamOversight_Coaches {
         return $wpdb->prefix . 'team_coach_changes';
     }
 
-    /** Short name => CREATE statement, for the guarded create loop. Nothing existing is ever altered. */
+    /**
+     * Short name => CREATE statement, for the guarded create loop. The one
+     * change to an existing table is program_details (1.82.0), which
+     * migrate_database() adds to team_coach_profiles behind a SHOW COLUMNS
+     * check.
+     */
     public static function tables_sql() {
         return array(
             'team_coach_profiles' => self::profiles_table_sql(),
@@ -237,10 +237,14 @@ class TeamOversight_Coaches {
     }
 
     /**
-     * One row per coach, never deleted. user_id is the linked account (set
-     * only from a team place; NULL = none, any number of NULLs under the
-     * unique key). No email, phone or name snapshot: everything public is
-     * typed by the committee. version is the edit counter: an editor save
+     * One row per coach, never deleted. user_id (1.81.0) is never written
+     * here: NULL, any number of them under the unique key (only an account
+     * merge re-points one that isn't). No email, phone or name snapshot:
+     * everything public is typed by the committee. program_roles is JSON
+     * program key => role; program_details (1.82.0) is JSON program key =>
+     * which team, written alongside it, in a column of its own so a
+     * rollback to 1.81.x still reads the roles and simply ignores the
+     * teams. version is the edit counter: an editor save
      * that changes something (or an Update while published), Publish, Hide
      * and enforce_guard() raise it; Still correct (mark_checked(), which
      * stamps only checked_at) and an account merge's re-point of user_id
@@ -262,6 +266,7 @@ class TeamOversight_Coaches {
                 highlights text DEFAULT NULL,
                 playing_background varchar(150) NOT NULL DEFAULT '',
                 program_roles text DEFAULT NULL,
+                program_details text DEFAULT NULL,
                 photo_id bigint(20) unsigned DEFAULT NULL,
                 photo_cleared_id bigint(20) unsigned DEFAULT NULL,
                 consent_date date DEFAULT NULL,
@@ -280,10 +285,10 @@ class TeamOversight_Coaches {
     }
 
     /**
-     * The tick on one team place (1.83.0): keyed by team_assignments.id plus
-     * a snapshot of that row's season, team (bare code) and role when it was
-     * ticked. state is shown, off or cleared (with cleared_reason). Rows are
-     * never deleted; re-ticking updates the same row.
+     * Created in 1.81.0 for team ticks, and unused: team coaching is typed
+     * by hand, as programs (2 Nov 2026), so nothing reads or writes it. It
+     * stays because sites already have it and the account merge registers
+     * its account columns (shown_by, cleared_by, seen_by). Never dropped.
      */
     public static function ticks_table_sql() {
         global $wpdb;
@@ -313,8 +318,8 @@ class TeamOversight_Coaches {
     /**
      * The history: one row per change, with old and new values, NEVER pruned
      * (the activity log is), like team_assignment_changes. profile_id 0 is a
-     * club-wide event (programs, the editor role, announcing a season).
-     * recorded_by NULL = the daily check.
+     * club-wide event (programs, the editor role, a photo uploaded on the
+     * editor). recorded_by NULL = no signed-in account.
      */
     public static function changes_table_sql() {
         global $wpdb;
@@ -505,73 +510,6 @@ class TeamOversight_Coaches {
         return '';
     }
 
-    /** A team place's stop date, '' when it has none (NULL, blank or the zero date). */
-    private static function end_of($row) {
-        $end = isset($row->end_date) ? (string) $row->end_date : '';
-        return ($end === '' || $end === '0000-00-00') ? '' : $end;
-    }
-
-    /**
-     * Is a team_assignments row a current place on $today ('YYYY-MM-DD')?
-     * 2027+: active and no stop date, or one after today (the stop date is
-     * the first day off the team, and is_active lags the daily job). Earlier
-     * seasons: active and no end date, or one on or after today. A future
-     * start counts as current.
-     */
-    public static function place_is_current($row, $today) {
-        if (!$row || intval(isset($row->is_active) ? $row->is_active : 0) !== 1) {
-            return false;
-        }
-        $end = self::end_of($row);
-        if ($end === '') {
-            return true;
-        }
-        $season = isset($row->season) ? (string) $row->season : '';
-        return TeamOversight_Fees::timeline_applies($season) ? $end > $today : $end >= $today;
-    }
-
-    /**
-     * Does a place belong to the account? A place with an account id belongs
-     * only to that account; one without goes by email, and only when the
-     * account has one (the coach portal's identity rule, in PHP).
-     */
-    public static function place_matches_account($place, $account_id, $account_email) {
-        $place_user = intval(isset($place->user_id) ? $place->user_id : 0);
-        if ($place_user > 0) {
-            return $place_user === intval($account_id);
-        }
-        $account_email = (string) $account_email;
-        return $account_email !== '' && strtolower((string) (isset($place->email) ? $place->email : '')) === strtolower($account_email);
-    }
-
-    /**
-     * '' when a tick is live, else why not, checked in this order: removed
-     * (no place), changed (the place's season, team or role is not the
-     * tick's snapshot: this covers a change to a playing role), account (no
-     * linked account, or the place isn't the account's), ended (not
-     * current). $tick may carry the snapshot as season / team / role or,
-     * from a joined row, as t_season / t_team / t_role. Every reader of
-     * ticks and the daily check use this one function.
-     */
-    public static function tick_problem($tick, $place, $account_id, $account_email, $today) {
-        if (!$place || empty($place->id)) {
-            return 'removed';
-        }
-        foreach (array('season', 'team', 'role') as $field) {
-            $snap = isset($tick->{'t_' . $field}) ? $tick->{'t_' . $field} : (isset($tick->$field) ? $tick->$field : '');
-            if ((string) $snap !== (string) (isset($place->$field) ? $place->$field : '')) {
-                return 'changed';
-            }
-        }
-        if (intval($account_id) < 1 || !self::place_matches_account($place, $account_id, $account_email)) {
-            return 'account';
-        }
-        if (!self::place_is_current($place, (string) $today)) {
-            return 'ended';
-        }
-        return '';
-    }
-
     // ------------------------------------------------------------------
     // Readers: profiles
     // ------------------------------------------------------------------
@@ -601,7 +539,7 @@ class TeamOversight_Coaches {
     /**
      * The Profiles list: at most LIST_MAX rows, by public name, each with
      * account_id / account_email from the linked account (NULL when there is
-     * none or it is gone: used only to judge ticks, never printed). $filter
+     * none or it is gone: for the Account column only, never printed). $filter
      * is '' (all), shown, hidden, check (needs checking), consent (no
      * consent, or a parent's missing) or photo (waiting to be cleared); an
      * unknown filter is all. $search is matched against the public name.
@@ -630,7 +568,7 @@ class TeamOversight_Coaches {
         ));
         $rows = is_array($rows) ? $rows : array();
         foreach ($rows as $row) {
-            self::$roles_cache[intval($row->id)] = $row->program_roles;
+            self::$roles_cache[intval($row->id)] = array($row->program_roles, isset($row->program_details) ? $row->program_details : null);
         }
         return $rows;
     }
@@ -696,15 +634,59 @@ class TeamOversight_Coaches {
     }
 
     /**
-     * profile id => the grid role line for the Profiles list ("Lead coach,
-     * Junior Academy · Coach, Reds Social League"), drafts included, with the
-     * program parts in programs() order. The program roles come from the
-     * rows list_profiles() just read; ids it didn't read cost one query for
-     * all of them. Team parts (live ticks in $season, marked "(after Show
-     * YYYY)" while it isn't announced) join these from 1.83.0, when ticks
-     * exist.
+     * A profile's Which team per program (1.82.0), program key => text,
+     * keeping only programs that exist and text that isn't blank (from a
+     * row, its JSON, or a map). A card shows one only where the profile
+     * has a role on that program.
      */
-    public static function list_role_lines(array $profile_ids, $season) {
+    public static function program_details_of($row) {
+        $raw = is_object($row) ? (isset($row->program_details) ? $row->program_details : null) : $row;
+        $map = is_array($raw) ? $raw : json_decode((string) $raw, true);
+        $programs = self::programs();
+        $out = array();
+        foreach (is_array($map) ? $map : array() as $key => $detail) {
+            $key = (string) $key;
+            $detail = is_scalar($detail) ? trim((string) $detail) : '';
+            if (isset($programs[$key]) && $detail !== '') {
+                $out[$key] = $detail;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * The word for a role on a program: lead is the program's top role,
+     * Lead coach or Head coach as its lead says (LEAD_WORDS); coach and
+     * assistant are Coach and Assistant coach on every program. $program is
+     * a programs() entry or a program key (one that doesn't exist reads as
+     * Lead coach). '' for a role that isn't in PROGRAM_ROLES. The editor's
+     * role select, the cards, the Profiles list and History all use it.
+     */
+    public static function role_label($program, $role) {
+        $role = is_scalar($role) ? (string) $role : '';
+        if (!array_key_exists($role, self::PROGRAM_ROLES)) {
+            return '';
+        }
+        if ($role !== 'lead') {
+            return self::PROGRAM_ROLES[$role];
+        }
+        if (!is_array($program)) {
+            $programs = self::programs();
+            $program = is_scalar($program) && isset($programs[(string) $program]) ? $programs[(string) $program] : array();
+        }
+        $lead = isset($program['lead']) && is_scalar($program['lead']) ? (string) $program['lead'] : 'lead';
+        return isset(self::LEAD_WORDS[$lead]) ? self::LEAD_WORDS[$lead] : self::LEAD_WORDS['lead'];
+    }
+
+    /**
+     * profile id => the role line for the Profiles list ("Lead coach,
+     * Junior Academy · Head coach, State League (State League 2 Women)"),
+     * drafts included, with the parts in programs() order: each role's word
+     * (role_label()), its program and, when set, its Which team in
+     * brackets. The roles and teams come from the rows list_profiles() just
+     * read; ids it didn't read cost one query for all of them.
+     */
+    public static function list_role_lines(array $profile_ids) {
         global $wpdb;
         $ids = array();
         foreach ($profile_ids as $id) {
@@ -723,19 +705,21 @@ class TeamOversight_Coaches {
             }
         }
         if (!empty($missing)) {
-            $found = $wpdb->get_results('SELECT id, program_roles FROM ' . self::profiles_table() . ' WHERE id IN (' . implode(',', array_map('intval', $missing)) . ')');
+            $found = $wpdb->get_results('SELECT id, program_roles, program_details FROM ' . self::profiles_table() . ' WHERE id IN (' . implode(',', array_map('intval', $missing)) . ')');
             foreach (is_array($found) ? $found : array() as $row) {
-                self::$roles_cache[intval($row->id)] = $row->program_roles;
+                self::$roles_cache[intval($row->id)] = array($row->program_roles, $row->program_details);
             }
         }
         $programs = self::programs();
         $out = array();
         foreach ($ids as $id) {
-            $roles = self::program_roles_of(isset(self::$roles_cache[$id]) ? self::$roles_cache[$id] : null);
+            $cached = isset(self::$roles_cache[$id]) && is_array(self::$roles_cache[$id]) ? self::$roles_cache[$id] : array(null, null);
+            $roles = self::program_roles_of($cached[0]);
+            $details = self::program_details_of($cached[1]);
             $parts = array();
             foreach ($programs as $key => $program) {
                 if (isset($roles[$key])) {
-                    $parts[] = self::PROGRAM_ROLES[$roles[$key]] . ', ' . $program['label'];
+                    $parts[] = self::role_label($program, $roles[$key]) . ', ' . $program['label'] . (isset($details[$key]) ? ' (' . $details[$key] . ')' : '');
                 }
             }
             $out[$id] = implode(' · ', $parts);
@@ -744,14 +728,16 @@ class TeamOversight_Coaches {
     }
 
     // ------------------------------------------------------------------
-    // Readers: programs and the announced seasons
+    // Readers: programs
     // ------------------------------------------------------------------
 
     /**
      * The programs a profile can hold a role on: key => array(label, accent
-     * (blue | red), filter (0 | 1), order (0 to 999)), ordered by order then
-     * key. The saved list, or DEFAULT_PROGRAMS while it has never been
-     * saved. Keys never change once made.
+     * (blue | red), filter (0 | 1), order (0 to 999), lead (lead | head:
+     * what its top role is called, LEAD_WORDS; lead when it was saved
+     * without one)), ordered by order then key. The saved list, or
+     * DEFAULT_PROGRAMS while it has never been saved. Keys never change
+     * once made.
      */
     public static function programs() {
         $saved = get_option(self::PROGRAMS_OPTION, null);
@@ -770,6 +756,7 @@ class TeamOversight_Coaches {
                 'accent' => (isset($program['accent']) && $program['accent'] === 'red') ? 'red' : 'blue',
                 'filter' => empty($program['filter']) ? 0 : 1,
                 'order' => isset($program['order']) ? max(0, min(999, intval($program['order']))) : 0,
+                'lead' => (isset($program['lead']) && $program['lead'] === 'head') ? 'head' : 'lead',
             );
         }
         $keys = array_keys($out);
@@ -791,45 +778,18 @@ class TeamOversight_Coaches {
         return md5(serialize(get_option(self::PROGRAMS_OPTION)));
     }
 
-    /** The seasons whose team coaching is on the website: season => array(at, by), newest first. */
-    public static function announced() {
-        $saved = get_option(self::ANNOUNCED_OPTION, array());
-        $out = array();
-        foreach (is_array($saved) ? $saved : array() as $season => $entry) {
-            $season = (string) $season;
-            if (!self::valid_season($season)) {
-                continue;
-            }
-            $out[$season] = array(
-                'at' => is_array($entry) && isset($entry['at']) ? (string) $entry['at'] : '',
-                'by' => is_array($entry) && isset($entry['by']) ? intval($entry['by']) : 0,
-            );
-        }
-        krsort($out);
-        return $out;
-    }
-
-    public static function is_announced($season) {
-        $season = is_scalar($season) ? (string) $season : '';
-        if (!self::valid_season($season)) {
-            return false;
-        }
-        $announced = self::announced();
-        return isset($announced[$season]);
-    }
-
-    /** The newest announced season, or ''. */
-    public static function website_season() {
-        $seasons = array_keys(self::announced());
-        return empty($seasons) ? '' : (string) $seasons[0];
-    }
-
     // ------------------------------------------------------------------
     // The pages that show coaches, and asking the site's page cache to
     // refresh them (section 10)
     // ------------------------------------------------------------------
 
-    /** The attributes [club_coaches] takes, at their blank values (the shortcode's own shortcode_atts() defaults). */
+    /**
+     * The attributes [club_coaches] reads, at their blank values (the
+     * shortcode's own shortcode_atts() defaults): program and mode, plus
+     * team, group and season, which normalise_atts() refuses with a
+     * sentence (team lists are programs), so a page still holding one is
+     * flagged rather than drawn as the whole grid.
+     */
     private static function shortcode_defaults() {
         return array('program' => '', 'team' => '', 'group' => '', 'season' => '', 'mode' => '');
     }
@@ -839,15 +799,15 @@ class TeamOversight_Coaches {
      * title (plain text: the caller escapes it), url, uses), pages first,
      * then by id, at most PAGES_MAX. uses lists each [club_coaches] on the
      * page in order, as TeamOversight_Coaches_Public::normalise_atts()
-     * gives it (ok, problem, mode, program, teams, group, season) plus code
+     * gives it (ok, problem, mode, program) plus code
      * (the code line as typed) and unknown (the attribute names the
      * shortcode ignores, e.g. a misspelt one). A post whose text only looks
      * like one ([[club_coaches]], [club_coaches_x]) is left out.
      *
      * What was found on the pages is kept in PAGES_TRANSIENT (12 hours;
      * forget_pages() drops it whenever a page or post is saved, trashed or
-     * deleted); the uses are judged again on each request, so a program,
-     * team or season change shows at once. $fresh reads the pages again
+     * deleted); the uses are judged again on each request, so a program
+     * change shows at once. $fresh reads the pages again
      * and refills the transient. $store false (the public render, through
      * grid_url()) never writes: with the transient missing it reads the
      * pages for this request only, and the refill is left to a request
@@ -990,7 +950,7 @@ class TeamOversight_Coaches {
 
     /** One use as TeamOversight_Coaches_Public::normalise_atts() judges it, with every key it returns present. */
     private static function normalise_use(array $atts) {
-        $blank = array('ok' => false, 'problem' => '', 'mode' => '', 'program' => '', 'teams' => array(), 'group' => '', 'season' => '');
+        $blank = array('ok' => false, 'problem' => '', 'mode' => '', 'program' => '');
         if (!class_exists('TeamOversight_Coaches_Public')) {
             $blank['problem'] = 'The coach lists aren\'t available on this site.';
             return $blank;
@@ -1000,21 +960,19 @@ class TeamOversight_Coaches {
     }
 
     /**
-     * Is this use the Our coaches page: a grid that names no program, team
-     * or group (so its filter buttons are there)? A line with a setting the
+     * Is this use the Our coaches page: a grid that names no program (so
+     * its filter buttons are there)? A line with a setting the
      * shortcode ignores (a misspelt program="...") isn't: it draws the whole
      * grid by mistake, and To do flags it.
      */
     private static function is_grid_use(array $use) {
         return !empty($use['ok']) && empty($use['unknown']) && isset($use['mode']) && $use['mode'] === 'grid'
-            && (string) (isset($use['program']) ? $use['program'] : '') === ''
-            && empty($use['teams'])
-            && (string) (isset($use['group']) ? $use['group'] : '') === '';
+            && (string) (isset($use['program']) ? $use['program'] : '') === '';
     }
 
     /**
      * The address of the Our coaches page: the first page in pages() with
-     * a grid use that names no program, team or group (a filtered grid has
+     * a grid use that names no program (a filtered grid has
      * no filter buttons, so the strips' #key links would find none), or ''.
      * The strips' Meet all our coaches link and the cards' name links go
      * here. $store as pages(): the public render passes false, so it never
@@ -1077,8 +1035,8 @@ class TeamOversight_Coaches {
 
     /**
      * Ask for the coach pages to be refreshed at the end of this request.
-     * $reason is a short code (published, hidden, profile, programs, teams,
-     * photo, pages, manual) passed on to murvc_coaches_changed. However many
+     * $reason is a short code (published, hidden, profile, programs, photo,
+     * pages, manual) passed on to murvc_coaches_changed. However many
      * writers queue one in a request (a bulk Hide of 20 profiles), each
      * page is refreshed once.
      */
@@ -1132,11 +1090,6 @@ class TeamOversight_Coaches {
             return self::result(true, 'warning', $asked, array('Nothing connects the site\'s page cache to Coach bios yet, so visitors can see an old copy until it expires on its own. Ask an administrator to set up the coach-pages refresh.'));
         }
         return self::result(true, 'success', $asked . ' Visitors see the new cards within a few minutes.');
-    }
-
-    /** update_option_team_oversight_teams / _team_meta: team names are on the cards, so refresh the coach pages. */
-    public static function on_team_config_changed() {
-        self::queue_purge('teams');
     }
 
     /**
@@ -1332,6 +1285,7 @@ class TeamOversight_Coaches {
             'highlights' => array(),
             'playing_background' => '',
             'program_roles' => array(),
+            'program_details' => array(),
             'display_mode' => 'full',
             'photo_id' => 0,
             'photo_cleared_id' => 0,
@@ -1348,7 +1302,8 @@ class TeamOversight_Coaches {
      * array($fields, $errors) out. $fields has the columns an editor sets
      * (public_name, intro, bio, accreditation, accreditation_other,
      * highlights (a list), playing_background, program_roles (key => role),
-     * display_mode, photo_id, photo_cleared_id, consent_date,
+     * program_details (key => which team), display_mode, photo_id,
+     * photo_cleared_id, consent_date,
      * consent_method, consent_scope, is_minor, guardian_date; blank = '' or
      * 0). The input uses the same names, except that the Photo cleared box
      * posts photo_cleared (photo_cleared_id is read when it is absent, so
@@ -1357,7 +1312,11 @@ class TeamOversight_Coaches {
      * A value over its limit is refused with a message naming the field and
      * the limit, never cut short. The photo counts as cleared only when the
      * posted cleared id equals it and it is an image in the Media Library.
-     * Contact details are refused in every public field.
+     * Contact details are refused in every public field, Which team
+     * included. A Which team is kept only beside a role: one typed for a
+     * program left blank is refused (Choose a role for ... or clear its
+     * team.). The fields come back with the errors too, so the editor's
+     * preview can draw what was typed.
      */
     public static function clean_fields(array $data) {
         $errors = array();
@@ -1431,12 +1390,14 @@ class TeamOversight_Coaches {
             $posted = is_array($decoded) ? $decoded : array();
         }
         $programs = self::programs();
+        $typed_roles = array();
         foreach (is_array($posted) ? $posted : array() as $key => $role) {
             $role = is_scalar($role) ? sanitize_key((string) $role) : '';
             if ($role === '') {
                 continue;
             }
             $key = (string) $key;
+            $typed_roles[$key] = true;
             if (!isset($programs[$key])) {
                 $errors[] = 'A program on this page no longer exists. Reload the page and set the roles again.';
             } elseif (!array_key_exists($role, self::PROGRAM_ROLES)) {
@@ -1446,6 +1407,30 @@ class TeamOversight_Coaches {
             }
         }
         ksort($fields['program_roles']);
+
+        // Which team (1.82.0): a line per program role, printed on the card in place of the program's
+        // name, so it is public text (DETAIL_MAX, no contact details). A role refused above has its own error.
+        $posted = isset($data['program_details']) ? $data['program_details'] : array();
+        if (is_string($posted)) {
+            $decoded = json_decode($posted, true);
+            $posted = is_array($decoded) ? $decoded : array();
+        }
+        foreach (is_array($posted) ? $posted : array() as $key => $detail) {
+            $detail = is_scalar($detail) ? sanitize_text_field((string) $detail) : '';
+            if ($detail === '') {
+                continue;
+            }
+            $key = (string) $key;
+            if (!isset($programs[$key])) {
+                $errors[] = 'A program on this page no longer exists. Reload the page and set the roles again.';
+            } elseif (isset($fields['program_roles'][$key])) {
+                $fields['program_details'][$key] = $detail;
+                $public['Which team for ' . $programs[$key]['label']] = array($detail, self::DETAIL_MAX);
+            } elseif (!isset($typed_roles[$key])) {
+                $errors[] = 'Choose a role for ' . $programs[$key]['label'] . ' or clear its team.';
+            }
+        }
+        ksort($fields['program_details']);
 
         $mode = $code('display_mode');
         if ($mode === '') {
@@ -1526,13 +1511,26 @@ class TeamOversight_Coaches {
             $f['program_roles'][(string) $key] = (string) $role;
         }
         ksort($f['program_roles']);
+        $details = json_decode((string) (isset($row->program_details) ? $row->program_details : ''), true);
+        $f['program_details'] = array();
+        foreach (is_array($details) ? $details : array() as $key => $detail) {
+            if (is_scalar($detail)) {
+                $f['program_details'][(string) $key] = (string) $detail;
+            }
+        }
+        ksort($f['program_details']);
         $f['photo_id'] = intval($row->photo_id);
         $f['photo_cleared_id'] = intval($row->photo_cleared_id);
         $f['is_minor'] = intval($row->is_minor);
         return $f;
     }
 
-    /** field => array(old, new) for every field that differs; the photo fields have events of their own. */
+    /**
+     * field => array(old, new) for every field that differs; the photo
+     * fields have events of their own. A Which team reads with its role, so
+     * a change to either records both (History then shows State League:
+     * Head coach (State League 2 Women)).
+     */
     private static function diff(array $old, array $new) {
         $out = array();
         foreach ($new as $key => $value) {
@@ -1544,6 +1542,11 @@ class TeamOversight_Coaches {
                 continue;
             }
             $out[$key] = array($was, $value);
+        }
+        if (isset($out['program_roles']) || isset($out['program_details'])) {
+            foreach (array('program_roles', 'program_details') as $key) {
+                $out[$key] = array(isset($old[$key]) ? $old[$key] : array(), isset($new[$key]) ? $new[$key] : array());
+            }
         }
         return $out;
     }
@@ -1560,6 +1563,7 @@ class TeamOversight_Coaches {
             'highlights' => "NULLIF(%s, '')",
             'playing_background' => '%s',
             'program_roles' => "NULLIF(%s, '')",
+            'program_details' => "NULLIF(%s, '')",
             'photo_id' => 'NULLIF(%d, 0)',
             'photo_cleared_id' => 'NULLIF(%d, 0)',
             'consent_date' => "NULLIF(%s, '')",
@@ -1570,14 +1574,14 @@ class TeamOversight_Coaches {
         );
     }
 
-    /** The values for column_sql(), in its order (highlights and program roles as JSON). */
+    /** The values for column_sql(), in its order (highlights, program roles and their teams as JSON). */
     private static function column_values(array $f) {
         $out = array();
         foreach (array_keys(self::column_sql()) as $column) {
             $value = $f[$column];
             if ($column === 'highlights') {
                 $value = empty($value) ? '' : (string) wp_json_encode(array_values($value));
-            } elseif ($column === 'program_roles') {
+            } elseif ($column === 'program_roles' || $column === 'program_details') {
                 ksort($value);
                 $value = empty($value) ? '' : (string) wp_json_encode($value);
             }
@@ -1591,7 +1595,7 @@ class TeamOversight_Coaches {
         $words = array(
             'public_name' => 'name', 'intro' => 'intro', 'bio' => 'bio', 'accreditation' => 'accreditation',
             'accreditation_other' => 'accreditation', 'highlights' => 'highlights', 'playing_background' => 'background',
-            'program_roles' => 'programs', 'display_mode' => 'display', 'consent_date' => 'consent', 'consent_method' => 'consent',
+            'program_roles' => 'programs', 'program_details' => 'programs', 'display_mode' => 'display', 'consent_date' => 'consent', 'consent_method' => 'consent',
             'consent_scope' => 'consent', 'is_minor' => 'consent', 'guardian_date' => 'consent', 'photo' => 'photo',
         );
         $out = array();
@@ -1654,16 +1658,11 @@ class TeamOversight_Coaches {
     /**
      * Make a new draft profile (version 1) from what an editor typed (the
      * posted fields, or clean_fields()' output: it is cleaned here again).
-     * Making one from a team place ($place_id, under the link lock) comes in
-     * 1.83.0; until then a place id is refused. Records created (the fields
-     * typed) and the photo events, and logs. Never inserts a tick. Warns
-     * when another profile has the same public name.
+     * Records created (the fields typed) and the photo events, and logs.
+     * Warns when another profile has the same public name.
      */
-    public static function create_profile(array $fields, $place_id, $actor) {
+    public static function create_profile(array $fields, $actor) {
         global $wpdb;
-        if (intval($place_id) > 0) {
-            return self::result(false, 'error', 'A profile can\'t be made from a team place yet. Use Add New.');
-        }
         list($clean, $errors) = self::clean_fields($fields);
         if (!empty($errors)) {
             return self::result(false, 'error', 'Nothing was saved.', $errors);
@@ -1806,7 +1805,7 @@ class TeamOversight_Coaches {
      * and say who changed the profile since, and when. That is whoever last
      * raised the version: every writer that raises it stamps updated_at and
      * its history row with one time, while Still correct (a bulk checked
-     * row) and the ticks leave the version alone, so their rows are skipped.
+     * row) leaves the version alone, so its rows are skipped.
      */
     private static function stale($id, array $clean, $actor) {
         global $wpdb;
@@ -1818,7 +1817,7 @@ class TeamOversight_Coaches {
             set_transient(self::DRAFT_PREFIX . intval($actor) . '_' . intval($id), $clean, 1800);
         }
         $last = $wpdb->get_row($wpdb->prepare(
-            'SELECT recorded_by FROM ' . self::changes_table() . " WHERE profile_id = %d AND recorded_at = %s AND event NOT LIKE 'tick\\_%%' AND NOT (event = 'checked' AND source = 'bulk') ORDER BY id DESC LIMIT 1",
+            'SELECT recorded_by FROM ' . self::changes_table() . " WHERE profile_id = %d AND recorded_at = %s AND NOT (event = 'checked' AND source = 'bulk') ORDER BY id DESC LIMIT 1",
             intval($id), (string) $fresh->updated_at
         ));
         $who = $last ? self::person_name($last->recorded_by) : 'someone';
@@ -1866,7 +1865,7 @@ class TeamOversight_Coaches {
     public static function set_status($id, $status, $actor, $source) {
         global $wpdb;
         $id = intval($id);
-        $source = in_array($source, array('editor', 'list', 'bulk', 'season'), true) ? $source : 'editor';
+        $source = in_array($source, array('editor', 'list', 'bulk'), true) ? $source : 'editor';
         $row = self::get_profile($id);
         if (!$row) {
             return self::result(false, 'error', 'That profile was not found. Reload the page.', array(), $id);
@@ -1966,11 +1965,11 @@ class TeamOversight_Coaches {
     /**
      * A new program's key, made from its label once and never changed:
      * lower-case letters, digits and _, unique with _2, _3... The Our coaches
-     * filter keys all and the TEAM_GROUPS keys count as taken, so a program
-     * called All or State League never shares a filter button with them.
+     * filter key all counts as taken, so a program called All never shares
+     * the All button's key.
      */
     private static function program_key($label, array $taken) {
-        $taken += array_fill_keys(array_merge(array('all'), array_keys(self::TEAM_GROUPS)), true);
+        $taken += array('all' => true);
         $base = preg_replace('/[^a-z0-9_]/', '', str_replace('-', '_', sanitize_title($label)));
         $base = $base === '' || ctype_digit($base) ? 'program' . ($base === '' ? '' : '_' . $base) : $base;
         $base = substr($base, 0, 30);
@@ -1983,7 +1982,7 @@ class TeamOversight_Coaches {
 
     /**
      * Save Programs and settings' program table. $rows is keyed by program
-     * key: array(label, accent, filter, order, remove) for an existing
+     * key: array(label, accent, filter, order, lead, remove) for an existing
      * program (one left out is kept as it is); any entry under a key that is
      * not an existing program, with a label, is a new program (its key is
      * made from the label, e.g. $rows['new'] = array('label' => ...,
@@ -1991,7 +1990,9 @@ class TeamOversight_Coaches {
      * $expect_hash (programs_hash() when the page was drawn), and refused
      * while a removed program still has a role on any profile. Labels are
      * required and at most 60 characters, accents blue or red, orders 0 to
-     * 999. Records programs_saved (each added and removed program's entry,
+     * 999, lead lead or head (what the top role is called: Lead coach or
+     * Head coach; blank keeps it, a new program is lead). Records
+     * programs_saved (each added and removed program's entry,
      * each changed one's old and new entry), logs and refreshes the coach
      * pages (labels, accents and filter buttons are on them).
      */
@@ -2028,7 +2029,12 @@ class TeamOversight_Coaches {
                 }
             }
             $filter = array_key_exists('filter', $row) ? (empty($row['filter']) ? 0 : 1) : $program['filter'];
-            return array('label' => $label, 'accent' => $accent, 'filter' => $filter, 'order' => $order);
+            $lead = isset($row['lead']) && is_scalar($row['lead']) && (string) $row['lead'] !== '' ? (string) $row['lead'] : $program['lead'];
+            if (!array_key_exists($lead, self::LEAD_WORDS)) {
+                $errors[] = 'Choose Lead coach or Head coach for ' . $label_name . '.';
+                $lead = $program['lead'];
+            }
+            return array('label' => $label, 'accent' => $accent, 'filter' => $filter, 'order' => $order, 'lead' => $lead);
         };
         foreach ($current as $key => $program) {
             $row = isset($rows[$key]) && is_array($rows[$key]) ? $rows[$key] : null;
@@ -2057,7 +2063,7 @@ class TeamOversight_Coaches {
             if ($label === '') {
                 continue;
             }
-            $defaults = array('label' => $label, 'accent' => 'blue', 'filter' => 1, 'order' => min(999, $last_order + 10));
+            $defaults = array('label' => $label, 'accent' => 'blue', 'filter' => 1, 'order' => min(999, $last_order + 10), 'lead' => 'lead');
             $program = $read($row, $defaults, $label);
             $new_key = self::program_key($label, array_merge($current, $next));
             $next[$new_key] = $program;
@@ -2431,14 +2437,12 @@ class TeamOversight_Coaches {
      * escapes it) and names profiles by #id or public name, accounts by
      * their display name (decoded once) and pages by their title, never an
      * email. The Editors links and the Media links are given to
-     * administrators only. $season is the focus season (the website season,
-     * else this year). A fixed number of queries, however many profiles,
-     * pages or uploads there are. Writes nothing (pages() may refill its own
-     * transient).
+     * administrators only. A fixed number of queries, however many
+     * profiles, pages or uploads there are. Writes nothing (pages() may
+     * refill its own transient).
      */
-    public static function todo($season) {
+    public static function todo() {
         global $wpdb;
-        $season = is_scalar($season) && self::valid_season((string) $season) ? (string) $season : (string) current_time('Y');
         $profiles = self::profiles_table();
         $changes = self::changes_table();
         $admin = current_user_can('manage_options') && current_user_can('promote_users');
@@ -2597,22 +2601,19 @@ class TeamOversight_Coaches {
             $rows[] = self::todo_row('same_name', 'warn', ($n === 2 ? 'Two' : $n) . ' profiles are called ' . $row->public_name . ': check they aren\'t the same person.', self::page_url('club-coaches', array('s' => $row->public_name)), 'Show them');
         }
 
-        // Shown profiles that appear on no page: no program role and no team shown in the focus season.
-        $team_sql = self::is_announced($season)
-            ? $wpdb->prepare('EXISTS (SELECT 1 FROM ' . self::ticks_table() . " t WHERE t.profile_id = p.id AND t.state = 'shown' AND t.season = %s)", $season)
-            : '0';
-        $shown = $wpdb->get_results("SELECT p.id, p.program_roles, $team_sql AS has_team FROM $profiles p WHERE p.status = 'published' AND " . self::guard_sql('p') . ' ORDER BY p.id LIMIT ' . self::LIST_MAX);
+        // Shown profiles that appear on no page: no program role (team lists are programs too).
+        $shown = $wpdb->get_results("SELECT p.id, p.program_roles FROM $profiles p WHERE p.status = 'published' AND " . self::guard_sql('p') . ' ORDER BY p.id LIMIT ' . self::LIST_MAX);
         $no_role = array();
         foreach (is_array($shown) ? $shown : array() as $row) {
-            if (intval($row->has_team) !== 1 && empty(self::program_roles_of($row))) {
+            if (empty(self::program_roles_of($row))) {
                 $no_role[] = intval($row->id);
             }
         }
         if (!empty($no_role)) {
             $n = count($no_role);
             $rows[] = self::todo_row('no_role', 'warn', $n === 1
-                ? '1 shown profile has no program role and no team shown, so it appears on no page.'
-                : $n . ' shown profiles have no program role and no team shown, so they appear on no page.', $n === 1 ? self::profile_url($no_role[0]) : $list('shown'), $n === 1 ? 'Open the profile' : 'Show them');
+                ? '1 shown profile has no program role, so it appears on no page.'
+                : $n . ' shown profiles have no program role, so they appear on no page.', $n === 1 ? self::profile_url($no_role[0]) : $list('shown'), $n === 1 ? 'Open the profile' : 'Show them');
         }
 
         // The pages that show coaches (1.82.0): the Our coaches page, code lines that show nothing, coach lists
