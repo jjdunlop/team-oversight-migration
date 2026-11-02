@@ -2855,6 +2855,10 @@ class TeamOversight_Admin {
                                         // A student category that isn't confirmed for
                                         // the season and no old institution to fall back on.
                                         $institution_short = 'Category not confirmed';
+                                    } elseif (is_scalar($institution1) && trim((string) $institution1) !== '') {
+                                        // No (or an unknown) category, and an old
+                                        // institution that isn't a university (Other).
+                                        $institution_short = 'Not student (old institution)';
                                     }
                                 } elseif ($institution1 === 'Melbourne University') {
                                     $institution_short = 'Melb Uni';
