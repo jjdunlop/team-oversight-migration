@@ -484,7 +484,7 @@ class TeamOversight_Coaches_Public {
      * could hold a focused link out of sight past the left edge, where the
      * browser can't scroll to it). The wrapper clips (overflow clip, so it is
      * no scroll container and keeps no offset) except while focus is in it,
-     * when it may scroll a focused card into view. For anyone whose device
+     * when it may scroll a focused card into view. Focus here means a link that matches :focus-visible, through :has() (1.83.1), so a mouse click or a tap never moves the row out from under the pointer, which broke every link in 1.83.0; a browser without :has() just keeps the row moving under keyboard focus. For anyone whose device
      * asks for reduced motion it stops, drops the copy and becomes a row
      * scrolled by hand. The loop has no gap only while the row is no wider
      * than one list (N x 312px, N x 272px under 600px wide: 1248px for four
@@ -768,8 +768,9 @@ class TeamOversight_Coaches_Public {
      * sliding the track by -50% moves it exactly one list and the loop joins
      * up; --murvc-cards sets the time (6s a card); it pauses on hover, and
      * keyboard focus in the track stops it at the start (so no focused link
-     * is held out of sight to the left); the loop wrapper clips, and scrolls
-     * only while focus is in it, so no offset outlives the focus; reduced
+     * is held out of sight to the left; :has(a:focus-visible), 1.83.1, so a
+     * mouse click never moves the row); the loop wrapper clips, and scrolls
+     * only while such focus is in it, so no offset outlives the focus; reduced
      * motion stops it, hides the copy and lets the row be scrolled by hand.
      * A row too short to loop scrolls by hand, from the keyboard too.
      */
@@ -817,7 +818,7 @@ class TeamOversight_Coaches_Public {
         .murvc-coaches--scroll{overflow-x:auto;overflow-y:hidden;padding-bottom:6px}
         .murvc-coaches--scroll:focus-visible{outline:2px solid var(--cc-blue);outline-offset:2px}
         .murvc-coaches--loop{overflow:hidden;overflow:clip;padding-bottom:0}
-        .murvc-coaches--loop:focus-within{overflow:hidden}
+        .murvc-coaches--loop:has(a:focus-visible){overflow:hidden}
         .murvc-coaches--scroll .murvc-coach-track{display:flex;width:max-content}
         .murvc-coaches--scroll .murvc-coach-list{flex:none;padding-right:12px}
         .murvc-coaches--scroll .murvc-coach-card{flex:0 0 300px;width:300px}
@@ -826,8 +827,8 @@ class TeamOversight_Coaches_Public {
         @keyframes murvc-coach-scroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
         .murvc-coaches--loop .murvc-coach-track{animation:murvc-coach-scroll calc(var(--murvc-cards) * 6s) linear infinite}
         .murvc-coaches--loop:hover .murvc-coach-track{animation-play-state:paused}
-        .murvc-coaches--loop .murvc-coach-track:focus-within{animation:none}
-        @media (prefers-reduced-motion:reduce){.murvc-coaches--loop,.murvc-coaches--loop:focus-within{overflow-x:auto;overflow-y:hidden;padding-bottom:6px}.murvc-coaches--loop .murvc-coach-track{animation:none}.murvc-coaches--scroll .murvc-coach-list[aria-hidden=true]{display:none}}
+        .murvc-coaches--loop .murvc-coach-track:has(a:focus-visible){animation:none}
+        @media (prefers-reduced-motion:reduce){.murvc-coaches--loop,.murvc-coaches--loop:has(a:focus-visible){overflow-x:auto;overflow-y:hidden;padding-bottom:6px}.murvc-coaches--loop .murvc-coach-track{animation:none}.murvc-coaches--scroll .murvc-coach-list[aria-hidden=true]{display:none}}
         </style>';
     }
 
