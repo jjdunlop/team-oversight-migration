@@ -44,8 +44,9 @@ if (!defined('ABSPATH')) {
  *    exception: the live preview puts the cards ajax_preview() answers with
  *    into the page as HTML. That HTML is the plugin's own render_card()
  *    output, every value in it escaped; it is parsed with DOMParser, any
- *    script element is dropped, and the parsed nodes are adopted (never
- *    innerHTML on a string). The problems beside it use textContent.
+ *    script element is dropped, and the parsed nodes are adopted (a string
+ *    is never assigned as an element's markup). The problems beside it use
+ *    textContent.
  */
 class TeamOversight_Coaches_Admin {
 
@@ -2073,7 +2074,8 @@ class TeamOversight_Coaches_Admin {
      * textContent only, except the preview's cards: ajax_preview() answers
      * with the plugin's own escaped render_card() HTML, which is parsed
      * with DOMParser, has any script element dropped and is adopted node by
-     * node (never innerHTML on a string). The problems use textContent.
+     * node (a string is never assigned as an element's markup). The
+     * problems use textContent.
      */
     private static function edit_script() {
         ?>
