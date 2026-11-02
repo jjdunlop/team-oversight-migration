@@ -479,11 +479,19 @@ class TeamOversight_Coaches_Public {
      * (tabindex -1, added to the plugin's own escaped copy), so keyboard and
      * screen-reader users meet each coach once, and styles() slides the
      * track left by one list's width, about six seconds a card, then starts
-     * again; it pauses while the pointer or keyboard focus is on it, and for
-     * anyone whose device asks for reduced motion it stops, drops the copy
-     * and becomes a row scrolled by hand. Fewer cards are a plain row that
-     * never moves. Then Meet all our coaches, as under a strip. CSS only: no
-     * script. '' for no cards.
+     * again; it pauses while the pointer is on it, and while keyboard focus
+     * is in the track it stops and goes back to the start (a paused track
+     * could hold a focused link out of sight past the left edge, where the
+     * browser can't scroll to it). The wrapper clips (overflow clip, so it is
+     * no scroll container and keeps no offset) except while focus is in it,
+     * when it may scroll a focused card into view. For anyone whose device
+     * asks for reduced motion it stops, drops the copy and becomes a row
+     * scrolled by hand. The loop has no gap only while the row is no wider
+     * than one list (N x 312px, N x 272px under 600px wide: 1248px for four
+     * cards), so it suits a content column, not a full-width layout. Fewer
+     * cards are a still row that never moves, with tabindex 0 (as a strip's
+     * region has) so it can be scrolled from the keyboard. Then Meet all our
+     * coaches, as under a strip. CSS only: no script. '' for no cards.
      */
     private static function render_scroll(array $cards, array $use) {
         $cards = array_values($cards);
@@ -505,7 +513,7 @@ class TeamOversight_Coaches_Public {
             // stop; the markup is the plugin's own escaped output, where every typed < is &lt;, so '<a ' is only a link.
             $track .= '<ul class="murvc-coach-list" aria-hidden="true">' . str_replace('<a ', '<a tabindex="-1" ', $items) . '</ul>';
         }
-        $html = '<div class="murvc-coaches murvc-coaches--scroll' . ($loop ? ' murvc-coaches--loop' : '') . '" role="region" aria-label="' . esc_attr($label) . '" style="' . esc_attr('--murvc-cards:' . $count) . '">'
+        $html = '<div class="murvc-coaches murvc-coaches--scroll' . ($loop ? ' murvc-coaches--loop' : '') . '" role="region" aria-label="' . esc_attr($label) . '" style="' . esc_attr('--murvc-cards:' . $count) . '"' . ($loop ? '' : ' tabindex="0"') . '>'
             . '<div class="murvc-coach-track">' . $track . '</div>';
         $grid = self::grid_url();
         if ($grid !== '') {
@@ -758,9 +766,12 @@ class TeamOversight_Coaches_Public {
      * (1.83.0, CSS only): cards of a fixed width (300px, 260px under 600px)
      * in a track as wide as its lists, each list ending in the 12px gap, so
      * sliding the track by -50% moves it exactly one list and the loop joins
-     * up; --murvc-cards sets the time (6s a card); it pauses on hover and
-     * focus, and reduced motion stops it, hides the copy and lets the row be
-     * scrolled by hand. A row too short to loop scrolls by hand.
+     * up; --murvc-cards sets the time (6s a card); it pauses on hover, and
+     * keyboard focus in the track stops it at the start (so no focused link
+     * is held out of sight to the left); the loop wrapper clips, and scrolls
+     * only while focus is in it, so no offset outlives the focus; reduced
+     * motion stops it, hides the copy and lets the row be scrolled by hand.
+     * A row too short to loop scrolls by hand, from the keyboard too.
      */
     public static function styles() {
         if (!empty(self::$printed['styles'])) {
@@ -804,7 +815,9 @@ class TeamOversight_Coaches_Public {
         .murvc-coaches p.murvc-coach-more{margin:6px 0 0;font-size:14px}
         .murvc-coach-all a{display:inline-block;padding:8px 16px;border:2px solid var(--cc-blue);border-radius:6px;color:var(--cc-blue);font-weight:700;text-decoration:none}
         .murvc-coaches--scroll{overflow-x:auto;overflow-y:hidden;padding-bottom:6px}
-        .murvc-coaches--loop{overflow:hidden;padding-bottom:0}
+        .murvc-coaches--scroll:focus-visible{outline:2px solid var(--cc-blue);outline-offset:2px}
+        .murvc-coaches--loop{overflow:hidden;overflow:clip;padding-bottom:0}
+        .murvc-coaches--loop:focus-within{overflow:hidden}
         .murvc-coaches--scroll .murvc-coach-track{display:flex;width:max-content}
         .murvc-coaches--scroll .murvc-coach-list{flex:none;padding-right:12px}
         .murvc-coaches--scroll .murvc-coach-card{flex:0 0 300px;width:300px}
@@ -812,8 +825,9 @@ class TeamOversight_Coaches_Public {
         .murvc-coaches--scroll .murvc-coach-all{position:sticky;left:0}
         @keyframes murvc-coach-scroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
         .murvc-coaches--loop .murvc-coach-track{animation:murvc-coach-scroll calc(var(--murvc-cards) * 6s) linear infinite}
-        .murvc-coaches--loop:hover .murvc-coach-track,.murvc-coaches--loop:focus-within .murvc-coach-track{animation-play-state:paused}
-        @media (prefers-reduced-motion:reduce){.murvc-coaches--loop{overflow-x:auto;overflow-y:hidden;padding-bottom:6px}.murvc-coaches--loop .murvc-coach-track{animation:none}.murvc-coaches--scroll .murvc-coach-list[aria-hidden=true]{display:none}}
+        .murvc-coaches--loop:hover .murvc-coach-track{animation-play-state:paused}
+        .murvc-coaches--loop .murvc-coach-track:focus-within{animation:none}
+        @media (prefers-reduced-motion:reduce){.murvc-coaches--loop,.murvc-coaches--loop:focus-within{overflow-x:auto;overflow-y:hidden;padding-bottom:6px}.murvc-coaches--loop .murvc-coach-track{animation:none}.murvc-coaches--scroll .murvc-coach-list[aria-hidden=true]{display:none}}
         </style>';
     }
 

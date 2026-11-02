@@ -1044,7 +1044,7 @@ class TeamOversight_Coaches_Admin {
             'Name only' => 'The website shows just their name and role: no photo, intro or bio.',
             'Strip' => 'A row of compact cards on a program\'s page, one per coach with a role on that program. It swipes sideways on a phone, and its Meet all our coaches link goes to the Our coaches page.',
             'Our coaches page' => 'The page holding [club_coaches]: every shown coach with a role, with filter buttons and Read more.',
-            'Home page scroller' => 'The line [club_coaches mode="scroll"]: every shown coach with a role in a row that scrolls slowly and loops (from four coaches), pausing while the pointer is on it.',
+            'Home page scroller' => 'The line [club_coaches mode="scroll"]: every shown coach with a role in a row that scrolls slowly and loops (from four coaches). It pauses while the pointer is on it, goes back to the start while keyboard focus is in it, and stays still for anyone whose device asks for less motion.',
             'Which team' => 'On a team program, the team a coach coaches (for example State League 2 Women). Their card shows it in place of the program name.',
             'Photo waiting' => 'A photo has been chosen but Photo cleared isn\'t ticked, so the card shows their initials.',
             'Needs checking' => 'A shown profile nobody has confirmed for ' . $months . ' months. Open it and click Update, or tick it in the list and choose Still correct.',
@@ -1843,7 +1843,7 @@ class TeamOversight_Coaches_Admin {
         self::$view['anchor'] = 'code';
         $lines = array(
             array('Our coaches page', 'every shown coach with a role, with filter buttons and Read more. Put it on one page only.', '[club_coaches]'),
-            array('Home page scroller', 'every shown coach with a role in a slowly scrolling row that loops, for the home page. It pauses while the pointer or keyboard is on it, and stays still for anyone whose device asks for less motion.', '[club_coaches mode="scroll"]'),
+            array('Home page scroller', 'every shown coach with a role in a slowly scrolling row that loops, for the home page. It pauses while the pointer is on it, goes back to the start while keyboard focus is in it, and stays still for anyone whose device asks for less motion.', '[club_coaches mode="scroll"]'),
         );
         foreach (TeamOversight_Coaches::programs() as $key => $program) {
             // Program keys match /^[a-z0-9_]{1,30}$/D (programs()), so the line needs no quoting beyond esc_attr().
