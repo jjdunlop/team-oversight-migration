@@ -64,8 +64,10 @@ if (!defined('ABSPATH')) {
  *    coaches page's
  *    address) and Refresh coach pages now (refresh_pages()).
  *    mark_checked(), saves of drafts and an upload on its own refresh
- *    nothing: no card changes. The public render never writes, not even
- *    the pages list's transient (pages() with $store false).
+ *    nothing: no card changes. The public render and the editor's live
+ *    preview never write, not even the pages list's transient: pages()
+ *    with $store false neither fills it nor lets core's get_transient()
+ *    delete an expired one (stored_pages()).
  *
  * Tables: team_coach_profiles (one row per coach, never deleted),
  * team_coach_ticks (created in 1.81.0 and unused) and team_coach_changes
@@ -225,8 +227,8 @@ class TeamOversight_Coaches {
     /**
      * Short name => CREATE statement, for the guarded create loop. The one
      * change to an existing table is program_details (1.82.0), which
-     * migrate_database() adds to team_coach_profiles behind a SHOW COLUMNS
-     * check.
+     * add_details_column() adds to team_coach_profiles behind a SHOW
+     * COLUMNS check.
      */
     public static function tables_sql() {
         return array(
@@ -234,6 +236,26 @@ class TeamOversight_Coaches {
             'team_coach_ticks' => self::ticks_table_sql(),
             'team_coach_changes' => self::changes_table_sql(),
         );
+    }
+
+    /**
+     * 1.82.0: add program_details to a team_coach_profiles table made
+     * before it (a 1.81.x site), right after program_roles, as
+     * tables_sql() has it. Guarded by SHOW TABLES and SHOW COLUMNS, so it
+     * runs once: a normal load issues no ALTER, and a fresh table (which
+     * tables_sql() makes with the column) is left alone. Nothing is
+     * backfilled. migrate_database() calls it on every load, and
+     * create_tables() and team_oversight_create_tables() (activation) call
+     * it before their dbDelta(), whose own ADD COLUMN would put the column
+     * at the end of the table. Returns whether it added the column.
+     */
+    public static function add_details_column() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'team_coach_profiles';
+        if (!$wpdb->get_var("SHOW TABLES LIKE '{$table}'") || !empty($wpdb->get_results("SHOW COLUMNS FROM {$table} LIKE 'program_details'"))) {
+            return false;
+        }
+        return $wpdb->query("ALTER TABLE {$table} ADD COLUMN program_details text DEFAULT NULL AFTER program_roles") !== false;
     }
 
     /**
@@ -446,11 +468,6 @@ class TeamOversight_Coaches {
     // The rules
     // ------------------------------------------------------------------
 
-    /** A season string: four digits. */
-    public static function valid_season($s) {
-        return is_string($s) && preg_match('/^\d{4}$/D', $s) === 1;
-    }
-
     /**
      * The publish guard as an SQL condition, for the table alias $a (one to
      * three lower-case letters, else it throws). No placeholders. Every
@@ -525,21 +542,11 @@ class TeamOversight_Coaches {
         return $row ? $row : null;
     }
 
-    /** The profile linked to that account, or null. */
-    public static function profile_for_account($user_id) {
-        global $wpdb;
-        $user_id = intval($user_id);
-        if ($user_id < 1) {
-            return null;
-        }
-        $row = $wpdb->get_row($wpdb->prepare('SELECT * FROM ' . self::profiles_table() . ' WHERE user_id = %d LIMIT 1', $user_id));
-        return $row ? $row : null;
-    }
-
     /**
      * The Profiles list: at most LIST_MAX rows, by public name, each with
-     * account_id / account_email from the linked account (NULL when there is
-     * none or it is gone: for the Account column only, never printed). $filter
+     * account_id, the linked account's id (NULL when there is none or it is
+     * gone: for the Account column only; Coach bios never links one, so it
+     * is NULL unless a link was made outside Coach bios). $filter
      * is '' (all), shown, hidden, check (needs checking), consent (no
      * consent, or a parent's missing) or photo (waiting to be cleared); an
      * unknown filter is all. $search is matched against the public name.
@@ -560,7 +567,7 @@ class TeamOversight_Coaches {
         }
         $args[] = self::LIST_MAX;
         $rows = $wpdb->get_results($wpdb->prepare(
-            'SELECT p.*, u.ID AS account_id, u.user_email AS account_email FROM ' . self::profiles_table() . " p
+            'SELECT p.*, u.ID AS account_id FROM ' . self::profiles_table() . " p
              LEFT JOIN {$wpdb->users} u ON u.ID = p.user_id"
             . (empty($where) ? '' : ' WHERE ' . implode(' AND ', $where))
             . ' ORDER BY p.public_name, p.id LIMIT %d',
@@ -808,10 +815,12 @@ class TeamOversight_Coaches {
      * forget_pages() drops it whenever a page or post is saved, trashed or
      * deleted); the uses are judged again on each request, so a program
      * change shows at once. $fresh reads the pages again
-     * and refills the transient. $store false (the public render, through
-     * grid_url()) never writes: with the transient missing it reads the
-     * pages for this request only, and the refill is left to a request
-     * that may write (a Coach bios screen's load_page(), run_purge(), and
+     * and refills the transient. $store false (the public render and the
+     * editor's live preview, through grid_url()) never writes: it reads the
+     * transient through stored_pages(), so an expired one is not deleted
+     * either, and with the transient missing or expired it reads the pages
+     * for this request only. The refill is left to a request that may
+     * write (a Coach bios screen's load_page(), run_purge(), and
      * refill_pages() at the end of the request that changed a page).
      * Cached for the request.
      */
@@ -819,7 +828,7 @@ class TeamOversight_Coaches {
         if (!$fresh && self::$pages !== null) {
             return self::$pages;
         }
-        $found = $fresh ? false : get_transient(self::PAGES_TRANSIENT);
+        $found = $fresh ? false : ($store ? get_transient(self::PAGES_TRANSIENT) : self::stored_pages());
         if (!is_array($found)) {
             $found = self::read_pages();
             if ($store) {
@@ -855,6 +864,28 @@ class TeamOversight_Coaches {
         }
         self::$pages = $out;
         return $out;
+    }
+
+    /**
+     * The pages list's transient for a request that writes nothing (pages()
+     * with $store false): what get_transient() would return, or false for
+     * one that is missing or expired, but never removing anything. Core's
+     * get_transient() deletes an expired transient's two option rows as it
+     * reads it when the site has no persistent object cache, so in that
+     * case this reads the timeout and the value as plain options and
+     * leaves an expired list for a request that may write to drop or fill.
+     * With a persistent object cache get_transient() only reads the cache,
+     * and the cache expires the entry by itself.
+     */
+    private static function stored_pages() {
+        if (wp_using_ext_object_cache()) {
+            return get_transient(self::PAGES_TRANSIENT);
+        }
+        $timeout = get_option('_transient_timeout_' . self::PAGES_TRANSIENT);
+        if ($timeout !== false && intval($timeout) < time()) {
+            return false;
+        }
+        return get_option('_transient_' . self::PAGES_TRANSIENT);
     }
 
     /**
@@ -975,8 +1006,9 @@ class TeamOversight_Coaches {
      * a grid use that names no program (a filtered grid has
      * no filter buttons, so the strips' #key links would find none), or ''.
      * The strips' Meet all our coaches link and the cards' name links go
-     * here. $store as pages(): the public render passes false, so it never
-     * refills the transient.
+     * here. $store as pages(): the public render (and with it the editor's
+     * live preview) passes false, so it never refills the transient, nor
+     * removes an expired one.
      */
     public static function grid_url($store = true) {
         foreach (self::pages(false, $store) as $page) {
@@ -1334,15 +1366,15 @@ class TeamOversight_Coaches {
         if ($fields['public_name'] === '') {
             $errors[] = 'Add a public name.';
         }
-        $public['The public name'] = array($fields['public_name'], self::NAME_MAX);
+        $public[] = array('The public name', $fields['public_name'], self::NAME_MAX);
         $fields['intro'] = $line('intro');
-        $public['The one-line intro'] = array($fields['intro'], self::INTRO_MAX);
+        $public[] = array('The one-line intro', $fields['intro'], self::INTRO_MAX);
         // The browser posts each line break as \r\n; count it as one character, as the editor's counter does.
         $bio = isset($data['bio']) && is_scalar($data['bio']) ? str_replace(array("\r\n", "\r"), "\n", (string) $data['bio']) : '';
         $fields['bio'] = sanitize_textarea_field($bio);
-        $public['The short bio'] = array($fields['bio'], self::BIO_MAX);
+        $public[] = array('The short bio', $fields['bio'], self::BIO_MAX);
         $fields['playing_background'] = $line('playing_background');
-        $public['The playing background'] = array($fields['playing_background'], self::BACKGROUND_MAX);
+        $public[] = array('The playing background', $fields['playing_background'], self::BACKGROUND_MAX);
 
         // Highlights: the first HIGHLIGHTS boxes; blanks are dropped.
         $posted = isset($data['highlights']) ? $data['highlights'] : array();
@@ -1356,7 +1388,7 @@ class TeamOversight_Coaches {
             $text = is_scalar($item) ? sanitize_text_field((string) $item) : '';
             if ($text !== '') {
                 $fields['highlights'][] = $text;
-                $public['Highlight ' . $n] = array($text, self::HIGHLIGHT_MAX);
+                $public[] = array('Highlight ' . $n, $text, self::HIGHLIGHT_MAX);
             }
         }
 
@@ -1377,7 +1409,7 @@ class TeamOversight_Coaches {
             } elseif (preg_match('/^(none|none yet|nil|n\/?a|unaccredited|not accredited|not yet|no|-+)$/i', $plain) === 1) {
                 $errors[] = 'Leave accreditation as Not set: the card simply shows no chip.';
             } else {
-                $public['The Other accreditation'] = array($other, self::OTHER_MAX);
+                $public[] = array('The Other accreditation', $other, self::OTHER_MAX);
             }
         }
         $fields['accreditation'] = $acc;
@@ -1425,7 +1457,8 @@ class TeamOversight_Coaches {
                 $errors[] = 'A program on this page no longer exists. Reload the page and set the roles again.';
             } elseif (isset($fields['program_roles'][$key])) {
                 $fields['program_details'][$key] = $detail;
-                $public['Which team for ' . $programs[$key]['label']] = array($detail, self::DETAIL_MAX);
+                // One check per program, never keyed by its label: two programs may share a label.
+                $public[] = array('Which team for ' . $programs[$key]['label'], $detail, self::DETAIL_MAX);
             } elseif (!isset($typed_roles[$key])) {
                 $errors[] = 'Choose a role for ' . $programs[$key]['label'] . ' or clear its team.';
             }
@@ -1481,16 +1514,17 @@ class TeamOversight_Coaches {
         $fields['consent_scope'] = $scope;
         $fields['is_minor'] = empty($data['is_minor']) ? 0 : 1;
 
-        // Lengths, then no contact details in anything the website prints.
-        foreach ($public as $label => $check) {
-            $length = mb_strlen($check[0], 'UTF-8');
-            if ($length > $check[1]) {
-                $errors[] = $label . ' is ' . $length . ' characters; the limit is ' . $check[1] . '.';
+        // Lengths, then no contact details in anything the website prints. $public is a list of
+        // array(label, text, limit), one per field, so every value is checked even when two labels match.
+        foreach ($public as $check) {
+            $length = mb_strlen($check[1], 'UTF-8');
+            if ($length > $check[2]) {
+                $errors[] = $check[0] . ' is ' . $length . ' characters; the limit is ' . $check[2] . '.';
             }
-            if (preg_match('/[^\s@]+@[^\s@]+\.[a-z]{2,}/i', $check[0]) === 1) {
+            if (preg_match('/[^\s@]+@[^\s@]+\.[a-z]{2,}/i', $check[1]) === 1) {
                 $errors[] = 'Public text can\'t contain an email address.';
             }
-            if (preg_match('/\+?\(?\d(?:[\s.\-()]*\d){8,}/', $check[0]) === 1) {
+            if (preg_match('/\+?\(?\d(?:[\s.\-()]*\d){8,}/', $check[1]) === 1) {
                 $errors[] = 'Public text can\'t contain a phone number. If those are years, separate them with commas or \'to\'.';
             }
         }
@@ -1511,10 +1545,13 @@ class TeamOversight_Coaches {
             $f['program_roles'][(string) $key] = (string) $role;
         }
         ksort($f['program_roles']);
+        // A Which team counts only beside its role, as on the card and the form: one left without a role
+        // (a role cleared while 1.81.x, which doesn't write this column, was running) reads as absent, so a
+        // save that changes nothing else stays Nothing changed.
         $details = json_decode((string) (isset($row->program_details) ? $row->program_details : ''), true);
         $f['program_details'] = array();
         foreach (is_array($details) ? $details : array() as $key => $detail) {
-            if (is_scalar($detail)) {
+            if (is_scalar($detail) && isset($f['program_roles'][(string) $key])) {
                 $f['program_details'][(string) $key] = (string) $detail;
             }
         }
@@ -2133,11 +2170,11 @@ class TeamOversight_Coaches {
         return wp_specialchars_decode((string) $user->display_name, ENT_QUOTES);
     }
 
-    /** A history row's person as plain text: the daily check for nobody, and a note for an account that has gone. */
+    /** A history row's person as plain text: the site itself when no account was signed in (recorded_by NULL), and a note for an account that has gone. */
     private static function person_name($user_id) {
         $user_id = intval($user_id);
         if ($user_id < 1) {
-            return 'the daily check';
+            return 'the site (no signed-in account)';
         }
         $user = get_userdata($user_id);
         return $user ? self::plain_name($user) : 'an account that no longer exists';
@@ -2289,7 +2326,8 @@ class TeamOversight_Coaches {
 
     /**
      * Add one history row: detail is JSON (NULL when empty), $actor 0 is
-     * stored as NULL (the daily check). $at defaults to now; a writer passes
+     * stored as NULL (no signed-in account: a change made while nobody was
+     * signed in, e.g. from WP-CLI). $at defaults to now; a writer passes
      * its own time so the row matches the times it stamped. Every writer
      * calls this, so it also drops the request caches.
      */
@@ -2588,13 +2626,8 @@ class TeamOversight_Coaches {
                 . ' Open each and press Update, or tick them on the list and choose Still correct.', $list('check'), 'Show them');
         }
 
-        // A linked account that was deleted.
-        $gone = $wpdb->get_col("SELECT p.id FROM $profiles p LEFT JOIN {$wpdb->users} u ON u.ID = p.user_id WHERE p.user_id IS NOT NULL AND u.ID IS NULL ORDER BY p.id LIMIT 20");
-        foreach (is_array($gone) ? $gone : array() as $id) {
-            $rows[] = self::todo_row('link_gone', 'bad', 'Profile #' . intval($id) . ' is linked to an account that no longer exists. Open it and click Unlink account.', self::profile_url($id), 'Open the profile');
-        }
-
-        // Two profiles with one name.
+        // Two profiles with one name. (There is no row for a linked account that was deleted: Coach bios never
+        // links a profile to an account, so there is no link to lose and nothing an editor could unlink.)
         $same = $wpdb->get_results("SELECT p.public_name, COUNT(*) AS n FROM $profiles p WHERE p.public_name <> '' GROUP BY p.public_name HAVING COUNT(*) > 1 ORDER BY p.public_name LIMIT 20");
         foreach (is_array($same) ? $same : array() as $row) {
             $n = intval($row->n);

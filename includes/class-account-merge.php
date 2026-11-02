@@ -934,13 +934,16 @@ class TeamOversight_Account_Merge {
         }
         // 1.81.0: a coach profile is one per account (unique user_id), so two
         // can't be re-pointed onto the kept account; say so here, rather than
-        // let the unique key fail the merge with no reason given.
+        // let the unique key fail the merge with no reason given. Coach bios
+        // never writes user_id (team coaching is typed by hand, as programs),
+        // so this can only fire for a link made outside it, which Coach bios
+        // can't undo either: the sentence sends it to the maintainer.
         $coach = $wpdb->prefix . 'team_coach_profiles';
         if (self::table_exists($coach)) {
             $in = implode(',', array_map('intval', array_keys($all_users)));
             $with = array_map('intval', $wpdb->get_col("SELECT user_id FROM `$coach` WHERE user_id IN ($in)"));
             if (count($with) > 1) {
-                $blockers[] = 'More than one of these accounts has a coach profile (#' . implode(', #', $with) . '). On Coaches, open the profile that should go, click Unlink account, then merge.';
+                $blockers[] = 'More than one of these accounts has a coach profile (#' . implode(', #', $with) . '). Coach bios has no way to unlink a profile from an account, so ask the maintainer to clear the extra link, then merge.';
             }
         }
         foreach (array('team_oversight_committee_access') as $option) {

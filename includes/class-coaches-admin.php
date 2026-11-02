@@ -1011,13 +1011,13 @@ class TeamOversight_Coaches_Admin {
                 </ol>
                 <p>Pages refresh within a few minutes of a change. If one still shows an old card after that, press Refresh coach pages now under <a href="<?php echo $pages; ?>">Pages using coach lists</a>.</p>
                 <h3>Team coaches (State League, Premier League, junior teams)</h3>
-                <p>Teams are programs. Add the program once on <a href="<?php echo $programs; ?>">Programs and settings</a> (for example State League, with Top role is called set to Head coach). Then on each coach's profile set their role on it and type their team under Which team (for example State League 2 Women): the card names the team in place of the program. Paste the program's line from <a href="<?php echo $code; ?>">Code lines</a> on the team's page. Never make a second profile for the same person.</p>
+                <p>Teams are programs. Add the program once on <a href="<?php echo $programs; ?>">Programs and settings</a> (for example State League, with Top role is called set to Head coach). Then on each coach's profile set their role on it and type their team under Which team (for example State League 2 Women): the card names the team in place of the program. When they stop, set the role back to blank and clear Which team (a team with no role beside it is refused). Paste the program's line from <a href="<?php echo $code; ?>">Code lines</a> on the team's page. Never make a second profile for the same person.</p>
                 <h3>A coach on several programs</h3>
                 <p>Keep one profile. In What they coach, set their role for each program: blank, the top role (Lead coach or Head coach, as the program calls it), Coach or Assistant coach.</p>
                 <h3>Update a bio or photo</h3>
                 <p>Open the profile from the list, change it and click Update. The History under the form shows who changed what, with the old text, so a mistake can be copied back.</p>
                 <h3>Retire or hide a coach</h3>
-                <p>For a program coach, set that program back to blank. To hide someone straight away, point at their name in the list (or Tab to it) and click Hide from website, or use Hide from website on their profile. Never delete a profile: there is no delete. To get rid of a photo file, ask an administrator to delete it in Media: Remove photo only takes it off the profile, and the file stays.</p>
+                <p>For a program coach, set that program back to blank and clear its Which team box. To hide someone straight away, point at their name in the list (or Tab to it) and click Hide from website, or use Hide from website on their profile. Never delete a profile: there is no delete. To get rid of a photo file, ask an administrator to delete it in Media: Remove photo only takes it off the profile, and the file stays.</p>
                 <h3>Reorder</h3>
                 <p>You don't need to. The top role (Lead coach or Head coach) comes first, then coaches, then assistants, then A to Z. To put someone first, give them the program's top role.</p>
                 <h3>New season</h3>
@@ -1150,7 +1150,9 @@ class TeamOversight_Coaches_Admin {
             }
             $v['highlights'] = TeamOversight_Coaches::highlights_of($profile);
             $v['program_roles'] = TeamOversight_Coaches::program_roles_of($profile);
-            $v['program_details'] = TeamOversight_Coaches::program_details_of($profile);
+            // A Which team only beside its role, as the card shows it: one left behind when a role was cleared
+            // under 1.81.x (which doesn't write the column) would otherwise sit in the form and refuse every save.
+            $v['program_details'] = array_intersect_key(TeamOversight_Coaches::program_details_of($profile), $v['program_roles']);
             $v['photo_id'] = (int) $profile->photo_id;
             $v['photo_cleared'] = $v['photo_id'] > 0 && (int) $profile->photo_cleared_id === $v['photo_id'];
             $v['is_minor'] = (int) $profile->is_minor;
@@ -1242,14 +1244,14 @@ class TeamOversight_Coaches_Admin {
             }
             $roles .= '<div class="mc-program"><label for="' . esc_attr('mc-role-' . $key) . '">' . self::h($label) . '</label> '
                 . '<select id="' . esc_attr('mc-role-' . $key) . '" name="' . esc_attr('program_roles[' . $key . ']') . '">' . self::options($choices, $current, '(blank)') . '</select>'
-                . '<span class="mc-program-team"><label for="' . esc_attr('mc-team-' . $key) . '">Which team (optional)</label> '
+                . '<span class="mc-program-team"><label for="' . esc_attr('mc-team-' . $key) . '">Which team (optional)<span class="screen-reader-text"> for ' . self::h($label) . '</span></label> '
                 . '<input type="text" class="regular-text" id="' . esc_attr('mc-team-' . $key) . '" name="' . esc_attr('program_details[' . $key . ']') . '" value="' . esc_attr($detail) . '"></span></div>';
         }
         if ($roles === '') {
             $roles = '<p>No programs yet: add one on <a href="' . esc_url(self::page_url(self::PAGE_SETTINGS) . '#programs') . '">Programs and settings</a>.</p>';
         }
         self::field_row('What they coach', '', $roles,
-            'The top role (Lead coach, or Head coach where the program calls it that) comes first on every page. Which team is optional, at most ' . TeamOversight_Coaches::DETAIL_MAX . ' characters, e.g. State League 2 Women: shown on the card instead of the program name. Keep one profile per person, whatever they coach.');
+            'The top role (Lead coach, or Head coach where the program calls it that) comes first on every page. Which team is optional, at most ' . TeamOversight_Coaches::DETAIL_MAX . ' characters, e.g. State League 2 Women: shown on the card instead of the program name. Setting a role back to blank? Clear its Which team too. Keep one profile per person, whatever they coach.');
 
         self::field_row('Show as', '',
             '<fieldset><legend class="screen-reader-text">Show as</legend>'
@@ -1323,7 +1325,8 @@ class TeamOversight_Coaches_Admin {
             $by = '';
             foreach ($history as $row) {
                 if ((string) self::v($row, 'recorded_at') === $checked) {
-                    $by = self::who(self::v($row, 'recorded_by', 0), 'the daily check');
+                    // No "by" for a check made with no signed-in account (recorded_by NULL).
+                    $by = self::who(self::v($row, 'recorded_by', 0), '');
                     break;
                 }
             }
@@ -1366,8 +1369,11 @@ class TeamOversight_Coaches_Admin {
      * page load input_from_values()): array('strip' => the strip card's
      * HTML, 'grid' => the grid card's, 'program' => the key of the program
      * the strip card is drawn for, 'label' => its label ('' and no strip
-     * card with no role), 'problems' => clean_fields()' errors, the
-     * sentences a save would be refused with). The fields go through
+     * card with no role), 'problems' => clean_fields()' errors, the field
+     * problems a save would be refused with; do_save()'s own check that a
+     * newly chosen photo is an image is not repeated, because it needs the
+     * saved row, and the photo picker offers images only). The fields go
+     * through
      * TeamOversight_Coaches::clean_fields(), and when it refuses them the
      * card is still drawn from what it cleaned, so the editor sees the card
      * and the problem together. The row is built in memory: id is the
@@ -1375,7 +1381,10 @@ class TeamOversight_Coaches_Admin {
      * clean_fields() reads it, photo_cleared_id is the photo when the Photo
      * cleared box is ticked for it, else 0. Nothing else is read from the
      * database: only programs(), the photo's attachment check and, for the
-     * strip card's name link, the Our coaches page's address. The cards are
+     * strip card's name link, the Our coaches page's address (read as the
+     * public render reads it: TeamOversight_Coaches::pages() with $store
+     * false, which neither fills the pages list's transient nor lets core
+     * delete an expired one). The cards are
      * TeamOversight_Coaches_Public::card_from_row() drawn by render_card()
      * with the context the shortcode gives it: the strip card as on the
      * strip of the first program (in programs() order) it has a role on,
@@ -1449,9 +1458,10 @@ class TeamOversight_Coaches_Admin {
      * (wp_unslash(), then posted_fields()) and the profile id (0 for a new
      * one), and answers preview_build()'s cards: success with strip, grid,
      * program (the label of the program the strip card is drawn for, ''
-     * with no role) and problems (clean_fields()' sentences, what a save
-     * would be refused with). Writes nothing: no option, transient, history
-     * row or log line.
+     * with no role) and problems (clean_fields()' sentences, the field
+     * problems a save would be refused with). Writes nothing: no option,
+     * transient (not even an expired pages list removed), history row or
+     * log line.
      */
     public static function ajax_preview() {
         if (!current_user_can(TeamOversight_Coaches::CAP)) {
@@ -1476,7 +1486,7 @@ class TeamOversight_Coaches_Admin {
      * preview_build(), the path the AJAX takes too: a strip card ("On
      * program pages") and a grid card ("On Our coaches") in the site's own
      * markup and styles, inside a box as wide as the site's content column,
-     * with what a save would be refused with above them. edit_script()
+     * with the field problems a save would be refused with above them. edit_script()
      * redraws both cards and the problems as the editor types; the nonce,
      * the address and the no-role sentence are on the box.
      */
@@ -1573,8 +1583,9 @@ class TeamOversight_Coaches_Admin {
     }
 
     /**
-     * History (8.5): the newest 50 changes, each with the date, who
-     * ("Daily check" for the daily job) and a plain sentence. Long old values
+     * History (8.5): the newest 50 changes, each with the date, who ("No
+     * signed-in account" for a row with no recorded_by) and a plain
+     * sentence. Long old values
      * sit in <details>, so an old bio can be copied back.
      */
     private static function render_history(array $rows) {
@@ -2075,7 +2086,11 @@ class TeamOversight_Coaches_Admin {
      * with the plugin's own escaped render_card() HTML, which is parsed
      * with DOMParser, has any script element dropped and is adopted node by
      * node (a string is never assigned as an element's markup). The
-     * problems use textContent.
+     * problems use textContent. The preview asks again only when the
+     * form's fields differ from the last request, keeps a grid card's Read
+     * more open across a redraw (its open property), and opens a link in
+     * the cards (a Full profile's name) in a new tab, so the editor never
+     * leaves a form with unsaved typing in it.
      */
     private static function edit_script() {
         ?>
@@ -2128,18 +2143,22 @@ class TeamOversight_Coaches_Admin {
                 // the save's action and nonce) to murvc_coaches_preview, and only the newest answer is drawn. While
                 // a request is out the cards stay as they are; a failed one says Preview unavailable and keeps them.
                 var form = byId('mc-profile-form'), box = byId('mc-preview'), refresh = function () {};
-                if (form && box && window.fetch && window.FormData && window.DOMParser) {
+                if (form && box && window.fetch && window.FormData && window.FormData.prototype.forEach && window.DOMParser) {
                     var url = window.ajaxurl || box.getAttribute('data-url'), nonce = box.getAttribute('data-nonce') || '',
                         stripList = byId('mc-preview-strip'), stripBox = byId('mc-preview-strip-box'), stripNote = byId('mc-preview-strip-note'),
                         grid = byId('mc-preview-grid'), problems = byId('mc-preview-problems'), problemList = byId('mc-preview-problem-list'),
-                        status = byId('mc-preview-status'), timer = null, latest = 0;
-                    // The plugin's own escaped card HTML, parsed and adopted node by node.
+                        status = byId('mc-preview-status'), timer = null, latest = 0, lastSent = null;
+                    // The plugin's own escaped card HTML, parsed and adopted node by node. A Read more the editor
+                    // opened stays open (only its open property is set), so the bio can be watched as it is typed.
                     var put = function (target, html) {
+                        var before = target.querySelector('details.murvc-coach-more'), keepOpen = !!(before && before.open);
                         var doc = new DOMParser().parseFromString('<!DOCTYPE html><html><head></head><body>' + String(html) + '</body></html>', 'text/html');
                         var scripts = doc.body.querySelectorAll('script');
                         for (var i = 0; i < scripts.length; i++) { scripts[i].parentNode.removeChild(scripts[i]); }
                         while (target.firstChild) { target.removeChild(target.firstChild); }
                         while (doc.body.firstChild) { target.appendChild(document.adoptNode(doc.body.firstChild)); }
+                        var after = target.querySelector('details.murvc-coach-more');
+                        if (after && keepOpen) { after.open = true; }
                     };
                     var show = function (data) {
                         var list = Array.isArray(data.problems) ? data.problems : [];
@@ -2160,11 +2179,18 @@ class TeamOversight_Coaches_Admin {
                     };
                     var send = function () {
                         timer = null;
-                        var mine = ++latest;
                         var body = new FormData(form);
                         body.delete('action');
                         body.delete('do');
                         body.delete('_wpnonce');
+                        // The same fields as the last request (a change event when a box loses focus, a photo chosen
+                        // again) ask for nothing, so the cards aren't redrawn for no change.
+                        var pairs = [];
+                        body.forEach(function (value, name) { pairs.push([name, String(value)]); });
+                        var key = JSON.stringify(pairs);
+                        if (key === lastSent) { return; }
+                        lastSent = key;
+                        var mine = ++latest;
                         body.append('action', 'murvc_coaches_preview');
                         body.append('_ajax_nonce', nonce);
                         fetch(url, { method: 'POST', body: body, credentials: 'same-origin' })
@@ -2176,6 +2202,7 @@ class TeamOversight_Coaches_Admin {
                             })
                             .catch(function () {
                                 if (mine !== latest) { return; }
+                                lastSent = null;
                                 status.textContent = 'Preview unavailable';
                                 status.hidden = false;
                             });
@@ -2186,6 +2213,16 @@ class TeamOversight_Coaches_Admin {
                     };
                     form.addEventListener('input', refresh);
                     form.addEventListener('change', refresh);
+                }
+                // The preview's cards are the site's, so a Full profile's name links to the Our coaches page.
+                // Following it here would leave the form and lose what was typed: it opens in a new tab instead.
+                if (box) {
+                    box.addEventListener('click', function (e) {
+                        var link = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+                        if (!link || !box.contains(link)) { return; }
+                        e.preventDefault();
+                        window.open(link.href, '_blank', 'noopener');
+                    });
                 }
 
                 var choose = byId('mc-photo-choose'), remove = byId('mc-photo-remove'), field = byId('mc-photo-id'),
@@ -2269,8 +2306,8 @@ class TeamOversight_Coaches_Admin {
         return wp_specialchars_decode((string) $text, ENT_QUOTES);
     }
 
-    /** Who made a change, as plain text: $none for the daily job (no account). */
-    private static function who($user_id, $none = 'Daily check') {
+    /** Who made a change, as plain text: $none when no account was signed in (recorded_by NULL, e.g. WP-CLI). */
+    private static function who($user_id, $none = 'No signed-in account') {
         $user_id = (int) $user_id;
         if ($user_id <= 0) {
             return $none;

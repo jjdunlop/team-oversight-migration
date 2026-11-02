@@ -260,6 +260,9 @@ function team_oversight_create_tables() {
     foreach (TeamOversight_Coaches::tables_sql() as $short => $sql) {
         $tables[$short] = $sql;
     }
+    // 1.82.0: on a 1.81.x site activated again, add program_details right after program_roles first (behind
+    // its SHOW COLUMNS check): dbDelta()'s own ADD COLUMN below would put it at the end of the table.
+    TeamOversight_Coaches::add_details_column();
 
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
 

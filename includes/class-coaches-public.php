@@ -334,8 +334,10 @@ class TeamOversight_Coaches_Public {
     /**
      * The Our coaches page's address ('' when no page has a grid), read
      * once per request and never stored: with the pages list's transient
-     * missing, the render reads the pages for this request only and leaves
-     * the refill to a request that may write.
+     * missing or expired, the render reads the pages for this request only
+     * and leaves the refill (and the removal of an expired list) to a
+     * request that may write. The editor's live preview reads it the same
+     * way.
      */
     private static function grid_url() {
         if (self::$grid_url === null) {
