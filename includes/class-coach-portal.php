@@ -4609,7 +4609,13 @@ class TeamOversight_Coach_Portal {
      * person's trial application for the season through
      * application_csv_fields(): Registration (the VV registration type,
      * the admin's override included), Previous Club, Last VVL Season, Level
-     * Last Played and International, all blank when they have none. A
+     * Last Played and International, all blank when they have none. They
+     * are player columns: a Confirmed row for a staff place (coach,
+     * assistant coach, team manager, supporter: not is_playing_place())
+     * leaves all six blank, since the portal shows staff only their name,
+     * role, email and mobile; a staff member who is also on the selection
+     * board as a player (Selected, Training Only, Tentative or Declined)
+     * still gets them on that row, as their player card shows them. A
      * confirmed player's application is found for the whole roster in one
      * query (roster_applications()), and the user meta cache is primed once
      * for every row's date of birth, so the export costs the same number of
@@ -4669,9 +4675,16 @@ class TeamOversight_Coach_Portal {
         ", $team, $season, '%' . $wpdb->esc_like('"' . $team . '"') . '%'));
 
         // A confirmed player's date of birth comes from their place's
-        // account, else (a place with no account) their application's.
+        // account, else (a place with no account) their application's. A
+        // staff row (not is_playing_place()) gets none: 0 here and no
+        // application, so its columns 9-14 stay blank and its meta is
+        // never loaded.
         $roster_user_ids = array();
         foreach ($roster as $i => $member) {
+            if (!self::is_playing_place($member)) {
+                $roster_user_ids[$i] = 0;
+                continue;
+            }
             $user_id = isset($member->user_id) ? intval($member->user_id) : 0;
             if ($user_id <= 0 && !empty($roster_apps[$i])) {
                 $user_id = intval($roster_apps[$i]->user_id);
@@ -4790,15 +4803,27 @@ class TeamOversight_Coach_Portal {
     }
 
     /**
-     * Each confirmed roster member's trial application for the season, for
-     * the team list CSV, in ONE query for the whole roster: keyed by the
-     * roster's index, null when they have none. Matched the way
-     * get_application_context() matches one person (the account when the
-     * place has one, user_id 0 never matching, or the email), preferring an
-     * application on their account over one found only by email; within
-     * each, the newest application (highest id) wins. Returns the columns
-     * application_csv_fields() and registration_type() read, plus id,
-     * user_id and email.
+     * Whether a get_roster() row is a playing place (playing_member or
+     * training_only). Every other role (coach, assistant coach, team
+     * manager, supporter) is staff: the team list CSV leaves a staff row's
+     * date of birth and application columns blank and never loads them, as
+     * the portal shows staff only their name, role, email and mobile.
+     */
+    private static function is_playing_place($member) {
+        return isset($member->role) && in_array($member->role, array('playing_member', 'training_only'), true);
+    }
+
+    /**
+     * Each confirmed player's trial application for the season, for the
+     * team list CSV, in ONE query for the whole roster: keyed by the
+     * roster's index, null when they have none and for every staff row
+     * (is_playing_place(): a staff member's application is never loaded).
+     * Matched the way get_application_context() matches one person for
+     * their card (the account when the place has one, user_id 0 never
+     * matching, or the email), preferring an application on their account
+     * over one found only by email; within each, the newest application
+     * (highest id) wins. Returns the columns application_csv_fields() and
+     * registration_type() read, plus id, user_id and email.
      */
     private function roster_applications($roster, $season) {
         global $wpdb;
@@ -4808,6 +4833,9 @@ class TeamOversight_Coach_Portal {
         $emails = array();
         foreach ($roster as $i => $member) {
             $found[$i] = null;
+            if (!self::is_playing_place($member)) {
+                continue;
+            }
             $user_id = isset($member->user_id) ? intval($member->user_id) : 0;
             if ($user_id > 0) {
                 $user_ids[$user_id] = $user_id;
@@ -4852,6 +4880,9 @@ class TeamOversight_Coach_Portal {
             }
         }
         foreach ($roster as $i => $member) {
+            if (!self::is_playing_place($member)) {
+                continue;
+            }
             $user_id = isset($member->user_id) ? intval($member->user_id) : 0;
             $email = strtolower((string) $member->email);
             if ($user_id > 0 && isset($by_user[$user_id])) {
@@ -5266,7 +5297,10 @@ class TeamOversight_Coach_Portal {
      * A confirmed player's trial application for the season (if any):
      * everything the applicant cards show — trial number, questionnaire,
      * notes, registration status — so confirmed players keep their full
-     * context on the roster.
+     * context on the roster. An application on their account wins over one
+     * found only by their email (people are keyed by user_id), then the
+     * newest: the same choice roster_applications() makes for the team
+     * list CSV, so the card and the CSV read the same application.
      */
     private function get_application_context($user_id, $email, $season) {
         global $wpdb;
@@ -5276,8 +5310,8 @@ class TeamOversight_Coach_Portal {
         $app = $wpdb->get_row($wpdb->prepare("
             SELECT * FROM {$wpdb->prefix}trial_applications
             WHERE season = %s AND ((user_id > 0 AND user_id = %d) OR email = %s)
-            ORDER BY id DESC LIMIT 1
-        ", $season, intval($user_id), $email));
+            ORDER BY (user_id > 0 AND user_id = %d) DESC, id DESC LIMIT 1
+        ", $season, intval($user_id), $email, intval($user_id)));
 
         if (!$app) {
             return null;
