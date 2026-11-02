@@ -7,7 +7,9 @@ if (!defined('ABSPATH')) {
 /**
  * Coaches on the website (1.82.0): the [club_coaches] shortcode, which draws
  * every public coach list from the coach profiles, the card renderer, the
- * style block and the Our coaches filter script. The Coaches editor's card
+ * style block and the Our coaches filter script. Since 1.83.0 it also
+ * draws the home page scroller (mode="scroll"): a slowly looping row of
+ * strip cards, moved by CSS alone, with no script. The Coaches editor's card
  * preview builds and draws its card with the same card_from_row() and
  * render_card(), so the preview and the site never differ.
  *
@@ -49,9 +51,12 @@ class TeamOversight_Coaches_Public {
      * The shortcode's attributes and their defaults (shortcode_atts()):
      * program and mode, plus team, group and season, which are read only so
      * that normalise_atts() can refuse them (team lists are programs now).
+     * Modes: strip, grid and (1.83.0) scroll, the home page scroller.
      */
     const ATTS = array('program' => '', 'team' => '', 'group' => '', 'season' => '', 'mode' => '');
-    const MODES = array('strip', 'grid');
+    const MODES = array('strip', 'grid', 'scroll');
+    /** A scroller loops (and so carries its aria-hidden copy) only from this many cards: fewer can't fill the row (1.83.0). */
+    const SCROLL_LOOP_MIN = 4;
     /** Role => rank in every ordering: the top role (Lead coach or Head coach) first, then Coach, then assistants. */
     const RANKS = array('lead' => 0, 'coach' => 1, 'assistant' => 2);
 
@@ -94,8 +99,10 @@ class TeamOversight_Coaches_Public {
     // ------------------------------------------------------------------
 
     /**
-     * [club_coaches]: a program strip ([club_coaches program="academy"]) or
-     * the Our coaches grid ([club_coaches], filter buttons included). Returns
+     * [club_coaches]: a program strip ([club_coaches program="academy"]),
+     * the Our coaches grid ([club_coaches], filter buttons included) or
+     * (1.83.0) the home page scroller ([club_coaches mode="scroll"]: every
+     * shown coach, or one program's with program). Returns
      * the HTML and never echoes; '' for a render inside wp_head (so it can't
      * use up the print-once styles), for any attribute problem (a team,
      * group or season attribute or mode="line" included) and for an empty
@@ -120,7 +127,10 @@ class TeamOversight_Coaches_Public {
             return '';
         }
         $cards = self::sort_cards($cards, array('mode' => $use['mode'], 'program' => $use['program']));
-        return $use['mode'] === 'strip' ? self::render_strip($cards, $use) : self::render_grid($cards, $use);
+        if ($use['mode'] === 'strip') {
+            return self::render_strip($cards, $use);
+        }
+        return $use['mode'] === 'scroll' ? self::render_scroll($cards, $use) : self::render_grid($cards, $use);
     }
 
     /**
@@ -130,9 +140,10 @@ class TeamOversight_Coaches_Public {
      * one plain sentence in problem (no page title in it; the To do panel
      * adds that) when: it has a team, group or season attribute, or
      * mode="line" (team lists are programs now: each sentence says so and
-     * gives the fix); program isn't a key of programs(); mode isn't strip
-     * or grid; a strip names no program. An empty mode is strip with a
-     * program, else grid (a grid with a program has no filter buttons).
+     * gives the fix); program isn't a key of programs(); mode isn't strip,
+     * grid or scroll; a strip names no program. An empty mode is strip with
+     * a program, else grid (a grid with a program has no filter buttons). A
+     * scroll (1.83.0) takes a program or none (none: every shown coach).
      * Program and mode are read case-insensitively. A failed use still
      * carries what was typed, for the Pages list.
      */
@@ -171,7 +182,7 @@ class TeamOversight_Coaches_Public {
             $out['mode'] = $mode;
         }
         if (!in_array($mode, self::MODES, true)) {
-            return $fail('Its mode ' . self::quoted($mode) . ' isn\'t strip or grid.');
+            return $fail('Its mode ' . self::quoted($mode) . ' isn\'t strip, grid or scroll.');
         }
         if ($mode === 'strip' && $program === '') {
             return $fail('A strip (mode="strip") needs a program.');
@@ -188,9 +199,11 @@ class TeamOversight_Coaches_Public {
 
     /**
      * Does this use list this card? (A normalise_atts() result that is ok,
-     * and a card from card_from_row().) A program use: a role on that
-     * program. No program (the grid): a role on any program. The shortcode
-     * selects with this, and so does the editor's Appears on.
+     * and a card from card_from_row().) A program use (a strip, a grid for
+     * one program, a scroll with a program): a role on that program. No
+     * program (the grid, or the scroller of every coach): a role on any
+     * program. The shortcode selects with this, and so does the editor's
+     * Appears on.
      */
     public static function card_in_use(array $card, array $use) {
         if (empty($use['ok'])) {
@@ -456,6 +469,52 @@ class TeamOversight_Coaches_Public {
     }
 
     /**
+     * The home page scroller (1.83.0): the cards of a strip (render_card()'s
+     * strip card, with the ctx a strip passes: the use's program, which is
+     * '' for every coach so each card shows its first role, and the index;
+     * plus eager, so the first three photos load at once as the grid's do)
+     * in one row, with --murvc-cards set to how many there are. From
+     * SCROLL_LOOP_MIN cards it loops (murvc-coaches--loop): the list is
+     * followed by an identical aria-hidden copy whose links take no tab stop
+     * (tabindex -1, added to the plugin's own escaped copy), so keyboard and
+     * screen-reader users meet each coach once, and styles() slides the
+     * track left by one list's width, about six seconds a card, then starts
+     * again; it pauses while the pointer or keyboard focus is on it, and for
+     * anyone whose device asks for reduced motion it stops, drops the copy
+     * and becomes a row scrolled by hand. Fewer cards are a plain row that
+     * never moves. Then Meet all our coaches, as under a strip. CSS only: no
+     * script. '' for no cards.
+     */
+    private static function render_scroll(array $cards, array $use) {
+        $cards = array_values($cards);
+        $count = count($cards);
+        if ($count === 0) {
+            return '';
+        }
+        $programs = self::programs();
+        $key = isset($use['program']) && is_string($use['program']) ? $use['program'] : '';
+        $label = ($key !== '' && isset($programs[$key])) ? trim($programs[$key]['label'] . ' coaches') : 'Our coaches';
+        $items = '';
+        foreach ($cards as $i => $card) {
+            $items .= self::render_card($card, array('program' => $key, 'index' => $i, 'eager' => true), 'strip');
+        }
+        $loop = $count >= self::SCROLL_LOOP_MIN;
+        $track = '<ul class="murvc-coach-list">' . $items . '</ul>';
+        if ($loop) {
+            // The copy fills the row while the first list slides out. Its links take no tab stop, so each coach is one
+            // stop; the markup is the plugin's own escaped output, where every typed < is &lt;, so '<a ' is only a link.
+            $track .= '<ul class="murvc-coach-list" aria-hidden="true">' . str_replace('<a ', '<a tabindex="-1" ', $items) . '</ul>';
+        }
+        $html = '<div class="murvc-coaches murvc-coaches--scroll' . ($loop ? ' murvc-coaches--loop' : '') . '" role="region" aria-label="' . esc_attr($label) . '" style="' . esc_attr('--murvc-cards:' . $count) . '">'
+            . '<div class="murvc-coach-track">' . $track . '</div>';
+        $grid = self::grid_url();
+        if ($grid !== '') {
+            $html .= '<p class="murvc-coach-all"><a href="' . esc_url($key !== '' ? $grid . '#' . $key : $grid) . '">' . esc_html('Meet all our coaches') . '</a></p>';
+        }
+        return self::styles() . $html . '</div>';
+    }
+
+    /**
      * The grid (Our coaches): the filter bar and the count line (only with
      * no program, and only when a filter button would match a card), then
      * every card with Read more. The filter script follows a grid with no
@@ -516,8 +575,10 @@ class TeamOversight_Coaches_Public {
      * program: its role comes first, and a strip shows only that role;
      * with none, or a card without it, the card's first role is used),
      * index (the card's place in the list: the first three grid photos load
-     * at once) and grid_url (optional; the Our coaches address the strip
-     * card's name and Read more link to, else grid_url()).
+     * at once), eager (optional, 1.83.0: true loads a strip card's photo at
+     * once too when its index is under three; the scroller passes it) and
+     * grid_url (optional; the Our coaches address the strip card's name and
+     * Read more link to, else grid_url()).
      *
      * A strip card is the face, the role, the name (linked to its grid card
      * for a Full profile when there is a grid page), the chip when set, the
@@ -541,6 +602,7 @@ class TeamOversight_Coaches_Public {
         $full = isset($card['display']) && $card['display'] === 'full';
         $program = isset($ctx['program']) && is_string($ctx['program']) ? $ctx['program'] : '';
         $index = isset($ctx['index']) ? max(0, intval($ctx['index'])) : 0;
+        $eager = $grid || !empty($ctx['eager']);
         $parts = self::role_parts($card, $program);
         if (!$grid) {
             $parts = array_slice($parts, 0, 1);
@@ -588,7 +650,7 @@ class TeamOversight_Coaches_Public {
                 $body .= '<p class="murvc-coach-more"><a href="' . esc_url($link) . '" aria-label="' . esc_attr('Read more about ' . $plain_name) . '">' . esc_html('Read more') . '</a></p>';
             }
         }
-        $inner = ($full ? self::face($card, $grid, $index) : '') . '<div class="murvc-coach-body">' . $body . '</div>';
+        $inner = ($full ? self::face($card, $grid, $index, $eager) : '') . '<div class="murvc-coach-body">' . $body . '</div>';
 
         if ($grid) {
             return '<article class="' . esc_attr($classes) . '" id="coach-' . $id . '" data-filters="' . esc_attr(implode(' ', self::filter_keys($card))) . '">' . $inner . '</article>';
@@ -601,16 +663,17 @@ class TeamOversight_Coaches_Public {
      * image), else the initials. alt is empty because the name is printed
      * beside it. wp_get_attachment_image(), never the post-thumbnail
      * functions, so the site's featured-image filters never run on it; its
-     * output is not escaped again.
+     * output is not escaped again. $eager: the first three ($index under 3)
+     * load at once (the grid, the scroller), every other photo lazily.
      */
-    private static function face(array $card, $grid, $index) {
+    private static function face(array $card, $grid, $index, $eager = false) {
         $photo = intval(isset($card['photo_id']) ? $card['photo_id'] : 0);
         $img = '';
         if ($photo > 0) {
             $img = (string) wp_get_attachment_image($photo, 'medium', false, array(
                 'class' => 'murvc-coach-img',
                 'alt' => '',
-                'loading' => ($grid && $index < 3) ? 'eager' : 'lazy',
+                'loading' => ($eager && $index < 3) ? 'eager' : 'lazy',
                 'decoding' => 'async',
                 'sizes' => $grid ? '88px' : '64px',
             ));
@@ -691,7 +754,13 @@ class TeamOversight_Coaches_Public {
      * theme's colour tokens with the site's colours as fallbacks. The
      * [hidden] rules are what let the filter hide a card. A strip shows
      * 2.3 cards across from 600px (the content column is about 840px wide),
-     * one compact card with the next cut off on a phone.
+     * one compact card with the next cut off on a phone. The scroller
+     * (1.83.0, CSS only): cards of a fixed width (300px, 260px under 600px)
+     * in a track as wide as its lists, each list ending in the 12px gap, so
+     * sliding the track by -50% moves it exactly one list and the loop joins
+     * up; --murvc-cards sets the time (6s a card); it pauses on hover and
+     * focus, and reduced motion stops it, hides the copy and lets the row be
+     * scrolled by hand. A row too short to loop scrolls by hand.
      */
     public static function styles() {
         if (!empty(self::$printed['styles'])) {
@@ -734,6 +803,17 @@ class TeamOversight_Coaches_Public {
         .murvc-coach-background{color:var(--cc-muted)}
         .murvc-coaches p.murvc-coach-more{margin:6px 0 0;font-size:14px}
         .murvc-coach-all a{display:inline-block;padding:8px 16px;border:2px solid var(--cc-blue);border-radius:6px;color:var(--cc-blue);font-weight:700;text-decoration:none}
+        .murvc-coaches--scroll{overflow-x:auto;overflow-y:hidden;padding-bottom:6px}
+        .murvc-coaches--loop{overflow:hidden;padding-bottom:0}
+        .murvc-coaches--scroll .murvc-coach-track{display:flex;width:max-content}
+        .murvc-coaches--scroll .murvc-coach-list{flex:none;padding-right:12px}
+        .murvc-coaches--scroll .murvc-coach-card{flex:0 0 300px;width:300px}
+        @media (max-width:599px){.murvc-coaches--scroll .murvc-coach-card{flex-basis:260px;width:260px}}
+        .murvc-coaches--scroll .murvc-coach-all{position:sticky;left:0}
+        @keyframes murvc-coach-scroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+        .murvc-coaches--loop .murvc-coach-track{animation:murvc-coach-scroll calc(var(--murvc-cards) * 6s) linear infinite}
+        .murvc-coaches--loop:hover .murvc-coach-track,.murvc-coaches--loop:focus-within .murvc-coach-track{animation-play-state:paused}
+        @media (prefers-reduced-motion:reduce){.murvc-coaches--loop{overflow-x:auto;overflow-y:hidden;padding-bottom:6px}.murvc-coaches--loop .murvc-coach-track{animation:none}.murvc-coaches--scroll .murvc-coach-list[aria-hidden=true]{display:none}}
         </style>';
     }
 

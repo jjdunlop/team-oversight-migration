@@ -1005,7 +1005,7 @@ class TeamOversight_Coaches_Admin {
                 </ol>
                 <h3>Put coaches on a page</h3>
                 <ol>
-                    <li>On <a href="<?php echo $code; ?>">Programs and settings, Code lines</a>, copy the line for the list: a program's strip (for example <code>[club_coaches program="academy"]</code> for the Junior Academy) or the Our coaches page (<code>[club_coaches]</code>, on one page only).</li>
+                    <li>On <a href="<?php echo $code; ?>">Programs and settings, Code lines</a>, copy the line for the list: a program's strip (for example <code>[club_coaches program="academy"]</code> for the Junior Academy), the Our coaches page (<code>[club_coaches]</code>, on one page only) or the home page scroller (<code>[club_coaches mode="scroll"]</code>).</li>
                     <li>Whoever edits the website's pages pastes it into a Shortcode block where the list should go (in the page editor: + then Shortcode) and updates the page. A strip shows nothing until a coach with a role on that program is shown, so it can go in early.</li>
                     <li><a href="<?php echo $pages; ?>">Pages using coach lists</a> then lists the page, and says if a line has a mistake. Each profile's Appears on, under its form, lists the pages showing it.</li>
                 </ol>
@@ -1044,6 +1044,7 @@ class TeamOversight_Coaches_Admin {
             'Name only' => 'The website shows just their name and role: no photo, intro or bio.',
             'Strip' => 'A row of compact cards on a program\'s page, one per coach with a role on that program. It swipes sideways on a phone, and its Meet all our coaches link goes to the Our coaches page.',
             'Our coaches page' => 'The page holding [club_coaches]: every shown coach with a role, with filter buttons and Read more.',
+            'Home page scroller' => 'The line [club_coaches mode="scroll"]: every shown coach with a role in a row that scrolls slowly and loops (from four coaches), pausing while the pointer is on it.',
             'Which team' => 'On a team program, the team a coach coaches (for example State League 2 Women). Their card shows it in place of the program name.',
             'Photo waiting' => 'A photo has been chosen but Photo cleared isn\'t ticked, so the card shows their initials.',
             'Needs checking' => 'A shown profile nobody has confirmed for ' . $months . ' months. Open it and click Update, or tick it in the list and choose Still correct.',
@@ -1515,9 +1516,10 @@ class TeamOversight_Coaches_Admin {
      * Appears on (8.5): each page in TeamOversight_Coaches::pages() with a
      * coach list that would list this profile, judged by the shortcode's own
      * TeamOversight_Coaches_Public::card_in_use() on card_of()'s card, and
-     * why: the Our coaches list for any public role, a program's strip (or
-     * grid) for a role on that program. A draft reads Once published it will
-     * appear on; with no page, the reason.
+     * why: the Our coaches list for any public role (the scroller of every
+     * coach likewise, 1.83.0), a program's strip (or grid, or scroller) for a
+     * role on that program. A draft reads Once published it will appear on;
+     * with no page, the reason.
      */
     private static function render_appears_on($profile) {
         $pages = TeamOversight_Coaches::pages();
@@ -1537,10 +1539,12 @@ class TeamOversight_Coaches_Admin {
                     continue;
                 }
                 $program = (string) self::v($use, 'program');
+                $mode = (string) self::v($use, 'mode');
                 if ($program === '') {
-                    $why[] = 'the Our coaches list';
+                    $why[] = $mode === 'scroll' ? 'the scrolling row of every coach' : 'the Our coaches list';
                 } elseif (isset($programs[$program], $roles[$program], TeamOversight_Coaches::PROGRAM_ROLES[$roles[$program]])) {
-                    $why[] = 'the ' . $programs[$program]['label'] . (self::v($use, 'mode') === 'grid' ? ' coaches list' : ' strip') . ', as ' . TeamOversight_Coaches::role_label($programs[$program], $roles[$program]);
+                    $kind = $mode === 'grid' ? ' coaches list' : ($mode === 'scroll' ? ' scrolling row' : ' strip');
+                    $why[] = 'the ' . $programs[$program]['label'] . $kind . ', as ' . TeamOversight_Coaches::role_label($programs[$program], $roles[$program]);
                 }
             }
             if (!empty($why)) {
@@ -1561,7 +1565,7 @@ class TeamOversight_Coaches_Admin {
                 foreach ($roles as $key => $role) {
                     $labels[] = isset($programs[$key]['label']) ? $programs[$key]['label'] : $key;
                 }
-                $reason = 'no page holds the Our coaches list or a strip for ' . (count($labels) === 1 ? 'its program' : 'its programs') . ' (' . implode(', ', $labels) . ')';
+                $reason = 'no page holds the Our coaches list, the home page scroller or a strip for ' . (count($labels) === 1 ? 'its program' : 'its programs') . ' (' . implode(', ', $labels) . ')';
             }
             echo '<p class="mc-text">' . self::h('Not on any page yet' . ($draft ? ', even once published' : '') . ': ' . $reason . '.') . ' Every page with a coach list is under ' . $settings . '.</p>';
             return;
@@ -1831,12 +1835,16 @@ class TeamOversight_Coaches_Admin {
 
     /**
      * #code: the ready-made code lines, each in a readonly box with a Copy
-     * button: the Our coaches page, and a strip per program (a team list is
-     * a program, so it has a line here like any other).
+     * button: the Our coaches page, the home page scroller (1.83.0), and a
+     * strip per program (a team list is a program, so it has a line here
+     * like any other).
      */
     private static function render_code_section() {
         self::$view['anchor'] = 'code';
-        $lines = array(array('Our coaches page', 'every shown coach with a role, with filter buttons and Read more. Put it on one page only.', '[club_coaches]'));
+        $lines = array(
+            array('Our coaches page', 'every shown coach with a role, with filter buttons and Read more. Put it on one page only.', '[club_coaches]'),
+            array('Home page scroller', 'every shown coach with a role in a slowly scrolling row that loops, for the home page. It pauses while the pointer or keyboard is on it, and stays still for anyone whose device asks for less motion.', '[club_coaches mode="scroll"]'),
+        );
         foreach (TeamOversight_Coaches::programs() as $key => $program) {
             // Program keys match /^[a-z0-9_]{1,30}$/D (programs()), so the line needs no quoting beyond esc_attr().
             $lines[] = array($program['label'] . ' strip', 'its coaches in a row of cards, for the ' . $program['label'] . ' page.', '[club_coaches program="' . $key . '"]');
@@ -1929,9 +1937,12 @@ class TeamOversight_Coaches_Admin {
         $mode = (string) self::v($use, 'mode');
         $program = (string) self::v($use, 'program');
         if ($program === '') {
-            return 'The Our coaches list, with filter buttons.';
+            return $mode === 'scroll' ? 'Every shown coach in a slowly scrolling row (the home page scroller).' : 'The Our coaches list, with filter buttons.';
         }
         $what = isset($programs[$program]['label']) ? (string) $programs[$program]['label'] : $program;
+        if ($mode === 'scroll') {
+            return 'The ' . $what . ' coaches in a slowly scrolling row.';
+        }
         return $mode === 'grid' ? 'A grid of the ' . $what . ' coaches, with no filter buttons.' : 'The ' . $what . ' strip.';
     }
 

@@ -994,7 +994,8 @@ class TeamOversight_Coaches {
      * Is this use the Our coaches page: a grid that names no program (so
      * its filter buttons are there)? A line with a setting the
      * shortcode ignores (a misspelt program="...") isn't: it draws the whole
-     * grid by mistake, and To do flags it.
+     * grid by mistake, and To do flags it. Nor is a scroller (mode="scroll",
+     * 1.83.0), even of every coach: it has no cards to link to.
      */
     private static function is_grid_use(array $use) {
         return !empty($use['ok']) && empty($use['unknown']) && isset($use['mode']) && $use['mode'] === 'grid'
