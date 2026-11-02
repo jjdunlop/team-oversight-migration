@@ -458,7 +458,9 @@ class TeamOversight_Coaches_Public {
     /**
      * The grid (Our coaches): the filter bar and the count line (only with
      * no program, and only when a filter button would match a card), then
-     * every card with Read more. The filter script follows the bar, once.
+     * every card with Read more. The filter script follows a grid with no
+     * program, once, whether or not it has a bar (1.82.1: it also opens the
+     * card a #coach-<id> address names).
      */
     private static function render_grid(array $cards, array $use) {
         $items = '';
@@ -471,7 +473,9 @@ class TeamOversight_Coaches_Public {
         }
         $bar = $use['program'] === '' ? self::filter_bar($have) : '';
         $html = '<div class="murvc-coaches murvc-coaches--grid">' . $bar . '<div class="murvc-coach-grid">' . $items . '</div></div>';
-        return self::styles() . $html . ($bar !== '' ? self::filter_script() : '');
+        // The script follows every grid with no program, bar or not (1.82.1): that is the page (grid_url()) a
+        // strip's #coach-<id> links land on, and the script opens that card's Read more.
+        return self::styles() . $html . ($use['program'] === '' ? self::filter_script() : '');
     }
 
     /**
@@ -513,12 +517,14 @@ class TeamOversight_Coaches_Public {
      * with none, or a card without it, the card's first role is used),
      * index (the card's place in the list: the first three grid photos load
      * at once) and grid_url (optional; the Our coaches address the strip
-     * card's name links to, else grid_url()).
+     * card's name and Read more link to, else grid_url()).
      *
      * A strip card is the face, the role, the name (linked to its grid card
-     * for a Full profile when there is a grid page), the chip when set and
-     * the intro; a grid card has every role on its role line and, for a Full
-     * profile with a bio, highlights or background, Read more. A Name only
+     * for a Full profile when there is a grid page), the chip when set, the
+     * intro and (1.82.1), when there is a grid page and has_more(), a Read
+     * more link to the same grid card; a grid card has every role on its
+     * role line and, for a Full profile when has_more(), the Read more
+     * details. has_more() decides both, so they never disagree. A Name only
      * card (--min) is the role and the name only. --red when the first role
      * shown is on a red program. The editor's preview calls
      * this with card_from_row()'s card and wraps it as the site does: a
@@ -556,11 +562,15 @@ class TeamOversight_Coaches_Public {
             }
             $body .= '<p class="murvc-coach-role">' . esc_html(implode(' · ', $texts)) . '</p>';
         }
-        $name = esc_html(isset($card['name']) ? (string) $card['name'] : '');
+        $plain_name = isset($card['name']) ? (string) $card['name'] : '';
+        $name = esc_html($plain_name);
+        // The strip card's links (a Full profile's name, and Read more) go to its card on the Our coaches page.
+        $link = '';
         if (!$grid && $full && $id > 0) {
             $url = array_key_exists('grid_url', $ctx) ? (string) $ctx['grid_url'] : self::grid_url();
             if ($url !== '') {
-                $name = '<a href="' . esc_url($url . '#coach-' . $id) . '">' . $name . '</a>';
+                $link = $url . '#coach-' . $id;
+                $name = '<a href="' . esc_url($link) . '">' . $name . '</a>';
             }
         }
         $body .= '<h3 class="murvc-coach-name">' . $name . '</h3>';
@@ -574,6 +584,8 @@ class TeamOversight_Coaches_Public {
             }
             if ($grid) {
                 $body .= self::more($card);
+            } elseif ($link !== '' && self::has_more($card)) {
+                $body .= '<p class="murvc-coach-more"><a href="' . esc_url($link) . '" aria-label="' . esc_attr('Read more about ' . $plain_name) . '">' . esc_html('Read more') . '</a></p>';
             }
         }
         $inner = ($full ? self::face($card, $grid, $index) : '') . '<div class="murvc-coach-body">' . $body . '</div>';
@@ -609,8 +621,27 @@ class TeamOversight_Coaches_Public {
         return '<div class="murvc-coach-face">' . $img . '</div>';
     }
 
-    /** Read more (grid, Full profile): the bio's paragraphs (a blank line starts one), the highlights and the playing background; '' when there are none. */
+    /**
+     * Has this card more to read than a strip shows (1.82.1)? A Full
+     * profile with a bio, a highlight or a playing background. The one
+     * condition for both the grid card's Read more details (more()) and the
+     * strip card's Read more link (render_card()), so the link never leads
+     * to a card with nothing to open.
+     */
+    public static function has_more(array $card) {
+        if (!isset($card['display']) || $card['display'] !== 'full') {
+            return false;
+        }
+        $bio = isset($card['bio']) && is_scalar($card['bio']) ? trim((string) $card['bio']) : '';
+        $highlights = isset($card['highlights']) && is_array($card['highlights']) ? $card['highlights'] : array();
+        return $bio !== '' || !empty($highlights) || !empty($card['background']);
+    }
+
+    /** Read more (grid, Full profile): the bio's paragraphs (a blank line starts one), the highlights and the playing background; '' unless has_more(). */
     private static function more(array $card) {
+        if (!self::has_more($card)) {
+            return '';
+        }
         $html = '';
         $bio = str_replace(array("\r\n", "\r"), "\n", isset($card['bio']) ? (string) $card['bio'] : '');
         foreach (preg_split('/\n[ \t]*\n/', $bio) as $para) {
@@ -701,17 +732,22 @@ class TeamOversight_Coaches_Public {
         .murvc-coach-more p{margin:6px 0}
         .murvc-coaches .murvc-coach-highlights{list-style:disc;margin:6px 0;padding-left:1.2em}
         .murvc-coach-played{color:var(--cc-muted)}
+        .murvc-coaches p.murvc-coach-more{margin:6px 0 0;font-size:14px}
         .murvc-coach-all a{display:inline-block;padding:8px 16px;border:2px solid var(--cc-blue);border-radius:6px;color:var(--cc-blue);font-weight:700;text-decoration:none}
         </style>';
     }
 
     /**
      * The grid's filter script, once per request, after the first grid
-     * with a filter bar: it shows the bar, filters cards with the hidden
-     * attribute and says how many show, and pre-selects a filter named by
-     * the address's #key (Meet all our coaches links to #academy). Filters
-     * are never query arguments, which would split the page cache; a
-     * #coach-12 link simply scrolls, because the page loads on All.
+     * with no program: it shows the bar (where there is one), filters cards
+     * with the hidden attribute and says how many show, and pre-selects a
+     * filter named by the address's #key (Meet all our coaches links to
+     * #academy). Filters are never query arguments, which would split the
+     * page cache. A #coach-12 address (a strip card's name or Read more,
+     * 1.82.1), on load and on hashchange, opens that grid card's Read more
+     * (its details element's open property), back on All first if a filter
+     * hid it, and scrolls the card into view; it is never read as a filter
+     * key (the key pattern has no hyphen).
      */
     private static function filter_script() {
         if (!empty(self::$printed['script'])) {
@@ -744,7 +780,22 @@ class TeamOversight_Coaches_Public {
                     var h = location.hash.slice(1);
                     if (/^[a-z0-9_]{1,30}$/.test(h) && bar.querySelector("button[data-filter=\"" + h + "\"]")) { pick(h); }
                 });
+                openCoach();
             }
+            function openCoach() {
+                var m = /^#coach-(\d+)$/.exec(location.hash);
+                if (!m) { return; }
+                var card = document.getElementById("coach-" + m[1]);
+                if (!card || !card.matches(".murvc-coaches--grid .murvc-coach-card")) { return; }
+                if (card.hidden) {
+                    var g = card.closest(".murvc-coaches--grid"), all = g ? g.querySelector(".murvc-coach-filters button[data-filter=\"all\"]") : null;
+                    if (all) { all.click(); }
+                }
+                var more = card.querySelector("details.murvc-coach-more");
+                if (more) { more.open = true; }
+                card.scrollIntoView();
+            }
+            window.addEventListener("hashchange", openCoach);
             if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", init); } else { init(); }
         })();
         </script>';
