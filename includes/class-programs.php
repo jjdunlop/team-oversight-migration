@@ -1471,7 +1471,8 @@ class TeamOversight_Programs {
     /**
      * Session roster: picker + attendee cards. $base_url decides where the
      * picker links (admin page or the front-end page hosting the shortcode).
-     * 1.84.0: a card with a part refund gets a "Part refunded $X" chip; its
+     * 1.84.0: a card with a part refund gets a "Part refunded $X" chip (just
+     * "Part refunded" when only places were refunded, for $0); its
      * PHP tags sit at column 0 so every other card prints exactly what it
      * did before (the golden harness compares the markup).
      */
@@ -1615,7 +1616,7 @@ class TeamOversight_Programs {
                                     </span>
                                 <?php endif; ?>
 <?php if (!empty($attendee['part_refunded'])): ?>
-                                    <span class="verdict-chip chip-refund" title="Part of this booking was refunded in the shop">Part refunded $<?php echo esc_html(number_format((float) $attendee['refunded_amount'], 2)); ?></span>
+                                    <span class="verdict-chip chip-refund" title="Part of this booking was refunded in the shop">Part refunded<?php echo esc_html((float) $attendee['refunded_amount'] >= 0.005 ? ' $' . number_format((float) $attendee['refunded_amount'], 2) : ''); ?></span>
 <?php endif; ?>
                                 <?php if (!$attendee['has_account']): ?>
                                     <span class="verdict-chip chip-guestorder" title="Ordered without a club account — no profile or emergency contact on file">No account</span>

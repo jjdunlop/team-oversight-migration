@@ -375,7 +375,7 @@ class TeamOversight_Program_Setup {
                 $problems[] = $name . ': the kind must be one of ' . implode(', ', self::KINDS) . '.';
                 continue;
             }
-            if ($weekday === null || $weekday > 7) {
+            if ($weekday === null || $weekday < 0 || $weekday > 7) {
                 $problems[] = $name . ': the weekday must be 0 (none) or 1 (Monday) to 7 (Sunday).';
                 continue;
             }

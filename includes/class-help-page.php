@@ -1450,8 +1450,8 @@ class TeamOversight_Help_Page {
         echo '<h3>Club Programs</h3>';
         self::ul(array(
             'A program\'s supervisors see its roll, with names, mobiles and emergency contacts. Anyone on the old club-wide supervisor list (from before per-program supervisors) sees every program, as administrators do.',
-            'The portal pages ([session_attendance] and the Mixed Dev Portal\'s [mixed_dev_attendance]) are sent with no-cache and noindex headers, so a page cache never keeps a copy and search engines are told not to list them. Tick each portal page\'s noindex box in the SEO plugin too, so it also leaves the sitemap. Put the shortcode on the page itself: inside a synced pattern or a widget the page is still not cached, but the headers can\'t be sent early.',
-            'A booking refunded in WooCommerce (every place, or the whole amount) leaves the roll and the figures; a part refund stays, marked Part refunded with the amount.',
+            'The portal pages ([session_attendance] and the Mixed Dev Portal\'s [mixed_dev_attendance]) are sent with no-cache and noindex headers, so a page cache never keeps a copy and search engines are told not to list them. Tick each portal page\'s noindex box in the SEO plugin too, so it also leaves the sitemap. Always put the shortcode on the page itself: inside a synced pattern or a widget the page cache plugin skips the page, but no no-cache headers are sent, so a proxy cache in front of the site may keep the logged-out copy.',
+            'A booking refunded in WooCommerce (every place, or the whole amount) leaves the roll and the figures; a part refund stays, marked Part refunded with the amount (no amount when only places were refunded, for $0).',
             'A program\'s history reads its current product and, from 1.85.0, the earlier products added on its Setup tab, each with its own way of dating a line, so a family that bought a month pass or a trial is not New here later.',
         ));
         self::close_section();
