@@ -875,7 +875,7 @@ class TeamOversight_Help_Page {
                 array(self::admin_link('team-oversight-readiness', 'Player Readiness'))),
             array('Coach portal', 'The coaches\' page on the website ([team_coach_portal]): the selection board, verdicts and notes, attendance, the team list with each player\'s fee standing, the roster export and the trial book.',
                 array(self::admin_link('team-oversight-committee', 'Committee Access'))),
-            array('Club Programs', 'Attendance for casual programs (Mixed Development and the like), read live from paid shop orders, with supervisors per program.',
+            array('Club Programs', 'Attendance for the club\'s casual programs (Mixed Development and, once set up, the Junior Academy), read live from paid shop orders. A program\'s history reads its current product and, from 1.85.0, the earlier products added on its Setup tab, so returning players are never counted as new. A fully refunded booking leaves the roll; a part refunded one stays, marked. Supervisors per program; the portal pages are never cached or shown to search engines.',
                 array(self::admin_link($programs_slug, 'Club Programs'))),
             array('Coach bios', 'One profile per coach, typed by the committee (public name, intro, bio, accreditation, highlights, a vetted photo and a role per program), with the coach\'s consent recorded on it: Publish is refused without it. Administrators and the Coach bios editor role (given on Programs and settings) work here; profiles and their history are never deleted.',
                 array(self::admin_link('club-coaches', 'Coach bios'))),
@@ -1445,6 +1445,14 @@ class TeamOversight_Help_Page {
             'Committee members can be given view-only or edit access to every team on ' . 'Committee Access' . '; admins always have edit access.',
             'Fees appear on the team list as percentages only, never dollar amounts.',
             'Emergency contacts are looked up by the member\'s account. Exact dates of birth are shown on purpose: coaches need them for Volleyball Victoria age cutoffs and exemptions.',
+        ));
+
+        echo '<h3>Club Programs</h3>';
+        self::ul(array(
+            'A program\'s supervisors see its roll, with names, mobiles and emergency contacts. Anyone on the old club-wide supervisor list (from before per-program supervisors) sees every program, as administrators do.',
+            'The portal pages ([session_attendance] and the Mixed Dev Portal\'s [mixed_dev_attendance]) are sent with no-cache and noindex headers, so a page cache or a search engine never keeps a copy. Put the shortcode on the page itself: inside a synced pattern or a widget the page is still not cached, but the headers can\'t be sent early.',
+            'A booking refunded in WooCommerce (every place, or the whole amount) leaves the roll and the figures; a part refund stays, marked Part refunded with the amount.',
+            'A program\'s history reads its current product and, from 1.85.0, the earlier products added on its Setup tab, each with its own way of dating a line, so a family that bought a month pass or a trial is not New here later.',
         ));
         self::close_section();
     }

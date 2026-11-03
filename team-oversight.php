@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), and coach profiles (Coaches).
- * Version: 1.83.1
+ * Version: 1.84.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.83.1');
+define('TEAM_OVERSIGHT_VERSION', '1.84.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -245,6 +245,8 @@ function team_oversight_create_tables() {
     $tables['team_assignment_changes'] = TeamOversight_Database::assignment_changes_table_sql();
     // 1.75.0: confirmed players' team positions.
     $tables['team_positions'] = TeamOversight_Database::team_positions_table_sql();
+    // 1.84.0: per-line ticks for dated Club Programs sessions (written from 1.85.0).
+    $tables['team_program_line_ticks'] = TeamOversight_Database::program_line_ticks_table_sql();
     // 1.76.0: offers and deposits (offers, the email outbox, the
     // not-selected hold, and the fee matrix upper limits).
     foreach (TeamOversight_Database::offer_tables_sql() as $short => $sql) {
@@ -301,6 +303,8 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-member-lookup.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-stats-page.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-programs.php';
+    // 1.84.0: each Club Program's booking setup (the reader, its validation and one writer; no hooks yet).
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-program-setup.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-committee-access.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coach-portal.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-payments.php';

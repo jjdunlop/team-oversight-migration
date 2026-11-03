@@ -139,6 +139,9 @@ class TeamOversight_Account_Merge {
             array('team_attendance', 'marked_by'),
             array('team_program_attendance', 'user_id'),
             array('team_program_attendance', 'marked_by'),
+            // 1.84.0: per-line ticks for dated Club Programs sessions.
+            array('team_program_line_ticks', 'user_id'),
+            array('team_program_line_ticks', 'marked_by'),
             array('team_trial_notes', 'author_id'),
             array('team_trial_selections', 'created_by'),
             array('team_trial_selections', 'offer_accepted_by'),
@@ -903,6 +906,7 @@ class TeamOversight_Account_Merge {
                     'team_memberships' => 'Membership grants',
                     'team_activity_log' => 'Activity log lines',
                     'team_program_attendance' => 'Club program ticks',
+                    'team_program_line_ticks' => 'Club program ticks',
                     'team_trial_notes' => 'Trial notes written',
                     'team_trial_selections' => 'Trial verdicts recorded',
                     'team_coach_profiles' => 'Coach profile link',

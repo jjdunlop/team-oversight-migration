@@ -610,6 +610,14 @@ class TeamOversight_Database {
             // tables_sql()); nothing is backfilled.
             TeamOversight_Coaches::add_details_column();
         }
+
+        // 1.84.0: one tick per order line for dated Club Programs sessions
+        // (written from 1.85.0). Never pruned, never dropped; the old
+        // team_program_attendance table is untouched.
+        if (!$wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_program_line_ticks'")) {
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta(self::program_line_ticks_table_sql());
+        }
     }
 
     /**
@@ -809,6 +817,34 @@ class TeamOversight_Database {
                 KEY user_id (user_id),
                 KEY email (email)
             ) $charset_collate;";
+    }
+
+    /**
+     * 1.84.0: attendance ticks for dated Club Programs sessions, one per
+     * order line (a line belongs to exactly one session, so siblings in one
+     * order and the two slots of one night each get their own tick). Written
+     * from 1.85.0. user_id and marked_by are in the account merge's
+     * id_columns(). Never pruned, never dropped. One definition, shared by
+     * migrate_database(), create_tables() and activation.
+     */
+    public static function program_line_ticks_table_sql() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+        return "CREATE TABLE {$wpdb->prefix}team_program_line_ticks (
+                id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+                program_key varchar(60) NOT NULL,
+                product_id bigint(20) unsigned NOT NULL,
+                session_date date NOT NULL,
+                order_item_id bigint(20) unsigned NOT NULL,
+                order_id bigint(20) unsigned NOT NULL,
+                user_id bigint(20) unsigned DEFAULT NULL,
+                attended tinyint(1) NOT NULL DEFAULT 1,
+                marked_by bigint(20) unsigned DEFAULT NULL,
+                marked_at datetime DEFAULT NULL,
+                PRIMARY KEY  (id),
+                UNIQUE KEY uniq_line (order_item_id),
+                KEY session_lookup (program_key, session_date)
+            ) ENGINE=InnoDB $charset_collate;";
     }
 
     public static function assignment_changes_table_sql() {
@@ -1028,6 +1064,8 @@ class TeamOversight_Database {
             ",
             'team_assignment_changes' => self::assignment_changes_table_sql(),
             'team_positions' => self::team_positions_table_sql(),
+            // 1.84.0: per-line ticks for dated Club Programs sessions.
+            'team_program_line_ticks' => self::program_line_ticks_table_sql(),
         );
         // 1.76.0: offers and deposits.
         foreach (self::offer_tables_sql() as $short => $sql) {

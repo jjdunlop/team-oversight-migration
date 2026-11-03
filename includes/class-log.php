@@ -72,6 +72,8 @@ class TeamOversight_Log {
                 'coach_profile' => 'Coach profile',
                 'coach_website' => 'Coaches on the website',
                 'coach_editor' => 'Coach bios editor role',
+                // Club Programs (1.84.0): setup saves (the writer exists from 1.84.0; its screen from 1.85.0).
+                'program_setup' => 'Club Programs setup',
             ),
         );
 

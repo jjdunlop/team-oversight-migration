@@ -16,13 +16,32 @@ if (!defined('ABSPATH')) {
  *
  * Admin: Club Programs → one sub-page per program, plus Settings.
  * Front end: [session_attendance] for supervisors who aren't WP admins.
+ *
+ * 1.84.0 (program bookings, readers and fixes): a program reads every one
+ * of its products (program_products(): current, prepared, earlier, each
+ * with a kind), the parser reads full dates and month labels and tries
+ * only a product's listed years, refunded lines leave the roll and the
+ * figures (refund_state() is the ONE rule), history and stats read every
+ * product (get_program_history()), and both portal shortcodes are never
+ * cached or indexed (no_cache()).
  */
 class TeamOversight_Programs {
 
     const PROGRAMS_OPTION = 'team_oversight_programs';
     const SUPERVISORS_OPTION = 'team_oversight_program_supervisors';
+    /** 1.84.0: turns the refund rule off. For the golden harness only (it must then match 1.83.1 exactly). */
+    const REFUND_FILTER = 'murvc_program_refund_rule';
+    /** 1.84.0: the shortcodes that draw a supervisor portal (names, mobiles, emergency details). */
+    const PORTAL_SHORTCODES = array('session_attendance', 'mixed_dev_attendance');
+
+    /** Request caches (1.84.0), dropped by flush_program_caches(). */
+    private static $products_cache = array();
+    private static $history_cache = array();
 
     public function __construct() {
+        // 1.84.0: a page holding a portal shortcode is never cached or
+        // indexed. Static, so the admin's extra instance adds nothing twice.
+        add_action('template_redirect', array(__CLASS__, 'maybe_no_cache'), 9);
         // Attendance ticks post back and redirect (PRG) so a refresh never
         // re-submits; state is explicit, not a flip.
         add_action('template_redirect', array($this, 'maybe_handle_attendance'));
@@ -139,6 +158,94 @@ class TeamOversight_Programs {
             }
         }
         return $allowed;
+    }
+
+    // ------------------------------------------------------------------
+    // A program's products and their kinds (1.84.0)
+    // ------------------------------------------------------------------
+
+    /**
+     * How a product's order lines get their date: 'dated' (made by Club
+     * Manager, _murvc_session_product), else 'month' (a month attribute),
+     * else 'legacy_date' (the date label read with the weekday rule).
+     */
+    public static function detect_kind($product_id) {
+        $product_id = intval($product_id);
+        if ($product_id <= 0) {
+            return 'legacy_date';
+        }
+        if ((string) get_post_meta($product_id, '_murvc_session_product', true) === '1') {
+            return 'dated';
+        }
+        $attributes = get_post_meta($product_id, '_product_attributes', true);
+        if (is_array($attributes) && (isset($attributes['month']) || isset($attributes['pa_month']))) {
+            return 'month';
+        }
+        return 'legacy_date';
+    }
+
+    /**
+     * Every product of a program: the current one (team_oversight_programs),
+     * the prepared one and the earlier ones (the setup option, structurally
+     * clean), each once (the first role wins). Each is array(product_id,
+     * kind, weekday, years, role); years null means the current window, two
+     * years back to one ahead. Request cached.
+     */
+    public static function program_products($key) {
+        $key = (string) $key;
+        if (isset(self::$products_cache[$key])) {
+            return self::$products_cache[$key];
+        }
+        $list = array();
+        $seen = array();
+        $program = self::get_program($key);
+        if (is_array($program)) {
+            $weekday = self::get_program_weekday($program);
+            $current = isset($program['product_id']) && is_scalar($program['product_id']) ? intval($program['product_id']) : 0;
+            if ($current > 0) {
+                $list[] = array('product_id' => $current, 'kind' => self::detect_kind($current), 'weekday' => $weekday, 'years' => null, 'role' => 'current');
+                $seen[$current] = true;
+            }
+            if (class_exists('TeamOversight_Program_Setup')) {
+                $setup = TeamOversight_Program_Setup::get($key);
+                $prepared = intval($setup['prepared_product']);
+                if ($prepared > 0 && !isset($seen[$prepared])) {
+                    $list[] = array('product_id' => $prepared, 'kind' => self::detect_kind($prepared), 'weekday' => $weekday, 'years' => null, 'role' => 'prepared');
+                    $seen[$prepared] = true;
+                }
+                foreach ($setup['past_products'] as $past) {
+                    $pid = intval($past['product_id']);
+                    if ($pid <= 0 || isset($seen[$pid])) {
+                        continue;
+                    }
+                    $list[] = array('product_id' => $pid, 'kind' => $past['kind'], 'weekday' => $past['weekday'], 'years' => $past['years'], 'role' => 'past');
+                    $seen[$pid] = true;
+                }
+            }
+        }
+        self::$products_cache[$key] = $list;
+        return $list;
+    }
+
+    /** The kind of a program's current product ('' when there is no such program). */
+    public static function current_kind($key) {
+        foreach (self::program_products($key) as $product) {
+            if ($product['role'] === 'current') {
+                return $product['kind'];
+            }
+        }
+        return '';
+    }
+
+    /**
+     * Drop the request caches of program_products() and get_program_history().
+     * TeamOversight_Program_Setup::save() and save_settings() call it after
+     * they write; tests call it (with TeamOversight_Program_Setup::flush_cache())
+     * after changing a stand-in option.
+     */
+    public static function flush_program_caches() {
+        self::$products_cache = array();
+        self::$history_cache = array();
     }
 
     // ------------------------------------------------------------------
@@ -299,8 +406,10 @@ class TeamOversight_Programs {
      * Sessions for a program: every published variation's date attribute,
      * parsed to a real date so they sort and "today" can be found.
      * Returns array of array(label, date) sorted chronologically.
+     * $years (1.84.0): the years the labels belong to (an earlier product's
+     * list); null keeps the window of two years back to one ahead.
      */
-    public static function get_sessions($product_id, $weekday = 0) {
+    public static function get_sessions($product_id, $weekday = 0, $years = null) {
         global $wpdb;
 
         $rows = $wpdb->get_results($wpdb->prepare("
@@ -318,7 +427,7 @@ class TeamOversight_Programs {
             if (isset($sessions[$label])) {
                 continue;
             }
-            $date = self::parse_session_date($label, $year, $weekday);
+            $date = self::parse_session_date($label, $year, $weekday, $years);
             $sessions[$label] = array('label' => $label, 'date' => $date);
         }
 
@@ -338,19 +447,64 @@ class TeamOversight_Programs {
      * last season from this season's dates. Ties (impossible for a weekly
      * program, since weekdays shift each year) resolve to the year nearest
      * today, and anything that matches no candidate falls back to $year.
+     *
+     * 1.84.0: two shapes that carry their own year are read directly, before
+     * that rule (and ignore $years): "Sun 24 Jan 2027" (the labels Club
+     * Manager makes; the day name must match the date, else '') and
+     * "October 2026" (a month: the first of it). $years, when given, is the
+     * only list of years a year-less label is tried in (an earlier product's
+     * own years), and with no weekday match it falls back to the listed year
+     * nearest $year (a tie takes the later one). Without $years the rule is
+     * exactly as before.
      */
-    public static function parse_session_date($label, $year, $weekday = 0) {
-        $label = trim($label);
+    public static function parse_session_date($label, $year, $weekday = 0, $years = null) {
+        $label = trim((string) $label);
         if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $label)) {
             return $label;
         }
+
+        $short_months = array('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
+        if (preg_match('/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (\d{1,2}) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{4})$/D', $label, $m)) {
+            $month = intval(array_search($m[3], $short_months, true)) + 1;
+            $day = intval($m[2]);
+            $full_year = intval($m[4]);
+            if (!checkdate($month, $day, $full_year)) {
+                return '';
+            }
+            // Never strtotime() with a year appended: build the date and check its day name.
+            if (gmdate('D', gmmktime(0, 0, 0, $month, $day, $full_year)) !== $m[1]) {
+                return '';
+            }
+            return sprintf('%04d-%02d-%02d', $full_year, $month, $day);
+        }
+        $long_months = array('January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December');
+        if (preg_match('/^(January|February|March|April|May|June|July|August|September|October|November|December) (\d{4})$/D', $label, $m)) {
+            return sprintf('%04d-%02d-01', intval($m[2]), intval(array_search($m[1], $long_months, true)) + 1);
+        }
+
         $normalised = str_replace(array('-', '.', '/'), ' ', $label);
+
+        $listed = null;
+        if (is_array($years) && !empty($years)) {
+            $listed = array();
+            foreach ($years as $listed_year) {
+                if (is_int($listed_year) || (is_string($listed_year) && preg_match('/^\d{4}$/D', $listed_year))) {
+                    $listed[] = intval($listed_year);
+                }
+            }
+            $listed = array_values(array_unique($listed));
+            sort($listed);
+            if (empty($listed)) {
+                $listed = null;
+            }
+        }
+        $candidates = $listed !== null ? $listed : array($year - 2, $year - 1, $year, $year + 1);
 
         if ($weekday >= 1 && $weekday <= 7) {
             $today = strtotime(current_time('Y-m-d'));
             $best = '';
             $best_distance = null;
-            foreach (array($year - 2, $year - 1, $year, $year + 1) as $candidate) {
+            foreach ($candidates as $candidate) {
                 $ts = strtotime($normalised . ' ' . $candidate);
                 if (!$ts || intval(date('N', $ts)) !== $weekday) {
                     continue;
@@ -366,7 +520,20 @@ class TeamOversight_Programs {
             }
         }
 
-        $ts = strtotime($normalised . ' ' . $year);
+        $fallback = $year;
+        if ($listed !== null) {
+            $fallback = null;
+            $fallback_distance = null;
+            foreach ($listed as $candidate) {
+                // Ascending, so on a tie the later year wins.
+                $distance = abs($candidate - intval($year));
+                if ($fallback_distance === null || $distance <= $fallback_distance) {
+                    $fallback = $candidate;
+                    $fallback_distance = $distance;
+                }
+            }
+        }
+        $ts = strtotime($normalised . ' ' . $fallback);
         return $ts ? date('Y-m-d', $ts) : '';
     }
 
@@ -387,22 +554,188 @@ class TeamOversight_Programs {
         return $upcoming !== '' ? $upcoming : $last;
     }
 
+    // ------------------------------------------------------------------
+    // Refunds (1.84.0, design 4.9.1): one rule for the roll, the figures,
+    // and (from 1.85.0) To refund and the dated roll.
+    // ------------------------------------------------------------------
+
+    /** Whether refunds take lines off. Off only through REFUND_FILTER (the golden harness). */
+    public static function refund_rule_on() {
+        return (bool) apply_filters(self::REFUND_FILTER, true);
+    }
+
+    /**
+     * Refunds against these order lines: item id => array(qty, amount), the
+     * refunded quantity (the sum of -_qty on refund lines whose
+     * _refunded_item_id is the line) and amount (the sum of -(_line_total +
+     * _line_tax)). Only lines with a refund row are listed. One query per
+     * 1,000 lines; array() when the rule is off.
+     */
+    public static function refunds_for_items(array $item_ids) {
+        global $wpdb;
+        if (!self::refund_rule_on()) {
+            return array();
+        }
+        $ids = array_values(array_unique(array_filter(array_map('intval', $item_ids))));
+        $refunds = array();
+        foreach (array_chunk($ids, 1000) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '%d'));
+            $rows = $wpdb->get_results($wpdb->prepare("
+                SELECT ref.meta_value AS item_id,
+                    SUM(-1 * CAST(COALESCE(q.meta_value, '0') AS DECIMAL(12,4))) AS refunded_qty,
+                    SUM(-1 * (CAST(COALESCE(t.meta_value, '0') AS DECIMAL(16,6)) + CAST(COALESCE(x.meta_value, '0') AS DECIMAL(16,6)))) AS refunded_amount
+                FROM {$wpdb->prefix}woocommerce_order_items ri
+                JOIN {$wpdb->prefix}woocommerce_order_itemmeta ref
+                    ON ref.order_item_id = ri.order_item_id AND ref.meta_key = '_refunded_item_id'
+                LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta q
+                    ON q.order_item_id = ri.order_item_id AND q.meta_key = '_qty'
+                LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta t
+                    ON t.order_item_id = ri.order_item_id AND t.meta_key = '_line_total'
+                LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta x
+                    ON x.order_item_id = ri.order_item_id AND x.meta_key = '_line_tax'
+                WHERE ri.order_item_type = 'line_item' AND ref.meta_value IN ({$placeholders})
+                GROUP BY ref.meta_value
+            ", $chunk));
+            foreach ((array) $rows as $row) {
+                $refunds[intval($row->item_id)] = array('qty' => (float) $row->refunded_qty, 'amount' => (float) $row->refunded_amount);
+            }
+        }
+        return $refunds;
+    }
+
+    /**
+     * The same aggregate for every refund line of one product (refund lines
+     * carry the product's _product_id), for the history reader: one query.
+     * array() when the rule is off.
+     */
+    public static function refunds_for_product($product_id) {
+        global $wpdb;
+        if (!self::refund_rule_on()) {
+            return array();
+        }
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT ref.meta_value AS item_id,
+                SUM(-1 * CAST(COALESCE(q.meta_value, '0') AS DECIMAL(12,4))) AS refunded_qty,
+                SUM(-1 * (CAST(COALESCE(t.meta_value, '0') AS DECIMAL(16,6)) + CAST(COALESCE(x.meta_value, '0') AS DECIMAL(16,6)))) AS refunded_amount
+            FROM {$wpdb->prefix}woocommerce_order_items ri
+            JOIN {$wpdb->prefix}woocommerce_order_itemmeta ref
+                ON ref.order_item_id = ri.order_item_id AND ref.meta_key = '_refunded_item_id'
+            JOIN {$wpdb->prefix}woocommerce_order_itemmeta rp
+                ON rp.order_item_id = ri.order_item_id AND rp.meta_key = '_product_id' AND rp.meta_value = %d
+            LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta q
+                ON q.order_item_id = ri.order_item_id AND q.meta_key = '_qty'
+            LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta t
+                ON t.order_item_id = ri.order_item_id AND t.meta_key = '_line_total'
+            LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta x
+                ON x.order_item_id = ri.order_item_id AND x.meta_key = '_line_tax'
+            WHERE ri.order_item_type = 'line_item'
+            GROUP BY ref.meta_value
+        ", intval($product_id)));
+        $refunds = array();
+        foreach ((array) $rows as $row) {
+            $refunds[intval($row->item_id)] = array('qty' => (float) $row->refunded_qty, 'amount' => (float) $row->refunded_amount);
+        }
+        return $refunds;
+    }
+
+    /**
+     * THE rule (design 4.9.1): 'none', 'part' or 'full' for one order line.
+     * $refund is null (no refund row) or array(qty, amount) from
+     * refunds_for_items() / refunds_for_product(). A line is fully refunded
+     * when its refunded quantity reaches its quantity, or its refunded
+     * amount (above half a cent) reaches its own total incl. GST less half a
+     * cent; any other refund is a part refund. A line with no refund row is
+     * never refunded. Every reader of "is this line refunded" calls this.
+     */
+    public static function refund_state($qty, $line_total_incl_tax, $refund) {
+        if (!is_array($refund)) {
+            return 'none';
+        }
+        $refunded_qty = isset($refund['qty']) ? (float) $refund['qty'] : 0.0;
+        $refunded_amount = isset($refund['amount']) ? (float) $refund['amount'] : 0.0;
+        if ($refunded_qty > 0 && $refunded_qty >= (float) $qty) {
+            return 'full';
+        }
+        if ($refunded_amount > 0.004 && $refunded_amount >= (float) $line_total_incl_tax - 0.005) {
+            return 'full';
+        }
+        if ($refunded_qty > 0 || $refunded_amount > 0.004) {
+            return 'part';
+        }
+        return 'none';
+    }
+
+    /** Places left on a line: 0 when fully refunded, else its quantity less the refunded quantity. */
+    public static function places_after_refunds($qty, $state, $refund) {
+        if ($state === 'full') {
+            return 0;
+        }
+        $refunded_qty = (is_array($refund) && isset($refund['qty'])) ? (int) round((float) $refund['qty']) : 0;
+        return max(0, intval($qty) - $refunded_qty);
+    }
+
+    /**
+     * One order's refunds through WooCommerce's own refund objects (so it
+     * never lags behind the analytics tables): lines => item id =>
+     * array(qty, amount), refunded => the order's refunded total, unlinked
+     * => what was refunded that is tied to no line (0 below half a cent).
+     * Read only. Used by the tests now and by To refund from 1.85.0.
+     */
+    public static function refund_summary_for_order($order_id) {
+        $summary = array('lines' => array(), 'refunded' => 0.0, 'unlinked' => 0.0);
+        $order = function_exists('wc_get_order') ? wc_get_order(intval($order_id)) : false;
+        if (!$order || !($order instanceof WC_Order)) {
+            return $summary;
+        }
+        $tied = 0.0;
+        foreach ($order->get_refunds() as $refund) {
+            foreach ($refund->get_items() as $item) {
+                $line_id = intval($item->get_meta('_refunded_item_id'));
+                if ($line_id <= 0) {
+                    continue;
+                }
+                $qty = -1 * (float) $item->get_quantity();
+                $amount = -1 * ((float) $item->get_total() + (float) $item->get_total_tax());
+                if (!isset($summary['lines'][$line_id])) {
+                    $summary['lines'][$line_id] = array('qty' => 0.0, 'amount' => 0.0);
+                }
+                $summary['lines'][$line_id]['qty'] += $qty;
+                $summary['lines'][$line_id]['amount'] += $amount;
+                $tied += $amount;
+            }
+        }
+        foreach ($summary['lines'] as $line_id => $line) {
+            $summary['lines'][$line_id]['amount'] = round($line['amount'], 2);
+        }
+        $refunded = (float) $order->get_total_refunded();
+        $unlinked = $refunded - $tied;
+        $summary['refunded'] = round($refunded, 2);
+        $summary['unlinked'] = $unlinked < 0.005 ? 0.0 : round($unlinked, 2);
+        return $summary;
+    }
+
     /**
      * Everyone booked into one session of a program, from paid orders.
      * Storage-agnostic (order item tables + analytics), so it keeps
      * working under HPOS. Quantity > 1 means they booked guests too.
+     *
+     * One card per order (the legacy rule). 1.84.0: read per line, with the
+     * refund rule: a fully refunded line is left out (an order with no line
+     * left has no card), qty is the most places left on any of the order's
+     * kept lines, and a card with a part refund also carries
+     * refunded_amount (the kept lines' refunded amounts) and part_refunded
+     * (true). With the rule off every card is exactly 1.83.1's.
      */
     public static function get_attendees($product_id, $session_label) {
         global $wpdb;
 
-        $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT oi.order_id,
-                MAX(qty.meta_value) AS qty,
-                MAX(cl.user_id) AS user_id,
-                MAX(cl.email) AS email,
-                MAX(cl.first_name) AS first_name,
-                MAX(cl.last_name) AS last_name,
-                MAX(os.date_created) AS ordered
+        $lines = $wpdb->get_results($wpdb->prepare("
+            SELECT oi.order_item_id, oi.order_id,
+                qty.meta_value AS qty,
+                lt.meta_value AS line_total,
+                ltx.meta_value AS line_tax,
+                cl.user_id, cl.email, cl.first_name, cl.last_name,
+                os.date_created AS ordered
             FROM {$wpdb->prefix}woocommerce_order_items oi
             JOIN {$wpdb->prefix}woocommerce_order_itemmeta prod
                 ON prod.order_item_id = oi.order_item_id AND prod.meta_key = '_product_id' AND prod.meta_value = %d
@@ -410,22 +743,67 @@ class TeamOversight_Programs {
                 ON sess.order_item_id = oi.order_item_id AND sess.meta_key IN ('date', 'pa_date') AND sess.meta_value = %s
             LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta qty
                 ON qty.order_item_id = oi.order_item_id AND qty.meta_key = '_qty'
+            LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta lt
+                ON lt.order_item_id = oi.order_item_id AND lt.meta_key = '_line_total'
+            LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta ltx
+                ON ltx.order_item_id = oi.order_item_id AND ltx.meta_key = '_line_tax'
             JOIN {$wpdb->prefix}wc_order_stats os ON os.order_id = oi.order_id
             LEFT JOIN {$wpdb->prefix}wc_customer_lookup cl ON cl.customer_id = os.customer_id
-            WHERE os.status IN ('wc-processing', 'wc-completed')
-            GROUP BY oi.order_id
-            ORDER BY MAX(cl.last_name), MAX(cl.first_name)
+            WHERE os.status IN ('wc-processing', 'wc-completed') AND oi.order_item_type = 'line_item'
+            ORDER BY cl.last_name, cl.first_name, oi.order_id, oi.order_item_id
         ", intval($product_id), $session_label));
+
+        // The one extra query per roll: refunds against these lines.
+        $refunds = self::refunds_for_items(wp_list_pluck((array) $lines, 'order_item_id'));
+
+        // Group by order in first-seen (SQL) order, as one card per order.
+        $orders = array();
+        $seen_items = array();
+        foreach ((array) $lines as $line) {
+            $item_id = intval($line->order_item_id);
+            if (isset($seen_items[$item_id])) {
+                continue;
+            }
+            $seen_items[$item_id] = true;
+            $order_id = intval($line->order_id);
+            $qty = max(1, intval($line->qty));
+            $refund = isset($refunds[$item_id]) ? $refunds[$item_id] : null;
+            $state = self::refund_state($qty, (float) $line->line_total + (float) $line->line_tax, $refund);
+            if (!isset($orders[$order_id])) {
+                $orders[$order_id] = array('row' => $line, 'kept' => 0, 'qty' => 0, 'refunded_amount' => 0.0, 'part' => false);
+            }
+            if ($state === 'full') {
+                continue;
+            }
+            $orders[$order_id]['kept']++;
+            $orders[$order_id]['qty'] = max($orders[$order_id]['qty'], self::places_after_refunds($qty, $state, $refund));
+            if ($state === 'part') {
+                $orders[$order_id]['part'] = true;
+                $orders[$order_id]['refunded_amount'] += (float) $refund['amount'];
+            }
+        }
+
+        $rows = array();
+        foreach ($orders as $order) {
+            if ($order['kept'] > 0) {
+                $rows[] = $order;
+            }
+        }
 
         // Load every attendee's account and profile meta in two queries,
         // not two per person.
-        $user_ids = array_values(array_unique(array_filter(array_map('intval', wp_list_pluck((array) $rows, 'user_id')))));
+        $user_ids = array();
+        foreach ($rows as $order) {
+            $user_ids[] = intval($order['row']->user_id);
+        }
+        $user_ids = array_values(array_unique(array_filter($user_ids)));
         if (!empty($user_ids) && function_exists('cache_users')) {
             cache_users($user_ids);
         }
 
         $attendees = array();
-        foreach ($rows as $row) {
+        foreach ($rows as $order) {
+            $row = $order['row'];
             $user_id = intval($row->user_id);
             $account = $user_id ? get_userdata($user_id) : false;
             $email = $account ? $account->user_email : (string) $row->email;
@@ -434,61 +812,281 @@ class TeamOversight_Programs {
                 $name = $account->display_name;
             }
 
-            $attendees[] = array(
+            $attendee = array(
                 'order_id' => intval($row->order_id),
                 'user_id' => $user_id,
                 'name' => $name !== '' ? $name : ($email ?: 'Unknown'),
                 'email' => $email,
                 'mobile' => $user_id ? get_user_meta($user_id, 'mobile_number', true) : '',
-                'qty' => max(1, intval($row->qty)),
+                'qty' => $order['qty'],
                 'ordered' => $row->ordered,
                 'has_account' => (bool) $account,
             );
+            if ($order['part']) {
+                $attendee['refunded_amount'] = round($order['refunded_amount'], 2);
+                $attendee['part_refunded'] = true;
+            }
+            $attendees[] = $attendee;
         }
         return $attendees;
     }
 
+    // ------------------------------------------------------------------
+    // History across a program's products (1.84.0, design 4.13)
+    // ------------------------------------------------------------------
+
     /**
-     * How many sessions of this program each person had already booked
-     * BEFORE the given session — so someone who books three weeks ahead
-     * still reads as a first-timer at their first one.
-     * Returns array keyed by user id ('u123') or lowercased email.
+     * Every paid line of every product of a program (current, prepared,
+     * earlier), one query per product plus one refund query per product,
+     * request cached per program and rule state. Fully refunded lines are
+     * left out while the refund rule is on. Each row: order_item_id,
+     * order_id, product_id, kind, label (raw meta, '' when none), date
+     * (Y-m-d, '' when undated), user_id (0 for none), email (lowercased,
+     * '' for none), player_key ('' when none), qty (at least 1), places
+     * (after refunds) and refund_state. "New here", "Nth session" and the
+     * stats are all worked out from these rows.
      */
-    public static function get_prior_session_counts($product_id, $before_date, $weekday = 0) {
-        global $wpdb;
+    public static function get_program_history($key) {
+        $key = (string) $key;
+        $cache_key = $key . '|' . (self::refund_rule_on() ? '1' : '0');
+        if (!isset(self::$history_cache[$cache_key])) {
+            self::$history_cache[$cache_key] = self::history_rows(self::program_products($key));
+        }
+        return self::$history_cache[$cache_key];
+    }
 
-        $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT DISTINCT sess.meta_value AS label,
-                cl.user_id AS user_id,
-                LOWER(cl.email) AS email
-            FROM {$wpdb->prefix}woocommerce_order_items oi
-            JOIN {$wpdb->prefix}woocommerce_order_itemmeta prod
-                ON prod.order_item_id = oi.order_item_id AND prod.meta_key = '_product_id' AND prod.meta_value = %d
-            JOIN {$wpdb->prefix}woocommerce_order_itemmeta sess
-                ON sess.order_item_id = oi.order_item_id AND sess.meta_key IN ('date', 'pa_date')
-            JOIN {$wpdb->prefix}wc_order_stats os ON os.order_id = oi.order_id
-            LEFT JOIN {$wpdb->prefix}wc_customer_lookup cl ON cl.customer_id = os.customer_id
-            WHERE os.status IN ('wc-processing', 'wc-completed')
-        ", intval($product_id)));
-
+    /** The row reader behind get_program_history() and the two kept wrappers. */
+    private static function history_rows(array $products) {
+        $rule = self::refund_rule_on();
         $year = intval(wp_date('Y'));
-        $counts = array();
-        foreach ($rows as $row) {
-            $date = self::parse_session_date($row->label, $year, $weekday);
-            // Undated labels can't be ordered, so they don't count as prior.
-            if ($date === '' || ($before_date !== '' && $date >= $before_date)) {
+        $rows = array();
+        foreach ($products as $product) {
+            $product_id = intval($product['product_id']);
+            if ($product_id <= 0) {
                 continue;
             }
-            $keys = array();
-            if (intval($row->user_id)) {
-                $keys[] = 'u' . intval($row->user_id);
+            $kind = in_array($product['kind'], array('dated', 'legacy_date', 'month', 'paid_date'), true) ? $product['kind'] : 'legacy_date';
+            $weekday = isset($product['weekday']) ? $product['weekday'] : 0;
+            $years = isset($product['years']) ? $product['years'] : null;
+            $lines = self::history_lines($product_id, $kind);
+            $refunds = $rule ? self::refunds_for_product($product_id) : array();
+            $parsed = array();
+            foreach ((array) $lines as $line) {
+                $item_id = intval($line->order_item_id);
+                $label = $line->label === null ? '' : (string) $line->label;
+                $date = '';
+                if ($kind === 'paid_date') {
+                    $date = self::is_ymd($line->paid_on) ? (string) $line->paid_on : '';
+                } else {
+                    if ($kind === 'dated') {
+                        // The line's own date, else its variation's, else the label.
+                        foreach (array($line->line_date, $line->var_date) as $candidate) {
+                            if (self::is_ymd($candidate)) {
+                                $date = trim((string) $candidate);
+                                break;
+                            }
+                        }
+                    }
+                    if ($date === '' && ($kind !== 'dated' || $label !== '')) {
+                        if (!isset($parsed[$label])) {
+                            $parsed[$label] = self::parse_session_date($label, $year, $weekday, $years);
+                        }
+                        $date = $parsed[$label];
+                    }
+                }
+                $qty = max(1, intval($line->qty));
+                $refund = isset($refunds[$item_id]) ? $refunds[$item_id] : null;
+                $state = self::refund_state($qty, (float) $line->line_total + (float) $line->line_tax, $refund);
+                if ($state === 'full') {
+                    continue;
+                }
+                $rows[] = array(
+                    'order_item_id' => $item_id,
+                    'order_id' => intval($line->order_id),
+                    'product_id' => $product_id,
+                    'kind' => $kind,
+                    'label' => $label,
+                    'date' => $date,
+                    'user_id' => intval($line->user_id),
+                    'email' => $line->email !== null ? strtolower((string) $line->email) : '',
+                    'player_key' => $line->player_key !== null ? trim((string) $line->player_key) : '',
+                    'qty' => $qty,
+                    'places' => self::places_after_refunds($qty, $state, $refund),
+                    'refund_state' => $state,
+                );
             }
-            if ($row->email) {
-                $keys[] = $row->email;
+        }
+        return $rows;
+    }
+
+    private static function is_ymd($value) {
+        return is_string($value) && preg_match('/^\d{4}-\d{2}-\d{2}$/D', trim($value)) === 1;
+    }
+
+    /**
+     * One product's paid lines, by kind (design 3.2, 3.5). legacy_date keeps
+     * the 1.83.1 query's shape (paid statuses, an inner join on the date
+     * label, every label including '') so Mixed Development's history is
+     * unchanged; refund lines never carry a date label, so they never match.
+     * The other kinds read only orders (parent_id 0), since refund records
+     * sit in wc_order_stats under paid statuses too.
+     */
+    private static function history_lines($product_id, $kind) {
+        global $wpdb;
+        $p = $wpdb->prefix;
+        $label = "''";
+        $joins = '';
+        $extra = '';
+        $where = '';
+        if ($kind === 'legacy_date' || $kind === 'month') {
+            $keys = $kind === 'month' ? "'month', 'pa_month'" : "'date', 'pa_date'";
+            $label = 'MAX(sess.meta_value)';
+            $joins = "JOIN {$p}woocommerce_order_itemmeta sess
+                ON sess.order_item_id = oi.order_item_id AND sess.meta_key IN ({$keys})";
+            if ($kind === 'month') {
+                $where = 'AND os.parent_id = 0';
             }
-            foreach ($keys as $key) {
-                $counts[$key] = isset($counts[$key]) ? $counts[$key] + 1 : 1;
+        } elseif ($kind === 'dated') {
+            $label = 'MAX(lbl.meta_value)';
+            $joins = "LEFT JOIN {$p}woocommerce_order_itemmeta lbl
+                ON lbl.order_item_id = oi.order_item_id AND lbl.meta_key IN ('date', 'pa_date')
+            LEFT JOIN {$p}woocommerce_order_itemmeta lsd
+                ON lsd.order_item_id = oi.order_item_id AND lsd.meta_key = '_murvc_session_date'
+            LEFT JOIN {$p}woocommerce_order_itemmeta var
+                ON var.order_item_id = oi.order_item_id AND var.meta_key = '_variation_id'
+            LEFT JOIN {$wpdb->postmeta} vsd
+                ON vsd.post_id = CAST(var.meta_value AS UNSIGNED) AND vsd.meta_key = '_murvc_session_date'";
+            $extra = ', MAX(lsd.meta_value) AS line_date, MAX(vsd.meta_value) AS var_date';
+            $where = "AND oi.order_item_type = 'line_item' AND os.parent_id = 0";
+        } else {
+            $extra = ", MAX(DATE(COALESCE(NULLIF(os.date_paid, '0000-00-00 00:00:00'), os.date_created))) AS paid_on";
+            $where = "AND oi.order_item_type = 'line_item' AND os.parent_id = 0";
+        }
+        return $wpdb->get_results($wpdb->prepare("
+            SELECT oi.order_item_id,
+                MAX(oi.order_id) AS order_id,
+                {$label} AS label,
+                MAX(qty.meta_value) AS qty,
+                MAX(lt.meta_value) AS line_total,
+                MAX(ltx.meta_value) AS line_tax,
+                MAX(pk.meta_value) AS player_key,
+                MAX(cl.user_id) AS user_id,
+                LOWER(MAX(cl.email)) AS email
+                {$extra}
+            FROM {$p}woocommerce_order_items oi
+            JOIN {$p}woocommerce_order_itemmeta prod
+                ON prod.order_item_id = oi.order_item_id AND prod.meta_key = '_product_id' AND prod.meta_value = %d
+            {$joins}
+            LEFT JOIN {$p}woocommerce_order_itemmeta qty
+                ON qty.order_item_id = oi.order_item_id AND qty.meta_key = '_qty'
+            LEFT JOIN {$p}woocommerce_order_itemmeta lt
+                ON lt.order_item_id = oi.order_item_id AND lt.meta_key = '_line_total'
+            LEFT JOIN {$p}woocommerce_order_itemmeta ltx
+                ON ltx.order_item_id = oi.order_item_id AND ltx.meta_key = '_line_tax'
+            LEFT JOIN {$p}woocommerce_order_itemmeta pk
+                ON pk.order_item_id = oi.order_item_id AND pk.meta_key = '_murvc_player_key'
+            JOIN {$p}wc_order_stats os ON os.order_id = oi.order_id
+            LEFT JOIN {$p}wc_customer_lookup cl ON cl.customer_id = os.customer_id
+            WHERE os.status IN ('wc-processing', 'wc-completed') {$where}
+            GROUP BY oi.order_item_id
+        ", intval($product_id)));
+    }
+
+    /**
+     * How many sessions of this program each person had already booked
+     * BEFORE the given date ('' = all dated ones), across every product of
+     * the program, so someone who books three weeks ahead still reads as a
+     * first-timer at their first one. Returns person => player key => count,
+     * the person keyed by 'u<user id>' and by the lowercased email (a line
+     * counts under both); '' is a line with no player. Read it with
+     * count_prior().
+     */
+    public static function program_prior_counts($key, $before_date) {
+        return self::prior_counts_from_rows(self::get_program_history($key), (string) $before_date);
+    }
+
+    private static function prior_counts_from_rows(array $rows, $before_date) {
+        $seen = array();
+        $counts = array();
+        foreach ($rows as $row) {
+            // Undated lines can't be ordered, so they don't count as prior.
+            if ($row['date'] === '' || ($before_date !== '' && $row['date'] >= $before_date)) {
+                continue;
             }
+            // One count per session per person and player: the label for
+            // date and month labels, the date for dated sessions, the line
+            // for a fee dated by payment.
+            if ($row['kind'] === 'dated') {
+                $session = 'd' . $row['date'];
+            } elseif ($row['kind'] === 'paid_date') {
+                $session = 'i' . $row['order_item_id'];
+            } else {
+                $session = 'l' . $row['label'];
+            }
+            $distinct = $row['product_id'] . "\n" . $session . "\n" . $row['user_id'] . "\n" . $row['email'] . "\n" . $row['player_key'];
+            if (isset($seen[$distinct])) {
+                continue;
+            }
+            $seen[$distinct] = true;
+            $people = array();
+            if ($row['user_id'] > 0) {
+                $people[] = 'u' . $row['user_id'];
+            }
+            if ($row['email'] !== '') {
+                $people[] = $row['email'];
+            }
+            foreach ($people as $person) {
+                if (!isset($counts[$person][$row['player_key']])) {
+                    $counts[$person][$row['player_key']] = 0;
+                }
+                $counts[$person][$row['player_key']]++;
+            }
+        }
+        return $counts;
+    }
+
+    /**
+     * A person's earlier sessions from program_prior_counts(): by account
+     * first, else by email. With no player, the person's total over every
+     * player (the number before 1.84.0). With a player, that player's count
+     * plus the lines with no player, so a child whose parent bought months
+     * or the trial is not New here, while a second child is.
+     */
+    public static function count_prior($counts, $user_id, $email, $player_key = '') {
+        $user_id = intval($user_id);
+        $entry = null;
+        if ($user_id && isset($counts['u' . $user_id])) {
+            $entry = $counts['u' . $user_id];
+        } else {
+            $email = strtolower((string) $email);
+            if ($email !== '' && isset($counts[$email])) {
+                $entry = $counts[$email];
+            }
+        }
+        if ($entry === null) {
+            return 0;
+        }
+        if (!is_array($entry)) {
+            return intval($entry);
+        }
+        $player_key = (string) $player_key;
+        if ($player_key === '') {
+            return intval(array_sum($entry));
+        }
+        return (isset($entry[$player_key]) ? intval($entry[$player_key]) : 0) + (isset($entry['']) ? intval($entry['']) : 0);
+    }
+
+    /**
+     * Kept for any caller outside the plugin (1.84.0): one product's prior
+     * counts, read as the program readers read them (kind legacy_date, the
+     * given weekday, the current window), keyed 'u<user id>' or email with
+     * the person's total, as before. The plugin calls program_prior_counts().
+     */
+    public static function get_prior_session_counts($product_id, $before_date, $weekday = 0) {
+        $rows = self::history_rows(array(array('product_id' => intval($product_id), 'kind' => 'legacy_date', 'weekday' => $weekday, 'years' => null, 'role' => 'current')));
+        $counts = array();
+        foreach (self::prior_counts_from_rows($rows, (string) $before_date) as $person => $by_player) {
+            $counts[$person] = intval(array_sum($by_player));
         }
         return $counts;
     }
@@ -510,58 +1108,88 @@ class TeamOversight_Programs {
      * $from/$to are Y-m-d and inclusive; either may be '' for unbounded.
      * Sessions whose date label can't be parsed are excluded and counted
      * separately rather than silently dropped.
+     *
+     * 1.84.0: read from every product of the program (get_program_history()),
+     * with places after refunds (a fully refunded line is not there at all).
+     * Month and one-off fee lines (kinds month and paid_date) count for
+     * people (participants, newcomers, returning, new to the club) and for
+     * first-ever, never for sessions or spots; they are counted as
+     * no_session_date. A person is the account (or the email of a guest
+     * order) plus the player when a line names one, so an account with two
+     * players is two participants; a player's first-ever is the earlier of
+     * their own lines and the account's lines with no player. New to the
+     * club counts each account once.
+     */
+    public static function program_participation_stats($key, $from, $to) {
+        $has_no_session_kinds = false;
+        foreach (self::program_products($key) as $product) {
+            if ($product['kind'] === 'month' || $product['kind'] === 'paid_date') {
+                $has_no_session_kinds = true;
+            }
+        }
+        return self::stats_from_rows(self::get_program_history($key), (string) $from, (string) $to, $has_no_session_kinds);
+    }
+
+    /**
+     * Kept for any caller outside the plugin (1.84.0): one product's stats,
+     * read as the program readers read them (kind legacy_date, the given
+     * weekday, the current window). The plugin calls
+     * program_participation_stats().
      */
     public static function get_participation_stats($product_id, $from, $to, $weekday = 0) {
+        $rows = self::history_rows(array(array('product_id' => intval($product_id), 'kind' => 'legacy_date', 'weekday' => $weekday, 'years' => null, 'role' => 'current')));
+        return self::stats_from_rows($rows, (string) $from, (string) $to, false);
+    }
+
+    /** The two passes behind both stats readers, over history rows. */
+    private static function stats_from_rows(array $rows, $from, $to, $has_no_session_kinds) {
         global $wpdb;
 
-        $rows = $wpdb->get_results($wpdb->prepare("
-            SELECT oi.order_item_id,
-                MAX(oi.order_id) AS order_id,
-                MAX(sess.meta_value) AS label,
-                MAX(qty.meta_value) AS qty,
-                MAX(cl.user_id) AS user_id,
-                LOWER(MAX(cl.email)) AS email
-            FROM {$wpdb->prefix}woocommerce_order_items oi
-            JOIN {$wpdb->prefix}woocommerce_order_itemmeta prod
-                ON prod.order_item_id = oi.order_item_id AND prod.meta_key = '_product_id' AND prod.meta_value = %d
-            JOIN {$wpdb->prefix}woocommerce_order_itemmeta sess
-                ON sess.order_item_id = oi.order_item_id AND sess.meta_key IN ('date', 'pa_date') AND sess.meta_value <> ''
-            LEFT JOIN {$wpdb->prefix}woocommerce_order_itemmeta qty
-                ON qty.order_item_id = oi.order_item_id AND qty.meta_key = '_qty'
-            JOIN {$wpdb->prefix}wc_order_stats os ON os.order_id = oi.order_id
-            LEFT JOIN {$wpdb->prefix}wc_customer_lookup cl ON cl.customer_id = os.customer_id
-            WHERE os.status IN ('wc-processing', 'wc-completed')
-            GROUP BY oi.order_item_id
-        ", intval($product_id)));
-
-        $year = intval(wp_date('Y'));
         $first_ever = array();   // person => earliest session date, all time
         $in_range = array();     // person => sessions booked in range
         $sessions = array();     // date => label, people, spots, newcomers
         $undated = 0;
         $spots = 0;
+        $no_session_date = 0;
 
         // Pass one: everyone's first-ever session, across all of history.
-        // Labels repeat across hundreds of bookings, so parse each once.
         $bookings = array();
         $person_users = array();
-        $parsed = array();
+        $player_base = array();  // person with a player => the same account with no player
         foreach ($rows as $row) {
-            if (!isset($parsed[$row->label])) {
-                $parsed[$row->label] = self::parse_session_date($row->label, $year, $weekday);
+            $is_session = ($row['kind'] === 'legacy_date' || $row['kind'] === 'dated');
+            // As before: a line whose session label is blank isn't a booking
+            // of any session (a dated line may still carry its own date).
+            if ($row['kind'] === 'legacy_date' && $row['label'] === '') {
+                continue;
             }
-            $date = $parsed[$row->label];
+            if ($row['kind'] === 'dated' && $row['label'] === '' && $row['date'] === '') {
+                continue;
+            }
+            $date = $row['date'];
             if ($date === '') {
                 $undated++;
                 continue;
             }
 
-            $person = self::person_key($row);
-            $person_users[$person] = intval($row->user_id);
+            $base = self::person_key((object) array('user_id' => $row['user_id'], 'email' => $row['email'], 'order_id' => $row['order_id']));
+            $person = $base;
+            if ($row['player_key'] !== '') {
+                $person = $base . '|' . $row['player_key'];
+                $player_base[$person] = $base;
+            }
+            $person_users[$person] = intval($row['user_id']);
             if (!isset($first_ever[$person]) || $date < $first_ever[$person]) {
                 $first_ever[$person] = $date;
             }
-            $bookings[] = array('person' => $person, 'date' => $date, 'label' => $row->label, 'qty' => max(1, intval($row->qty)));
+            $bookings[] = array('person' => $person, 'date' => $date, 'label' => $row['label'], 'qty' => intval($row['places']), 'session' => $is_session);
+        }
+        // A player's first-ever: the earlier of their own lines and the
+        // account's lines with no player (a 2026 month or trial).
+        foreach ($player_base as $person => $base) {
+            if (isset($first_ever[$base]) && $first_ever[$base] < $first_ever[$person]) {
+                $first_ever[$person] = $first_ever[$base];
+            }
         }
 
         // Pass two: only what falls inside the window.
@@ -572,6 +1200,11 @@ class TeamOversight_Programs {
 
             $person = $booking['person'];
             $in_range[$person] = isset($in_range[$person]) ? $in_range[$person] + 1 : 1;
+            if (!$booking['session']) {
+                // A month or a one-off fee: a person, not a session.
+                $no_session_date++;
+                continue;
+            }
             $spots += $booking['qty'];
 
             $date = $booking['date'];
@@ -600,6 +1233,8 @@ class TeamOversight_Programs {
                 $no_account++;
             }
         }
+        // Each account once, however many players it booked for.
+        $user_ids = array_values(array_unique($user_ids));
 
         // New to the club: account created inside the window. Bookings made
         // without an account can't answer this, so they're reported apart.
@@ -633,6 +1268,9 @@ class TeamOversight_Programs {
             'repeat_bookings' => array_sum($in_range),
             'by_session' => array_values($sessions),
             'undated' => $undated,
+            // 1.84.0: month and one-off fee lines in the range, and whether the program sells any.
+            'no_session_date' => $no_session_date,
+            'has_no_session_kinds' => (bool) $has_no_session_kinds,
         );
     }
 
@@ -651,12 +1289,9 @@ class TeamOversight_Programs {
         return 'o' . intval($row->order_id);
     }
 
+    /** A roll card's earlier sessions (no player on the legacy roll): count_prior() by account, else email. */
     private static function prior_count_for($counts, $attendee) {
-        if ($attendee['user_id'] && isset($counts['u' . $attendee['user_id']])) {
-            return intval($counts['u' . $attendee['user_id']]);
-        }
-        $email = strtolower((string) $attendee['email']);
-        return ($email !== '' && isset($counts[$email])) ? intval($counts[$email]) : 0;
+        return self::count_prior($counts, $attendee['user_id'], $attendee['email']);
     }
 
     private static function ordinal($n) {
@@ -690,12 +1325,13 @@ class TeamOversight_Programs {
             $to = $swap;
         }
 
-        $stats = self::get_participation_stats(
-            $program['product_id'],
-            $from,
-            $to,
-            self::get_program_weekday($program)
-        );
+        // 1.84.0: every product of the program (its history across seasons).
+        // The "Bookings without a session date" tile shows only for a program
+        // selling months or a one-off fee; its PHP tags sit at column 0 so
+        // any other program's page prints exactly what it did before.
+        $stats =!empty(self::program_products($program_key))
+            ? self::program_participation_stats($program_key, $from, $to)
+            : self::get_participation_stats($program['product_id'], $from, $to, self::get_program_weekday($program));
 
         $ranges = array(
             'Year to date' => array($default_from, $default_to),
@@ -777,6 +1413,13 @@ class TeamOversight_Programs {
                         guests included<?php if ($stats['sessions'] > 0): ?>, <?php echo esc_html(number_format($stats['spots'] / $stats['sessions'], 1)); ?> per session<?php endif; ?>
                     </span>
                 </div>
+<?php if (!empty($stats['has_no_session_kinds'])): ?>
+                <div class="murvc-stat">
+                    <span class="murvc-stat-n"><?php echo intval($stats['no_session_date']); ?></span>
+                    <span class="murvc-stat-l">Bookings without a session date</span>
+                    <span class="murvc-stat-s">month passes and one-off fees, counted for people, not sessions</span>
+                </div>
+<?php endif; ?>
             </div>
 
             <p class="description murvc-stats-note">
@@ -828,6 +1471,9 @@ class TeamOversight_Programs {
     /**
      * Session roster: picker + attendee cards. $base_url decides where the
      * picker links (admin page or the front-end page hosting the shortcode).
+     * 1.84.0: a card with a part refund gets a "Part refunded $X" chip; its
+     * PHP tags sit at column 0 so every other card prints exactly what it
+     * did before (the golden harness compares the markup).
      */
     public static function render_roster($program, $selected_label, $base_url, $query_arg = 'session', $options = array()) {
         $options = array_merge(array('show_history' => true, 'program_key' => ''), $options);
@@ -835,7 +1481,25 @@ class TeamOversight_Programs {
         $weekday = self::get_program_weekday($program);
         $sessions = self::get_sessions($program['product_id'], $weekday);
 
+        // 1.84.0: history reads every product of the program. With no key
+        // given (no caller does that today), the program whose product this is.
+        $history_key = (string) $program_key;
+        if ($history_key === '') {
+            foreach (self::get_programs() as $candidate_key => $candidate) {
+                if (is_array($candidate) && isset($candidate['product_id']) && is_scalar($candidate['product_id'])
+                    && intval($candidate['product_id']) === intval($program['product_id'])) {
+                    $history_key = (string) $candidate_key;
+                    break;
+                }
+            }
+        }
+
         if (empty($sessions)) {
+            $kind = $history_key !== '' ? self::current_kind($history_key) : '';
+            if ($kind === 'month' || $kind === 'paid_date') {
+                // A month or a one-off fee is not a session (design 3.2).
+                return '<p>' . esc_html($program['name']) . ' sells months or a one-off fee, not dated sessions, so it has no roll. The figures above count its bookings.</p>';
+            }
             return '<p>No sessions found for ' . esc_html($program['name']) . '. Check the program\'s product has published date variations.</p>';
         }
 
@@ -854,8 +1518,14 @@ class TeamOversight_Programs {
         $session_date = $sessions[$selected_label]['date'];
         $is_today = ($session_date !== '' && $session_date === current_time('Y-m-d'));
 
-        // First-timers: nobody has "attended before" without prior sessions.
-        $prior_counts = $options['show_history'] ? self::get_prior_session_counts($program['product_id'], $session_date, $weekday) : array();
+        // First-timers: nobody has "attended before" without prior sessions,
+        // across every product of the program (1.84.0).
+        $prior_counts = array();
+        if ($options['show_history']) {
+            $prior_counts = $history_key !== ''
+                ? self::program_prior_counts($history_key, $session_date)
+                : self::prior_counts_from_rows(self::history_rows(array(array('product_id' => intval($program['product_id']), 'kind' => 'legacy_date', 'weekday' => $weekday, 'years' => null, 'role' => 'current'))), (string) $session_date);
+        }
         $first_timers = 0;
         if ($options['show_history']) {
             foreach ($attendees as $attendee) {
@@ -944,6 +1614,9 @@ class TeamOversight_Programs {
                                         &times;<?php echo intval($attendee['qty']); ?> (<?php echo intval($attendee['qty'] - 1); ?> guest<?php echo ($attendee['qty'] - 1) === 1 ? '' : 's'; ?>)
                                     </span>
                                 <?php endif; ?>
+<?php if (!empty($attendee['part_refunded'])): ?>
+                                    <span class="verdict-chip chip-refund" title="Part of this booking was refunded in the shop">Part refunded $<?php echo esc_html(number_format((float) $attendee['refunded_amount'], 2)); ?></span>
+<?php endif; ?>
                                 <?php if (!$attendee['has_account']): ?>
                                     <span class="verdict-chip chip-guestorder" title="Ordered without a club account — no profile or emergency contact on file">No account</span>
                                 <?php endif; ?>
@@ -1164,6 +1837,7 @@ class TeamOversight_Programs {
         .murvc-sessions .chip-guestorder { background: #fdeee0; color: #8a4b00; border: 1px solid #e0a86b; }
         .murvc-sessions .chip-firsttimer { background: #e7f1fa; color: #1d4f7c; border: 1px solid #9cc3e5; }
         .murvc-sessions .chip-regular { background: #f0f0f1; color: #50575e; border: 1px solid #c3c4c7; }
+        .murvc-sessions .chip-refund { background: #fdf2f2; color: #8a1f11; border: 1px solid #e3a6a0; }
         .murvc-sessions .murvc-first-timer { border-left: 4px solid #2271b1; }
         .murvc-sessions .murvc-attended { opacity: 0.62; background: #f6f7f7; }
         .murvc-sessions .murvc-attended .cac-name { text-decoration: line-through; }
@@ -1190,10 +1864,110 @@ class TeamOversight_Programs {
     }
 
     // ------------------------------------------------------------------
+    // Portal pages: never cached, never indexed (1.84.0, design 8)
+    // ------------------------------------------------------------------
+
+    /**
+     * The roll shows names, mobiles and emergency details, so a page that
+     * draws it is never cached or indexed: DONOTCACHEPAGE, the no-cache
+     * headers and X-Robots-Tag (when headers can still be sent), and the
+     * robots meta through the offer page's own filters (one copy of the
+     * rule). Idempotent.
+     */
+    public static function no_cache() {
+        if (!defined('DONOTCACHEPAGE')) {
+            define('DONOTCACHEPAGE', true);
+        }
+        if (!headers_sent()) {
+            nocache_headers();
+            header('X-Robots-Tag: noindex, nofollow', true);
+        }
+        if (class_exists('TeamOversight_Offers_Player')) {
+            if (method_exists('TeamOversight_Offers_Player', 'robots_noindex')) {
+                add_filter('wp_robots', array('TeamOversight_Offers_Player', 'robots_noindex'), 100);
+            }
+            if (method_exists('TeamOversight_Offers_Player', 'seo_noindex')) {
+                add_filter('the_seo_framework_robots_meta_array', array('TeamOversight_Offers_Player', 'seo_noindex'), 100);
+            }
+        }
+    }
+
+    /** Whether some content holds a portal shortcode ([session_attendance] or [mixed_dev_attendance]). */
+    public static function content_has_portal($content) {
+        if (!is_string($content) || $content === '') {
+            return false;
+        }
+        foreach (self::PORTAL_SHORTCODES as $tag) {
+            if (has_shortcode($content, $tag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * template_redirect, priority 9: before any output, so the headers go
+     * out. Reads only the page's own content: a portal shortcode inside a
+     * synced pattern, template part or widget gets DONOTCACHEPAGE when it
+     * renders but no early headers, which is why the shortcode goes on the
+     * page itself.
+     */
+    public static function maybe_no_cache() {
+        if (is_admin() || !is_singular()) {
+            return;
+        }
+        $post = get_queried_object();
+        if ($post instanceof WP_Post && self::content_has_portal((string) $post->post_content)) {
+            self::no_cache();
+        }
+    }
+
+    /**
+     * The program [mixed_dev_attendance] shows (design 5.2, a permanent
+     * alias): the program whose setup names this page as its portal page,
+     * else key mixed-dev, else (as before) the last program whose name
+     * contains "mixed". '' when none.
+     */
+    public static function alias_program_key($page_id = 0) {
+        $page_id = intval($page_id);
+        if ($page_id <= 0) {
+            $page_id = intval(get_the_ID());
+        }
+        if ($page_id <= 0) {
+            $page_id = intval(get_queried_object_id());
+        }
+        $programs = self::get_programs();
+        if ($page_id > 0 && class_exists('TeamOversight_Program_Setup')) {
+            foreach ($programs as $program_key => $program) {
+                if (!TeamOversight_Program_Setup::has_entry($program_key)) {
+                    continue;
+                }
+                $setup = TeamOversight_Program_Setup::get($program_key);
+                if (intval($setup['portal_page']) === $page_id) {
+                    return (string) $program_key;
+                }
+            }
+        }
+        if (isset($programs['mixed-dev'])) {
+            return 'mixed-dev';
+        }
+        $key = '';
+        foreach ($programs as $program_key => $program) {
+            if (stripos($program['name'], 'mixed') !== false) {
+                $key = (string) $program_key;
+            }
+        }
+        return $key;
+    }
+
+    // ------------------------------------------------------------------
     // Front end: [session_attendance]
     // ------------------------------------------------------------------
 
     public function render_shortcode($atts) {
+        // Before anything else: also covers a page that carries the shortcode
+        // somewhere template_redirect can't see (a block, a widget).
+        self::no_cache();
         $atts = shortcode_atts(array('program' => ''), $atts, 'session_attendance');
 
         if (!is_user_logged_in()) {
@@ -1256,20 +2030,16 @@ class TeamOversight_Programs {
      * that program and is the place to add program-specific behaviour
      * (first-timer highlighting lives here by default).
      * Attributes: history="0" hides the first-timer / session-count chips.
+     * 1.84.0: a permanent alias that finds its program by the page first
+     * (alias_program_key()), and is never cached.
      */
     public function render_mixed_dev_shortcode($atts) {
+        self::no_cache();
         $atts = shortcode_atts(array('history' => '1'), $atts, 'mixed_dev_attendance');
 
         $programs = self::get_programs();
-        $key = isset($programs['mixed-dev']) ? 'mixed-dev' : '';
-        if ($key === '') {
-            foreach ($programs as $program_key => $program) {
-                if (stripos($program['name'], 'mixed') !== false) {
-                    $key = $program_key;
-                }
-            }
-        }
-        if ($key === '') {
+        $key = self::alias_program_key();
+        if ($key === '' || !isset($programs[$key])) {
             return '<p>Mixed Development isn\'t configured yet — add it in Club Programs → Settings.</p>';
         }
 
@@ -1304,22 +2074,30 @@ class TeamOversight_Programs {
     public function render_admin_page($program_key) {
         // template_redirect doesn't run in wp-admin, so ticks are handled
         // here. Explicit state means a refresh resubmit is harmless.
+        // 1.84.0: a tick is saved only for this page's own program.
+        $tick_notice = '';
         if (isset($_POST['murvc_attendance_action']) && $_POST['murvc_attendance_action'] === 'mark'
             && isset($_POST['murvc_attendance_nonce']) && wp_verify_nonce($_POST['murvc_attendance_nonce'], 'murvc_attendance')
-            && current_user_can('manage_options')) {
-            self::set_attendance(
-                sanitize_key($_POST['program_key']),
-                sanitize_text_field(wp_unslash($_POST['session_label'])),
-                intval($_POST['order_id']),
-                !empty($_POST['attended']),
-                intval($_POST['attendee_user_id'])
-            );
+            && current_user_can('manage_options')
+            && isset($_POST['program_key'], $_POST['session_label'], $_POST['order_id'])) {
+            if (sanitize_key(wp_unslash($_POST['program_key'])) === sanitize_key((string) $program_key)) {
+                self::set_attendance(
+                    $program_key,
+                    sanitize_text_field(wp_unslash($_POST['session_label'])),
+                    intval($_POST['order_id']),
+                    !empty($_POST['attended']),
+                    isset($_POST['attendee_user_id']) ? intval($_POST['attendee_user_id']) : 0
+                );
+            } else {
+                $tick_notice = '<div class="notice notice-error"><p>That tick was for another program\'s page, so nothing was saved. Reload and try again.</p></div>';
+            }
         }
 
         $program = self::get_program($program_key);
         ?>
         <div class="wrap">
             <h1><?php echo $program ? esc_html($program['name']) : 'Program'; ?> — Attendance</h1>
+            <?php echo $tick_notice; ?>
             <?php if (!$program): ?>
                 <p>This program is no longer configured. Add it in <a href="<?php echo admin_url('admin.php?page=club-programs-settings'); ?>">Settings</a>.</p>
             <?php else: ?>
@@ -1357,6 +2135,19 @@ class TeamOversight_Programs {
             <form method="post" style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; max-width: 720px;">
                 <h2 style="margin-top: 0;">Programs</h2>
                 <p class="description">One line per program: <code>Name | product ID | weekday</code>. The product's date variations become the sessions; each program gets its own admin sub-page (reload after saving). <strong>Weekday is optional but important</strong> when the variation labels have no year (e.g. "13-May") — it pins each session to the right year, so last season's dates sort and filter correctly. Use a day name or 1–7 (Mon–Sun).</p>
+                <?php
+                $any_setup = false;
+                if (class_exists('TeamOversight_Program_Setup')) {
+                    foreach (array_keys($programs) as $setup_key) {
+                        if (TeamOversight_Program_Setup::has_entry($setup_key)) {
+                            $any_setup = true;
+                        }
+                    }
+                }
+                ?>
+                <?php if ($any_setup): ?>
+                    <p class="description">A program set up for online booking keeps its product here: change it on its Setup tab.</p>
+                <?php endif; ?>
                 <textarea name="programs" rows="5" style="width: 100%; font-family: monospace;"><?php
                     $lines = array();
                     foreach ($programs as $program) {
@@ -1478,6 +2269,8 @@ class TeamOversight_Programs {
             <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; max-width: 720px; margin-top: 20px;">
                 <h2 style="margin-top: 0;">Front-end page</h2>
                 <p>Put <code>[session_attendance]</code> on a page for supervisors. Lock it to one program with <code>[session_attendance program="mixed-dev"]</code>.</p>
+                <p>These pages are never cached or shown to search engines (sent automatically). Put the shortcode on the page itself, not in a synced pattern or widget.</p>
+                <p>The Mixed Dev Portal's <code>[mixed_dev_attendance]</code> finds its program by the page, then by the name.</p>
             </div>
         </div>
         <?php
@@ -1502,6 +2295,8 @@ class TeamOversight_Programs {
         // are stored against it, so regenerating keys from the name would
         // drop the supervisors being saved and orphan attendance history.
         $existing = self::get_programs();
+        $has_setup = class_exists('TeamOversight_Program_Setup');
+        $refusals = array();
         $key_by_name = array();
         $key_by_product = array();
         foreach ($existing as $existing_key => $existing_program) {
@@ -1555,9 +2350,42 @@ class TeamOversight_Programs {
             $ids = array_values(array_unique($ids));
             $supervisor_total += count($ids);
 
-            $programs[$key] = array('name' => $name, 'product_id' => $product_id, 'weekday' => $weekday, 'supervisors' => $ids);
+            // 1.84.0: a program set up for online booking keeps its product
+            // here: it changes only on its Setup tab (otherwise a typed id
+            // would bypass the switch).
+            if ($has_setup && TeamOversight_Program_Setup::has_entry($key) && isset($existing[$key]) && is_array($existing[$key])
+                && intval(isset($existing[$key]['product_id']) ? $existing[$key]['product_id'] : 0) !== $product_id) {
+                $refusals[] = esc_html($name) . ': change the product on the program\'s Setup tab.';
+            }
+
+            // 1.84.0: start from the stored entry and set only the four
+            // fields this screen owns, so a field it doesn't know survives.
+            $entry = (isset($existing[$key]) && is_array($existing[$key])) ? $existing[$key] : array();
+            $entry['name'] = $name;
+            $entry['product_id'] = $product_id;
+            $entry['weekday'] = $weekday;
+            $entry['supervisors'] = $ids;
+            $programs[$key] = $entry;
         }
+
+        // 1.84.0: nor can a set-up program be left out (deleted, or renamed
+        // with a new product in one save, which would make a new key).
+        if ($has_setup) {
+            foreach ($existing as $existing_key => $existing_program) {
+                if (!isset($programs[$existing_key]) && TeamOversight_Program_Setup::has_entry($existing_key)) {
+                    $existing_name = (is_array($existing_program) && isset($existing_program['name'])) ? (string) $existing_program['name'] : (string) $existing_key;
+                    $refusals[] = esc_html($existing_name) . ' is set up for online booking, so it can\'t be removed or given a new product here.';
+                }
+            }
+        }
+        if (!empty($refusals)) {
+            echo '<div class="notice notice-error"><p><strong>Nothing was saved.</strong></p><ul style="list-style: disc; margin-left: 20px;"><li>'
+                . implode('</li><li>', $refusals) . '</li></ul></div>';
+            return;
+        }
+
         update_option(self::PROGRAMS_OPTION, $programs);
+        self::flush_program_caches();
 
         if (!empty($_POST['clear_legacy'])) {
             delete_option(self::SUPERVISORS_OPTION);
