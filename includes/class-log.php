@@ -74,6 +74,9 @@ class TeamOversight_Log {
                 'coach_editor' => 'Coach bios editor role',
                 // Club Programs (1.84.0): setup saves (the writer exists from 1.84.0; its screen from 1.85.0).
                 'program_setup' => 'Club Programs setup',
+                // Club Programs (1.85.0): session changes and refused deletions.
+                'program_sessions' => 'Club Programs sessions',
+                'program_guard' => 'Club Programs deletion refused',
             ),
         );
 

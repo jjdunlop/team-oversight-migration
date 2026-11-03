@@ -24,6 +24,17 @@ if (!defined('ABSPATH')) {
  * figures (refund_state() is the ONE rule), history and stats read every
  * product (get_program_history()), and both portal shortcodes are never
  * cached or indexed (no_cache()).
+ *
+ * 1.85.0 (setup, sessions, switch): writers are a program's OWN supervisors
+ * and administrators (can_write_sessions(); the legacy club-wide list only
+ * views); the admin page has tabs (Roll and stats, Sessions, Setup, To
+ * refund) and a portal shows Roll / Sessions links only once the Sessions
+ * tab is available, so a legacy program's portal is drawn exactly as
+ * before; a program selling dated sessions has its own roll, one card per
+ * order line with per-line ticks (team_program_line_ticks) and its earlier
+ * date-label products under Earlier seasons; a paid order with session
+ * lines is imported into the shop's analytics at once; the Settings screen
+ * saves through admin-post under the setup lock.
  */
 class TeamOversight_Programs {
 
@@ -33,10 +44,16 @@ class TeamOversight_Programs {
     const REFUND_FILTER = 'murvc_program_refund_rule';
     /** 1.84.0: the shortcodes that draw a supervisor portal (names, mobiles, emergency details). */
     const PORTAL_SHORTCODES = array('session_attendance', 'mixed_dev_attendance');
+    /** 1.85.0: the Settings screen's notice after its admin-post save. */
+    const SETTINGS_FLASH = 'murvc_program_settings_flash_';
 
     /** Request caches (1.84.0), dropped by flush_program_caches(). */
     private static $products_cache = array();
     private static $history_cache = array();
+    /** 1.85.0: static hooks added once, and the orders to import into analytics at shutdown. */
+    private static $hooks_added = false;
+    private static $imports = array();
+    private static $imports_hooked = false;
 
     public function __construct() {
         // 1.84.0: a page holding a portal shortcode is never cached or
@@ -142,6 +159,157 @@ class TeamOversight_Programs {
             }
         }
         return false;
+    }
+
+    /**
+     * 1.85.0 (design 5.1, D26): who may write a program's sessions: an
+     * administrator, or someone on the program's OWN supervisor list. The
+     * legacy club-wide list still views a roll but never writes. A null user
+     * is the current one; 0 is nobody.
+     */
+    public static function can_write_sessions($program_key, $user_id = null) {
+        $user_id = $user_id === null ? get_current_user_id() : intval($user_id);
+        if ($user_id <= 0) {
+            return false;
+        }
+        if (user_can($user_id, 'manage_options')) {
+            return true;
+        }
+        $program = self::get_program((string) $program_key);
+        if (!is_array($program) || empty($program['supervisors']) || !is_array($program['supervisors'])) {
+            return false;
+        }
+        return in_array($user_id, array_map('intval', $program['supervisors']), true);
+    }
+
+    /**
+     * 1.85.0: the static hooks, added once (the constructor's instance hooks
+     * stay as they are): the analytics import of a paid or refunded order
+     * with session lines (design 4.12, D22), and the Settings screen's
+     * admin-post save (design 6, B16).
+     */
+    public static function register_hooks() {
+        if (self::$hooks_added) {
+            return;
+        }
+        self::$hooks_added = true;
+        add_action('woocommerce_order_status_processing', array(__CLASS__, 'queue_import'));
+        add_action('woocommerce_order_status_completed', array(__CLASS__, 'queue_import'));
+        add_action('woocommerce_order_refunded', array(__CLASS__, 'queue_refund_import'), 10, 2);
+        add_action('admin_post_murvc_program_settings', array(__CLASS__, 'handle_settings_post'));
+    }
+
+    /** Whether an order has a line of a session product (one made by Club Manager). */
+    private static function order_has_sessions($order) {
+        foreach ($order->get_items('line_item') as $item) {
+            if ($item instanceof WC_Order_Item_Product && (string) get_post_meta($item->get_product_id(), '_murvc_session_product', true) === '1') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function queue($id) {
+        $id = intval($id);
+        if ($id <= 0) {
+            return;
+        }
+        self::$imports[$id] = true;
+        if (!self::$imports_hooked) {
+            self::$imports_hooked = true;
+            add_action('shutdown', array(__CLASS__, 'run_pending_imports'));
+        }
+    }
+
+    /** D22: an order with session lines that is paid joins the analytics tables at shutdown, so the roll shows it at once. */
+    public static function queue_import($order_id) {
+        if (!function_exists('wc_get_order')) {
+            return;
+        }
+        $order = wc_get_order(intval($order_id));
+        if ($order instanceof WC_Order && self::order_has_sessions($order)) {
+            self::queue($order->get_id());
+        }
+    }
+
+    /** D22: its refund too (and the order again). */
+    public static function queue_refund_import($order_id, $refund_id = 0) {
+        if (!function_exists('wc_get_order')) {
+            return;
+        }
+        $order = wc_get_order(intval($order_id));
+        if ($order instanceof WC_Order && self::order_has_sessions($order)) {
+            self::queue(intval($refund_id));
+            self::queue($order->get_id());
+        }
+    }
+
+    /**
+     * Each queued id once, through the account merge's own call
+     * (OrdersScheduler::import()), never letting a failure reach the
+     * customer's request. Public so a test can run it in process.
+     */
+    public static function run_pending_imports() {
+        $ids = array_keys(self::$imports);
+        self::$imports = array();
+        $sched = '\Automattic\WooCommerce\Internal\Admin\Schedulers\OrdersScheduler';
+        if (empty($ids) || !class_exists($sched) || !method_exists($sched, 'import')) {
+            return;
+        }
+        foreach ($ids as $id) {
+            try {
+                $sched::import($id);
+            } catch (Throwable $e) {
+                // The scheduler's own run catches it up later.
+                continue;
+            }
+        }
+    }
+
+    /**
+     * Design 6.4 step 4: the program's current product becomes $product_id.
+     * Switch and Switch back only, under TeamOversight_Program_Setup's lock:
+     * the option read fresh (never a cached copy), only that entry's
+     * product_id set, then read back and confirmed (that entry changed,
+     * every other unchanged). False on any doubt.
+     */
+    public static function set_current_product($key, $product_id) {
+        $key = (string) $key;
+        $all = TeamOversight_Program_Setup::read_option_fresh(self::PROGRAMS_OPTION);
+        if ($all === null) {
+            return false;
+        }
+        if (empty($all)) {
+            $all = self::get_programs();
+        }
+        if (!isset($all[$key]) || !is_array($all[$key])) {
+            return false;
+        }
+        $before = $all;
+        $all[$key]['product_id'] = intval($product_id);
+        // Compare against the row, not an older autoloaded copy.
+        wp_cache_delete('alloptions', 'options');
+        wp_cache_delete(self::PROGRAMS_OPTION, 'options');
+        update_option(self::PROGRAMS_OPTION, $all);
+        wp_cache_delete(self::PROGRAMS_OPTION, 'options');
+        $after = TeamOversight_Program_Setup::read_option_fresh(self::PROGRAMS_OPTION);
+        $ok = is_array($after) && isset($after[$key]['product_id']) && is_scalar($after[$key]['product_id']) && intval($after[$key]['product_id']) === intval($product_id);
+        if ($ok) {
+            foreach (array_unique(array_merge(array_keys($before), array_keys($after))) as $other) {
+                if ((string) $other === $key) {
+                    continue;
+                }
+                if ((isset($before[$other]) ? serialize($before[$other]) : null) !== (isset($after[$other]) ? serialize($after[$other]) : null)) {
+                    $ok = false;
+                    break;
+                }
+            }
+        }
+        self::flush_program_caches();
+        if (class_exists('TeamOversight_Program_Sessions')) {
+            TeamOversight_Program_Sessions::flush_cache();
+        }
+        return $ok;
     }
 
     /** Programs this user may view (admins: all). */
@@ -299,11 +467,120 @@ class TeamOversight_Programs {
         if (!$program || !self::user_can_view($program_key)) {
             wp_send_json_error('You do not have access to this program');
         }
+        // 1.85.0 (B31): each field behind isset; a dated roll posts the line and the date, no label.
+        $item = isset($_POST['order_item_id']) ? absint($_POST['order_item_id']) : 0;
+        $date = isset($_POST['session_date']) ? sanitize_text_field(wp_unslash($_POST['session_date'])) : '';
         return array(
             'key' => $program_key,
             'program' => $program,
-            'session' => sanitize_text_field(wp_unslash($_POST['session_label'])),
+            'session' => isset($_POST['session_label']) ? sanitize_text_field(wp_unslash($_POST['session_label'])) : '',
+            'item' => $item,
+            'date' => $date,
+            'dated' => isset($_POST['order_item_id'], $_POST['session_date']) && self::current_kind($program_key) === 'dated',
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Per-line ticks for dated sessions (1.85.0, design 4.12, 3.9, D19)
+    // ------------------------------------------------------------------
+
+    /** order_item_id => array(attended, by, at) for one dated session (index session_lookup). */
+    public static function get_line_attendance($program_key, $session_date) {
+        global $wpdb;
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT t.order_item_id, t.attended, t.marked_at, u.display_name AS marked_by
+            FROM {$wpdb->prefix}team_program_line_ticks t
+            LEFT JOIN {$wpdb->users} u ON u.ID = t.marked_by
+            WHERE t.program_key = %s AND t.session_date = %s
+        ", (string) $program_key, (string) $session_date));
+        $marked = array();
+        foreach ((array) $rows as $row) {
+            $marked[intval($row->order_item_id)] = array(
+                'attended' => (bool) intval($row->attended),
+                'by' => $row->marked_by ? $row->marked_by : '',
+                'at' => $row->marked_at ? date('g:ia', strtotime($row->marked_at)) : '',
+            );
+        }
+        return $marked;
+    }
+
+    /**
+     * Tick or untick one order line of a dated session (design 4.12): the
+     * user may view the program; the line's product is one of the
+     * program's; its variation's session date is the posted date; its order
+     * is paid (processing or completed, an order, never a refund). The
+     * account comes from the order, never from the post. Returns
+     * array(ok, message).
+     */
+    public static function mark_line($user_id, $program_key, $order_item_id, $session_date, $attended) {
+        global $wpdb;
+        $user_id = intval($user_id);
+        $program_key = sanitize_key((string) $program_key);
+        $fail = function ($message) {
+            return array('ok' => false, 'message' => $message);
+        };
+        if (!is_array(self::get_program($program_key)) || $user_id <= 0 || !self::user_can_view($program_key, $user_id)) {
+            return $fail('You do not have access to this program');
+        }
+        $session_date = (string) $session_date;
+        if (!self::is_ymd($session_date) || !checkdate(intval(substr($session_date, 5, 2)), intval(substr($session_date, 8, 2)), intval(substr($session_date, 0, 4)))) {
+            return $fail('That isn\'t a session date.');
+        }
+        if (!class_exists('WC_Order_Factory')) {
+            return $fail('The shop isn\'t available.');
+        }
+        $item = WC_Order_Factory::get_order_item(intval($order_item_id));
+        if (!($item instanceof WC_Order_Item_Product)) {
+            return $fail('That booking isn\'t one of this program\'s.');
+        }
+        $products = array();
+        foreach (self::program_products($program_key) as $product) {
+            $products[] = intval($product['product_id']);
+        }
+        if (!in_array(intval($item->get_product_id()), $products, true)) {
+            return $fail('That booking isn\'t one of this program\'s.');
+        }
+        $variation_id = intval($item->get_variation_id());
+        if ($variation_id <= 0 || (string) get_post_meta($variation_id, '_murvc_session_date', true) !== $session_date) {
+            return $fail('That booking isn\'t for this session.');
+        }
+        $order = wc_get_order($item->get_order_id());
+        if (!($order instanceof WC_Order) || !in_array($order->get_status(), array('processing', 'completed'), true)) {
+            return $fail('That booking isn\'t paid.');
+        }
+        $customer = intval($order->get_customer_id());
+        $args = array($program_key, intval($item->get_product_id()), $session_date, intval($item->get_id()), intval($order->get_id()));
+        if ($customer > 0) {
+            $args[] = $customer;
+        }
+        $args[] = $attended ? 1 : 0;
+        $args[] = $user_id;
+        $args[] = current_time('mysql');
+        $wpdb->query($wpdb->prepare("
+            INSERT INTO {$wpdb->prefix}team_program_line_ticks
+                (program_key, product_id, session_date, order_item_id, order_id, user_id, attended, marked_by, marked_at)
+            VALUES (%s, %d, %s, %d, %d, " . ($customer > 0 ? '%d' : 'NULL') . ", %d, %d, %s)
+            ON DUPLICATE KEY UPDATE attended = VALUES(attended), marked_by = VALUES(marked_by), marked_at = VALUES(marked_at)
+        ", $args));
+        if ($wpdb->last_error !== '') {
+            return $fail('The tick couldn\'t be saved. Try again.');
+        }
+        return array('ok' => true, 'message' => '');
+    }
+
+    /** The marks of a dated session as the dated roll's script reads them, keyed by order line, plus their hash. */
+    private function marked_line_state($program_key, $session_date) {
+        $state = array();
+        foreach (self::get_line_attendance($program_key, $session_date) as $item_id => $entry) {
+            $state[$item_id] = array(
+                'attended' => (bool) $entry['attended'],
+                'note' => ($entry['attended'] && $entry['by'])
+                    ? 'Marked by ' . $entry['by'] . ($entry['at'] ? ' at ' . $entry['at'] : '')
+                    : '',
+            );
+        }
+        ksort($state);
+        return array($state, md5((string) wp_json_encode($state)));
     }
 
     /**
@@ -328,6 +605,21 @@ class TeamOversight_Programs {
 
     public function ajax_mark_attendance() {
         $ctx = $this->ajax_context();
+
+        if ($ctx['dated']) {
+            $done = self::mark_line(get_current_user_id(), $ctx['key'], $ctx['item'], $ctx['date'], !empty($_POST['attended']));
+            if (!$done['ok']) {
+                wp_send_json_error($done['message']);
+            }
+            $marked = self::get_line_attendance($ctx['key'], $ctx['date']);
+            $entry = isset($marked[$ctx['item']]) ? $marked[$ctx['item']] : null;
+            wp_send_json_success(array(
+                'attended' => (bool) ($entry && $entry['attended']),
+                'note' => ($entry && $entry['attended'] && $entry['by'])
+                    ? 'Marked by ' . $entry['by'] . ($entry['at'] ? ' at ' . $entry['at'] : '')
+                    : '',
+            ));
+        }
 
         self::set_attendance(
             $ctx['key'],
@@ -356,7 +648,11 @@ class TeamOversight_Programs {
     public function ajax_attendance_state() {
         $ctx = $this->ajax_context();
 
-        list($state, $hash) = $this->marked_state($ctx['key'], $ctx['session']);
+        if ($ctx['dated']) {
+            list($state, $hash) = $this->marked_line_state($ctx['key'], $ctx['date']);
+        } else {
+            list($state, $hash) = $this->marked_state($ctx['key'], $ctx['session']);
+        }
         $since = isset($_POST['since']) ? sanitize_text_field(wp_unslash($_POST['since'])) : '';
         if ($since !== '' && hash_equals($hash, $since)) {
             wp_send_json_success(array('unchanged' => true, 'hash' => $hash));
@@ -386,13 +682,18 @@ class TeamOversight_Programs {
             return;
         }
 
-        self::set_attendance(
-            $program_key,
-            sanitize_text_field(wp_unslash($_POST['session_label'])),
-            intval($_POST['order_id']),
-            !empty($_POST['attended']),
-            intval($_POST['attendee_user_id'])
-        );
+        if (isset($_POST['order_item_id'], $_POST['session_date'])) {
+            // 1.85.0: a dated roll's tick, checked against the line, the session and a paid order.
+            self::mark_line(get_current_user_id(), $program_key, absint($_POST['order_item_id']), sanitize_text_field(wp_unslash($_POST['session_date'])), !empty($_POST['attended']));
+        } elseif (isset($_POST['session_label'], $_POST['order_id'])) {
+            self::set_attendance(
+                $program_key,
+                sanitize_text_field(wp_unslash($_POST['session_label'])),
+                intval($_POST['order_id']),
+                !empty($_POST['attended']),
+                isset($_POST['attendee_user_id']) ? intval($_POST['attendee_user_id']) : 0
+            );
+        }
 
         wp_safe_redirect($_SERVER['REQUEST_URI']);
         exit;
@@ -1477,10 +1778,11 @@ class TeamOversight_Programs {
      * did before (the golden harness compares the markup).
      */
     public static function render_roster($program, $selected_label, $base_url, $query_arg = 'session', $options = array()) {
-        $options = array_merge(array('show_history' => true, 'program_key' => ''), $options);
+        // 1.85.0: years (an earlier product's own years, for its labels) and
+        // legacy (true = this product's legacy roll, never the dated one).
+        $options = array_merge(array('show_history' => true, 'program_key' => '', 'years' => null, 'legacy' => false), $options);
         $program_key = $options['program_key'];
         $weekday = self::get_program_weekday($program);
-        $sessions = self::get_sessions($program['product_id'], $weekday);
 
         // 1.84.0: history reads every product of the program. With no key
         // given (no caller does that today), the program whose product this is.
@@ -1494,6 +1796,13 @@ class TeamOversight_Programs {
                 }
             }
         }
+
+        // 1.85.0: a program selling dated sessions has its own roll, one card per line.
+        if (empty($options['legacy']) && $history_key !== '' && self::current_kind($history_key) === 'dated') {
+            return self::render_dated_roster($program, $history_key, (string) $selected_label, $base_url, $options);
+        }
+
+        $sessions = self::get_sessions($program['product_id'], $weekday, $options['years']);
 
         if (empty($sessions)) {
             $kind = $history_key !== '' ? self::current_kind($history_key) : '';
@@ -1865,6 +2174,564 @@ class TeamOversight_Programs {
     }
 
     // ------------------------------------------------------------------
+    // The dated roll (1.85.0, design 4.12, 3.5, B12, B13)
+    // ------------------------------------------------------------------
+
+    /**
+     * A dated product's session dates (any status but the Bin, sessions
+     * only): date => array(label, slots (start => array(ids, label, closed,
+     * cancelled)), closed (every session of the date closed), cancelled (any
+     * cancelled)), in date order, slots by start.
+     */
+    public static function dated_dates($product_id) {
+        $dates = array();
+        if (!class_exists('TeamOversight_Program_Sessions')) {
+            return $dates;
+        }
+        foreach (TeamOversight_Program_Sessions::children($product_id) as $row) {
+            if ($row['date'] === '' || $row['status'] === 'trash') {
+                continue;
+            }
+            $date = $row['date'];
+            if (!isset($dates[$date])) {
+                $dates[$date] = array('label' => TeamOversight_Program_Sessions::date_label($date), 'slots' => array(), 'closed' => true, 'cancelled' => false);
+            }
+            $slot = $row['slot'];
+            if (!isset($dates[$date]['slots'][$slot])) {
+                $dates[$date]['slots'][$slot] = array(
+                    'ids' => array(),
+                    'label' => $row['time_label'] !== '' ? $row['time_label'] : TeamOversight_Program_Sessions::time_label($slot),
+                    'closed' => false,
+                    'cancelled' => false,
+                );
+            }
+            $dates[$date]['slots'][$slot]['ids'][] = $row['id'];
+            if ($row['state'] === 'cancelled') {
+                $dates[$date]['cancelled'] = true;
+                $dates[$date]['slots'][$slot]['cancelled'] = true;
+            }
+            if ($row['state'] === 'closed') {
+                $dates[$date]['slots'][$slot]['closed'] = true;
+            } else {
+                $dates[$date]['closed'] = false;
+            }
+        }
+        ksort($dates);
+        foreach ($dates as $date => $day) {
+            ksort($dates[$date]['slots']);
+        }
+        return $dates;
+    }
+
+    /**
+     * Design 3.5: one card per paid order line of these variations (any
+     * status of the variation), matched by _variation_id, never by label.
+     * Fully refunded lines are left out unless $keep_refunded (a cancelled
+     * session's roll keeps them, marked Refunded: B12). Each card:
+     * order_item_id, order_id, variation_id, user_id, name (the account's),
+     * player, player_key, email, mobile, qty (places after refunds),
+     * refund_state, refunded_amount, ordered, has_account.
+     */
+    public static function get_line_attendees($product_id, array $variation_ids, $keep_refunded = false) {
+        global $wpdb;
+        $ids = array_values(array_unique(array_filter(array_map('intval', $variation_ids))));
+        if (empty($ids)) {
+            return array();
+        }
+        $p = $wpdb->prefix;
+        $args = array(intval($product_id));
+        foreach ($ids as $id) {
+            $args[] = (string) $id;
+        }
+        $in = implode(',', array_fill(0, count($ids), '%s'));
+        $lines = $wpdb->get_results($wpdb->prepare("
+            SELECT oi.order_item_id, oi.order_id,
+                MAX(var.meta_value) AS variation_id,
+                MAX(qty.meta_value) AS qty,
+                MAX(lt.meta_value) AS line_total,
+                MAX(ltx.meta_value) AS line_tax,
+                MAX(pl.meta_value) AS player,
+                MAX(pk.meta_value) AS player_key,
+                MAX(cl.user_id) AS user_id,
+                MAX(cl.email) AS email,
+                MAX(cl.first_name) AS first_name,
+                MAX(cl.last_name) AS last_name,
+                MAX(os.date_created) AS ordered
+            FROM {$p}woocommerce_order_items oi
+            JOIN {$p}woocommerce_order_itemmeta prod
+                ON prod.order_item_id = oi.order_item_id AND prod.meta_key = '_product_id' AND prod.meta_value = %d
+            JOIN {$p}woocommerce_order_itemmeta var
+                ON var.order_item_id = oi.order_item_id AND var.meta_key = '_variation_id' AND var.meta_value IN ({$in})
+            LEFT JOIN {$p}woocommerce_order_itemmeta qty
+                ON qty.order_item_id = oi.order_item_id AND qty.meta_key = '_qty'
+            LEFT JOIN {$p}woocommerce_order_itemmeta lt
+                ON lt.order_item_id = oi.order_item_id AND lt.meta_key = '_line_total'
+            LEFT JOIN {$p}woocommerce_order_itemmeta ltx
+                ON ltx.order_item_id = oi.order_item_id AND ltx.meta_key = '_line_tax'
+            LEFT JOIN {$p}woocommerce_order_itemmeta pl
+                ON pl.order_item_id = oi.order_item_id AND pl.meta_key = 'Player'
+            LEFT JOIN {$p}woocommerce_order_itemmeta pk
+                ON pk.order_item_id = oi.order_item_id AND pk.meta_key = '_murvc_player_key'
+            JOIN {$p}wc_order_stats os ON os.order_id = oi.order_id
+            LEFT JOIN {$p}wc_customer_lookup cl ON cl.customer_id = os.customer_id
+            WHERE os.status IN ('wc-processing', 'wc-completed') AND os.parent_id = 0 AND oi.order_item_type = 'line_item'
+            GROUP BY oi.order_item_id, oi.order_id
+            ORDER BY MAX(cl.last_name), MAX(cl.first_name), oi.order_id, oi.order_item_id
+        ", $args));
+        $refunds = self::refunds_for_items(wp_list_pluck((array) $lines, 'order_item_id'));
+
+        $user_ids = array();
+        foreach ((array) $lines as $line) {
+            $user_ids[] = intval($line->user_id);
+        }
+        $user_ids = array_values(array_unique(array_filter($user_ids)));
+        if (!empty($user_ids) && function_exists('cache_users')) {
+            cache_users($user_ids);
+        }
+
+        $cards = array();
+        foreach ((array) $lines as $line) {
+            $item_id = intval($line->order_item_id);
+            $qty = max(1, intval($line->qty));
+            $refund = isset($refunds[$item_id]) ? $refunds[$item_id] : null;
+            $state = self::refund_state($qty, (float) $line->line_total + (float) $line->line_tax, $refund);
+            if ($state === 'full' && !$keep_refunded) {
+                continue;
+            }
+            $user_id = intval($line->user_id);
+            $account = $user_id ? get_userdata($user_id) : false;
+            $email = $account ? $account->user_email : (string) $line->email;
+            $name = trim(trim((string) $line->first_name) . ' ' . trim((string) $line->last_name));
+            if ($name === '' && $account) {
+                $name = $account->display_name;
+            }
+            $cards[] = array(
+                'order_item_id' => $item_id,
+                'order_id' => intval($line->order_id),
+                'variation_id' => intval($line->variation_id),
+                'user_id' => $user_id,
+                'name' => $name !== '' ? $name : ($email ?: 'Unknown'),
+                'player' => $line->player !== null ? trim((string) $line->player) : '',
+                'player_key' => $line->player_key !== null ? trim((string) $line->player_key) : '',
+                'email' => $email,
+                'mobile' => $user_id ? get_user_meta($user_id, 'mobile_number', true) : '',
+                'qty' => self::places_after_refunds($qty, $state, $refund),
+                'refund_state' => $state,
+                'refunded_amount' => is_array($refund) ? round(max(0.0, (float) $refund['amount']), 2) : 0.0,
+                'ordered' => $line->ordered,
+                'has_account' => (bool) $account,
+            );
+        }
+        return $cards;
+    }
+
+    /**
+     * The roll of a program selling dated sessions (design 4.12): a picker
+     * of session dates (one Tuesday is one entry), a slot filter when the
+     * date has more than one slot, one card per order line (siblings and
+     * both slots of a night separate) with the player's name and "Booked
+     * by", a cancelled session's Refund due / Refunded chips (B12), per-line
+     * ticks, and Earlier seasons: the program's date-label products, each
+     * with today's legacy roll (B13).
+     */
+    private static function render_dated_roster($program, $key, $selected_date, $base_url, $options) {
+        $pid = intval($program['product_id']);
+        $name = isset($program['name']) ? (string) $program['name'] : $key;
+
+        // Earlier seasons: the legacy roll of one of the program's date-label products.
+        $earlier = array();
+        foreach (self::program_products($key) as $product) {
+            if ($product['role'] === 'past' && $product['kind'] === 'legacy_date') {
+                $earlier[intval($product['product_id'])] = $product;
+            }
+        }
+        $past_id = isset($_GET['past']) && is_scalar($_GET['past']) ? absint($_GET['past']) : 0;
+        if ($past_id > 0 && isset($earlier[$past_id])) {
+            $product = $earlier[$past_id];
+            $title = class_exists('TeamOversight_Program_Setup') ? TeamOversight_Program_Setup::product_title($past_id) : '#' . $past_id;
+            $selected = isset($_GET['session']) && is_scalar($_GET['session']) ? sanitize_text_field(wp_unslash($_GET['session'])) : '';
+            $back = remove_query_arg(array('past', 'session', 'slot'), $base_url);
+            return '<p class="murvc-earlier-head"><a href="' . esc_url($back) . '">&larr; ' . esc_html($name) . '</a> &middot; Earlier season: <strong>' . esc_html($title) . '</strong></p>'
+                . self::render_roster(
+                    array('name' => $title, 'product_id' => $past_id, 'weekday' => $product['weekday']),
+                    $selected,
+                    add_query_arg('past', $past_id, $back),
+                    'session',
+                    array('program_key' => $key, 'years' => $product['years'], 'legacy' => true, 'show_history' => $options['show_history'])
+                );
+        }
+        $earlier_html = '';
+        if (!empty($earlier)) {
+            $links = array();
+            foreach ($earlier as $id => $product) {
+                $title = class_exists('TeamOversight_Program_Setup') ? TeamOversight_Program_Setup::product_title($id) : '#' . $id;
+                $links[] = '<a href="' . esc_url(add_query_arg('past', $id, remove_query_arg(array('session', 'slot'), $base_url))) . '">' . esc_html($title . ' (' . implode(', ', (array) $product['years']) . ')') . '</a>';
+            }
+            $earlier_html = '<p class="murvc-earlier">Earlier seasons: ' . implode(' &middot; ', $links) . '</p>';
+        }
+
+        $dates = self::dated_dates($pid);
+        if (empty($dates)) {
+            return '<div class="murvc-sessions coach-portal"><p>No sessions yet for ' . esc_html($name) . '. They are added on the Sessions tab.</p>' . $earlier_html . '</div>';
+        }
+        $today = current_time('Y-m-d');
+        if ($selected_date === '' || !isset($dates[$selected_date])) {
+            $selected_date = '';
+            $last = '';
+            foreach (array_keys($dates) as $date) {
+                if ($date === $today) {
+                    $selected_date = $date;
+                    break;
+                }
+                if ($date > $today && $selected_date === '') {
+                    $selected_date = $date;
+                }
+                $last = $date;
+            }
+            if ($selected_date === '') {
+                $selected_date = $last;
+            }
+        }
+        $day = $dates[$selected_date];
+        $many_slots = count($day['slots']) > 1;
+        $slot_filter = isset($_GET['slot']) && is_scalar($_GET['slot']) ? sanitize_text_field(wp_unslash($_GET['slot'])) : '';
+        if (!$many_slots || !isset($day['slots'][$slot_filter])) {
+            $slot_filter = '';
+        }
+
+        $slot_of = array();
+        $all_ids = array();
+        foreach ($day['slots'] as $start => $slot) {
+            foreach ($slot['ids'] as $id) {
+                $slot_of[$id] = $start;
+                $all_ids[] = $id;
+            }
+        }
+        $cards = array();
+        $slot_places = array();
+        foreach (self::get_line_attendees($pid, $all_ids, true) as $card) {
+            $start = isset($slot_of[$card['variation_id']]) ? $slot_of[$card['variation_id']] : '';
+            $cancelled = $start !== '' && !empty($day['slots'][$start]['cancelled']);
+            if ($card['refund_state'] === 'full' && !$cancelled) {
+                continue;
+            }
+            $card['slot'] = $start;
+            $card['cancelled'] = $cancelled;
+            if ($card['refund_state'] !== 'full') {
+                $slot_places[$start] = (isset($slot_places[$start]) ? $slot_places[$start] : 0) + $card['qty'];
+            }
+            if ($slot_filter === '' || $start === $slot_filter) {
+                $cards[] = $card;
+            }
+        }
+
+        $counts = $options['show_history'] ? self::program_prior_counts($key, $selected_date) : array();
+        $marked = self::get_line_attendance($key, $selected_date);
+        $spots = 0;
+        $guests = 0;
+        $people = 0;
+        $first_timers = 0;
+        $checked_in = 0;
+        foreach ($cards as $index => $card) {
+            $entry = isset($marked[$card['order_item_id']]) ? $marked[$card['order_item_id']] : null;
+            $cards[$index]['attended'] = ($entry && $entry['attended']);
+            $cards[$index]['marked_note'] = ($entry && $entry['attended'] && $entry['by']) ? 'Marked by ' . $entry['by'] . ($entry['at'] ? ' at ' . $entry['at'] : '') : '';
+            $cards[$index]['prior'] = $options['show_history'] ? self::count_prior($counts, $card['user_id'], $card['email'], $card['player_key']) : null;
+            if ($card['refund_state'] === 'full') {
+                continue;
+            }
+            $people++;
+            $spots += $card['qty'];
+            $guests += max(0, $card['qty'] - 1);
+            if ($cards[$index]['prior'] === 0) {
+                $first_timers++;
+            }
+            if ($cards[$index]['attended']) {
+                $checked_in += $card['qty'];
+            }
+        }
+        usort($cards, function ($a, $b) {
+            if ($a['attended'] !== $b['attended']) {
+                return $a['attended'] ? 1 : -1;
+            }
+            return strcasecmp($a['player'] !== '' ? $a['player'] : $a['name'], $b['player'] !== '' ? $b['player'] : $b['name']);
+        });
+
+        $base = remove_query_arg(array('slot', 'past'), $base_url);
+        $date_url = add_query_arg('session', $selected_date, $base);
+        ob_start();
+        ?>
+        <div class="murvc-sessions murvc-dated coach-portal">
+            <div class="murvc-session-picker">
+                <label for="murvc-session-select"><strong>Session:</strong></label>
+                <select id="murvc-session-select" onchange="location.href=this.value;">
+                    <?php foreach ($dates as $date => $entry): ?>
+                        <option value="<?php echo esc_url(add_query_arg('session', $date, $base)); ?>" <?php selected($selected_date, $date); ?>>
+                            <?php
+                            echo esc_html($entry['label']);
+                            echo $date === $today ? ' — today' : '';
+                            echo $entry['cancelled'] ? ' (cancelled)' : ($entry['closed'] ? ' (bookings closed)' : '');
+                            ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <span class="murvc-session-summary">
+                    <strong><?php echo intval($spots); ?></strong> booked
+                    <?php if ($guests > 0): ?>(<?php echo intval($people); ?> bookings + <?php echo intval($guests); ?> guest<?php echo $guests === 1 ? '' : 's'; ?>)<?php endif; ?>
+                    <?php if ($first_timers > 0): ?> &middot; <strong><?php echo intval($first_timers); ?></strong> first-timer<?php echo $first_timers === 1 ? '' : 's'; ?><?php endif; ?>
+                    &middot; <strong class="murvc-checked-count"><?php echo intval($checked_in); ?></strong> here
+                    <?php if ($selected_date === $today): ?><span class="murvc-today-flag">TODAY</span><?php endif; ?>
+                </span>
+                <?php if ($many_slots): ?>
+                    <p class="murvc-slot-filter">
+                        <?php
+                        $filter_links = array();
+                        $all_label = 'All (' . intval(array_sum($slot_places)) . ')';
+                        $filter_links[] = $slot_filter === '' ? '<strong>' . esc_html($all_label) . '</strong>' : '<a href="' . esc_url($date_url) . '">' . esc_html($all_label) . '</a>';
+                        foreach ($day['slots'] as $start => $slot) {
+                            $label = TeamOversight_Program_Sessions::time_label($start) . ' (' . intval(isset($slot_places[$start]) ? $slot_places[$start] : 0) . ')';
+                            $filter_links[] = $slot_filter === $start ? '<strong>' . esc_html($label) . '</strong>' : '<a href="' . esc_url(add_query_arg('slot', $start, $date_url)) . '">' . esc_html($label) . '</a>';
+                        }
+                        echo implode(' &middot; ', $filter_links);
+                        ?>
+                    </p>
+                <?php endif; ?>
+            </div>
+            <?php echo $earlier_html; ?>
+            <?php foreach ($day['slots'] as $start => $slot): ?>
+                <?php if (!empty($slot['cancelled']) && ($slot_filter === '' || $slot_filter === $start)): ?>
+                    <p class="murvc-cancelled-banner">Cancelled by the club<?php echo $many_slots ? ': ' . esc_html($slot['label']) : ''; ?></p>
+                <?php elseif (!empty($slot['closed']) && ($slot_filter === '' || $slot_filter === $start)): ?>
+                    <p class="murvc-closed-note">Bookings closed<?php echo $many_slots ? ': ' . esc_html($slot['label']) : ''; ?></p>
+                <?php endif; ?>
+            <?php endforeach; ?>
+
+            <?php if (!empty($cards)): ?>
+                <p class="murvc-session-search">
+                    <label class="screen-reader-text" for="murvc-attendee-search">Search attendees</label>
+                    <input type="search" id="murvc-attendee-search" placeholder="Search name or email…" autocomplete="off">
+                    <span class="murvc-search-count"></span>
+                </p>
+            <?php endif; ?>
+
+            <?php if (empty($cards)): ?>
+                <p>Nobody has booked this session yet.</p>
+            <?php else: ?>
+                <?php foreach ($cards as $card): ?>
+                    <?php
+                    $prior = $card['prior'];
+                    $is_first = ($prior === 0 && $card['refund_state'] !== 'full');
+                    $shown_name = $card['player'] !== '' ? $card['player'] : $card['name'];
+                    ?>
+                    <div class="coach-applicant-card<?php echo $is_first ? ' murvc-first-timer' : ''; ?><?php echo !empty($card['attended']) ? ' murvc-attended' : ''; ?>"
+                         data-item="<?php echo intval($card['order_item_id']); ?>"
+                         data-qty="<?php echo intval($card['qty']); ?>"
+                         data-search="<?php echo esc_attr(strtolower($card['player'] . ' ' . $card['name'] . ' ' . $card['email'])); ?>">
+                        <div class="cac-header">
+                            <span class="cac-name"><?php echo esc_html($shown_name); ?></span>
+                            <span class="cac-chips">
+                                <?php if ($is_first): ?>
+                                    <span class="verdict-chip chip-firsttimer" title="First session of this program — say hello, check they know where to go, and confirm their emergency contact.">👋 New here</span>
+                                <?php elseif ($prior !== null && $prior > 0): ?>
+                                    <span class="verdict-chip chip-regular" title="Has booked <?php echo intval($prior); ?> earlier session(s) of this program."><?php echo esc_html(self::ordinal($prior + 1)); ?> session</span>
+                                <?php endif; ?>
+                                <?php if ($many_slots && $card['slot'] !== '' && isset($day['slots'][$card['slot']])): ?>
+                                    <span class="verdict-chip chip-slot"><?php echo esc_html($day['slots'][$card['slot']]['label']); ?></span>
+                                <?php endif; ?>
+                                <?php if ($card['qty'] > 1): ?>
+                                    <span class="verdict-chip chip-guests" title="Booked <?php echo intval($card['qty']); ?> spots — bringing <?php echo intval($card['qty'] - 1); ?> guest(s) whose names we don't have">&times;<?php echo intval($card['qty']); ?> (<?php echo intval($card['qty'] - 1); ?> guest<?php echo ($card['qty'] - 1) === 1 ? '' : 's'; ?>)</span>
+                                <?php endif; ?>
+                                <?php if ($card['cancelled'] && $card['refund_state'] === 'full'): ?>
+                                    <span class="verdict-chip chip-refunded">Refunded</span>
+                                <?php elseif ($card['refund_state'] === 'part'): ?>
+                                    <span class="verdict-chip chip-refund" title="Part of this booking was refunded in the shop">Part refunded<?php echo esc_html($card['refunded_amount'] >= 0.005 ? ' $' . number_format($card['refunded_amount'], 2) : ''); ?></span>
+                                <?php elseif ($card['cancelled']): ?>
+                                    <span class="verdict-chip chip-refund">Refund due</span>
+                                <?php endif; ?>
+                                <?php if (!$card['has_account']): ?>
+                                    <span class="verdict-chip chip-guestorder" title="Ordered without a club account — no profile or emergency contact on file">No account</span>
+                                <?php endif; ?>
+                            </span>
+                        </div>
+                        <div class="cac-meta">
+                            <?php if ($card['player'] !== ''): ?>
+                                Booked by <?php echo esc_html($card['name']); ?> &middot;
+                            <?php endif; ?>
+                            <?php if ($card['email']): ?>
+                                <a href="mailto:<?php echo esc_attr($card['email']); ?>"><?php echo esc_html($card['email']); ?></a>
+                            <?php endif; ?>
+                            <?php if ($card['mobile']): ?>
+                                &middot; <a href="tel:<?php echo esc_attr(TeamOversight_Coach_Portal::phone_tel_href($card['mobile'])); ?>"><?php echo esc_html(TeamOversight_Coach_Portal::format_phone($card['mobile'])); ?></a>
+                            <?php endif; ?>
+                            &middot; <small>order #<?php echo intval($card['order_id']); ?></small>
+                        </div>
+                        <div class="cac-footer">
+                            <span class="cac-expanders">
+                                <?php echo TeamOversight_Coach_Portal::render_emergency_details($card['email'], $card['user_id'], false); ?>
+                            </span>
+                            <span class="cac-actions">
+                                <?php if (!empty($card['marked_note'])): ?>
+                                    <small class="murvc-marked-note"><?php echo esc_html($card['marked_note']); ?></small>
+                                <?php endif; ?>
+                                <form method="post" class="murvc-attendance-form" data-item="<?php echo intval($card['order_item_id']); ?>">
+                                    <input type="hidden" name="murvc_attendance_action" value="mark">
+                                    <input type="hidden" name="program_key" value="<?php echo esc_attr($key); ?>">
+                                    <input type="hidden" name="order_item_id" value="<?php echo intval($card['order_item_id']); ?>">
+                                    <input type="hidden" name="session_date" value="<?php echo esc_attr($selected_date); ?>">
+                                    <input type="hidden" name="attended" value="<?php echo !empty($card['attended']) ? '0' : '1'; ?>">
+                                    <?php wp_nonce_field('murvc_attendance', 'murvc_attendance_nonce'); ?>
+                                    <?php if (!empty($card['attended'])): ?>
+                                        <button type="submit" class="button murvc-untick">✔ Here — undo</button>
+                                    <?php else: ?>
+                                        <button type="submit" class="button button-primary murvc-tick">Mark here</button>
+                                    <?php endif; ?>
+                                </form>
+                            </span>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            <?php endif; ?>
+        </div>
+        <script>
+        (function () {
+            var root = document.querySelector('.murvc-sessions.murvc-dated');
+            if (!root) { return; }
+            var ajaxUrl = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            var nonce = <?php echo wp_json_encode(wp_create_nonce('murvc_attendance')); ?>;
+            var programKey = <?php echo wp_json_encode($key); ?>;
+            var sessionDate = <?php echo wp_json_encode($selected_date); ?>;
+
+            var box = document.getElementById('murvc-attendee-search');
+            var counter = root.querySelector('.murvc-search-count');
+            if (box) {
+                box.addEventListener('input', function () {
+                    var term = box.value.toLowerCase().trim();
+                    var shown = 0;
+                    root.querySelectorAll('.coach-applicant-card').forEach(function (card) {
+                        var match = term === '' || (card.dataset.search || '').indexOf(term) !== -1;
+                        card.style.display = match ? '' : 'none';
+                        if (match) { shown++; }
+                    });
+                    counter.textContent = term === '' ? '' : shown + ' match' + (shown === 1 ? '' : 'es');
+                });
+            }
+
+            function applyState(card, attended, note) {
+                var form = card.querySelector('.murvc-attendance-form');
+                var button = form.querySelector('button');
+                var noteEl = card.querySelector('.murvc-marked-note');
+                card.classList.toggle('murvc-attended', attended);
+                form.querySelector('input[name="attended"]').value = attended ? '0' : '1';
+                button.textContent = attended ? '✔ Here — undo' : 'Mark here';
+                button.className = attended ? 'button murvc-untick' : 'button button-primary murvc-tick';
+                if (note) {
+                    if (!noteEl) {
+                        noteEl = document.createElement('small');
+                        noteEl.className = 'murvc-marked-note';
+                        form.parentNode.insertBefore(noteEl, form);
+                    }
+                    noteEl.textContent = note;
+                } else if (noteEl) {
+                    noteEl.remove();
+                }
+                if (attended) { card.parentNode.appendChild(card); }
+            }
+
+            function refreshCount() {
+                var el = root.querySelector('.murvc-checked-count');
+                if (!el) { return; }
+                var count = 0;
+                root.querySelectorAll('.coach-applicant-card.murvc-attended').forEach(function (card) {
+                    count += parseInt(card.dataset.qty, 10) || 0;
+                });
+                el.textContent = count;
+            }
+
+            root.addEventListener('submit', function (event) {
+                var form = event.target.closest('.murvc-attendance-form');
+                if (!form) { return; }
+                event.preventDefault();
+                var button = form.querySelector('button');
+                var card = form.closest('.coach-applicant-card');
+                var wanted = form.querySelector('input[name="attended"]').value === '1';
+                button.disabled = true;
+                var original = button.textContent;
+                button.textContent = 'Saving…';
+                fetch(ajaxUrl, {method: 'POST', credentials: 'same-origin', body: new URLSearchParams({
+                    action: 'murvc_mark_attendance',
+                    nonce: nonce,
+                    program_key: programKey,
+                    order_item_id: form.dataset.item,
+                    session_date: sessionDate,
+                    attended: wanted ? '1' : '0'
+                })})
+                    .then(function (r) { return r.json(); })
+                    .then(function (res) {
+                        button.disabled = false;
+                        if (!res || !res.success) {
+                            button.textContent = original;
+                            alert(res && res.data ? res.data : 'Could not save — please try again.');
+                            return;
+                        }
+                        applyState(card, res.data.attended, res.data.note);
+                        refreshCount();
+                    })
+                    .catch(function () {
+                        button.disabled = false;
+                        button.textContent = original;
+                        alert('Network problem — please try again.');
+                    });
+            });
+
+            var lastHash = '';
+            function poll() {
+                if (document.hidden) { return; }
+                fetch(ajaxUrl, {method: 'POST', credentials: 'same-origin', body: new URLSearchParams({
+                    action: 'murvc_attendance_state',
+                    nonce: nonce,
+                    program_key: programKey,
+                    order_item_id: '0',
+                    session_date: sessionDate,
+                    since: lastHash
+                })})
+                    .then(function (r) { return r.json(); })
+                    .then(function (res) {
+                        if (!res || !res.success) { return; }
+                        lastHash = res.data.hash || '';
+                        if (res.data.unchanged || !res.data.marked) { return; }
+                        root.querySelectorAll('.coach-applicant-card').forEach(function (card) {
+                            var form = card.querySelector('.murvc-attendance-form');
+                            if (!form) { return; }
+                            var state = res.data.marked[form.dataset.item];
+                            var attended = !!(state && state.attended);
+                            if (attended !== card.classList.contains('murvc-attended')) {
+                                applyState(card, attended, state ? state.note : '');
+                            }
+                        });
+                        refreshCount();
+                    })
+                    .catch(function () {});
+            }
+            setInterval(poll, 20000);
+            document.addEventListener('visibilitychange', function () {
+                if (!document.hidden) { poll(); }
+            });
+        })();
+        </script>
+        <?php echo self::render_styles(); ?>
+        <style>
+        .murvc-dated .chip-slot { background: #eef2f8; color: #1d3d6e; border: 1px solid #9fb3d1; }
+        .murvc-dated .chip-refunded { background: #f0f0f1; color: #50575e; border: 1px solid #c3c4c7; }
+        .murvc-dated .murvc-slot-filter { margin: 8px 0 0; font-size: 13px; }
+        .murvc-dated .murvc-cancelled-banner { background: #fdf2f2; border-left: 4px solid #b32d2e; color: #8a1f11; font-weight: 600; padding: 8px 12px; border-radius: 4px; }
+        .murvc-dated .murvc-closed-note { background: #fff7f0; border-left: 4px solid #e07b00; padding: 6px 12px; border-radius: 4px; }
+        .murvc-dated .murvc-earlier, .murvc-earlier-head { font-size: 13px; }
+        </style>
+        <?php
+        return ob_get_clean();
+    }
+
+    // ------------------------------------------------------------------
     // Portal pages: never cached, never indexed (1.84.0, design 8)
     // ------------------------------------------------------------------
 
@@ -2023,7 +2890,29 @@ class TeamOversight_Programs {
             $output .= '</p>';
         }
 
-        return $output . self::render_roster($programs[$key], $selected, add_query_arg('program', $key, $base_url), 'session', array('program_key' => $key));
+        return $output . $this->render_program_body($programs[$key], $key, $selected, add_query_arg('program', $key, $base_url), array('program_key' => $key));
+    }
+
+    /**
+     * 1.85.0 (design 5.2, B28): a portal's body. While the program has no
+     * Sessions tab (no dated current product, nothing prepared) it is
+     * exactly the roll as before. Otherwise two plain links, Roll and
+     * Sessions, then the roll or the Sessions tab.
+     */
+    private function render_program_body($program, $key, $selected, $base_url, $options) {
+        if (!class_exists('TeamOversight_Program_Sessions') || !TeamOversight_Program_Sessions::tab_available($key)) {
+            return self::render_roster($program, $selected, $base_url, 'session', $options);
+        }
+        $tab = (isset($_GET['tab']) && $_GET['tab'] === 'sessions') ? 'sessions' : 'roll';
+        $roll_url = remove_query_arg(array('tab', 'step', 'confirm', 'v', 'show_past', 'season'), $base_url);
+        $sessions_url = add_query_arg('tab', 'sessions', remove_query_arg(array('session', 'slot', 'past', 'step', 'confirm', 'v', 'show_past', 'season'), $base_url));
+        $bar = '<p class="murvc-portal-tabs"><strong>' . esc_html(isset($program['name']) ? (string) $program['name'] : $key) . '</strong> '
+            . '<a href="' . esc_url($roll_url) . '"' . ($tab === 'roll' ? ' aria-current="page"' : '') . '>Roll</a> &middot; '
+            . '<a href="' . esc_url($sessions_url) . '"' . ($tab === 'sessions' ? ' aria-current="page"' : '') . '>Sessions</a></p>';
+        if ($tab === 'sessions') {
+            return $bar . TeamOversight_Program_Sessions::render_tab($key, 'portal', $sessions_url);
+        }
+        return $bar . self::render_roster($program, $selected, $roll_url, 'session', $options);
     }
 
     /**
@@ -2065,7 +2954,7 @@ class TeamOversight_Programs {
         $selected = isset($_GET['session']) ? sanitize_text_field(wp_unslash($_GET['session'])) : '';
         $base_url = add_query_arg('program', $key, remove_query_arg('session'));
         $options['program_key'] = $key;
-        return self::render_roster($program, $selected, $base_url, 'session', $options);
+        return $this->render_program_body($program, $key, $selected, $base_url, $options);
     }
 
     // ------------------------------------------------------------------
@@ -2080,8 +2969,16 @@ class TeamOversight_Programs {
         if (isset($_POST['murvc_attendance_action']) && $_POST['murvc_attendance_action'] === 'mark'
             && isset($_POST['murvc_attendance_nonce']) && wp_verify_nonce($_POST['murvc_attendance_nonce'], 'murvc_attendance')
             && current_user_can('manage_options')
-            && isset($_POST['program_key'], $_POST['session_label'], $_POST['order_id'])) {
-            if (sanitize_key(wp_unslash($_POST['program_key'])) === sanitize_key((string) $program_key)) {
+            && isset($_POST['program_key'])) {
+            if (sanitize_key(wp_unslash($_POST['program_key'])) !== sanitize_key((string) $program_key)) {
+                $tick_notice = '<div class="notice notice-error"><p>That tick was for another program\'s page, so nothing was saved. Reload and try again.</p></div>';
+            } elseif (isset($_POST['order_item_id'], $_POST['session_date'])) {
+                // 1.85.0: a dated roll's tick, checked against the line, the session and a paid order.
+                $done = self::mark_line(get_current_user_id(), $program_key, absint($_POST['order_item_id']), sanitize_text_field(wp_unslash($_POST['session_date'])), !empty($_POST['attended']));
+                if (!$done['ok']) {
+                    $tick_notice = '<div class="notice notice-error"><p>' . esc_html($done['message']) . '</p></div>';
+                }
+            } elseif (isset($_POST['session_label'], $_POST['order_id'])) {
                 self::set_attendance(
                     $program_key,
                     sanitize_text_field(wp_unslash($_POST['session_label'])),
@@ -2089,12 +2986,29 @@ class TeamOversight_Programs {
                     !empty($_POST['attended']),
                     isset($_POST['attendee_user_id']) ? intval($_POST['attendee_user_id']) : 0
                 );
-            } else {
-                $tick_notice = '<div class="notice notice-error"><p>That tick was for another program\'s page, so nothing was saved. Reload and try again.</p></div>';
             }
         }
 
         $program = self::get_program($program_key);
+        // 1.85.0 (design 6): the program's tabs. Roll and stats is the default
+        // (and the answer to an unknown or unavailable tab).
+        $tabs = array('roll' => 'Roll and stats');
+        if ($program && class_exists('TeamOversight_Program_Sessions')) {
+            if (TeamOversight_Program_Sessions::tab_available($program_key)) {
+                $tabs['sessions'] = 'Sessions';
+            }
+            $tabs['setup'] = 'Setup';
+            foreach (self::program_products($program_key) as $product) {
+                if ($product['kind'] === 'dated') {
+                    $tabs['refund'] = 'To refund';
+                }
+            }
+        }
+        $tab = isset($_GET['tab']) && is_scalar($_GET['tab']) ? sanitize_key($_GET['tab']) : '';
+        if (!isset($tabs[$tab])) {
+            $tab = 'roll';
+        }
+        $tab_base = admin_url('admin.php?page=club-programs-' . $program_key);
         ?>
         <div class="wrap">
             <h1><?php echo $program ? esc_html($program['name']) : 'Program'; ?> — Attendance</h1>
@@ -2102,6 +3016,20 @@ class TeamOversight_Programs {
             <?php if (!$program): ?>
                 <p>This program is no longer configured. Add it in <a href="<?php echo admin_url('admin.php?page=club-programs-settings'); ?>">Settings</a>.</p>
             <?php else: ?>
+                <?php if (count($tabs) > 1): ?>
+                    <h2 class="nav-tab-wrapper">
+                        <?php foreach ($tabs as $tab_key => $tab_label): ?>
+                            <a href="<?php echo esc_url($tab_key === 'roll' ? $tab_base : add_query_arg('tab', $tab_key, $tab_base)); ?>" class="nav-tab<?php echo $tab === $tab_key ? ' nav-tab-active' : ''; ?>"><?php echo esc_html($tab_label); ?></a>
+                        <?php endforeach; ?>
+                    </h2>
+                <?php endif; ?>
+                <?php if ($tab === 'sessions'): ?>
+                    <?php echo TeamOversight_Program_Sessions::render_tab($program_key, 'admin', add_query_arg('tab', 'sessions', $tab_base)); ?>
+                <?php elseif ($tab === 'setup'): ?>
+                    <?php echo TeamOversight_Program_Setup::render_tab($program_key, add_query_arg('tab', 'setup', $tab_base)); ?>
+                <?php elseif ($tab === 'refund'): ?>
+                    <?php echo TeamOversight_Program_Sessions::render_refund_tab($program_key); ?>
+                <?php else: ?>
                 <p class="description">Who has paid for each session, read live from orders. Supervisors can see this on the front end via the <code>[session_attendance]</code> shortcode — grant access in <a href="<?php echo admin_url('admin.php?page=club-programs-settings'); ?>">Settings</a>.</p>
                 <?php
                 $page_url = admin_url('admin.php?page=club-programs-' . $program_key);
@@ -2117,14 +3045,41 @@ class TeamOversight_Programs {
                 $selected = isset($_GET['session']) ? sanitize_text_field(wp_unslash($_GET['session'])) : '';
                 echo self::render_roster($program, $selected, $page_url, 'session', array('program_key' => $program_key));
                 ?>
+                <?php endif; ?>
             <?php endif; ?>
         </div>
         <?php
     }
 
+    /**
+     * 1.85.0 (design 6, B16): the Settings form posts to admin-post. The
+     * save's own notice is kept in a flash for the page it redirects to
+     * (Post/Redirect/Get). save_settings() keeps its checks and output.
+     */
+    public static function handle_settings_post() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions.');
+        }
+        $self = new self();
+        ob_start();
+        $self->save_settings();
+        $notice = ob_get_clean();
+        set_transient(self::SETTINGS_FLASH . get_current_user_id(), (string) $notice, 300);
+        wp_safe_redirect(admin_url('admin.php?page=club-programs-settings'));
+        exit;
+    }
+
     public function render_settings_page() {
+        // 1.85.0: the page no longer saves anything itself (the form posts to
+        // admin-post). A page opened before the update still posts here.
         if (isset($_POST['action']) && $_POST['action'] === 'save_program_settings') {
-            $this->save_settings();
+            echo '<div class="notice notice-error"><p>This page was opened before an update, so nothing was saved. Make the change again.</p></div>';
+        }
+        $flash_name = self::SETTINGS_FLASH . get_current_user_id();
+        $flash = get_transient($flash_name);
+        if (is_string($flash) && $flash !== '') {
+            delete_transient($flash_name);
+            echo wp_kses_post($flash);
         }
 
         $programs = self::get_programs();
@@ -2133,7 +3088,7 @@ class TeamOversight_Programs {
         <div class="wrap">
             <h1>Club Programs — Settings</h1>
 
-            <form method="post" style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; max-width: 720px;">
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; max-width: 720px;">
                 <h2 style="margin-top: 0;">Programs</h2>
                 <p class="description">One line per program: <code>Name | product ID | weekday</code>. The product's date variations become the sessions; each program gets its own admin sub-page (reload after saving). <strong>Weekday is optional but important</strong> when the variation labels have no year (e.g. "13-May") — it pins each session to the right year, so last season's dates sort and filter correctly. Use a day name or 1–7 (Mon–Sun).</p>
                 <?php
@@ -2166,7 +3121,11 @@ class TeamOversight_Programs {
                     $own = (!empty($program['supervisors']) && is_array($program['supervisors'])) ? $program['supervisors'] : array();
                     ?>
                     <div class="murvc-sup-group" data-program="<?php echo esc_attr($key); ?>" style="margin-bottom: 18px;">
-                        <p style="margin-bottom: 4px;"><strong><?php echo esc_html($program['name']); ?></strong></p>
+                        <p style="margin-bottom: 4px;"><strong><?php echo esc_html($program['name']); ?></strong>
+                            <?php if (class_exists('TeamOversight_Program_Setup')): ?>
+                                <a href="<?php echo esc_url(admin_url('admin.php?page=club-programs-' . $key . '&tab=setup')); ?>" style="margin-left: 8px; font-size: 12px;">Setup tab</a>
+                            <?php endif; ?>
+                        </p>
                         <div class="murvc-sup-list" style="margin-bottom: 6px;">
                             <?php foreach ($own as $user_id): ?>
                                 <?php $user = get_userdata(intval($user_id)); ?>
@@ -2262,7 +3221,7 @@ class TeamOversight_Programs {
 
                 <p>
                     <input type="submit" class="button button-primary" value="Save Program Settings">
-                    <input type="hidden" name="action" value="save_program_settings">
+                    <input type="hidden" name="action" value="murvc_program_settings">
                     <?php wp_nonce_field('save_program_settings', 'program_settings_nonce'); ?>
                 </p>
             </form>
@@ -2287,6 +3246,34 @@ class TeamOversight_Programs {
             return;
         }
 
+        // 1.85.0 (B16): under the setup lock, so a save can't race a Switch.
+        // NULL (no named locks) runs unlocked, as the setup's own saves do.
+        global $wpdb;
+        $has_setup = class_exists('TeamOversight_Program_Setup');
+        $lock = $has_setup ? TeamOversight_Program_Setup::lock_name() : '';
+        $got = null;
+        if ($lock !== '') {
+            $got = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 10)', $lock));
+            if ($got !== null && intval($got) !== 1) {
+                echo '<div class="notice notice-error"><p>Someone else is saving a program\'s setup. Try again in a minute.</p></div>';
+                return;
+            }
+        }
+        try {
+            $this->save_settings_locked($has_setup);
+        } finally {
+            if ($lock !== '' && $got !== null) {
+                $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock));
+            }
+            self::flush_program_caches();
+            if (class_exists('TeamOversight_Program_Sessions')) {
+                TeamOversight_Program_Sessions::flush_cache();
+            }
+        }
+    }
+
+    /** save_settings()' steps, inside the setup lock (1.85.0). */
+    private function save_settings_locked($has_setup) {
         $submitted_supervisors = (isset($_POST['supervisors']) && is_array($_POST['supervisors'])) ? $_POST['supervisors'] : array();
         $unknown = array();
         $supervisor_total = 0;
@@ -2295,8 +3282,30 @@ class TeamOversight_Programs {
         // supervisors under the key that was rendered, and attendance rows
         // are stored against it, so regenerating keys from the name would
         // drop the supervisors being saved and orphan attendance history.
-        $existing = self::get_programs();
-        $has_setup = class_exists('TeamOversight_Program_Setup');
+        // 1.85.0 (B16): both options read straight from the database inside
+        // the lock (an autoloaded copy can be older than the row, and a
+        // Settings page opened before a Switch would write the old product
+        // back); the product-id lock then refuses that page's old id.
+        $setup_all = array();
+        if ($has_setup) {
+            $existing = TeamOversight_Program_Setup::read_option_fresh(self::PROGRAMS_OPTION);
+            $setup_all = TeamOversight_Program_Setup::read_option_fresh(TeamOversight_Program_Setup::OPTION);
+            if ($existing === null || $setup_all === null) {
+                echo '<div class="notice notice-error"><p>The settings couldn\'t be read, so nothing was saved.</p></div>';
+                return;
+            }
+            if (empty($existing)) {
+                // Nothing stored yet: the seeded list, as before.
+                $existing = self::get_programs();
+            }
+            TeamOversight_Program_Setup::flush_cache();
+            wp_cache_delete(TeamOversight_Program_Setup::OPTION, 'options');
+        } else {
+            $existing = self::get_programs();
+        }
+        $has_entry = function ($program_key) use ($setup_all) {
+            return isset($setup_all[$program_key]) && is_array($setup_all[$program_key]);
+        };
         $refusals = array();
         $key_by_name = array();
         $key_by_product = array();
@@ -2354,9 +3363,17 @@ class TeamOversight_Programs {
             // 1.84.0: a program set up for online booking keeps its product
             // here: it changes only on its Setup tab (otherwise a typed id
             // would bypass the switch).
-            if ($has_setup && TeamOversight_Program_Setup::has_entry($key) && isset($existing[$key]) && is_array($existing[$key])
+            if ($has_setup && $has_entry($key) && isset($existing[$key]) && is_array($existing[$key])
                 && intval(isset($existing[$key]['product_id']) ? $existing[$key]['product_id'] : 0) !== $product_id) {
                 $refusals[] = esc_html($name) . ': change the product on the program\'s Setup tab.';
+            }
+            // 1.85.0 (plan 1.84.0 A17): never another program's prepared or earlier product.
+            if ($has_setup) {
+                $owner = TeamOversight_Program_Setup::owner_of_product($product_id, $key, false);
+                if ($owner !== '') {
+                    $other = isset($existing[$owner]['name']) && is_scalar($existing[$owner]['name']) ? (string) $existing[$owner]['name'] : $owner;
+                    $refusals[] = esc_html($name) . ': product #' . intval($product_id) . ' already belongs to ' . esc_html($other) . ' (its prepared or an earlier product).';
+                }
             }
 
             // 1.84.0: start from the stored entry and set only the four
@@ -2373,7 +3390,7 @@ class TeamOversight_Programs {
         // with a new product in one save, which would make a new key).
         if ($has_setup) {
             foreach ($existing as $existing_key => $existing_program) {
-                if (!isset($programs[$existing_key]) && TeamOversight_Program_Setup::has_entry($existing_key)) {
+                if (!isset($programs[$existing_key]) && $has_entry($existing_key)) {
                     $existing_name = (is_array($existing_program) && isset($existing_program['name'])) ? (string) $existing_program['name'] : (string) $existing_key;
                     $refusals[] = esc_html($existing_name) . ' is set up for online booking, so it can\'t be removed or given a new product here.';
                 }
@@ -2385,8 +3402,13 @@ class TeamOversight_Programs {
             return;
         }
 
+        // update_option() compares with the row, not an older autoloaded copy.
+        wp_cache_delete('alloptions', 'options');
         update_option(self::PROGRAMS_OPTION, $programs);
         self::flush_program_caches();
+        if (class_exists('TeamOversight_Program_Sessions')) {
+            TeamOversight_Program_Sessions::flush_cache();
+        }
 
         if (!empty($_POST['clear_legacy'])) {
             delete_option(self::SUPERVISORS_OPTION);
