@@ -25,8 +25,9 @@ if (!defined('ABSPATH')) {
  * - merged_problems(), the only place for checks across fields or programs,
  *   called only by save();
  * - the one writer, save(): ONE option-wide named lock (lock_name()), the
- *   per-program rev compare-and-refuse, stored fields this version doesn't
- *   know kept, one program_setup log line;
+ *   per-program rev compare-and-refuse, the stored row read and confirmed
+ *   straight from the database (stored_row(), never a cached copy), stored
+ *   fields this version doesn't know kept, one program_setup log line;
  * - the pure tier maths (tier_pct(), discounted_cents(), tier_dip()) that the
  *   booking code will call, so the rule lives in one place.
  *
@@ -957,8 +958,11 @@ class TeamOversight_Program_Setup {
      * the design's per-program lock on purpose; 1.85.0's Prepare, Discard,
      * Switch, Switch back and Add an earlier product take this same lock and
      * go through the same steps.) A database that can't do named locks (NULL)
-     * runs unlocked, as everywhere else in the plugin. Stored fields this
-     * version doesn't know are kept. Writes one program_setup log line.
+     * runs unlocked, as everywhere else in the plugin. Inside the lock the
+     * stored row is read and confirmed straight from the database
+     * (stored_row()), so a stale cached copy or "no such option" flag can't
+     * drop another program's entry. Stored fields this version doesn't know
+     * are kept. Writes one program_setup log line.
      *
      * Returns array('ok' => bool, 'errors' => array of sentences, 'rev' => int).
      */
@@ -995,12 +999,51 @@ class TeamOversight_Program_Setup {
         return array('ok' => false, 'errors' => $errors, 'rev' => intval($rev));
     }
 
+    /**
+     * The option as stored, read straight from the database, for save()
+     * inside the lock. get_option() would trust the object cache, and the
+     * site's is persistent: a request that loaded the "no such option" flag
+     * (notoptions) before another request created the option would read
+     * nothing and its write would drop that request's entry. get_option()'s
+     * own pre_option filters still apply, so a stand-in works here as it does
+     * for all(). A stale flag for a row that exists is dropped, as
+     * add_option() does once a row exists. Null when the read failed, so a
+     * save never writes over what it could not read.
+     */
+    private static function stored_row() {
+        global $wpdb;
+        $pre = apply_filters('pre_option_' . self::OPTION, false, self::OPTION, array());
+        $pre = apply_filters('pre_option', $pre, self::OPTION, array());
+        if ($pre !== false) {
+            return is_array($pre) ? $pre : array();
+        }
+        $raw = $wpdb->get_var($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1", self::OPTION));
+        if ($wpdb->last_error !== '') {
+            return null;
+        }
+        if ($raw === null) {
+            return array();
+        }
+        $notoptions = wp_cache_get('notoptions', 'options');
+        if (is_array($notoptions) && isset($notoptions[self::OPTION])) {
+            unset($notoptions[self::OPTION]);
+            wp_cache_set('notoptions', $notoptions, 'options');
+        }
+        $value = apply_filters('option_' . self::OPTION, maybe_unserialize($raw), self::OPTION);
+        return is_array($value) ? $value : array();
+    }
+
     /** save()'s steps a to f, inside the lock. */
     private static function save_locked($key, array $program, array $fields, $expected) {
-        // a. A fresh read: the site has a persistent object cache.
+        // a. A fresh read of the stored row (stored_row(), never the cache),
+        // which every check below reads too.
         wp_cache_delete(self::OPTION, 'options');
         self::flush_cache();
-        $all = self::all();
+        $all = self::stored_row();
+        if ($all === null) {
+            return self::refused(array('The setup couldn\'t be read, so nothing was saved. Reload and try again.'));
+        }
+        self::$all = $all;
         $stored = (isset($all[$key]) && is_array($all[$key])) ? $all[$key] : null;
         $stored_rev = 0;
         if ($stored !== null && isset($stored['rev'])) {
@@ -1035,8 +1078,8 @@ class TeamOversight_Program_Setup {
             return self::refused($errors, $stored_rev);
         }
 
-        // e. Write, then confirm by reading back (update_option() also
-        // returns false for "unchanged", so its answer proves nothing).
+        // e. Write, then confirm by reading the stored row back (update_option()
+        // also returns false for "unchanged", so its answer proves nothing).
         $new_rev = $stored_rev + 1;
         $merged['rev'] = $new_rev;
         $before = $all;
@@ -1044,8 +1087,8 @@ class TeamOversight_Program_Setup {
         update_option(self::OPTION, $all, false);
         wp_cache_delete(self::OPTION, 'options');
         self::flush_cache();
-        $after = self::all();
-        $ok = isset($after[$key]) && is_array($after[$key]) && isset($after[$key]['rev']) && self::whole($after[$key]['rev']) === $new_rev;
+        $after = self::stored_row();
+        $ok = is_array($after) && isset($after[$key]) && is_array($after[$key]) && isset($after[$key]['rev']) && self::whole($after[$key]['rev']) === $new_rev;
         if ($ok) {
             foreach (array_unique(array_merge(array_keys($before), array_keys($after))) as $other) {
                 if ((string) $other === $key) {

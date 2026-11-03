@@ -1329,7 +1329,7 @@ class TeamOversight_Programs {
         // The "Bookings without a session date" tile shows only for a program
         // selling months or a one-off fee; its PHP tags sit at column 0 so
         // any other program's page prints exactly what it did before.
-        $stats =!empty(self::program_products($program_key))
+        $stats = !empty(self::program_products($program_key))
             ? self::program_participation_stats($program_key, $from, $to)
             : self::get_participation_stats($program['product_id'], $from, $to, self::get_program_weekday($program));
 
@@ -2269,8 +2269,8 @@ class TeamOversight_Programs {
             <div style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; max-width: 720px; margin-top: 20px;">
                 <h2 style="margin-top: 0;">Front-end page</h2>
                 <p>Put <code>[session_attendance]</code> on a page for supervisors. Lock it to one program with <code>[session_attendance program="mixed-dev"]</code>.</p>
-                <p>These pages are never cached or shown to search engines (sent automatically). Put the shortcode on the page itself, not in a synced pattern or widget.</p>
-                <p>The Mixed Dev Portal's <code>[mixed_dev_attendance]</code> finds its program by the page, then by the name.</p>
+                <p>These pages are never cached, and are marked noindex for search engines (sent automatically). Tick the page's noindex box in the SEO plugin too, so it also leaves the sitemap. Put the shortcode on the page itself, not in a synced pattern or widget.</p>
+                <p>The Mixed Dev Portal's <code>[mixed_dev_attendance]</code> finds its program by the page, then the key <code>mixed-dev</code>, then by the name.</p>
             </div>
         </div>
         <?php

@@ -451,7 +451,7 @@ Casual programs (Mixed Development and similar) sell one WooCommerce product per
 
   Counted from paid bookings rather than attendance ticks, so the numbers hold whether or not anyone marked people off, with places after refunds (1.84.0: a fully refunded booking isn't counted). Sessions whose label has no readable date are excluded and disclosed rather than silently dropped. A program that sells months or a one-off fee gets one more tile, **Bookings without a session date**.
 - **Mixed Development** has its own shortcode, `[mixed_dev_attendance]`, so the club's weekly program can grow its own behaviour without touching the generic one. Both accept `history="0"` to hide the first-timer/session-count badges. Since 1.84.0 it is a permanent alias that finds its program by the page being a program's portal page (set up from 1.85.0), then the key `mixed-dev`, then a program whose name contains "mixed".
-- **Caching** (1.84.0): both portal shortcodes send no-cache and noindex (`DONOTCACHEPAGE`, `nocache_headers()`, `X-Robots-Tag: noindex, nofollow` and the robots meta), so no page cache rule and no robots setting is needed. Put the shortcode on the page itself: inside a synced pattern, template part or widget the page only gets `DONOTCACHEPAGE` when it is drawn, with no early headers. The SEO plugin's sitemap still lists a portal page until that page's own noindex box is ticked there (the Mixed Dev Portal's is); tick it for each new portal page. After updating to 1.84.0, purge the page cache once, so no copy cached before it is served.
+- **Caching** (1.84.0): both portal shortcodes send no-cache and noindex (`DONOTCACHEPAGE`, `nocache_headers()`, `X-Robots-Tag: noindex, nofollow` and the robots meta), so no page cache rule is needed, and the page itself is noindex. The sitemap still needs the per-page noindex box (below). Put the shortcode on the page itself: inside a synced pattern, template part or widget the page only gets `DONOTCACHEPAGE` when it is drawn, with no early headers. The SEO plugin's sitemap still lists a portal page until that page's own noindex box is ticked there (the Mixed Dev Portal's is); tick it for each new portal page. After updating to 1.84.0, purge the page cache once, so no copy cached before it is served.
 
 ### Data imports/exports
 
@@ -528,7 +528,7 @@ Those are the only two. `team`, `group`, `season` and `mode="line"` (planned for
 | `team_oversight_email_format` | Set to 2 once the 1.72.0 wording copy has run |
 | `team_oversight_transfer_clubs`, `team_oversight_trial_fee_rules` | Configuration → Trial application rules |
 | `team_oversight_programs`, `team_oversight_program_supervisors` | Club Programs → Settings |
-| `team_oversight_program_setup` | Set by code from 1.84.0 (Club Programs → each program's Setup tab from 1.85.0): per program, the prepared and earlier products and the booking settings; no user ids (not autoloaded) |
+| `team_oversight_program_setup` | Read from 1.84.0, written from 1.85.0 (Club Programs → each program's Setup tab): per program, the prepared and earlier products and the booking settings; no user ids (not autoloaded) |
 | `team_oversight_payment_product` | Payment Management → settings |
 | `team_oversight_vv_reg_url`, `team_oversight_kit_shop_url`, `team_oversight_fees_page_url`, `team_oversight_kit_products` | Player Readiness → settings |
 | `team_oversight_membership_category_rules` | Club Membership → category rules |
@@ -568,7 +568,7 @@ All created/migrated automatically on load (`TeamOversight_Database::migrate_dat
 - `team_accreditations` — RevSport data (email keyed — CSV matches by email)
 - `team_activity_log` — append-only activity log (payments, emails, fee edits, grants; pruned after 2 years)
 - `team_assignment_changes` — (1.70.0, written from 1.70.1) the 2027+ fee timeline's change history: one row per change to a team place (added, start or stop changed, stop cleared, role or team changed, removed by mistake, a future stop taking effect), with who, when, the old and new dates, and the fee and amount due before and after (a change that put more due on the day it was recorded is a floor for the behind clock, 1.70.2); it also holds each person's fee class history (`class_recorded`, `history_reset`). **Never pruned**, unlike the activity log, because it is the only record of removed rows. Explicitly InnoDB
-- `team_program_attendance` — club program attendance ticks (products sold before 2027; one row per order per session label)
+- `team_program_attendance` — club program attendance ticks (legacy date-label products; dated sessions from 1.85.0 use `team_program_line_ticks`; one row per order per session label)
 - `team_program_line_ticks` — (1.84.0, written from 1.85.0) one attendance tick per order line for dated Club Programs sessions; unique on the line; account columns re-pointed by an account merge; never pruned. Explicitly InnoDB
 - `team_attendance` — coach-portal trial/training attendance (one row per player per team per date; unique on person + team + date)
 - `fee_matrix`, `fee_matrix_versions` — season fee rates
