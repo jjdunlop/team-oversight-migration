@@ -995,6 +995,13 @@ class TeamOversight_Program_Sessions {
         $made = 0;
         $outcome = null;
         try {
+            // A Discard holds this lock while it bins the product: one that finished while this
+            // waited would leave published sessions under a binned parent. Check the product again,
+            // fresh, now that nothing else can change it.
+            clean_post_cache($pid);
+            if (!self::product_ok($key, $pid)) {
+                return array('ok' => false, 'message' => 'That product is no longer taking sessions.', 'step' => 'preview');
+            }
             $children = self::children($pid);
             $outcome = self::series_outcome($series, $children);
             $create = $outcome['create'];
@@ -1372,6 +1379,11 @@ class TeamOversight_Program_Sessions {
             if ($places < $paid) {
                 return array('ok' => false, 'message' => $paid . ' place' . ($paid === 1 ? ' is' : 's are') . ' paid for, so it can\'t go below ' . $paid . '.');
             }
+            $too_far = function ($held, $free) {
+                return array('ok' => false, 'message' => $held > 0
+                    ? $held . ' place' . ($held === 1 ? ' is' : 's are') . ' held by checkouts in progress, so it can go down by at most ' . $free . ' now.'
+                    : 'Only ' . $free . ' place' . ($free === 1 ? ' is' : 's are') . ' left, so it can go down by at most ' . $free . ' now.');
+            };
             if ($places > $capacity) {
                 wc_update_product_stock($variation, $places - $capacity, 'increase');
             } else {
@@ -1380,11 +1392,21 @@ class TeamOversight_Program_Sessions {
                 $held = function_exists('wc_get_held_stock_quantity') ? intval(wc_get_held_stock_quantity($variation)) : 0;
                 $free = max(0, $stock - $held);
                 if ($down > $free) {
-                    return array('ok' => false, 'message' => $held > 0
-                        ? $held . ' place' . ($held === 1 ? ' is' : 's are') . ' held by checkouts in progress, so it can go down by at most ' . $free . ' now.'
-                        : 'Only ' . $free . ' place' . ($free === 1 ? ' is' : 's are') . ' left, so it can go down by at most ' . $free . ' now.');
+                    return $too_far($held, $free);
                 }
                 wc_update_product_stock($variation, $down, 'decrease');
+                // A checkout reserves and takes stock without this lock, so one that ran between the
+                // check and the decrease could leave fewer places than it holds (or below 0): read
+                // again and, if so, put the places back and refuse.
+                $after = self::fresh_variation($row['id']);
+                if ($after) {
+                    $stock_now = intval($after->get_stock_quantity());
+                    $held_now = function_exists('wc_get_held_stock_quantity') ? intval(wc_get_held_stock_quantity($after)) : 0;
+                    if ($stock_now < max(0, $held_now)) {
+                        wc_update_product_stock($after, $down, 'increase');
+                        return $too_far($held_now, max(0, $stock_now + $down - $held_now));
+                    }
+                }
             }
             $variation = self::fresh_variation($row['id']);
             if ($variation) {

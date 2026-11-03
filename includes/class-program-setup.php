@@ -1336,6 +1336,7 @@ class TeamOversight_Program_Setup {
 
     const REV_REFUSAL = 'Someone else saved this program since you opened it. Reload and try again.';
     const READ_REFUSAL = 'The setup couldn\'t be read, so nothing was changed. Reload and try again.';
+    const ON_SALE_REFUSAL = 'This product is on sale: adding it as an earlier product stops it selling. Make it private first, then add it.';
 
     /** admin-post murvc_program_setup: manage_options, the program's nonce, then process_post() and back to the tab. */
     public static function handle_admin_post() {
@@ -1908,10 +1909,12 @@ class TeamOversight_Program_Setup {
     /**
      * Prepare the next product (design 6.4, 3.2): inside the lock, makes the
      * program's next season product as a hidden draft (variable, taxable,
-     * virtual, sold individually when one place per booking, the current
-     * product's category, description and membership fields, one grant per
-     * order marked for 1.86.0, attributes Date and Time) and records it as
-     * the prepared product. The current product is read, never written.
+     * sold individually when one place per booking, the current product's
+     * category, description and membership fields, one grant per order
+     * marked for 1.86.0, attributes Date and Time) and records it as the
+     * prepared product. The current product is read, never written. Its
+     * sessions are virtual: WooCommerce keeps that flag per variation (a
+     * variable parent is never virtual), so the generator sets it on each.
      */
     public static function prepare($key, $title, $year, $expected_rev) {
         $key = (string) $key;
@@ -1961,7 +1964,6 @@ class TeamOversight_Program_Setup {
             $product->set_catalog_visibility('hidden');
             $product->set_tax_status('taxable');
             $product->set_tax_class('');
-            $product->set_virtual(true);
             $product->set_sold_individually(intval($setup['max_places']) === 1);
             $product->set_category_ids($current->get_category_ids('edit'));
             $product->set_description($current->get_description('edit'));
@@ -2176,6 +2178,33 @@ class TeamOversight_Program_Setup {
         return $dates;
     }
 
+    /**
+     * Whether a product has any non-empty session date or date / month label
+     * (variations in the Bin left out), read or not: tells labels that can't
+     * be read from no labels at all.
+     */
+    private static function has_date_labels($product_id, $kind) {
+        global $wpdb;
+        $pid = intval($product_id);
+        if ($pid <= 0) {
+            return false;
+        }
+        if ($kind === 'dated') {
+            $keys = "'_murvc_session_date'";
+        } elseif ($kind === 'month') {
+            $keys = "'attribute_month', 'attribute_pa_month'";
+        } elseif ($kind === 'legacy_date') {
+            $keys = "'attribute_date', 'attribute_pa_date'";
+        } else {
+            return false;
+        }
+        return intval($wpdb->get_var($wpdb->prepare("
+            SELECT EXISTS (SELECT 1 FROM {$wpdb->posts} p
+                JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key IN ({$keys}) AND TRIM(m.meta_value) <> ''
+                WHERE p.post_parent = %d AND p.post_type = 'product_variation' AND p.post_status <> 'trash')
+        ", $pid))) === 1;
+    }
+
     /** Design 6.4 step 1: a product's last session date ('' when none). */
     public static function last_session_date($product_id, $kind, $weekday) {
         $dates = self::product_session_dates($product_id, $kind, $weekday);
@@ -2251,9 +2280,14 @@ class TeamOversight_Program_Setup {
             $problems[] = 'The program has no current product.';
             return $problems;
         }
-        $last = self::last_session_date($old_id, TeamOversight_Programs::detect_kind($old_id), $weekday);
+        $old_kind = TeamOversight_Programs::detect_kind($old_id);
+        $last = self::last_session_date($old_id, $old_kind, $weekday);
         if ($last !== '' && current_time('Y-m-d') <= $last) {
             $problems[] = 'The current product\'s last session is ' . TeamOversight_Program_Sessions::date_label($last) . '. Switch after that day.';
+        }
+        if ($last === '' && self::has_date_labels($old_id, $old_kind)) {
+            // Labels that read as no date must not let a Switch run early: refuse rather than guess.
+            $problems[] = 'The current product\'s session dates can\'t be read, so the Switch can\'t check they have passed.';
         }
         if ($old['slug'] === '') {
             $problems[] = 'The current product has no address, so it can\'t hand one over.';
@@ -2653,6 +2687,9 @@ class TeamOversight_Program_Setup {
                 $facts['problem'] = 'Product #' . $pid . ' is already one of this program\'s earlier products.';
             }
         }
+        if ($facts['problem'] === '' && $post->post_status === 'publish') {
+            $facts['problem'] = self::ON_SALE_REFUSAL;
+        }
         $paid = "FROM {$wpdb->prefix}woocommerce_order_items oi
             JOIN {$wpdb->prefix}woocommerce_order_itemmeta prod
                 ON prod.order_item_id = oi.order_item_id AND prod.meta_key = '_product_id' AND prod.meta_value = %d
@@ -2671,7 +2708,9 @@ class TeamOversight_Program_Setup {
      * paid_date (a dated earlier product comes only from Switch). save()
      * decides: validate() (the shape, the years, not twice) and
      * merged_problems() (not the current or prepared product, not another
-     * program's).
+     * program's). A published product is refused first: an earlier product
+     * is never purchasable, so adding one that is on sale would stop it
+     * selling without a word.
      */
     public static function add_past_product($key, $product_id, $kind, $weekday, array $years, $expected_rev) {
         $key = (string) $key;
@@ -2686,6 +2725,9 @@ class TeamOversight_Program_Setup {
             return self::refused(array('Choose how its dates are read: date labels, months or dated by payment.'));
         }
         $pid = intval($product_id);
+        if (get_post_type($pid) === 'product' && get_post_status($pid) === 'publish') {
+            return self::refused(array(self::ON_SALE_REFUSAL));
+        }
         $list = self::get($key)['past_products'];
         $list[] = array('product_id' => $pid, 'kind' => $kind, 'weekday' => $weekday, 'years' => array_values($years));
         $clean_years = array();
