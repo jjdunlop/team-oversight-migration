@@ -1480,9 +1480,12 @@ class TeamOversight_Fees {
      * a blank limit deletes that cell's limit, a number sets it, and a
      * fee above its limit is saved with a warning naming the cell. Every
      * fee and limit change is logged (fee_edit). While the season's fees
-     * are not released and it has no invoices, a blank fee input also
-     * clears that fee (back to "unknown"), so a fee filled in by a copy can
-     * be taken back. Nothing is refused, so a save is never half applied.
+     * are not released and none of its invoices carries a fee yet (1.85.1:
+     * the $0 invoices an accepted offer or an early place holds until the
+     * release don't count; one with an amount, a raised fee or an Edit Fee
+     * override does), a blank fee input also clears that fee (back to
+     * "unknown"), so a fee filled in by a copy can be taken back. Nothing is
+     * refused, so a save is never half applied.
      */
     public function save_fee_matrix() {
         if (!isset($_POST['fee_nonce']) || !wp_verify_nonce($_POST['fee_nonce'], 'save_fee_matrix')) {
@@ -1523,9 +1526,17 @@ class TeamOversight_Fees {
             }
         };
         // A blank fee input clears the fee only while nothing could rely on
-        // it: fee-timeline season, fees not released, no invoice yet.
+        // it: fee-timeline season, fees not released, and no invoice in the
+        // season carries a fee yet (1.85.1). Until the release a place's
+        // invoice is a $0 placeholder (deposits are payments against it), so
+        // only an invoice with an amount, an amount still owing, a raised fee
+        // or an Edit Fee override stops it.
         $may_clear_fees = $timeline && !self::fees_released($season)
-            && intval($wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s", $season))) === 0;
+            && intval($wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s
+                    AND (invoice_amount <> 0 OR outstanding_amount <> 0 OR fee_raised_at IS NOT NULL OR fee_overridden = 1)",
+                $season
+            ))) === 0;
         $cleared = 0;
 
         // Update fees for the specific season only
@@ -1621,7 +1632,7 @@ class TeamOversight_Fees {
 
         $message = 'Fees updated successfully for ' . $season . ' season';
         if ($cleared) {
-            $message .= '; ' . $cleared . ' blank fee' . ($cleared === 1 ? '' : 's') . ' cleared (not released yet, nothing invoiced)';
+            $message .= '; ' . $cleared . ' blank fee' . ($cleared === 1 ? '' : 's') . ' cleared (not released yet, no fee invoiced)';
         }
         wp_send_json_success(array(
             'message' => $message,
