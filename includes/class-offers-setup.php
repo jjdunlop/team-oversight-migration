@@ -340,7 +340,7 @@ class TeamOversight_Offers_Setup {
 
         // 3. Upper limits.
         $report = $fees->matrix_report($season);
-        $cells = count(TeamOversight_Fees::offerable_cells());
+        $cells = count(TeamOversight_Fees::offerable_cells($season));
         $missing = count($report['no_limit']);
         if ($missing > 0 && TeamOversight_Offers::basis_now($season) === 'fee') {
             // After the release a new offer is quoted on the fee (row 3b), so a missing limit blocks nothing new.
@@ -366,6 +366,12 @@ class TeamOversight_Offers_Setup {
             } else {
                 $rows[] = self::row('fees', 'ok', 'Fees', 'All ' . $cells . ' offerable fee cells have a fee, so every offer can be quoted on the real fee.', self::config_url($season, 'fee-matrix'), 'Fee matrix');
             }
+        }
+
+        // 3c. JPL and YSL (1.87.0): a season the one-off data step kept on the one JPL/YSL row, said where the committee looks.
+        $jpl_ysl_kept = TeamOversight_Fees::jpl_ysl_kept_note($season);
+        if ($jpl_ysl_kept !== '') {
+            $rows[] = self::row('jpl_ysl', 'warn', 'JPL and YSL fee rows', $jpl_ysl_kept . ' Juniors on JPL and YSL teams pay that one row, as before 1.87.0, and the fee matrix shows it in place of JPL and YSL.', self::config_url($season, 'fee-matrix'), 'Fee matrix');
         }
 
         // 4. Division levels.

@@ -520,8 +520,10 @@ class TeamOversight_Fees {
     // How a season fee is worked out (1.66.0)
     //
     // Every active assignment is a "bucket": team + role + fee class. The
-    // fee class can differ per team — an under-19 is JPL/YSL on a junior-
-    // league team and Junior U/19 (VVL) on any other team.
+    // fee class can differ per team — an under-19 is charged the JPL row on
+    // a JPL team and the YSL row on a YSL team (2026 and earlier, one
+    // JPL/YSL row: junior_league_class(), 1.87.0), and Junior U/19 (VVL) on
+    // any other team.
     //  1. Each bucket is priced from the matrix: playing member, training
     //     only and supporter at their own rate; coach and assistant coach
     //     at the SUPPORTER rate (there's no coaching discount — the club
@@ -617,14 +619,793 @@ class TeamOversight_Fees {
         return $this->get_fee($fee_class, $team_role, $season);
     }
 
-    /** Is this a junior-league (JPL / YSL) team? By its age rule, or its code. */
+    // ------------------------------------------------------------------
+    // JPL and YSL (1.87.0, club decision 4 Nov 2026). From the 2027 season
+    // the one junior-league fee class JPL/YSL is two: JPL (a junior on a
+    // Junior Premier League team, age rule U19) and YSL (a junior on a
+    // Youth State League team, age rules U17 and U15). junior_league_type()
+    // is the one rule (never test a team's code or age rule for a fee class
+    // anywhere else); junior_league_class() is the matrix row a junior on a
+    // team is charged. 2026 and earlier keep the one JPL/YSL row, and so
+    // does a 2027+ season until the one-off data step (split_jpl_ysl()) has
+    // copied its JPL/YSL amounts to both rows, and a season that step kept
+    // (released, invoiced or not matching): junior_league_split_applies().
+    // ------------------------------------------------------------------
+
+    /** First season with separate JPL and YSL fee classes (club decision, 4 Nov 2026). */
+    const JUNIOR_LEAGUE_SPLIT_FROM = 2027;
+    const CLASS_JPL_YSL = 'JPL/YSL';
+    const CLASS_JPL = 'JPL';
+    const CLASS_YSL = 'YSL';
+    /** A junior-league team's type by its age rule (the code decides only when the team has none). */
+    const JUNIOR_LEAGUE_AGE_RULES = array('u19' => self::CLASS_JPL, 'u17' => self::CLASS_YSL, 'u15' => self::CLASS_YSL);
+    /** The one-off's flag (autoloaded): done, at, version, seasons, kept, split, class_history. */
+    const JPL_YSL_SPLIT_OPTION = 'team_oversight_jpl_ysl_split';
+    /** The one-off's before-copy (not autoloaded): per season, every row it changed, as it was. No account id, email or name. */
+    const JPL_YSL_BEFORE_OPTION = 'team_oversight_jpl_ysl_split_before';
+
+    /**
+     * The one rule: 'JPL', 'YSL' or '' (not a junior-league team) for a team
+     * in a season. The team's age rule decides (u19 JPL, u17 or u15 YSL);
+     * only a team with no age rule that season (open, or not configured)
+     * goes by its code (JPL..., YSL...). The teams with a type are exactly
+     * the 1.86.1 junior-league teams (code prefix or any age rule); only the
+     * label splits. The team list comes from TeamOversight_Offers::
+     * teams_config() (cached for the request, cleared by its flush_cache()).
+     */
+    public static function junior_league_type($team, $season) {
+        $team = (string) $team;
+        $config = ($season !== null && class_exists('TeamOversight_Offers'))
+            ? TeamOversight_Offers::teams_config($season)
+            : TeamOversight_Database::shared()->get_teams_config($season);
+        $rule = (isset($config[$team]) && is_array($config[$team]) && isset($config[$team]['age_rule'])) ? (string) $config[$team]['age_rule'] : '';
+        if (isset(self::JUNIOR_LEAGUE_AGE_RULES[$rule])) {
+            return self::JUNIOR_LEAGUE_AGE_RULES[$rule];
+        }
+        if (strpos($team, 'JPL') === 0) {
+            return self::CLASS_JPL;
+        }
+        if (strpos($team, 'YSL') === 0) {
+            return self::CLASS_YSL;
+        }
+        return '';
+    }
+
+    /** Is this a junior-league (JPL or YSL) team? junior_league_type() decides. */
     public static function is_junior_league_team($team, $season) {
-        if (strpos($team, 'JPL') === 0 || strpos($team, 'YSL') === 0) {
+        return self::junior_league_type($team, $season) !== '';
+    }
+
+    /**
+     * Does this season charge JPL and YSL separately? A four-digit season
+     * from JUNIOR_LEAGUE_SPLIT_FROM whose data the one-off has split (on the
+     * flag's split list, written as soon as its JPL and YSL rows exist), or
+     * any such season once the one-off has finished on this site, unless it
+     * kept that season on JPL/YSL. Until then the season keeps JPL/YSL, so a
+     * request never prices JPL against a matrix that only has JPL/YSL.
+     */
+    public static function junior_league_split_applies($season) {
+        if (!is_scalar($season) || preg_match('/^\d{4}$/D', (string) $season) !== 1 || intval($season) < self::JUNIOR_LEAGUE_SPLIT_FROM) {
+            return false;
+        }
+        $flag = get_option(self::JPL_YSL_SPLIT_OPTION, null);
+        if (!is_array($flag)) {
+            return false;
+        }
+        $season = (string) $season;
+        if (in_array($season, self::split_list($flag), true)) {
             return true;
         }
-        $database = new TeamOversight_Database();
-        $config = $database->get_teams_config($season);
-        return isset($config[$team]) && $config[$team]['age_rule'] !== '';
+        return !empty($flag['done']) && !in_array($season, array_map('strval', (array) (isset($flag['kept']) ? $flag['kept'] : array())), true);
+    }
+
+    /** The one-off's flag once it has finished on this site, else null. */
+    public static function jpl_ysl_split_state() {
+        $flag = get_option(self::JPL_YSL_SPLIT_OPTION, null);
+        return (is_array($flag) && !empty($flag['done'])) ? $flag : null;
+    }
+
+    /** The seasons on a flag's split list (strings). */
+    private static function split_list($flag) {
+        return (is_array($flag) && isset($flag['split'])) ? array_values(array_unique(array_map('strval', (array) $flag['split']))) : array();
+    }
+
+    /** The junior-league matrix rows of a season: JPL and YSL, or JPL/YSL. null = a season from 2027 on this site. */
+    public static function junior_league_classes($season = null) {
+        $split = $season === null ? self::junior_league_split_applies((string) self::JUNIOR_LEAGUE_SPLIT_FROM) : self::junior_league_split_applies($season);
+        return $split ? array(self::CLASS_JPL, self::CLASS_YSL) : array(self::CLASS_JPL_YSL);
+    }
+
+    /** The matrix class a junior on this team is charged: JPL or YSL (split season), JPL/YSL (other seasons), '' (not a junior-league team). */
+    public static function junior_league_class($team, $season) {
+        $type = self::junior_league_type($team, $season);
+        if ($type === '') {
+            return '';
+        }
+        return self::junior_league_split_applies($season) ? $type : self::CLASS_JPL_YSL;
+    }
+
+    /** JPL/YSL, JPL or YSL. */
+    public static function is_junior_league_class($class) {
+        return in_array((string) $class, array(self::CLASS_JPL_YSL, self::CLASS_JPL, self::CLASS_YSL), true);
+    }
+
+    /** The person class behind a matrix class: any junior-league row belongs to a Junior U/19 (VVL) person. */
+    public static function person_class_of($class) {
+        return self::is_junior_league_class($class) ? 'Junior U/19 (VVL)' : (string) $class;
+    }
+
+    /** Copy and import (D11): a JPL/YSL source row into a split season is a JPL row and a YSL row; anything else stays itself. */
+    private static function matrix_classes_for($class, $season) {
+        return ((string) $class === self::CLASS_JPL_YSL && self::junior_league_split_applies($season)) ? array(self::CLASS_JPL, self::CLASS_YSL) : array((string) $class);
+    }
+
+    /**
+     * How many of the season's invoices carry a fee (1.85.1's rule): an
+     * amount, an amount still owing, a raised fee or an Edit Fee override.
+     * The $0 placeholders an accepted offer or an early place holds until
+     * the release (deposits are payments against them) don't count.
+     */
+    public static function season_fee_invoice_count($season) {
+        global $wpdb;
+        return intval($wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s
+                AND (invoice_amount <> 0 OR outstanding_amount <> 0 OR fee_raised_at IS NOT NULL OR fee_overridden = 1)",
+            (string) $season
+        )));
+    }
+
+    /**
+     * Configuration and the offers checklist: '' unless the one-off kept
+     * this season on the one JPL/YSL row, else one sentence saying so.
+     */
+    public static function jpl_ysl_kept_note($season) {
+        $season = (string) $season;
+        $flag = get_option(self::JPL_YSL_SPLIT_OPTION, null);
+        if (!is_array($flag) || empty($flag['done']) || in_array($season, self::split_list($flag), true)
+            || !in_array($season, array_map('strval', (array) (isset($flag['kept']) ? $flag['kept'] : array())), true)) {
+            return '';
+        }
+        $reason = (isset($flag['seasons'][$season]) && is_array($flag['seasons'][$season]) && isset($flag['seasons'][$season]['reason'])) ? (string) $flag['seasons'][$season]['reason'] : '';
+        $why = in_array($reason, array('conflict', 'duplicate'), true)
+            ? 'its JPL, YSL and JPL/YSL amounts did not match when 1.87.0 arrived'
+            : 'fees were released or invoiced when 1.87.0 arrived';
+        return $season . ' still uses one JPL/YSL row (' . $why . ').';
+    }
+
+    // ---- the one-off data step (1.87.0) ----
+
+    /** An option's stored value straight from the options table (never a cache), or null. */
+    private static function raw_option($name) {
+        global $wpdb;
+        $raw = $wpdb->get_var($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1", $name));
+        return $raw === null ? null : maybe_unserialize($raw);
+    }
+
+    /** Drop an option from the object cache so the next read goes to the table. */
+    private static function forget_option_cache($name) {
+        wp_cache_delete('alloptions', 'options');
+        wp_cache_delete($name, 'options');
+        wp_cache_delete('notoptions', 'options');
+    }
+
+    /** Write an option past any stale cache; returns the stored value read back. */
+    private static function write_option($name, $value, $autoload) {
+        self::forget_option_cache($name);
+        update_option($name, $value, $autoload);
+        self::forget_option_cache($name);
+        return self::raw_option($name);
+    }
+
+    /**
+     * One fee_edit line from the one-off, by nobody: the step runs on
+     * whichever page load comes first (a member's, say), so the line's
+     * actor is set back to 0 (the system) after it is written.
+     */
+    private static function jpl_ysl_log($message) {
+        global $wpdb;
+        $message = 'Automatic 1.87.0 update step: ' . $message;
+        TeamOversight_Log::add('fee_edit', $message);
+        $id = intval($wpdb->insert_id);
+        if ($id > 0 && get_current_user_id() > 0) {
+            $wpdb->query($wpdb->prepare(
+                'UPDATE ' . TeamOversight_Log::table() . " SET actor_id = 0 WHERE id = %d AND event_type = 'fee_edit' AND message = %s",
+                $id,
+                substr($message, 0, 500)
+            ));
+        }
+    }
+
+    /** A list of cells for a log line, at most $max named. */
+    private static function cells_words(array $cells, $max = 6) {
+        $cells = array_values($cells);
+        $more = count($cells) - $max;
+        return implode(', ', array_slice($cells, 0, $max)) . ($more > 0 ? ' and ' . $more . ' more' : '');
+    }
+
+    /** 'JPL / training only'. */
+    private static function cell_label($class, $role) {
+        return $class . ' / ' . strtolower(self::role_label($role));
+    }
+
+    /**
+     * The 1.87.0 one-off (TeamOversight_Database::migrate_database() calls
+     * it on every load; once done it is one autoloaded option read). Every
+     * 2027+ season with junior-league data (jpl_ysl_seasons()) goes through
+     * convert_season_jpl_ysl(); the flag is written last, with done, when
+     * every season went through (converted, nothing or refused). A season
+     * whose JPL and YSL rows exist is on the flag's split list from that
+     * moment (mark_season_split()), so a season that finished is priced on
+     * JPL and YSL even when a later one fails. A failed write returns null
+     * and the next request carries on (every step is idempotent and the
+     * before-copy is kept). Under a named lock; never throws.
+     */
+    public static function split_jpl_ysl() {
+        $state = self::jpl_ysl_split_state();
+        if ($state !== null) {
+            return $state;
+        }
+        global $wpdb;
+        $lock = 'murvc_jpl_ysl_split_' . md5($wpdb->prefix);
+        $got = null;
+        try {
+            foreach (array('fee_matrix', 'fee_matrix_limits', 'team_offers', 'team_fee_segments', 'team_invoices', 'team_assignment_changes') as $short) {
+                if (!$wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix . $short)))) {
+                    return null; // a table it reads is not there yet: the next request tries again
+                }
+            }
+            $got = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 0)', $lock));
+            if ($got !== null && intval($got) !== 1) {
+                $got = null; // another request holds it: not ours to release
+                return null;
+            }
+            $stored = self::raw_option(self::JPL_YSL_SPLIT_OPTION);
+            if (is_array($stored) && !empty($stored['done'])) {
+                self::forget_option_cache(self::JPL_YSL_SPLIT_OPTION);
+                return $stored; // another request just finished it
+            }
+            $classes = array(self::CLASS_JPL_YSL, self::CLASS_JPL, self::CLASS_YSL);
+            $flag = array(
+                'done' => true,
+                'at' => current_time('mysql'),
+                'version' => defined('TEAM_OVERSIGHT_VERSION') ? TEAM_OVERSIGHT_VERSION : '',
+                'seasons' => array(),
+                'kept' => array(),
+                'split' => self::split_list($stored),
+                // D6: the class history holds person classes only (record_class()); expected 0.
+                'class_history' => intval($wpdb->get_var($wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->prefix}team_assignment_changes WHERE CHAR_LENGTH(season) = 4 AND season >= %s
+                        AND (old_class IN (%s, %s, %s) OR new_class IN (%s, %s, %s))",
+                    array_merge(array((string) self::JUNIOR_LEAGUE_SPLIT_FROM), $classes, $classes)
+                ))),
+            );
+            foreach (self::jpl_ysl_seasons() as $season) {
+                $r = self::convert_season_jpl_ysl($season);
+                if (!is_array($r)) {
+                    return null;
+                }
+                $flag['seasons'][$season] = $r;
+                if (isset($r['state']) && $r['state'] === 'refused') {
+                    $flag['kept'][] = $season;
+                }
+            }
+            // The seasons marked split on the way are merged in, never dropped.
+            $split = array_values(array_unique(array_merge($flag['split'], self::split_list(self::raw_option(self::JPL_YSL_SPLIT_OPTION)))));
+            sort($split, SORT_STRING);
+            $flag['split'] = $split;
+            $written = self::write_option(self::JPL_YSL_SPLIT_OPTION, $flag, true);
+            return (is_array($written) && !empty($written['done'])) ? $written : null;
+        } catch (\Throwable $e) {
+            try {
+                if (!get_transient('murvc_jys_split_error')) {
+                    set_transient('murvc_jys_split_error', 1, DAY_IN_SECONDS);
+                    self::jpl_ysl_log('the JPL and YSL fee class step stopped (' . get_class($e) . ' in ' . basename($e->getFile()) . ':' . $e->getLine() . '); the next page load tries again. A season it has not split yet keeps the one JPL/YSL class until then.');
+                }
+            } catch (\Throwable $ignored) {
+                // never throws
+            }
+            return null;
+        } finally {
+            if ($got !== null) {
+                $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock));
+            }
+        }
+    }
+
+    /**
+     * The seasons the one-off looks at (D9): four-digit seasons from 2027
+     * holding an active JPL/YSL, JPL or YSL fee row, a limit of one of
+     * those classes, an offer quoted on JPL/YSL, a segment whose buckets
+     * name JPL/YSL (stored as JPL\/YSL by wp_json_encode, which the LIKE
+     * matches), or an unfinished before-copy entry. Ascending.
+     */
+    private static function jpl_ysl_seasons() {
+        global $wpdb;
+        $p = $wpdb->prefix;
+        $classes = array(self::CLASS_JPL_YSL, self::CLASS_JPL, self::CLASS_YSL);
+        $found = array_merge(
+            (array) $wpdb->get_col($wpdb->prepare("SELECT DISTINCT season FROM {$p}fee_matrix WHERE is_active = 1 AND fee_class IN (%s, %s, %s)", $classes)),
+            (array) $wpdb->get_col($wpdb->prepare("SELECT DISTINCT season FROM {$p}fee_matrix_limits WHERE fee_class IN (%s, %s, %s)", $classes)),
+            (array) $wpdb->get_col($wpdb->prepare("SELECT DISTINCT season FROM {$p}team_offers WHERE quote_fee_class = %s", self::CLASS_JPL_YSL)),
+            (array) $wpdb->get_col($wpdb->prepare("SELECT DISTINCT season FROM {$p}team_fee_segments WHERE buckets LIKE %s", '%JPL%YSL%'))
+        );
+        $before = self::raw_option(self::JPL_YSL_BEFORE_OPTION);
+        foreach ((is_array($before) ? $before : array()) as $season => $entry) {
+            if (is_array($entry) && empty($entry['finished_at'])) {
+                $found[] = (string) $season;
+            }
+        }
+        $seasons = array();
+        foreach ($found as $season) {
+            $season = (string) $season;
+            if (preg_match('/^\d{4}$/D', $season) === 1 && intval($season) >= self::JUNIOR_LEAGUE_SPLIT_FROM) {
+                $seasons[$season] = true;
+            }
+        }
+        $seasons = array_keys($seasons);
+        $seasons = array_map('strval', $seasons);
+        sort($seasons, SORT_STRING);
+        return $seasons;
+    }
+
+    /** Put a season on the flag's split list (its JPL and YSL rows exist now). The flag's done is left as it is. True when it reads back. */
+    private static function mark_season_split($season) {
+        $season = (string) $season;
+        $flag = self::raw_option(self::JPL_YSL_SPLIT_OPTION);
+        if (!is_array($flag)) {
+            $flag = array('done' => false);
+        }
+        $split = self::split_list($flag);
+        if (in_array($season, $split, true)) {
+            return true;
+        }
+        $split[] = $season;
+        sort($split, SORT_STRING);
+        $flag['split'] = $split;
+        if (!array_key_exists('done', $flag)) {
+            $flag['done'] = false;
+        }
+        return in_array($season, self::split_list(self::write_option(self::JPL_YSL_SPLIT_OPTION, $flag, true)), true);
+    }
+
+    /**
+     * Convert one season (the one-off and the tests call it; never by hand
+     * on a real season). Returns array(state, ...) or null when a write
+     * failed (the next run resumes). States: skipped (not a 2027+ season,
+     * no query), already (its before-copy entry is finished: nothing read
+     * or written), nothing, refused (reason released, invoiced, conflict or
+     * duplicate; nothing written), converted. In order: the refusal (a fresh
+     * run only), the before-copy, JPL and YSL fee rows and upper limits
+     * copied from JPL/YSL with the same amounts (a cell already holding the
+     * same amount is kept), the season put on the split list, offers'
+     * quote_fee_class and segment buckets relabelled by team, the JPL/YSL
+     * rows taken out (fee rows set inactive, limits deleted), the entry
+     * marked finished and one log line. Nothing is re-priced.
+     */
+    public static function convert_season_jpl_ysl($season) {
+        if (!is_scalar($season) || preg_match('/^\d{4}$/D', (string) $season) !== 1 || intval($season) < self::JUNIOR_LEAGUE_SPLIT_FROM) {
+            return array('state' => 'skipped');
+        }
+        global $wpdb;
+        $season = (string) $season;
+        $p = $wpdb->prefix;
+        $before_all = self::raw_option(self::JPL_YSL_BEFORE_OPTION);
+        $before_all = is_array($before_all) ? $before_all : array();
+        $entry = (isset($before_all[$season]) && is_array($before_all[$season])) ? $before_all[$season] : null;
+        if ($entry !== null && !empty($entry['finished_at'])) {
+            return array('state' => 'already', 'finished_at' => (string) $entry['finished_at']);
+        }
+        $resume = $entry !== null;
+
+        // Step 2: everything of this season the conversion touches.
+        $classes = array(self::CLASS_JPL_YSL, self::CLASS_JPL, self::CLASS_YSL);
+        $matrix = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, version, season, fee_class, team_role, fee_amount, is_active, created_date FROM {$p}fee_matrix
+                WHERE season = %s AND is_active = 1 AND fee_class IN (%s, %s, %s) ORDER BY id",
+            array_merge(array($season), $classes)
+        ));
+        if ($wpdb->last_error !== '') {
+            return null;
+        }
+        $limits = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, season, fee_class, team_role, upper_limit, updated_at FROM {$p}fee_matrix_limits
+                WHERE season = %s AND fee_class IN (%s, %s, %s) ORDER BY id",
+            array_merge(array($season), $classes)
+        ));
+        if ($wpdb->last_error !== '') {
+            return null;
+        }
+        $offers = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, team, quote_fee_class FROM {$p}team_offers WHERE season = %s AND quote_fee_class = %s ORDER BY id",
+            $season, self::CLASS_JPL_YSL
+        ));
+        if ($wpdb->last_error !== '') {
+            return null;
+        }
+        $segment_rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, buckets FROM {$p}team_fee_segments WHERE season = %s AND buckets LIKE %s ORDER BY id",
+            $season, '%JPL%YSL%'
+        ));
+        if ($wpdb->last_error !== '') {
+            return null;
+        }
+        $matrix = (array) $matrix;
+        $limits = (array) $limits;
+        $offers = (array) $offers;
+        $segments = array();
+        foreach ((array) $segment_rows as $row) {
+            $list = json_decode((string) $row->buckets, true);
+            if (!is_array($list)) {
+                continue;
+            }
+            foreach ($list as $b) {
+                if (is_array($b) && isset($b['class']) && $b['class'] === self::CLASS_JPL_YSL) {
+                    $segments[] = $row;
+                    break;
+                }
+            }
+        }
+        $old_rows = array();
+        $new_rows = array();
+        foreach ($matrix as $row) {
+            if ((string) $row->fee_class === self::CLASS_JPL_YSL) {
+                $old_rows[] = $row;
+            } else {
+                $new_rows[] = $row;
+            }
+        }
+        $old_limits = array();
+        $new_limits = array();
+        foreach ($limits as $row) {
+            if ((string) $row->fee_class === self::CLASS_JPL_YSL) {
+                $old_limits[] = $row;
+            } else {
+                $new_limits[] = $row;
+            }
+        }
+        $has_old = !empty($old_rows) || !empty($old_limits) || !empty($offers) || !empty($segments);
+        $has_new = !empty($new_rows) || !empty($new_limits);
+
+        // The JPL/YSL amount per role (the first active row; a second one with
+        // another amount is refused below on a fresh run).
+        $old_fee_by_role = array();
+        foreach ($old_rows as $row) {
+            if (!isset($old_fee_by_role[(string) $row->team_role])) {
+                $old_fee_by_role[(string) $row->team_role] = $row;
+            }
+        }
+        $old_limit_by_role = array();
+        foreach ($old_limits as $row) {
+            $old_limit_by_role[(string) $row->team_role] = round(floatval($row->upper_limit), 2);
+        }
+
+        $counts = array('fees' => 0, 'fees_kept' => array(), 'limits' => 0, 'limits_kept' => array(),
+            'offers' => array(self::CLASS_JPL => 0, self::CLASS_YSL => 0, 'left' => 0), 'segments' => 0, 'buckets_left' => 0);
+
+        if (!$has_old && !$has_new) {
+            if (!$resume) {
+                return array('state' => 'nothing');
+            }
+            // A run that died after its last write: only the finish is left.
+            return self::finish_season_jpl_ysl($season, $resume, $counts);
+        }
+
+        // Step 5, the refusal (D8), on a fresh run only: anything that could
+        // move someone's fee keeps the season on JPL/YSL, and nothing is written.
+        if (!$resume) {
+            $reason = '';
+            $cells = array();
+            $invoices = 0;
+            if ($has_old && self::fees_released($season)) {
+                $reason = 'released';
+            } elseif ($has_old && ($invoices = self::season_fee_invoice_count($season)) > 0) {
+                $reason = 'invoiced';
+            } else {
+                foreach ($old_rows as $row) {
+                    $first = $old_fee_by_role[(string) $row->team_role];
+                    if (intval($first->id) !== intval($row->id) && abs(floatval($first->fee_amount) - floatval($row->fee_amount)) >= 0.005) {
+                        $cells[] = self::cell_label(self::CLASS_JPL_YSL, $row->team_role) . ' fee ($' . number_format(floatval($first->fee_amount), 2) . ' and $' . number_format(floatval($row->fee_amount), 2) . ')';
+                    }
+                }
+                if (!empty($cells)) {
+                    $reason = 'duplicate';
+                } else {
+                    // A JPL or YSL amount typed already is never read before the
+                    // split; it may stay only when it equals the JPL/YSL amount.
+                    foreach ($new_rows as $row) {
+                        $base = isset($old_fee_by_role[(string) $row->team_role]) ? floatval($old_fee_by_role[(string) $row->team_role]->fee_amount) : null;
+                        if ($base === null || abs($base - floatval($row->fee_amount)) >= 0.005) {
+                            $cells[] = self::cell_label($row->fee_class, $row->team_role) . ' fee ($' . number_format(floatval($row->fee_amount), 2) . '; JPL/YSL ' . ($base === null ? 'blank' : '$' . number_format($base, 2)) . ')';
+                        }
+                    }
+                    foreach ($new_limits as $row) {
+                        $base = isset($old_limit_by_role[(string) $row->team_role]) ? $old_limit_by_role[(string) $row->team_role] : null;
+                        if ($base === null || abs($base - floatval($row->upper_limit)) >= 0.005) {
+                            $cells[] = self::cell_label($row->fee_class, $row->team_role) . ' upper limit ($' . number_format(floatval($row->upper_limit), 2) . '; JPL/YSL ' . ($base === null ? 'none' : '$' . number_format($base, 2)) . ')';
+                        }
+                    }
+                    if (!empty($cells)) {
+                        $reason = 'conflict';
+                    }
+                }
+            }
+            if ($reason !== '') {
+                if ($reason === 'released') {
+                    $why = 'the ' . $season . ' fees are released (a season with no release date counts as released), so changing the class could move someone\'s fee';
+                } elseif ($reason === 'invoiced') {
+                    $why = $invoices . ' ' . $season . ' invoice(s) already carry a fee, so changing the class could move someone\'s fee';
+                } elseif ($reason === 'duplicate') {
+                    $why = $season . ' has two different JPL/YSL amounts for one cell (' . self::cells_words($cells, 3) . '), so which one to copy is unclear';
+                } else {
+                    $why = 'JPL or YSL amounts already typed for ' . $season . ' differ from its JPL/YSL row (' . self::cells_words($cells, 3) . '), so splitting would change what someone is charged';
+                }
+                self::jpl_ysl_log($season . ' fee classes not split: ' . $why . '. ' . $season . ' keeps the one JPL/YSL row exactly as before; nothing was changed.');
+                return array('state' => 'refused', 'reason' => $reason, 'invoices' => $invoices, 'cells' => $cells,
+                    'found' => array('fees' => count($old_rows), 'limits' => count($old_limits), 'offers' => count($offers), 'segments' => count($segments)));
+            }
+
+            // Step 6, the before-copy: every row this conversion may change,
+            // as it is now (the JPL and YSL rows already there too, so a
+            // restore is exact). No account id, email or name.
+            $copy = array('taken_at' => current_time('mysql'), 'version' => defined('TEAM_OVERSIGHT_VERSION') ? TEAM_OVERSIGHT_VERSION : '',
+                'matrix' => array(), 'limits' => array(), 'offers' => array(), 'segments' => array());
+            foreach ($matrix as $row) {
+                $copy['matrix'][] = array('id' => intval($row->id), 'version' => (string) $row->version, 'season' => (string) $row->season,
+                    'fee_class' => (string) $row->fee_class, 'team_role' => (string) $row->team_role, 'fee_amount' => (string) $row->fee_amount,
+                    'is_active' => intval($row->is_active), 'created_date' => (string) $row->created_date);
+            }
+            foreach ($limits as $row) {
+                $copy['limits'][] = array('id' => intval($row->id), 'season' => (string) $row->season, 'fee_class' => (string) $row->fee_class,
+                    'team_role' => (string) $row->team_role, 'upper_limit' => (string) $row->upper_limit, 'updated_at' => (string) $row->updated_at);
+            }
+            foreach ($offers as $row) {
+                $copy['offers'][intval($row->id)] = array('team' => (string) $row->team, 'quote_fee_class' => (string) $row->quote_fee_class);
+            }
+            foreach ($segments as $row) {
+                $copy['segments'][intval($row->id)] = (string) $row->buckets;
+            }
+            $before_all[$season] = $copy;
+            $stored = self::write_option(self::JPL_YSL_BEFORE_OPTION, $before_all, false);
+            if (!is_array($stored) || !isset($stored[$season]) || !is_array($stored[$season])) {
+                return null;
+            }
+            $entry = $stored[$season];
+        }
+
+        // Steps 7 and 8, the copies (nothing taken out yet). Skipped by a
+        // resumed run whose season is on the split list already: its copies
+        // were finished then, and may have been edited since.
+        //
+        // Cells that were JPL or YSL before this conversion began are kept as
+        // they are. A resumed run takes them from the before-copy only, so its
+        // own earlier copies are brought to today's JPL/YSL amount (the season
+        // was still combined, so nobody was charged them).
+        $kept_fee_cells = array();
+        $before_ids = array();
+        $kept_limit_cells = array();
+        foreach ((isset($entry['matrix']) && is_array($entry['matrix'])) ? $entry['matrix'] : array() as $row) {
+            if (!is_array($row) || !isset($row['id'], $row['fee_class'], $row['team_role'])) {
+                continue;
+            }
+            $before_ids[intval($row['id'])] = true;
+            if (in_array((string) $row['fee_class'], array(self::CLASS_JPL, self::CLASS_YSL), true)) {
+                $kept_fee_cells[$row['fee_class'] . '|' . $row['team_role']] = true;
+            }
+        }
+        foreach ((isset($entry['limits']) && is_array($entry['limits'])) ? $entry['limits'] : array() as $row) {
+            if (is_array($row) && isset($row['fee_class'], $row['team_role']) && in_array((string) $row['fee_class'], array(self::CLASS_JPL, self::CLASS_YSL), true)) {
+                $kept_limit_cells[$row['fee_class'] . '|' . $row['team_role']] = true;
+            }
+        }
+        $in_split = in_array($season, self::split_list(self::raw_option(self::JPL_YSL_SPLIT_OPTION)), true);
+        if ($resume && $in_split) {
+            // The copies were finished by the run that stopped (and may have
+            // been edited since): nothing is written, they are only counted.
+            foreach ($new_rows as $row) {
+                if (!isset($before_ids[intval($row->id)])) {
+                    $counts['fees']++;
+                }
+            }
+            foreach ($new_limits as $row) {
+                if (!isset($kept_limit_cells[$row->fee_class . '|' . $row->team_role])) {
+                    $counts['limits']++;
+                }
+            }
+            foreach (array_keys($kept_fee_cells) as $cell) {
+                list($class, $role) = explode('|', $cell, 2);
+                $counts['fees_kept'][] = self::cell_label($class, $role);
+            }
+            foreach (array_keys($kept_limit_cells) as $cell) {
+                list($class, $role) = explode('|', $cell, 2);
+                $counts['limits_kept'][] = self::cell_label($class, $role);
+            }
+        } else {
+            // Fees.
+            $copies = array();
+            foreach ($new_rows as $row) {
+                if (!isset($before_ids[intval($row->id)])) {
+                    $copies[$row->fee_class . '|' . $row->team_role][] = $row;
+                }
+            }
+            foreach ($old_fee_by_role as $role => $source) {
+                $amount = round(floatval($source->fee_amount), 2);
+                foreach (array(self::CLASS_JPL, self::CLASS_YSL) as $class) {
+                    $cell = $class . '|' . $role;
+                    if (isset($kept_fee_cells[$cell])) {
+                        $counts['fees_kept'][] = self::cell_label($class, $role);
+                        continue;
+                    }
+                    if (isset($copies[$cell])) {
+                        foreach ($copies[$cell] as $copy_row) {
+                            if (abs(floatval($copy_row->fee_amount) - $amount) >= 0.005
+                                && $wpdb->query($wpdb->prepare("UPDATE {$p}fee_matrix SET fee_amount = %f WHERE id = %d AND is_active = 1", $amount, intval($copy_row->id))) === false) {
+                                return null;
+                            }
+                        }
+                        unset($copies[$cell]);
+                    } elseif ($wpdb->insert($p . 'fee_matrix', array(
+                        'version' => (string) $source->version, 'season' => $season, 'fee_class' => $class,
+                        'team_role' => $role, 'fee_amount' => $amount, 'is_active' => 1,
+                    ), array('%s', '%s', '%s', '%s', '%f', '%d')) === false) {
+                        return null;
+                    }
+                    $kept_fee_cells[$cell] = true; // one row per cell, whatever follows
+                    $counts['fees']++;
+                }
+            }
+            // An earlier copy whose JPL/YSL fee was cleared since goes too.
+            foreach ($copies as $rows) {
+                foreach ($rows as $copy_row) {
+                    if ($wpdb->query($wpdb->prepare("UPDATE {$p}fee_matrix SET is_active = 0 WHERE id = %d AND is_active = 1", intval($copy_row->id))) === false) {
+                        return null;
+                    }
+                    $counts['fees']++;
+                }
+            }
+
+            // Upper limits, through set_limit() (the one writer), by the system.
+            self::flush_limits_cache();
+            $written = array();
+            foreach ($old_limit_by_role as $role => $amount) {
+                foreach (array(self::CLASS_JPL, self::CLASS_YSL) as $class) {
+                    $cell = $class . '|' . $role;
+                    if (isset($kept_limit_cells[$cell])) {
+                        $counts['limits_kept'][] = self::cell_label($class, $role);
+                        continue;
+                    }
+                    self::set_limit($season, $class, $role, $amount, array('log' => false, 'user_id' => 0));
+                    self::flush_limits_cache();
+                    $now = self::get_limit($class, $role, $season);
+                    if ($now === null || abs($now - $amount) >= 0.005) {
+                        return null;
+                    }
+                    $written[$cell] = true;
+                    $counts['limits']++;
+                }
+            }
+            if ($resume) {
+                foreach ($new_limits as $row) {
+                    $cell = $row->fee_class . '|' . $row->team_role;
+                    if (isset($kept_limit_cells[$cell]) || isset($written[$cell])) {
+                        continue;
+                    }
+                    self::set_limit($season, (string) $row->fee_class, (string) $row->team_role, null, array('log' => false, 'user_id' => 0));
+                    self::flush_limits_cache();
+                    if (self::get_limit((string) $row->fee_class, (string) $row->team_role, $season) !== null) {
+                        return null;
+                    }
+                    $counts['limits']++;
+                }
+            }
+
+            // The JPL and YSL rows exist: from here this season is priced on them.
+            if (!self::mark_season_split($season)) {
+                return null;
+            }
+        }
+
+        // Step 9, offers (D5): only quote_fee_class moves, by the offer's team.
+        foreach ($offers as $offer) {
+            $type = self::junior_league_type($offer->team, $season);
+            if ($type === '') {
+                $counts['offers']['left']++;
+                continue;
+            }
+            $n = $wpdb->query($wpdb->prepare(
+                "UPDATE {$p}team_offers SET quote_fee_class = %s WHERE id = %d AND season = %s AND quote_fee_class = %s",
+                $type, intval($offer->id), $season, self::CLASS_JPL_YSL
+            ));
+            if ($n === false) {
+                return null;
+            }
+            if (intval($n) === 1) {
+                $counts['offers'][$type]++;
+            }
+        }
+
+        // Step 10, segment buckets (D7): a JPL/YSL bucket takes its team's type; compare-and-set on the old text.
+        foreach ($segments as $row) {
+            $list = json_decode((string) $row->buckets, true);
+            $changed = false;
+            foreach ($list as $i => $b) {
+                if (!is_array($b) || !isset($b['class']) || $b['class'] !== self::CLASS_JPL_YSL) {
+                    continue;
+                }
+                $type = self::junior_league_type(isset($b['team']) ? (string) $b['team'] : '', $season);
+                if ($type === '') {
+                    $counts['buckets_left']++;
+                    continue;
+                }
+                $list[$i]['class'] = $type;
+                $changed = true;
+            }
+            if (!$changed) {
+                continue;
+            }
+            $n = $wpdb->query($wpdb->prepare(
+                "UPDATE {$p}team_fee_segments SET buckets = %s WHERE id = %d AND buckets = %s",
+                wp_json_encode($list), intval($row->id), (string) $row->buckets
+            ));
+            if ($n === false) {
+                return null;
+            }
+            if (intval($n) === 1) {
+                $counts['segments']++;
+            }
+        }
+
+        // Step 11, take out the JPL/YSL rows (D3): fee rows inactive (kept as history), limits deleted.
+        foreach ($old_rows as $row) {
+            if ($wpdb->query($wpdb->prepare(
+                "UPDATE {$p}fee_matrix SET is_active = 0 WHERE id = %d AND season = %s AND fee_class = %s AND is_active = 1",
+                intval($row->id), $season, self::CLASS_JPL_YSL
+            )) === false) {
+                return null;
+            }
+        }
+        foreach ($old_limit_by_role as $role => $amount) {
+            self::set_limit($season, self::CLASS_JPL_YSL, $role, null, array('log' => false, 'user_id' => 0));
+            self::flush_limits_cache();
+            if (self::get_limit(self::CLASS_JPL_YSL, $role, $season) !== null) {
+                return null;
+            }
+        }
+        self::flush_limits_cache();
+        if (class_exists('TeamOversight_Offers')) {
+            TeamOversight_Offers::flush_cache();
+        }
+
+        return self::finish_season_jpl_ysl($season, $resume, $counts);
+    }
+
+    /** Step 12: the season on the split list, its before-copy entry finished, one log line, the result. Null when a write failed. */
+    private static function finish_season_jpl_ysl($season, $resume, array $counts) {
+        if (!self::mark_season_split($season)) {
+            return null;
+        }
+        $before_all = self::raw_option(self::JPL_YSL_BEFORE_OPTION);
+        $before_all = is_array($before_all) ? $before_all : array();
+        if (!isset($before_all[$season]) || !is_array($before_all[$season])) {
+            $before_all[$season] = array();
+        }
+        $before_all[$season]['finished_at'] = current_time('mysql');
+        $stored = self::write_option(self::JPL_YSL_BEFORE_OPTION, $before_all, false);
+        if (!is_array($stored) || empty($stored[$season]['finished_at'])) {
+            return null;
+        }
+        $o = $counts['offers'];
+        $message = $season . ' fee classes: JPL/YSL is now two rows, JPL and YSL (club decision). ' . $counts['fees'] . ' fee amount(s) and ' . $counts['limits']
+            . ' upper limit(s) copied to both with the same amounts, and the JPL/YSL row taken out of the matrix; ' . $o[self::CLASS_JPL] . ' offer(s) now carry JPL and '
+            . $o[self::CLASS_YSL] . ' YSL by their team, quotes unchanged; ' . $counts['segments'] . ' fee-history row(s) relabelled. Nothing was re-priced; the earlier rows are kept';
+        $kept = array_merge($counts['fees_kept'], $counts['limits_kept']);
+        $tail = ($o['left'] > 0 ? '; ' . $o['left'] . ' offer(s) left as JPL/YSL (team not junior-league)' : '') . ($resume ? ' (resumed)' : '') . '.';
+        if (!empty($kept)) {
+            $named = '; already set and kept: ' . self::cells_words(array_values(array_unique($kept)), 4);
+            $message .= (strlen('Automatic 1.87.0 update step: ' . $message . $named . $tail) <= 500) ? $named : '; ' . count($kept) . ' cell(s) already set and kept';
+        }
+        self::jpl_ysl_log($message . $tail);
+        return array('state' => 'converted', 'resumed' => (bool) $resume, 'fees' => $counts['fees'], 'fees_kept' => $counts['fees_kept'],
+            'limits' => $counts['limits'], 'limits_kept' => $counts['limits_kept'], 'offers' => $o, 'segments' => $counts['segments'], 'buckets_left' => $counts['buckets_left']);
     }
 
     /**
@@ -633,14 +1414,23 @@ class TeamOversight_Fees {
      * alumni / staff / student rules as determine_fee_class().
      */
     public function determine_person_fee_class($email, $season = null) {
-        $class = $this->determine_fee_class($email, $season);
-        return $class === 'JPL/YSL' ? 'Junior U/19 (VVL)' : $class;
+        return self::person_class_of($this->determine_fee_class($email, $season));
     }
 
-    /** Fee class for one team: juniors on a JPL/YSL team pay the JPL/YSL rates. */
+    /**
+     * Fee class for one team: a junior on a junior-league team is charged
+     * that team's row (JPL or YSL from 2027, JPL/YSL before:
+     * junior_league_class()), everyone else their own class. A stored team
+     * row given as the class (JPL, YSL or JPL/YSL) counts as the junior it
+     * belongs to, so it prices by this team.
+     */
     public function fee_class_for_team($person_class, $team, $season) {
-        if ($person_class === 'Junior U/19 (VVL)' && self::is_junior_league_team($team, $season)) {
-            return 'JPL/YSL';
+        $person_class = self::person_class_of($person_class);
+        if ($person_class === 'Junior U/19 (VVL)') {
+            $league = self::junior_league_class($team, $season);
+            if ($league !== '') {
+                return $league;
+            }
         }
         return $person_class;
     }
@@ -1422,7 +2212,49 @@ class TeamOversight_Fees {
                 );
                 
                 $version = 'csv-import-' . $season . '-' . time();
-                
+
+                // 1.87.0 (D11): into a season that charges JPL and YSL
+                // separately, a JPL/YSL line is written as a JPL row and a YSL
+                // row (an explicit JPL or YSL line wins its cell), the limit
+                // column following the same cells. Every other season reads
+                // the file exactly as before, line by line, below.
+                if (self::junior_league_split_applies($season)) {
+                    $lines = array();
+                    $explicit = array();
+                    while (($data = fgetcsv($handle)) !== FALSE) {
+                        if (count($data) >= 3 && !empty($data[0])) {
+                            $line = array(sanitize_text_field($data[0]), sanitize_text_field($data[1]), floatval($data[2]), isset($data[3]) ? $data[3] : null);
+                            $lines[] = $line;
+                            if ($line[0] !== self::CLASS_JPL_YSL) {
+                                $explicit[$line[0] . '|' . $line[1]] = true;
+                            }
+                        }
+                    }
+                    $mapped = array();
+                    foreach ($lines as $line) {
+                        list($fee_class, $team_role, $fee_amount, $limit) = $line;
+                        foreach (self::matrix_classes_for($fee_class, $season) as $class) {
+                            $cell = $class . '|' . $team_role;
+                            if ($class !== $fee_class) {
+                                if (isset($explicit[$cell]) || isset($mapped[$cell])) {
+                                    continue;
+                                }
+                                $mapped[$cell] = true;
+                            }
+                            $wpdb->insert(
+                                $wpdb->prefix . 'fee_matrix',
+                                array('version' => $version, 'season' => $season, 'fee_class' => $class, 'team_role' => $team_role, 'fee_amount' => $fee_amount, 'is_active' => 1),
+                                array('%s', '%s', '%s', '%s', '%f', '%d')
+                            );
+                            if ($limit !== null && trim((string) $limit) !== '' && is_numeric($limit) && self::timeline_applies($season)) {
+                                self::set_limit($season, $class, $team_role, floatval($limit), array('log' => false));
+                            }
+                        }
+                    }
+                    fclose($handle);
+                    return true;
+                }
+
                 while (($data = fgetcsv($handle)) !== FALSE) {
                     if (count($data) >= 3 && !empty($data[0])) {
                         $fee_class = sanitize_text_field($data[0]);
@@ -1531,13 +2363,17 @@ class TeamOversight_Fees {
         // invoice is a $0 placeholder (deposits are payments against it), so
         // only an invoice with an amount, an amount still owing, a raised fee
         // or an Edit Fee override stops it.
-        $may_clear_fees = $timeline && !self::fees_released($season)
-            && intval($wpdb->get_var($wpdb->prepare(
-                "SELECT COUNT(*) FROM {$wpdb->prefix}team_invoices WHERE season = %s
-                    AND (invoice_amount <> 0 OR outstanding_amount <> 0 OR fee_raised_at IS NOT NULL OR fee_overridden = 1)",
-                $season
-            ))) === 0;
+        $may_clear_fees = $timeline && !self::fees_released($season) && self::season_fee_invoice_count($season) === 0;
         $cleared = 0;
+        // 1.87.0: a page drawn before the JPL and YSL split posts JPL/YSL
+        // cells into a season that now reads JPL and YSL (or the other way
+        // round): those are skipped, never saved, and the page is reloaded.
+        $stale = 0;
+        $stale_classes = array();
+        $season_league = $timeline ? self::junior_league_classes($season) : array();
+        $is_stale = function ($class) use ($timeline, $season_league) {
+            return $timeline && self::is_junior_league_class($class) && !in_array((string) $class, $season_league, true);
+        };
 
         // Update fees for the specific season only
         foreach ($fees as $fee_id => $fee_amount) {
@@ -1575,6 +2411,11 @@ class TeamOversight_Fees {
             }
             $class = sanitize_text_field($cell['class']);
             $role = sanitize_key($cell['role']);
+            if ($is_stale($class)) {
+                $stale++;
+                $stale_classes[$class] = true;
+                continue;
+            }
             $amount = max(0, floatval($cell['amount']));
             $existing = $wpdb->get_var($wpdb->prepare("SELECT id FROM $table WHERE season = %s AND fee_class = %s AND team_role = %s AND is_active = 1", $season, $class, $role));
             if ($existing) {
@@ -1606,6 +2447,11 @@ class TeamOversight_Fees {
                 if ($class === '' || $role === '') {
                     continue;
                 }
+                if ($is_stale($class)) {
+                    $stale++;
+                    $stale_classes[$class] = true;
+                    continue;
+                }
                 $raw = isset($cell['amount']) ? trim((string) $cell['amount']) : '';
                 if ($raw !== '' && !is_numeric($raw)) {
                     continue; // not a number: leave that limit as it is
@@ -1630,6 +2476,12 @@ class TeamOversight_Fees {
             }
         }
 
+        if ($stale > 0) {
+            $warnings[] = isset($stale_classes[self::CLASS_JPL_YSL])
+                ? 'This page was opened before the JPL and YSL split; nothing was saved for JPL/YSL. Reload the page.'
+                : 'This page shows JPL and YSL rows, but ' . $season . ' uses one JPL/YSL row; nothing was saved for JPL or YSL. Reload the page.';
+        }
+
         $message = 'Fees updated successfully for ' . $season . ' season';
         if ($cleared) {
             $message .= '; ' . $cleared . ' blank fee' . ($cleared === 1 ? '' : 's') . ' cleared (not released yet, no fee invoiced)';
@@ -1640,7 +2492,8 @@ class TeamOversight_Fees {
             'cleared' => $cleared,
             'limits_changed' => $limits_changed,
             'warnings' => $warnings,
-            'reload' => ($inserted > 0 || $cleared > 0),
+            'stale' => $stale,
+            'reload' => ($inserted > 0 || $cleared > 0 || $stale > 0),
         ));
     }
 
@@ -1895,6 +2748,10 @@ class TeamOversight_Fees {
                         ? '<div class="notice notice-success"><p>Copied ' . intval($copied) . ' fees from ' . esc_html($from) . ' into ' . esc_html($selected_season) . ' — update any amounts that change and save.</p></div>'
                         : '<div class="notice notice-error"><p>Nothing copied — ' . esc_html($selected_season) . ' already has fees, or ' . esc_html($from) . ' has none.</p></div>';
                 }
+                // 1.87.0: JPL and YSL rows a season on the one JPL/YSL row can't read.
+                if (!empty($this->last_copy['skipped'])) {
+                    echo '<div class="notice notice-warning"><p>JPL and YSL rows not copied: ' . esc_html($selected_season) . ' uses one JPL/YSL row; type it on the grid (' . esc_html(implode(', ', $this->last_copy['skipped'])) . ').</p></div>';
+                }
             } else {
                 echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
             }
@@ -2127,6 +2984,12 @@ class TeamOversight_Fees {
                     <?php endif; ?>
 
                     <?php if ($timeline_season): ?>
+                        <?php $jpl_ysl_kept = self::jpl_ysl_kept_note($selected_season); ?>
+                        <?php if ($jpl_ysl_kept !== ''): ?>
+                            <div class="notice notice-warning inline">
+                                <p><strong>JPL and YSL:</strong> <?php echo esc_html($jpl_ysl_kept); ?> Juniors on JPL and YSL teams pay that one row, as before 1.87.0.</p>
+                            </div>
+                        <?php endif; ?>
                         <?php if (!empty($matrix_report['no_limit'])): ?>
                             <div class="notice notice-error inline">
                                 <p><strong><?php echo count($matrix_report['no_limit']); ?> cell(s) in the <?php echo esc_html($selected_season); ?> matrix have no upper limit, so offers for players in them can't be sent:</strong> <?php echo esc_html(implode(', ', $matrix_report['no_limit'])); ?>. Enter 0 where a role is meant to be free.</p>
@@ -2158,7 +3021,7 @@ class TeamOversight_Fees {
                     // notices above say it, per cell and per amount.)
                     $blank_cells = array();
                     if (!empty($fee_matrix) && !$timeline_season) {
-                        foreach (array_diff(self::standard_fee_classes(), array('Unknown')) as $class) {
+                        foreach (array_diff(self::standard_fee_classes($selected_season), array('Unknown')) as $class) {
                             foreach ($grid['roles'] as $role) {
                                 if (empty($grid['cells'][$class][$role])) {
                                     $blank_cells[] = $class . ' · ' . strtolower(self::role_label($role));
@@ -2180,6 +3043,9 @@ class TeamOversight_Fees {
                         <p class="description">Each person pays the <strong>highest</strong> amount across their teams (fees never add up). Coaches and assistant coaches are charged the <strong>supporter</strong> amount for their fee class, and team managers the <strong>playing member</strong> amount. A blank cell has no fee set.</p>
                         <?php if ($timeline_season): ?>
                             <p class="description">From <?php echo intval(self::FEE_TIMELINE_FROM); ?> every cell has two amounts. <strong>Fee</strong> is the real amount: leave it blank until it is known (it can be cleared again until fees are released and invoices exist). <strong>Limit</strong> is the upper limit, the most a fee in this cell can be: offers sent before fees are released are quoted on it, and a player quoted on a limit is never invoiced above what they were quoted. Clear a limit to take it away (offers for that cell can't be sent without one). Enter 0 for a free cell.</p>
+                        <?php endif; ?>
+                        <?php if (self::junior_league_split_applies($selected_season)): ?>
+                            <p class="description">JPL is the row for a junior on a team with the U19 age rule (Junior Premier League), YSL for a team with the U17 or U15 rule (Youth State League); a team with no age rule goes by its code. Before <?php echo intval(self::JUNIOR_LEAGUE_SPLIT_FROM); ?> both were one JPL/YSL row.</p>
                         <?php endif; ?>
                         <div style="overflow-x: auto;">
                             <table class="wp-list-table widefat striped fee-grid">
@@ -2432,7 +3298,14 @@ class TeamOversight_Fees {
                     // Newly filled cells become real matrix rows (and a cleared
                     // fee stops being one): reload so the next save updates
                     // them rather than adding again. The page repeats any
-                    // fee-above-limit warning itself.
+                    // fee-above-limit warning itself. A page drawn before the
+                    // JPL and YSL split (1.87.0) says so first, then reloads.
+                    if (data.data && data.data.stale > 0) {
+                        statusDiv.textContent = '✓ Saved. ' + (data.data.warnings || []).join(' ');
+                        statusDiv.style.color = '#996800';
+                        setTimeout(() => window.location.reload(), 4000);
+                        return;
+                    }
                     if (data.data && (data.data.inserted > 0 || data.data.reload)) {
                         window.location.reload();
                         return;
@@ -3009,16 +3882,23 @@ class TeamOversight_Fees {
         return $filtered_seasons;
     }
 
-    /** Fee classes, most common first — the grid's rows. */
-    public static function standard_fee_classes() {
-        return array('Full Adult', 'Melb Uni Student', 'Other Student', 'Junior U/19 (VVL)', 'JPL/YSL', 'Unknown');
+    /**
+     * Fee classes, most common first — the grid's rows. The junior-league
+     * rows are the season's (junior_league_classes(), 1.87.0): JPL and YSL
+     * from 2027, JPL/YSL before (and for a season the one-off kept), so a
+     * season before 2027 gets exactly the 1.86.1 list. null = a season from
+     * 2027 on this site.
+     */
+    public static function standard_fee_classes($season = null) {
+        return array_merge(array('Full Adult', 'Melb Uni Student', 'Other Student', 'Junior U/19 (VVL)'), self::junior_league_classes($season), array('Unknown'));
     }
 
     /**
      * The classes determine_person_fee_class() can give a person (their
-     * class ignoring teams): Junior U/19 (VVL) becomes JPL/YSL per place on
-     * a junior-league team (fee_class_for_team()), and nobody is ever put
-     * in Unknown. Keep in step with determine_fee_class().
+     * class ignoring teams): Junior U/19 (VVL) becomes JPL or YSL (JPL/YSL
+     * before 2027) per place on a junior-league team (fee_class_for_team()),
+     * and nobody is ever put in Unknown. Keep in step with
+     * determine_fee_class().
      */
     public static function person_fee_classes() {
         return array('Full Adult', 'Melb Uni Student', 'Other Student', 'Junior U/19 (VVL)');
@@ -3056,7 +3936,8 @@ class TeamOversight_Fees {
         }
         // Every standard class always has a row (blank cells can be filled
         // in), then any other class found in the matrix.
-        $classes = self::order_like(array_values(array_unique(array_merge($classes, self::standard_fee_classes()))), self::standard_fee_classes());
+        $standard = self::standard_fee_classes($season);
+        $classes = self::order_like(array_values(array_unique(array_merge($classes, $standard))), $standard);
         // Always exactly the paying columns; old coach/manager amounts in the
         // table are no longer used and aren't shown.
         $roles = self::standard_fee_roles();
@@ -3079,11 +3960,20 @@ class TeamOversight_Fees {
      *  - limits_from_fees (default false; timeline seasons only): where the
      *    source has a fee but no limit, start the limit from that fee (once).
      * $this->last_copy describes the last call: fees, limits,
-     * limits_from_fees, limits_kept.
+     * limits_from_fees, limits_kept, skipped.
+     *
+     * JPL and YSL (1.87.0, D11): into a season that charges them
+     * separately (junior_league_split_applies()) a JPL/YSL source row (fee,
+     * limit, or a limit started from a fee) is written as a JPL row and a
+     * YSL row with the same amount; an explicit JPL or YSL row of the
+     * source wins for its cell. From a split season into a season that uses
+     * the one JPL/YSL row (before 2027, or kept), the source's JPL and YSL
+     * rows are not copied (nothing would read them) and are listed in
+     * last_copy['skipped']; every other copy is exactly as before.
      */
     public function copy_fee_matrix($from, $to, $opts = array()) {
         global $wpdb;
-        $this->last_copy = array('fees' => 0, 'limits' => 0, 'limits_from_fees' => 0, 'limits_kept' => array());
+        $this->last_copy = array('fees' => 0, 'limits' => 0, 'limits_from_fees' => 0, 'limits_kept' => array(), 'skipped' => array());
         $valid = function ($s) {
             return is_string($s) && preg_match('/^\d{4}$/D', $s) === 1;
         };
@@ -3092,16 +3982,42 @@ class TeamOversight_Fees {
         }
         $timeline = self::timeline_applies($to);
         $opts = array_merge(array('copy_fees' => !$timeline, 'copy_limits' => true, 'limits_from_fees' => false), (array) $opts);
+        $split_to = self::junior_league_split_applies($to);
+        $split_from = self::junior_league_split_applies($from);
+        $skipped = array();
+        // A split source's JPL or YSL row, which a target on the one JPL/YSL row can't read.
+        $unreadable = function ($class) use ($split_to, $split_from) {
+            return $split_from && !$split_to && ((string) $class === self::CLASS_JPL || (string) $class === self::CLASS_YSL);
+        };
+        $source_fees = $this->get_fee_matrix_for_season($from);
+        $explicit_fees = array();
+        foreach ($source_fees as $fee) {
+            $explicit_fees[$fee->fee_class . '|' . $fee->team_role] = true;
+            if (!empty($opts['copy_fees']) && $unreadable($fee->fee_class)) {
+                $skipped[] = self::cell_label($fee->fee_class, $fee->team_role);
+            }
+        }
 
         $n = 0;
         if (!empty($opts['copy_fees']) && empty($this->get_fee_matrix_for_season($to))) {
             $version = 'copied-' . $from . '-' . $to . '-' . time();
-            foreach ($this->get_fee_matrix_for_season($from) as $fee) {
-                $wpdb->insert($wpdb->prefix . 'fee_matrix', array(
-                    'version' => $version, 'season' => $to, 'fee_class' => $fee->fee_class,
-                    'team_role' => $fee->team_role, 'fee_amount' => $fee->fee_amount, 'is_active' => 1,
-                ), array('%s', '%s', '%s', '%s', '%f', '%d'));
-                $n++;
+            $written = array();
+            foreach ($source_fees as $fee) {
+                if ($unreadable($fee->fee_class)) {
+                    continue;
+                }
+                foreach (self::matrix_classes_for($fee->fee_class, $to) as $class) {
+                    $cell = $class . '|' . $fee->team_role;
+                    if ($class !== (string) $fee->fee_class && (isset($explicit_fees[$cell]) || isset($written[$cell]))) {
+                        continue; // an explicit JPL or YSL row of the source wins its cell
+                    }
+                    $wpdb->insert($wpdb->prefix . 'fee_matrix', array(
+                        'version' => $version, 'season' => $to, 'fee_class' => $class,
+                        'team_role' => $fee->team_role, 'fee_amount' => $fee->fee_amount, 'is_active' => 1,
+                    ), array('%s', '%s', '%s', '%s', '%f', '%d'));
+                    $written[$cell] = true;
+                    $n++;
+                }
             }
             $this->last_copy['fees'] = $n;
             if ($n) {
@@ -3112,31 +4028,50 @@ class TeamOversight_Fees {
         if ($timeline) {
             self::flush_limits_cache();
             $have = self::get_limits_for_season($to);
+            $source_limits = self::get_limits_for_season($from);
             $limits = 0;
             $kept = array();
             if (!empty($opts['copy_limits'])) {
-                foreach (self::get_limits_for_season($from) as $class => $by_role) {
+                foreach ($source_limits as $source_class => $by_role) {
                     foreach ($by_role as $role => $amount) {
-                        if (isset($have[$class][$role])) {
-                            $kept[] = $class . ' / ' . strtolower(self::role_label($role));
+                        if ($unreadable($source_class)) {
+                            $skipped[] = self::cell_label($source_class, $role);
                             continue;
                         }
-                        if (self::set_limit($to, $class, $role, $amount, array('log' => false))['changed']) {
-                            $limits++;
-                            $have[$class][$role] = $amount;
+                        foreach (self::matrix_classes_for($source_class, $to) as $class) {
+                            if ($class !== (string) $source_class && isset($source_limits[$class][$role])) {
+                                continue; // an explicit JPL or YSL limit of the source wins its cell
+                            }
+                            if (isset($have[$class][$role])) {
+                                $kept[] = $class . ' / ' . strtolower(self::role_label($role));
+                                continue;
+                            }
+                            if (self::set_limit($to, $class, $role, $amount, array('log' => false))['changed']) {
+                                $limits++;
+                                $have[$class][$role] = $amount;
+                            }
                         }
                     }
                 }
             }
             $from_fees = 0;
             if (!empty($opts['limits_from_fees'])) {
-                foreach ($this->get_fee_matrix_for_season($from) as $fee) {
-                    if (isset($have[$fee->fee_class][$fee->team_role])) {
+                foreach ($source_fees as $fee) {
+                    if ($unreadable($fee->fee_class)) {
+                        $skipped[] = self::cell_label($fee->fee_class, $fee->team_role);
                         continue;
                     }
-                    if (self::set_limit($to, $fee->fee_class, $fee->team_role, floatval($fee->fee_amount), array('log' => false))['changed']) {
-                        $from_fees++;
-                        $have[$fee->fee_class][$fee->team_role] = floatval($fee->fee_amount);
+                    foreach (self::matrix_classes_for($fee->fee_class, $to) as $class) {
+                        if ($class !== (string) $fee->fee_class && isset($explicit_fees[$class . '|' . $fee->team_role])) {
+                            continue; // an explicit JPL or YSL fee of the source starts its own cell
+                        }
+                        if (isset($have[$class][$fee->team_role])) {
+                            continue;
+                        }
+                        if (self::set_limit($to, $class, $fee->team_role, floatval($fee->fee_amount), array('log' => false))['changed']) {
+                            $from_fees++;
+                            $have[$class][$fee->team_role] = floatval($fee->fee_amount);
+                        }
                     }
                 }
             }
@@ -3148,11 +4083,12 @@ class TeamOversight_Fees {
             }
             $n += $limits + $from_fees;
         }
+        $this->last_copy['skipped'] = array_values(array_unique($skipped));
         return $n;
     }
 
-    /** What the last copy_fee_matrix() call did: fees, limits, limits_from_fees, limits_kept (list of cells). */
-    public $last_copy = array('fees' => 0, 'limits' => 0, 'limits_from_fees' => 0, 'limits_kept' => array());
+    /** What the last copy_fee_matrix() call did: fees, limits, limits_from_fees, limits_kept (list of cells), skipped (1.87.0: JPL and YSL cells the target can't read). */
+    public $last_copy = array('fees' => 0, 'limits' => 0, 'limits_from_fees' => 0, 'limits_kept' => array(), 'skipped' => array());
 
     // ------------------------------------------------------------------
     // Upper limits (1.76.0). Every cell of the fee matrix holds two
@@ -3246,14 +4182,16 @@ class TeamOversight_Fees {
     }
 
     /**
-     * The cells an offer can land in: every person fee class plus JPL/YSL,
-     * in the playing member and training only columns (the supporter column
-     * and the Unknown row take a limit if typed but never matter to offers).
-     * Returns a list of array(fee_class, role).
+     * The cells an offer can land in: every person fee class plus the
+     * season's junior-league rows (JPL and YSL from 2027, 1.87.0; JPL/YSL
+     * for a season the one-off kept), in the playing member and training
+     * only columns (the supporter column and the Unknown row take a limit if
+     * typed but never matter to offers). Returns a list of array(fee_class,
+     * role). null = a season from 2027 on this site.
      */
-    public static function offerable_cells() {
+    public static function offerable_cells($season = null) {
         $cells = array();
-        foreach (array_merge(self::person_fee_classes(), array('JPL/YSL')) as $class) {
+        foreach (array_merge(self::person_fee_classes(), self::junior_league_classes($season)) as $class) {
             foreach (array('playing_member', 'training_only') as $role) {
                 $cells[] = array($class, $role);
             }
@@ -3274,7 +4212,7 @@ class TeamOversight_Fees {
         }
         $limits = self::get_limits_for_season($season);
         $report = array('no_limit' => array(), 'no_fee' => array(), 'above' => array());
-        foreach (self::offerable_cells() as $cell) {
+        foreach (self::offerable_cells($season) as $cell) {
             list($class, $role) = $cell;
             $label = $class . ' / ' . strtolower(self::role_label($role));
             if (!isset($limits[$class][$role])) {
@@ -3405,9 +4343,24 @@ class TeamOversight_Fees {
         if ($is_junior) {
             // Check if they're in junior leagues - use correct season
             $assigned_teams = $this->get_user_teams($email, $season);
+            if ($season_given && self::junior_league_split_applies($season)) {
+                // 1.87.0: from 2027 the team's type decides (junior_league_type()): JPL when any team is a JPL team, else YSL.
+                $types = array();
+                foreach ($assigned_teams as $team) {
+                    $types[self::junior_league_type($team, $season)] = true;
+                }
+                if (isset($types[self::CLASS_JPL])) {
+                    return self::CLASS_JPL;
+                }
+                if (isset($types[self::CLASS_YSL])) {
+                    return self::CLASS_YSL;
+                }
+                return 'Junior U/19 (VVL)';
+            }
+            // 2026 and earlier (and a season the 1.87.0 step kept): by code, exactly as before.
             foreach ($assigned_teams as $team) {
                 if (strpos($team, 'JPL') === 0 || strpos($team, 'YSL') === 0) {
-                    return 'JPL/YSL';
+                    return self::CLASS_JPL_YSL;
                 }
             }
             return 'Junior U/19 (VVL)';

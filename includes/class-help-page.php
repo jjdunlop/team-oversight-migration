@@ -264,8 +264,9 @@ class TeamOversight_Help_Page {
         }
         if (!empty($breakdown['stretches']) && !$priced) {
             // Name the cells the engine actually looked up: the class per
-            // team (JPL/YSL for a junior on a junior-league team) and the
-            // column each role is charged at (coaches at supporter).
+            // team (JPL or YSL, JPL/YSL before 2027, for a junior on a
+            // junior-league team) and the column each role is charged at
+            // (coaches at supporter).
             $cells = array();
             foreach ($breakdown['stretches'] as $s) {
                 foreach ((array) (isset($s['buckets']) ? $s['buckets'] : array()) as $b) {
@@ -1048,7 +1049,10 @@ class TeamOversight_Help_Page {
         foreach (TeamOversight_Fees::CHARGED_AS as $role => $as) {
             $charged[] = TeamOversight_Fees::role_label($role) . ' is charged the ' . self::role_text($as) . ' amount';
         }
-        echo '<p class="description">' . esc_html(implode('; ', $charged) . '. The matrix has only these three columns, so there is no separate coaching rate (and no coaching discount). JPL/YSL is the row for a junior on a junior-league team; nobody is put in Unknown. A blank cell has no amount: someone who falls into it is charged the highest of their other places that has one; with none at all they get no new invoice, and an invoice they already have keeps its amount.') . '</p>';
+        $league_rows = TeamOversight_Fees::junior_league_split_applies($season)
+            ? 'JPL and YSL are the rows for a junior on a Junior Premier League team (age rule U19) and on a Youth State League team (age rule U17 or U15; a team with no age rule goes by its code)'
+            : 'JPL/YSL is the row for a junior on a junior-league team';
+        echo '<p class="description">' . esc_html(implode('; ', $charged) . '. The matrix has only these three columns, so there is no separate coaching rate (and no coaching discount). ' . $league_rows . '; nobody is put in Unknown. A blank cell has no amount: someone who falls into it is charged the highest of their other places that has one; with none at all they get no new invoice, and an invoice they already have keeps its amount.') . '</p>';
         self::close_section();
     }
 
@@ -1062,8 +1066,11 @@ class TeamOversight_Help_Page {
 
         echo '<h3>Fee classes</h3>';
         echo '<p>Every person is in one fee class for the season, which picks their row of the fee matrix. It is worked out from their profile, in this order:</p>';
+        $league_words = TeamOversight_Fees::junior_league_split_applies($class_season)
+            ? 'On a junior-league team the same junior is charged that team\'s row for that place: JPL on a Junior Premier League team (age rule U19), YSL on a Youth State League team (age rule U17 or U15); a team with no age rule goes by its code (JPL..., YSL...).'
+            : 'On a junior-league team (JPL or YSL, by its code or an age rule on the team) the same junior is charged the JPL/YSL row for that place.';
         self::ul(array(
-            sprintf('Junior U/19 (VVL): born on or after Volleyball Victoria\'s U19 cutoff for the season, 1 January of the season year minus 18 (for %s: born on or after %s), so nobody turns 19 during the season. On a junior-league team (JPL or YSL, by its code or an age rule on the team) the same junior is charged the JPL/YSL row for that place.', $class_season, self::d($cutoff)),
+            sprintf('Junior U/19 (VVL): born on or after Volleyball Victoria\'s U19 cutoff for the season, 1 January of the season year minus 18 (for %s: born on or after %s), so nobody turns 19 during the season. %s', $class_season, self::d($cutoff), $league_words),
             'Full Adult: alumni (their degree end date is before the moment their fee was first recorded for the season), staff (degree type Staff), anyone not at a university, and anyone with no account.',
             'Melb Uni Student: not alumni or staff, and their MU Sport category is a University of Melbourne undergraduate or postgraduate student; or, when the MU Sport category doesn\'t decide it (below), the old registration forms recorded Melbourne University.',
             'Other Student: not alumni or staff, and their MU Sport category is a student of another university (or the retired "student or alumni of another university" with a course end date); or, when the MU Sport category doesn\'t decide it (below), the old registration forms recorded Other University.',
@@ -1094,7 +1101,7 @@ class TeamOversight_Help_Page {
         echo '<p>Changing a season\'s start or end date re-prices every automatic invoice for the season straight away (once released). Changing only the payment window re-prices nothing, but moves what everyone has due.</p>';
 
         echo '<h3>Seasons before ' . intval(TeamOversight_Fees::FEE_TIMELINE_FROM) . '</h3>';
-        echo '<p>Those seasons keep their original rules, so their numbers never change: each team change records a dated stretch (a fee segment) and the fee is the same rate × share of the season, priced by the same code; the fee class is judged on the day the fee is worked out (age and degree end then, and the student classes from the institution recorded by the old registration forms, not the MU Sport category); team places are edited on Team Assignments; and the fee falls due evenly across the season dates. Once a season\'s year is over, anything still owing is fully overdue.</p>';
+        echo '<p>Those seasons keep their original rules, so their numbers never change: each team change records a dated stretch (a fee segment) and the fee is the same rate × share of the season, priced by the same code; the fee class is judged on the day the fee is worked out (age and degree end then, and the student classes from the institution recorded by the old registration forms, not the MU Sport category); a junior on a JPL or YSL team pays the one JPL/YSL row; team places are edited on Team Assignments; and the fee falls due evenly across the season dates. Once a season\'s year is over, anything still owing is fully overdue.</p>';
         self::close_section();
     }
 

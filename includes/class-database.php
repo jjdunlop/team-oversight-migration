@@ -618,6 +618,14 @@ class TeamOversight_Database {
             require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
             dbDelta(self::program_line_ticks_table_sql());
         }
+
+        // 1.87.0: from 2027 JPL and YSL are separate fee classes (club decision, 4 Nov 2026). The one-off data step
+        // (TeamOversight_Fees::split_jpl_ysl()) runs once per site behind its own autoloaded flag (one option read
+        // once done); a season keeps the one JPL/YSL class until the step has split it. Last, so every table it
+        // reads exists.
+        if (class_exists('TeamOversight_Fees') && method_exists('TeamOversight_Fees', 'split_jpl_ysl')) {
+            TeamOversight_Fees::split_jpl_ysl();
+        }
     }
 
     /**
@@ -1535,12 +1543,15 @@ class TeamOversight_Database {
         );
     }
     
+    /** Every fee class name (unused; kept in step). JPL/YSL for seasons before 2027, JPL and YSL from 2027: TeamOversight_Fees::junior_league_classes(). */
     public function get_fee_classes() {
         return array(
             'Junior U/19 (VVL)' => 'Junior U/19 (VVL)',
             'Melb Uni Student' => 'Melb Uni Student',
             'Other Student' => 'Other Student',
             'JPL/YSL' => 'JPL/YSL',
+            'JPL' => 'JPL',
+            'YSL' => 'YSL',
             'Full Adult' => 'Full Adult'
         );
     }

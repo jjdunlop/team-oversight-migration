@@ -1716,7 +1716,10 @@ class TeamOversight_Admin {
                         <tbody>
                             <?php foreach ($team_members as $member): 
                                 $fees = new TeamOversight_Fees();
-                                $mus_category = $fees->determine_fee_class($member->email, $season);
+                                // 1.87.0 (D14): from 2027 the row this team charges (JPL or YSL for a junior on a junior-league team).
+                                $mus_category = TeamOversight_Fees::junior_league_split_applies($season)
+                                    ? $fees->fee_class_for_team($fees->determine_person_fee_class($member->email, $season), $team_code, $season)
+                                    : $fees->determine_fee_class($member->email, $season);
                                 
                                 $payment_status = 'N/A';
                                 $outstanding = 0;
@@ -2883,8 +2886,9 @@ class TeamOversight_Admin {
                                     $status = 'Alumni';
                                 }
                                 
-                                // The person's own class; juniors pay JPL/YSL
-                                // rates on junior-league teams (see breakdown).
+                                // The person's own class; juniors pay the JPL or
+                                // YSL row (JPL/YSL before 2027) on junior-league
+                                // teams (see breakdown).
                                 $calculated_fee_class = $breakdown_fees->determine_person_fee_class($invoice->email, $invoice->season);
 
                                 $fee_info = "{$age_text} | {$institution_short} | {$degree_short} | {$status} → {$calculated_fee_class}";

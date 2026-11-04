@@ -475,8 +475,9 @@ class TeamOversight_Offers {
 
     /**
      * The fee class and matrix column a player is priced on for one place:
-     * their person class, then JPL/YSL for a junior on a junior-league
-     * team (exactly what the engine does). Returns array(fee_class, column)
+     * their person class, then JPL or YSL (JPL/YSL before 2027) for a junior
+     * on a junior-league team, exactly what the engine does
+     * (TeamOversight_Fees::fee_class_for_team()). Returns array(fee_class, column)
      * or null when the account can't be read. $fees: an optional
      * TeamOversight_Fees (pass one with enable_rate_cache() for a list).
      */
@@ -490,9 +491,9 @@ class TeamOversight_Offers {
         return array($fees->fee_class_for_team($person, $team, $season), TeamOversight_Fees::charged_as($role));
     }
 
-    /** The person fee class behind a matrix cell's class (the JPL/YSL cell belongs to a Junior U/19 (VVL) person on a junior-league team). */
+    /** The person fee class behind a matrix cell's class: any junior-league cell (JPL, YSL, JPL/YSL) belongs to a Junior U/19 (VVL) person on a junior-league team (1.87.0). */
     private static function person_class_for_cell($cell_class) {
-        return (string) $cell_class === 'JPL/YSL' ? 'Junior U/19 (VVL)' : (string) $cell_class;
+        return TeamOversight_Fees::person_class_of($cell_class);
     }
 
     /**
