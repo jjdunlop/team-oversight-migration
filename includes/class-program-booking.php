@@ -43,6 +43,8 @@ class TeamOversight_Program_Booking {
     const GRANT_TAIL_DAYS = 28;
     /** Design 7.1.1: "N left" at 10 or fewer. */
     const SHOW_LEFT_AT = 10;
+    /** Club 2: a listed session that has started (still open until its cut-off, never ticked by a shortcut). */
+    const STARTED_WORDS = 'Today, already started';
     /** Design 4.6: a typed player name. */
     const PLAYER_MIN = 2;
     const PLAYER_MAX = 60;
@@ -79,6 +81,13 @@ class TeamOversight_Program_Booking {
     const ORDER_TIERS_META = '_murvc_program_tiers';
     /** Product meta set by Prepare (design 3.1). */
     const GRANT_META = '_murvc_membership_grant';
+    /**
+     * Design 4.9.3: how to make a withdrawal refund. WooCommerce fills in
+     * what the withdrawn lines paid, which is more than a withdrawal owes
+     * (the kept lines move to a dearer tier). Shared by the refund box, the
+     * To refund tab and the README.
+     */
+    const REFUND_HOW = 'Refund on the order screen: put the withdrawn sessions\' quantities, then change the refund amounts so they add up to the last column. WooCommerce fills in the full price those lines paid, which is more. When the last column is $0.00, nothing is owed back.';
 
     /**
      * Design 4.5, D17: true only around Club Manager's own add_to_cart()
@@ -592,7 +601,9 @@ class TeamOversight_Program_Booking {
      * can see: a session date, not in the Bin, today or later and before
      * its booking cut-off ("a session stays listed until its cut-off").
      * Each children() row gains end, group ("17:00-19:00"), group_label
-     * ("5:00pm to 7:00pm") and full_cents. Sorted by date then start.
+     * ("5:00pm to 7:00pm"), started (its start has passed: today's session
+     * kept open by an end or end-of-day cut-off) and full_cents. Sorted by
+     * date then start.
      */
     public static function listed_sessions($key) {
         $key = (string) $key;
@@ -601,13 +612,14 @@ class TeamOversight_Program_Booking {
             return array();
         }
         $today = current_time('Y-m-d');
+        $now = time();
         $rows = array();
         foreach (TeamOversight_Program_Sessions::children($pid) as $row) {
             if ($row['date'] === '' || $row['status'] === 'trash' || $row['date'] < $today
                 || !preg_match('/^([01]\d|2[0-3]):[0-5]\d$/D', $row['slot'])) {
                 continue;
             }
-            if (!TeamOversight_Program_Sessions::before_cutoff($key, $row)) {
+            if (!TeamOversight_Program_Sessions::before_cutoff($key, $row, $now)) {
                 continue;
             }
             $end = TeamOversight_Program_Sessions::session_end($row);
@@ -617,6 +629,8 @@ class TeamOversight_Program_Booking {
             $row['end'] = $end;
             $row['group'] = $row['slot'] . '-' . $end;
             $row['group_label'] = self::group_label($row['slot'], $end);
+            $start = TeamOversight_Program_Sessions::start_ts($row['date'], $row['slot']);
+            $row['started'] = $start > 0 && $start <= $now;
             $rows[] = $row;
         }
         $ids = wp_list_pluck($rows, 'id');
@@ -738,13 +752,16 @@ class TeamOversight_Program_Booking {
      * total at that start, the added sessions priced at the highest full
      * price among the lines. $available (finding 8): the sessions that
      * could still be added; '' when fewer than needed. '' when n < 1 or no
-     * tier starts above n.
+     * tier starts above n. $weights (same keys as $line_cents; 1 when
+     * missing) are each line's places and $add_places the places of each
+     * added session: money counts places, the tier never does (4.7.1).
      */
-    public static function nudge(array $tiers, array $line_cents, array $unit, $count = null, $available = null) {
+    public static function nudge(array $tiers, array $line_cents, array $unit, $count = null, $available = null, array $weights = array(), $add_places = 1) {
         $n = $count === null ? count($line_cents) : intval($count);
         if ($n < 1 || empty($line_cents)) {
             return '';
         }
+        $add_places = max(1, intval($add_places));
         $next = null;
         foreach ($tiers as $tier) {
             if (!is_array($tier) || !isset($tier['from'])) {
@@ -770,12 +787,13 @@ class TeamOversight_Program_Booking {
         $pct_then = TeamOversight_Program_Setup::tier_pct($tiers, $next);
         $now = 0;
         $then = 0;
-        foreach ($line_cents as $cents) {
-            $now += TeamOversight_Program_Setup::discounted_cents(intval($cents), $pct_now);
-            $then += TeamOversight_Program_Setup::discounted_cents(intval($cents), $pct_then);
+        foreach ($line_cents as $i => $cents) {
+            $places = isset($weights[$i]) ? max(1, intval($weights[$i])) : 1;
+            $now += TeamOversight_Program_Setup::discounted_cents(intval($cents), $pct_now) * $places;
+            $then += TeamOversight_Program_Setup::discounted_cents(intval($cents), $pct_then) * $places;
         }
         $each_then = TeamOversight_Program_Setup::discounted_cents($add, $pct_then);
-        $then += $k * $each_then;
+        $then += $k * $each_then * $add_places;
         $words = isset($unit[0], $unit[1]) ? ($k === 1 ? (string) $unit[0] : (string) $unit[1]) : ($k === 1 ? 'session' : 'sessions');
         if ($then < $now) {
             return 'Add ' . $k . ' more ' . $words . ' and pay ' . self::money_text($now - $then) . ' less in total.';
@@ -783,7 +801,7 @@ class TeamOversight_Program_Booking {
         if ($then === $now) {
             return 'Add ' . $k . ' more ' . $words . ' and pay the same in total.';
         }
-        return 'Book ' . $k . ' more and pay ' . self::money_text($each_then) . ' each.';
+        return 'Book ' . $k . ' more and pay ' . self::money_text($each_then) . ($add_places > 1 ? ' a place.' : ' each.');
     }
 
     /** "$1,057.80" (member-facing text). */
@@ -1000,6 +1018,9 @@ class TeamOversight_Program_Booking {
             } else {
                 $free = self::free_places($row['id']);
                 $state = $free <= 0 ? 'Full' : ($free <= self::SHOW_LEFT_AT ? $free . ' left' : '');
+                if (!empty($row['started'])) {
+                    $state = self::STARTED_WORDS . ($state !== '' ? ' (' . $state . ')' : '');
+                }
             }
             $out .= '<li class="murvc-book-row"><span class="murvc-book-date">' . esc_html(TeamOversight_Program_Sessions::date_label($row['date'])) . '</span>'
                 . ($state !== '' ? ' <span class="murvc-book-state">' . esc_html($state) . '</span>' : '') . '</li>';
@@ -1111,18 +1132,26 @@ class TeamOversight_Program_Booking {
         return array(array_slice($dates, 0, self::MAX_PER_ADD), $more);
     }
 
-    /** "Sam: 24 Sundays at $23.10 = $554.40 (23% off, you save $165.60)" for the ticked dates ('' with none). */
-    public static function total_text($who, array $ticked_cents, array $cart_cents, array $tiers, array $unit) {
+    /**
+     * "Sam: 24 Sundays at $23.10 = $554.40 (23% off, you save $165.60)" for
+     * the ticked dates ('' with none); with $places above 1 "10 Tuesdays,
+     * 2 places each, at $14.85 a place = $297.00 (...)": the money counts
+     * every place, the tier only the sessions (4.7.1), as the cart does.
+     */
+    public static function total_text($who, array $ticked_cents, array $cart_cents, array $tiers, array $unit, $places = 1) {
         $n = count($ticked_cents);
         if ($n < 1) {
             return '';
         }
+        $places = max(1, intval($places));
         $t = self::totals(array_values($ticked_cents), $tiers, $n + count($cart_cents));
         $same = count(array_unique($t['each'])) === 1;
         $text = ($who !== '' ? $who . ': ' : '') . $n . ' ' . ($n === 1 ? $unit[0] : $unit[1])
-            . ($same ? ' at ' . self::money_text(reset($t['each'])) : '') . ' = ' . self::money_text($t['total']);
+            . ($places > 1 ? ', ' . $places . ' places each' . ($same ? ',' : '') : '')
+            . ($same ? ' at ' . self::money_text(reset($t['each'])) . ($places > 1 ? ' a place' : '') : '')
+            . ' = ' . self::money_text($t['total'] * $places);
         if ($t['pct'] > 0) {
-            $text .= ' (' . $t['pct'] . '% off' . (count($cart_cents) > 0 ? ' with the ' . count($cart_cents) . ' already in your cart' : '') . ', you save ' . self::money_text($t['saving']) . ')';
+            $text .= ' (' . $t['pct'] . '% off' . (count($cart_cents) > 0 ? ' with the ' . count($cart_cents) . ' already in your cart' : '') . ', you save ' . self::money_text($t['saving'] * $places) . ')';
         }
         return $text;
     }
@@ -1178,10 +1207,12 @@ class TeamOversight_Program_Booking {
         $cart_lines = self::cart_lines($key);
         $in_cart = array();
         $cart_cents = array();
+        $cart_qty = array();
         $cart_players = array();
         foreach ($cart_lines as $line) {
             $in_cart[$player_program ? $line['variation_id'] . '|' . $line['player_key'] : (string) $line['variation_id']] = true;
             $cart_cents[] = $line['full_cents'];
+            $cart_qty[] = $line['qty'];
             if ($line['player'] !== '') {
                 $cart_players[$line['player_key']] = $line['player'];
             }
@@ -1277,7 +1308,8 @@ class TeamOversight_Program_Booking {
             return $out . '<p>' . esc_html('No ' . $unit[1] . ' to book right now.') . '</p>' . self::script();
         }
 
-        // The chosen group's rows and what a shortcut may tick.
+        // The chosen group's rows and what a shortcut may tick: never a session that has
+        // started (club 2: it stays open to tick by hand, to pay for today, until its cut-off).
         $group_rows = array();
         $tickable = array();
         foreach ($rows as $row) {
@@ -1285,7 +1317,7 @@ class TeamOversight_Program_Booking {
                 continue;
             }
             $group_rows[] = $row;
-            if ($can_tick && $info[$row['id']]['state'] === 'open') {
+            if ($can_tick && $info[$row['id']]['state'] === 'open' && empty($row['started'])) {
                 $tickable[] = $row;
             }
         }
@@ -1354,6 +1386,9 @@ class TeamOversight_Program_Booking {
                 $note = $state === 'have'
                     ? 'You have ' . $info[$row['id']]['have'] . ' place' . ($info[$row['id']]['have'] === 1 ? '' : 's')
                     : ($free <= self::SHOW_LEFT_AT ? $free . ' left' : '');
+                if (!empty($row['started'])) {
+                    $note = self::STARTED_WORDS . ': tick it only to pay for today' . ($note !== '' ? ' (' . $note . ')' : '');
+                }
                 $list .= '<li class="murvc-book-row is-' . $state . '"><label><input type="checkbox" name="dates[]" value="' . esc_attr($row['date']) . '" data-cents="' . intval($row['full_cents']) . '"' . ($is_ticked ? ' checked' : '') . '> '
                     . '<span class="murvc-book-date">' . esc_html($label) . '</span></label>'
                     . ($note !== '' ? ' <span class="murvc-book-state">' . esc_html($note) . '</span>' : '') . '</li>';
@@ -1372,15 +1407,23 @@ class TeamOversight_Program_Booking {
         foreach ($setup['tiers'] as $tier) {
             $tier_attr[] = intval($tier['from']) . ':' . intval($tier['pct']);
         }
-        $total = self::total_text($who_name, $ticked_cents, $cart_cents, $setup['tiers'], $unit);
-        $nudge = self::nudge($setup['tiers'], array_merge($cart_cents, $ticked_cents), $unit, null, max(0, $available - count($ticked_cents)));
+        // Money counts places (the ticked dates' and each cart line's own), the tier only sessions.
+        $places = max(1, intval($view['places']));
+        $total = self::total_text($who_name, $ticked_cents, $cart_cents, $setup['tiers'], $unit, $places);
+        $weights = array_merge($cart_qty, empty($ticked_cents) ? array() : array_fill(0, count($ticked_cents), $places));
+        $nudge = self::nudge($setup['tiers'], array_merge($cart_cents, $ticked_cents), $unit, null, max(0, $available - count($ticked_cents)), $weights, $places);
         $n = count($ticked_cents);
         $button = $n > 0 ? 'Add ' . $n . ' ' . ($n === 1 ? $unit[0] : $unit[1]) . ' to cart' : 'Add the ticked ' . $unit[1] . ' to cart';
+        $cart_attr = array();
+        foreach ($cart_cents as $i => $cents) {
+            $cart_attr[] = intval($cents) . ':' . max(1, intval($cart_qty[$i]));
+        }
 
         $action = add_query_arg(self::view_query($view), $url);
         $out .= '<form method="post" action="' . esc_url($action) . '" id="murvc-book-add" class="murvc-book-add"'
             . ' data-tiers="' . esc_attr(implode(',', $tier_attr)) . '"'
-            . ' data-in-cart="' . esc_attr(implode(',', array_map('intval', $cart_cents))) . '"'
+            . ' data-in-cart="' . esc_attr(implode(',', $cart_attr)) . '"'
+            . ' data-places="' . $places . '"'
             . ' data-unit="' . esc_attr($unit[0] . '|' . $unit[1]) . '"'
             . ' data-who="' . esc_attr($who_name) . '"'
             . ' data-open="' . intval($available) . '">'
@@ -1459,7 +1502,8 @@ class TeamOversight_Program_Booking {
             if (!form) { return; }
             function ints(text, sep) { return (text || "").split(sep).filter(function (s) { return s !== ""; }); }
             var tiers = ints(form.getAttribute("data-tiers"), ",").map(function (t) { var p = t.split(":"); return [parseInt(p[0], 10), parseInt(p[1], 10)]; });
-            var inCart = ints(form.getAttribute("data-in-cart"), ",").map(function (c) { return parseInt(c, 10) || 0; });
+            var inCart = ints(form.getAttribute("data-in-cart"), ",").map(function (c) { var p = c.split(":"); return [parseInt(p[0], 10) || 0, Math.max(1, parseInt(p[1] || "1", 10) || 1)]; });
+            var places = Math.max(1, parseInt(form.getAttribute("data-places") || "1", 10) || 1);
             var unit = (form.getAttribute("data-unit") || "session|sessions").split("|");
             var open = parseInt(form.getAttribute("data-open") || "0", 10) || 0;
             var whoFixed = form.getAttribute("data-who") || "";
@@ -1475,20 +1519,20 @@ class TeamOversight_Program_Booking {
                 return "$" + d + out + "." + ("0" + (c % 100)).slice(-2);
             }
             function word(n) { return n === 1 ? unit[0] : unit[1]; }
-            function nudge(cents, available) {
-                var n = cents.length, next = null, i;
+            function nudge(lines, available) {
+                var n = lines.length, next = null, i;
                 if (n < 1) { return ""; }
                 tiers.forEach(function (t) { if (t[0] > n && (next === null || t[0] < next)) { next = t[0]; } });
                 if (next === null) { return ""; }
                 var k = next - n;
                 if (available < k) { return ""; }
                 var add = 0, now = 0, then = 0, pn = pct(n), pt = pct(next);
-                for (i = 0; i < n; i++) { add = Math.max(add, cents[i]); now += disc(cents[i], pn); then += disc(cents[i], pt); }
+                for (i = 0; i < n; i++) { add = Math.max(add, lines[i][0]); now += disc(lines[i][0], pn) * lines[i][1]; then += disc(lines[i][0], pt) * lines[i][1]; }
                 var each = disc(add, pt);
-                then += k * each;
+                then += k * each * places;
                 if (then < now) { return "Add " + k + " more " + word(k) + " and pay " + money(now - then) + " less in total."; }
                 if (then === now) { return "Add " + k + " more " + word(k) + " and pay the same in total."; }
-                return "Book " + k + " more and pay " + money(each) + " each.";
+                return "Book " + k + " more and pay " + money(each) + (places > 1 ? " a place." : " each.");
             }
             function redraw() {
                 var boxes = form.querySelectorAll("input[name=\'dates[]\']"), ticked = [], i;
@@ -1496,12 +1540,14 @@ class TeamOversight_Program_Booking {
                 var n = ticked.length, who = whoFixed || (newName ? newName.value.trim() : ""), text = "";
                 if (n > 0) {
                     var p = pct(n + inCart.length), each = [], total = 0, full = 0, same = true;
-                    for (i = 0; i < n; i++) { each.push(disc(ticked[i], p)); total += each[i]; full += ticked[i]; if (each[i] !== each[0]) { same = false; } }
-                    text = (who !== "" ? who + ": " : "") + n + " " + word(n) + (same ? " at " + money(each[0]) : "") + " = " + money(total);
+                    for (i = 0; i < n; i++) { each.push(disc(ticked[i], p)); total += each[i] * places; full += ticked[i] * places; if (each[i] !== each[0]) { same = false; } }
+                    text = (who !== "" ? who + ": " : "") + n + " " + word(n)
+                        + (places > 1 ? ", " + places + " places each" + (same ? "," : "") : "")
+                        + (same ? " at " + money(each[0]) + (places > 1 ? " a place" : "") : "") + " = " + money(total);
                     if (p > 0) { text += " (" + p + "% off" + (inCart.length > 0 ? " with the " + inCart.length + " already in your cart" : "") + ", you save " + money(full - total) + ")"; }
                 }
                 if (totalEl) { totalEl.textContent = text; }
-                if (nudgeEl) { nudgeEl.textContent = nudge(inCart.concat(ticked), Math.max(0, open - n)); }
+                if (nudgeEl) { nudgeEl.textContent = nudge(inCart.concat(ticked.map(function (c) { return [c, places]; })), Math.max(0, open - n)); }
                 if (button) { button.textContent = n > 0 ? "Add " + n + " " + word(n) + " to cart" : "Add the ticked " + unit[1] + " to cart"; }
             }
             form.addEventListener("change", redraw);
@@ -2407,7 +2453,9 @@ class TeamOversight_Program_Booking {
                     $open++;
                 }
             }
-            $nudge = self::nudge($setup['tiers'], array_values($cents), $unit, null, max(0, $open - count($plines)));
+            // Each line's places count toward the money; an added session is priced at the most places booked on one.
+            $qtys = array_values(wp_list_pluck($plines, 'qty'));
+            $nudge = self::nudge($setup['tiers'], array_values($cents), $unit, null, max(0, $open - count($plines)), $qtys, empty($qtys) ? 1 : max($qtys));
             $book = self::book_url($key);
             if ($nudge !== '' || $book !== '') {
                 $out .= '<p>' . ($nudge !== '' ? '<span class="murvc-book-nudge">' . esc_html($nudge) . '</span> ' : '')
@@ -2844,16 +2892,18 @@ class TeamOversight_Program_Booking {
 
     /**
      * Design 4.9.3: the refund for a family that withdraws the lines
-     * $withdraw_item_ids of one program in an order, in cents: what the
-     * program's lines cost (after earlier refunds, read from WooCommerce's
-     * own refund objects), less any refund tied to no line, less what the
-     * kept lines cost at the tier their own number reaches (the tiers kept
-     * on the order), never below 0. A fully refunded line is neither kept
-     * nor withdrawn. Returns paid, kept_count, pct, kept_cost, unlinked and
-     * refund. Reads only.
+     * $withdraw_item_ids of one program in an order, in cents: the money
+     * the program's lines still hold (what every one of them paid, fully
+     * refunded lines included, less the money already given back against
+     * them: refunded_money()), less any refund tied to no line, less what
+     * the kept lines cost at the tier their own number reaches (the tiers
+     * kept on the order), never below 0. A fully refunded line is neither
+     * kept nor withdrawn. Returns paid, kept_count, pct, kept_cost,
+     * unlinked, coupons (what coupons took off the program's lines, cents)
+     * and refund. Reads only.
      */
     public static function withdrawal($order, $key, array $withdraw_item_ids) {
-        $out = array('paid' => 0, 'kept_count' => 0, 'pct' => 0, 'kept_cost' => 0, 'unlinked' => 0, 'refund' => 0);
+        $out = array('paid' => 0, 'kept_count' => 0, 'pct' => 0, 'kept_cost' => 0, 'unlinked' => 0, 'coupons' => 0, 'refund' => 0);
         if (!($order instanceof WC_Order)) {
             return $out;
         }
@@ -2861,6 +2911,7 @@ class TeamOversight_Program_Booking {
         $ids = array_flip(self::dated_product_ids($key));
         $withdraw = array_flip(array_map('intval', $withdraw_item_ids));
         $summary = TeamOversight_Programs::refund_summary_for_order($order->get_id());
+        $lines = array();
         $kept = array();
         foreach ($order->get_items() as $item_id => $item) {
             if (!($item instanceof WC_Order_Item_Product) || !isset($ids[intval($item->get_product_id())])) {
@@ -2870,26 +2921,67 @@ class TeamOversight_Program_Booking {
             if ($full === '') {
                 continue;
             }
+            $lines[intval($item_id)] = true;
             $qty = max(1, intval($item->get_quantity()));
             $line_cents = intval(round(((float) $item->get_total() + (float) $item->get_total_tax()) * 100));
+            $out['paid'] += $line_cents;
+            $out['coupons'] += max(0, intval(round(((float) $item->get_subtotal() + (float) $item->get_subtotal_tax()) * 100)) - $line_cents);
             $refund = isset($summary['lines'][intval($item_id)]) ? $summary['lines'][intval($item_id)] : null;
-            $refunded_cents = is_array($refund) ? intval(round((float) $refund['amount'] * 100)) : 0;
             $state = TeamOversight_Programs::refund_state($qty, $line_cents / 100, $refund);
             if ($state === 'full') {
                 continue;
             }
-            $out['paid'] += $line_cents - $refunded_cents;
             if (!isset($withdraw[intval($item_id)])) {
                 $kept[] = array('full' => self::price_cents($full), 'places' => TeamOversight_Programs::places_after_refunds($qty, $state, $refund));
             }
         }
+        $money = self::refunded_money($order, $lines);
+        $out['paid'] = max(0, $out['paid'] - $money['tied']);
         $out['kept_count'] = count($kept);
         $out['pct'] = TeamOversight_Program_Setup::tier_pct(self::order_tiers($order, $key), count($kept));
         foreach ($kept as $line) {
             $out['kept_cost'] += TeamOversight_Program_Setup::discounted_cents($line['full'], $out['pct']) * $line['places'];
         }
-        $out['unlinked'] = intval(round((float) $summary['unlinked'] * 100));
+        $out['unlinked'] = $money['unlinked'];
         $out['refund'] = max(0, $out['paid'] - $out['unlinked'] - $out['kept_cost']);
+        return $out;
+    }
+
+    /**
+     * The money an order's refunds gave back, in cents: tied => against
+     * the lines $line_ids (item id => true), unlinked => against no line.
+     * Read refund by refund, so it is the money returned, never what the
+     * refund's lines recorded: a refund whose lines add up to more than
+     * its own amount (the committee lowered the total WooCommerce filled
+     * in from the lines) shares its amount over its lines in proportion,
+     * and a refund for more than its lines adds the rest to unlinked.
+     */
+    private static function refunded_money($order, array $line_ids) {
+        $out = array('tied' => 0, 'unlinked' => 0);
+        foreach ($order->get_refunds() as $refund) {
+            $amount = max(0, intval(round((float) $refund->get_amount() * 100)));
+            $all = 0;
+            $ours = 0;
+            foreach ($refund->get_items() as $item) {
+                $line_id = intval($item->get_meta('_refunded_item_id'));
+                if ($line_id <= 0) {
+                    continue;
+                }
+                $cents = intval(round(-100 * ((float) $item->get_total() + (float) $item->get_total_tax())));
+                $all += $cents;
+                if (isset($line_ids[$line_id])) {
+                    $ours += $cents;
+                }
+            }
+            if ($all <= 0) {
+                $out['unlinked'] += $amount;
+            } elseif ($amount >= $all) {
+                $out['tied'] += $ours;
+                $out['unlinked'] += $amount - $all;
+            } else {
+                $out['tied'] += intval(round($amount * $ours / $all));
+            }
+        }
         return $out;
     }
 
@@ -2944,12 +3036,18 @@ class TeamOversight_Program_Booking {
             return;
         }
         echo '<div class="murvc-refund-box">';
+        $summary = TeamOversight_Programs::refund_summary_for_order($order->get_id());
         foreach ($keys as $key) {
             $ids = array_flip(self::dated_product_ids($key));
             $base = self::withdrawal($order, $key, array());
             $people = array();
             foreach ($order->get_items() as $item_id => $item) {
                 if (!($item instanceof WC_Order_Item_Product) || !isset($ids[intval($item->get_product_id())]) || (string) $item->get_meta(self::META_FULL, true) === '') {
+                    continue;
+                }
+                // A line already refunded in full is neither kept nor withdrawn: no stop row of its own.
+                $refund = isset($summary['lines'][intval($item_id)]) ? $summary['lines'][intval($item_id)] : null;
+                if (TeamOversight_Programs::refund_state(max(1, intval($item->get_quantity())), (float) $item->get_total() + (float) $item->get_total_tax(), $refund) === 'full') {
                     continue;
                 }
                 $player = trim((string) $item->get_meta(self::META_PLAYER, true));
@@ -2966,7 +3064,7 @@ class TeamOversight_Program_Booking {
                 $dates = array_values(array_unique(array_values($person['lines'])));
                 $who = $person['name'] !== '' ? $person['name'] : 'they';
                 echo '<details><summary>' . esc_html('If ' . $who . ' stop' . ($person['name'] !== '' ? 's' : '') . ' part way') . '</summary>';
-                echo '<table class="widefat striped" style="margin: 6px 0;"><thead><tr><th>Stop after</th><th>Sessions kept</th><th>They cost at the kept tier</th><th>Refund that keeps the rest at the right tier</th></tr></thead><tbody>';
+                echo '<table class="widefat striped" style="margin: 6px 0;"><thead><tr><th>Stop after</th><th>Sessions kept on this order (all players)</th><th>What the kept sessions cost</th><th>Refund that keeps the rest at the right tier</th></tr></thead><tbody>';
                 $stops = array_merge(array(''), $dates);
                 foreach ($stops as $stop) {
                     $withdraw = array();
@@ -2981,11 +3079,18 @@ class TeamOversight_Program_Booking {
                         . '<td>' . esc_html(self::money_text($w['kept_cost'])) . '</td>'
                         . '<td><strong>' . esc_html(self::money_text($w['refund'])) . '</strong></td></tr>';
                 }
-                echo '</tbody></table></details>';
+                echo '</tbody></table>';
+                if (count($people) > 1) {
+                    echo '<p class="description">The other players\' sessions on this order count toward the tier too.</p>';
+                }
+                echo '</details>';
             }
-            echo '<p class="description">Make the refund by hand above, by quantity on the lines withdrawn. Nothing here changes the order.</p>';
+            echo '<p class="description">' . esc_html(self::REFUND_HOW) . ' Nothing here changes the order.</p>';
             if ($base['unlinked'] > 0) {
                 echo '<p class="description">' . esc_html('This order also has ' . self::money_text($base['unlinked']) . ' refunded that is not tied to a session; it is taken off the refunds above.') . '</p>';
+            }
+            if ($base['coupons'] > 0) {
+                echo '<p class="description">' . esc_html('This order used ' . self::money_text($base['coupons']) . ' of coupons on these sessions. The refunds above count only the money paid, so that amount is treated as spent on the sessions kept; if it was store credit, decide whether to give it back as credit.') . '</p>';
             }
         }
         echo '</div>';

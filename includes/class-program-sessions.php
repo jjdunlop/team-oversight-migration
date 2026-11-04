@@ -2651,7 +2651,7 @@ class TeamOversight_Program_Sessions {
         }
         $out = self::styles() . '<div class="murvc-sessions-tab coach-portal">';
         $out .= '<p>Refund from the order screen, by quantity, never only in Square. Square allows at most 20 refunds on one payment and none after a year.</p>'
-            . '<p>For a family that stops part way, the order screen\'s Club Programs refunds box works out the refund that keeps the rest at the right tier.</p>';
+            . '<p>For a family that stops part way, the order screen\'s Club Programs refunds box works out the refund that keeps the rest at the right tier. Put the withdrawn sessions\' quantities, then change the refund amounts to that box\'s figure: WooCommerce fills in the full price those lines paid, which is more, and $0.00 there means nothing is owed back.</p>';
         $any = false;
         foreach (TeamOversight_Programs::program_products($key) as $product) {
             if ($product['kind'] !== 'dated') {

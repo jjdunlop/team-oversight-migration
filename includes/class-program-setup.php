@@ -568,12 +568,12 @@ class TeamOversight_Program_Setup {
 
     private static function check_tiers($value, $full) {
         if (!is_array($value)) {
-            return array(false, null, array('Discount tiers must be a list.'));
+            return array(false, null, array('Discounts must be a list.'));
         }
         $kept = array();
         $problems = array();
         if ($full && count($value) > self::MAX_TIERS) {
-            $problems[] = 'Discount tiers: at most ' . self::MAX_TIERS . ' rows.';
+            $problems[] = 'Discounts: at most ' . self::MAX_TIERS . ' rows.';
         }
         foreach (array_values($value) as $i => $row) {
             if (count($kept) >= self::MAX_TIERS) {
@@ -596,7 +596,7 @@ class TeamOversight_Program_Setup {
             }
             $last = empty($kept) ? null : $kept[count($kept) - 1];
             if ($last !== null && ($from <= $last['from'] || $pct <= $last['pct'])) {
-                $problems[] = 'Discount tiers: both the number of sessions and the percent off must rise from row to row.';
+                $problems[] = 'Discounts: both the number of sessions and the percent off must rise from row to row.';
                 continue;
             }
             $kept[] = array('from' => $from, 'pct' => $pct);
@@ -1874,7 +1874,7 @@ class TeamOversight_Program_Setup {
             . self::field_row('Who is coming', '<select name="player_name"><option value="required"' . selected($setup['player_name'], 'required', false) . '>Ask for the player\'s name</option><option value="off"' . selected($setup['player_name'], 'off', false) . '>Not asked</option></select>',
                 'Asking for the player\'s name on every booking suits juniors. Not asked suits adults booking for themselves.')
             . self::field_row('Places per booking', '<input type="number" name="max_places" min="1" max="' . self::MAX_MAX_PLACES . '" value="' . intval($setup['max_places']) . '" style="width: 64px;">',
-                '1 means one person per booking. Up to ' . self::MAX_MAX_PLACES . ' lets an adult bring guests on one booking.')
+                '1 means one person per booking. Up to ' . self::MAX_MAX_PLACES . ' lets an adult bring guests on one booking. How many places each session has is set when sessions are added, on the Sessions tab.')
             . self::field_row('Booking cut-off', $cutoff,
                 'When a session stops taking bookings. At the end of the day lets a late arrival pay on the spot or that evening.')
             . '</tbody></table><p><button type="submit" class="button button-primary">Save booking</button></p></form></div>';
@@ -2966,7 +2966,7 @@ class TeamOversight_Program_Setup {
         $old = $facts['old'];
         $new = $facts['new'];
         $weekday = $facts['weekday'] > 0 ? TeamOversight_Program_Sessions::day_name($facts['weekday']) : 'no weekday';
-        $out .= '<p class="murvc-setup-confirm-lead"><strong>' . esc_html('This puts ' . $new['title'] . ' on sale at /product/' . $old['slug'] . '/ and retires ' . $old['title'] . '; bookings stay closed until you tick Bookings open.') . '</strong></p>'
+        $out .= '<p class="murvc-setup-confirm-lead"><strong>' . esc_html('This makes ' . $new['title'] . ' the program\'s product at /product/' . $old['slug'] . '/ and retires ' . $old['title'] . '; nothing can be booked until you tick Bookings open.') . '</strong></p>'
             . '<ol>'
             . '<li>' . esc_html($old['title']) . ' (#' . intval($old['id']) . ') gets the address /product/' . esc_html($old['retired_slug']) . '/, becomes private and hidden from the shop. Nothing else on it changes: no attribute, label, price, stock, variation or membership field; its orders, refunds and reports are untouched.</li>'
             . '<li>' . esc_html($new['title']) . ' (#' . intval($new['id']) . ', ' . intval($new['sessions']) . ' session' . ($new['sessions'] === 1 ? '' : 's') . ') takes /product/' . esc_html($old['slug']) . '/, is published and stays hidden from the shop.</li>'
