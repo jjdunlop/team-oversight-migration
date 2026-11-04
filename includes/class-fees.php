@@ -973,8 +973,11 @@ class TeamOversight_Fees {
      * on a real season). Returns array(state, ...) or null when a write
      * failed (the next run resumes). States: skipped (not a 2027+ season,
      * no query), already (its before-copy entry is finished: nothing read
-     * or written), nothing, refused (reason released, invoiced, conflict or
-     * duplicate; nothing written), converted. In order: the refusal (a fresh
+     * or written), nothing (also a season an earlier run split whose flag and
+     * before-copy entry are gone: JPL or YSL rows, no active JPL/YSL data and
+     * an inactive JPL/YSL fee row; split_earlier true), refused (reason
+     * released, invoiced, conflict or duplicate; nothing written), converted.
+     * In order: the refusal (a fresh
      * run only), the before-copy, JPL and YSL fee rows and upper limits
      * copied from JPL/YSL with the same amounts (a cell already holding the
      * same amount is kept), the season put on the split list, offers'
@@ -1088,6 +1091,24 @@ class TeamOversight_Fees {
             }
             // A run that died after its last write: only the finish is left.
             return self::finish_season_jpl_ysl($season, $resume, $counts);
+        }
+
+        // Split already: JPL or YSL data, nothing JPL/YSL left, and the JPL/YSL
+        // fee rows an earlier run took out (inactive). That run's flag and
+        // before-copy entry are gone (deleted by hand, or a restore that put
+        // no rows back), so this is not a conflict: refusing would put the
+        // season back on a JPL/YSL row that no longer exists. Nothing to do.
+        if (!$resume && !$has_old) {
+            $retired = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$p}fee_matrix WHERE season = %s AND fee_class = %s AND is_active = 0",
+                $season, self::CLASS_JPL_YSL
+            ));
+            if ($wpdb->last_error !== '') {
+                return null;
+            }
+            if (intval($retired) > 0) {
+                return array('state' => 'nothing', 'split_earlier' => true);
+            }
         }
 
         // Step 5, the refusal (D8), on a fresh run only: anything that could
@@ -1355,6 +1376,9 @@ class TeamOversight_Fees {
         }
 
         // Step 11, take out the JPL/YSL rows (D3): fee rows inactive (kept as history), limits deleted.
+        // A request already running with the flag it loaded before mark_season_split() still asks for
+        // JPL/YSL until it ends (an offer approved in it could be quoted without that place's bucket):
+        // an accepted risk of the first second after the update, which is why it goes out at a quiet time.
         foreach ($old_rows as $row) {
             if ($wpdb->query($wpdb->prepare(
                 "UPDATE {$p}fee_matrix SET is_active = 0 WHERE id = %d AND season = %s AND fee_class = %s AND is_active = 1",
@@ -1394,16 +1418,37 @@ class TeamOversight_Fees {
             return null;
         }
         $o = $counts['offers'];
-        $message = $season . ' fee classes: JPL/YSL is now two rows, JPL and YSL (club decision). ' . $counts['fees'] . ' fee amount(s) and ' . $counts['limits']
-            . ' upper limit(s) copied to both with the same amounts, and the JPL/YSL row taken out of the matrix; ' . $o[self::CLASS_JPL] . ' offer(s) now carry JPL and '
-            . $o[self::CLASS_YSL] . ' YSL by their team, quotes unchanged; ' . $counts['segments'] . ' fee-history row(s) relabelled. Nothing was re-priced; the earlier rows are kept';
-        $kept = array_merge($counts['fees_kept'], $counts['limits_kept']);
-        $tail = ($o['left'] > 0 ? '; ' . $o['left'] . ' offer(s) left as JPL/YSL (team not junior-league)' : '') . ($resume ? ' (resumed)' : '') . '.';
-        if (!empty($kept)) {
-            $named = '; already set and kept: ' . self::cells_words(array_values(array_unique($kept)), 4);
-            $message .= (strlen('Automatic 1.87.0 update step: ' . $message . $named . $tail) <= 500) ? $named : '; ' . count($kept) . ' cell(s) already set and kept';
+        // What was copied, counted at the source (one JPL/YSL amount is two cells, JPL and YSL),
+        // from the before-copy, so a resumed run counts the same.
+        $source = array('fees' => array(), 'limits' => array());
+        foreach (array('matrix' => 'fees', 'limits' => 'limits') as $part => $key) {
+            $list = (isset($stored[$season][$part]) && is_array($stored[$season][$part])) ? $stored[$season][$part] : array();
+            foreach ($list as $row) {
+                if (is_array($row) && isset($row['fee_class'], $row['team_role']) && (string) $row['fee_class'] === self::CLASS_JPL_YSL) {
+                    $source[$key][(string) $row['team_role']] = true;
+                }
+            }
         }
-        self::jpl_ysl_log($message . $tail);
+        $head = $season . ' fee classes: JPL/YSL is now two rows, JPL and YSL (club decision). '
+            . count($source['fees']) . ' JPL/YSL fee amount(s) and ' . count($source['limits']) . ' upper limit(s) copied to both unchanged';
+        $cells = ' (' . $counts['fees'] . ' fee and ' . $counts['limits'] . ' limit cells)';
+        $rest = '; the JPL/YSL row taken out (fee rows kept inactive, limits in the before-copy); ' . $o[self::CLASS_JPL] . ' offer(s) now carry JPL and '
+            . $o[self::CLASS_YSL] . ' YSL by team, quotes unchanged; ' . $counts['segments'] . ' fee-history row(s) relabelled. Nothing was re-priced';
+        $short = '; the JPL/YSL row taken out; ' . $o[self::CLASS_JPL] . ' offer(s) now JPL and ' . $o[self::CLASS_YSL] . ' YSL; '
+            . $counts['segments'] . ' fee-history row(s) relabelled. Nothing was re-priced';
+        $kept = array_values(array_unique(array_merge($counts['fees_kept'], $counts['limits_kept'])));
+        $named = empty($kept) ? '' : '; already set and kept: ' . self::cells_words($kept, 4);
+        $counted = empty($kept) ? '' : '; ' . count($kept) . ' cell(s) already set and kept';
+        $tail = ($o['left'] > 0 ? '; ' . $o['left'] . ' offer(s) left as JPL/YSL (team not junior-league)' : '') . ($resume ? ' (resumed)' : '') . '.';
+        // At most 500 characters: the kept cells' names before the cell counts (both are in the flag too).
+        $message = '';
+        foreach (array($cells . $rest . $named, $rest . $named, $cells . $rest . $counted, $rest . $counted, $short . $counted) as $middle) {
+            $message = $head . $middle . $tail;
+            if (strlen('Automatic 1.87.0 update step: ' . $message) <= 500) {
+                break;
+            }
+        }
+        self::jpl_ysl_log($message);
         return array('state' => 'converted', 'resumed' => (bool) $resume, 'fees' => $counts['fees'], 'fees_kept' => $counts['fees_kept'],
             'limits' => $counts['limits'], 'limits_kept' => $counts['limits_kept'], 'offers' => $o, 'segments' => $counts['segments'], 'buckets_left' => $counts['buckets_left']);
     }
@@ -4344,7 +4389,8 @@ class TeamOversight_Fees {
             // Check if they're in junior leagues - use correct season
             $assigned_teams = $this->get_user_teams($email, $season);
             if ($season_given && self::junior_league_split_applies($season)) {
-                // 1.87.0: from 2027 the team's type decides (junior_league_type()): JPL when any team is a JPL team, else YSL.
+                // 1.87.0: from 2027 the team's type decides (junior_league_type()): JPL when any team is a JPL team,
+                // else YSL when any is a YSL team, else Junior U/19 (VVL) (a junior on senior teams only).
                 $types = array();
                 foreach ($assigned_teams as $team) {
                     $types[self::junior_league_type($team, $season)] = true;
