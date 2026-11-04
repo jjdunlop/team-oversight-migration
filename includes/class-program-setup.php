@@ -54,6 +54,12 @@ if (!defined('ABSPATH')) {
  * prices are kept and still validated, so a rollback finds them, but
  * nothing reads days or slots any more.
  *
+ * 1.86.1 (the club's decision of 4 Nov 2026: a booking is always for the
+ * account holder): the Setup tab no longer shows Who is coming. The stored
+ * player_name field is kept and still validated, so a rollback finds it,
+ * but get() reads every program as player name off whatever is stored, and
+ * a Booking box post never writes it.
+ *
  * No user id is ever stored in this option, so the account merge needs
  * nothing for it.
  */
@@ -159,6 +165,9 @@ class TeamOversight_Program_Setup {
      * One program's setup: defaults(), overlaid with the stored entry's
      * structurally clean fields. Never writes, never queries beyond the two
      * option reads, never asks about other programs. Request cached per key.
+     * 1.86.1: player_name always reads off (a booking is always for the
+     * account holder); a stored required, which 1.86.0 could save and the
+     * live Academy holds, is kept in the option for a rollback and ignored.
      */
     public static function get($key) {
         $key = (string) $key;
@@ -173,6 +182,7 @@ class TeamOversight_Program_Setup {
                 $entry[$field] = $value;
             }
         }
+        $entry['player_name'] = 'off';
         self::$entries[$key] = $entry;
         return $entry;
     }
@@ -1515,6 +1525,8 @@ class TeamOversight_Program_Setup {
      * carries close_at only when posted (C5: a page opened before 1.86.0
      * keeps the stored choice); the Standard price box writes prices as the
      * typed price followed by the stored others (C9, kept for a rollback).
+     * 1.86.1: the Booking box never carries player_name (a page opened
+     * before 1.86.1 still posts it; it is ignored and the stored value kept).
      */
     private static function fields_from_post($box, array $post, $key = '') {
         $scalar = function ($name) use ($post) {
@@ -1534,7 +1546,6 @@ class TeamOversight_Program_Setup {
                     'bookings_open' => $scalar('bookings_open') === '1' ? '1' : '0',
                     'booking_page' => $scalar('booking_page'),
                     'portal_page' => $scalar('portal_page'),
-                    'player_name' => $scalar('player_name'),
                     'max_places' => $scalar('max_places'),
                     'close_hours' => $scalar('close_hours'),
                 );
@@ -1871,10 +1882,8 @@ class TeamOversight_Program_Setup {
                 'The page holding [program_booking program="' . $key . '"]. Members book there, and the product\'s own page forwards to it.')
             . self::field_row('Portal page', self::page_select('portal_page', $setup['portal_page']),
                 'The page holding [session_attendance program="' . $key . '"], for this program\'s supervisors.')
-            . self::field_row('Who is coming', '<select name="player_name"><option value="required"' . selected($setup['player_name'], 'required', false) . '>Ask for the player\'s name</option><option value="off"' . selected($setup['player_name'], 'off', false) . '>Not asked</option></select>',
-                'Asking for the player\'s name on every booking suits juniors. Not asked suits adults booking for themselves.')
             . self::field_row('Places per booking', '<input type="number" name="max_places" min="1" max="' . self::MAX_MAX_PLACES . '" value="' . intval($setup['max_places']) . '" style="width: 64px;">',
-                '1 means one person per booking. Up to ' . self::MAX_MAX_PLACES . ' lets an adult bring guests on one booking. How many places each session has is set when sessions are added, on the Sessions tab.')
+                'Every booking is for the account holder, by the name on their account. 1 means just them. Up to ' . self::MAX_MAX_PLACES . ' lets them bring guests on one booking. How many places each session has is set when sessions are added, on the Sessions tab.')
             . self::field_row('Booking cut-off', $cutoff,
                 'When a session stops taking bookings. At the end of the day lets a late arrival pay on the spot or that evening.')
             . '</tbody></table><p><button type="submit" class="button button-primary">Save booking</button></p></form></div>';

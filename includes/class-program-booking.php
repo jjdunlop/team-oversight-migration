@@ -23,10 +23,20 @@ if (!defined('ABSPATH')) {
  * Money is whole cents inside (TeamOversight_Program_Setup::money_cents()
  * and cents_text() at the edges); tier_for() is the ONE place the tier
  * rule is read. No price, total, tier, GST figure or product id is read
- * from a post. A player's name never goes in a URL, a log line or
- * error_log: the Book page's links carry an index into the account's own
- * players (p), and its form a 16-character HMAC (player_ref) that is never
- * stored.
+ * from a post. A name never goes in a URL, a log line or error_log.
+ *
+ * 1.86.1 (the club's decision of 4 Nov 2026): a booking is ALWAYS for the
+ * account holder. There is no per-booking player name: the Book page says
+ * who it is for (holder_name(): the account's first and last name), the
+ * Add form carries a required tick (HOLDER_FIELD) confirming it, and an
+ * account with no first or last name is asked to add one before booking.
+ * The already-booked and in-cart checks key on the account (one line per
+ * session in a cart; where a booking is one place, never a session the
+ * account already holds). The cart line, the order line (Player, as at
+ * checkout) and the roll show the holder's name. Order lines from 1.86.0
+ * that carry a typed player name (Player, _murvc_player_key) are still read.
+ * The program setup's player_name field is never read as anything but off
+ * (TeamOversight_Program_Setup::get()).
  *
  * Never return false from woocommerce_order_needs_payment: WooCommerce's
  * checkout and pay handlers then call payment_complete() on the order.
@@ -45,13 +55,10 @@ class TeamOversight_Program_Booking {
     const SHOW_LEFT_AT = 10;
     /** Club 2: a listed session that has started (still open until its cut-off, never ticked by a shortcut). */
     const STARTED_WORDS = 'Today, already started';
-    /** Design 4.6: a typed player name. */
-    const PLAYER_MIN = 2;
-    const PLAYER_MAX = 60;
-    /** Players listed on the Book page (C20). */
-    const MAX_PLAYERS = 12;
-    /** Design 7.1.3: player_ref length. */
-    const REF_LENGTH = 16;
+    /** 1.86.1: the Add form's required tick (these sessions are for the account holder). */
+    const HOLDER_FIELD = 'murvc_book_for';
+    /** 1.86.1: the murvc_booking data version of a line booked for the account holder (1.86.0's lines are 1). */
+    const BOOKING_V = 2;
     /** Design 4.7.2: after the fee payment rule at 20. */
     const TOTALS_PRIORITY = 25;
 
@@ -65,7 +72,12 @@ class TeamOversight_Program_Booking {
     const CART_KEY = 'murvc_booking';
     const TIER_KEY = 'murvc_tier';
 
-    /** Order item meta (design 3.8): two visible, the rest hidden. */
+    /**
+     * Order item meta (design 3.8): two visible, the rest hidden. Player is
+     * the account holder's name as it was at checkout (1.86.1);
+     * _murvc_player_key is only on 1.86.0's lines (a typed name), read and
+     * never written.
+     */
     const META_PLAYER = 'Player';
     const META_DISCOUNT = 'Multi-session discount';
     const META_PROGRAM = '_murvc_program';
@@ -216,21 +228,31 @@ class TeamOversight_Program_Booking {
         return TeamOversight_Program_Sessions::target_product((string) $key, 'current') > 0;
     }
 
-    /** A cart line's murvc_booking data, cleaned (program, player, player_key), or null. */
+    /**
+     * A cart line's murvc_booking data, cleaned (program, player, player_key,
+     * v), or null. player is the name the line was added with: the account
+     * holder's from 1.86.1 (v 2, no player_key), a typed name on 1.86.0's
+     * lines (v 1, player_key from the name).
+     */
     private static function booking_data($item) {
         if (!is_array($item) || !isset($item[self::CART_KEY]) || !is_array($item[self::CART_KEY])) {
             return null;
         }
         $b = $item[self::CART_KEY];
+        $v = isset($b['v']) && is_scalar($b['v']) ? intval($b['v']) : 1;
         $player = isset($b['player']) && is_scalar($b['player']) ? trim((string) $b['player']) : '';
-        $key = isset($b['player_key']) && is_scalar($b['player_key']) ? (string) $b['player_key'] : '';
-        if ($key === '' && $player !== '') {
-            $key = self::player_key($player);
+        $key = '';
+        if ($v < self::BOOKING_V) {
+            $key = isset($b['player_key']) && is_scalar($b['player_key']) ? (string) $b['player_key'] : '';
+            if ($key === '' && $player !== '') {
+                $key = self::player_key($player);
+            }
         }
         return array(
             'program' => isset($b['program']) && is_scalar($b['program']) ? (string) $b['program'] : '',
             'player' => $player,
             'player_key' => $key,
+            'v' => $v,
         );
     }
 
@@ -327,27 +349,59 @@ class TeamOversight_Program_Booking {
         return array('session', 'sessions');
     }
 
-    /** Design 3.8: a typed name trimmed, spaces squeezed, lowercased. */
+    /** Design 3.8: a name trimmed, spaces squeezed, lowercased (how 1.86.0's lines keyed a typed player). */
     public static function player_key($name) {
         $name = trim(preg_replace('/\s+/u', ' ', (string) $name));
         return function_exists('mb_strtolower') ? mb_strtolower($name, 'UTF-8') : strtolower($name);
     }
 
-    /** Design 7.1.3: 16 hex characters naming a player of this account. Never stored. */
-    public static function player_ref($player_key, $user_id) {
-        return substr(hash_hmac('sha256', (string) $player_key . '|' . intval($user_id), wp_salt('auth')), 0, self::REF_LENGTH);
+    /**
+     * 1.86.1: the name a booking of this account is for: the account's first
+     * and last name ("Sam Lee"), cleaned (entities decoded, tags and extra
+     * spaces dropped), falling back to the display name when they clean to
+     * nothing. '' when the account has no first or last name: such an
+     * account is asked to add them before booking.
+     */
+    public static function holder_name($user_id) {
+        $user_id = intval($user_id);
+        if ($user_id <= 0) {
+            return '';
+        }
+        $clean = function ($text) {
+            $text = html_entity_decode(is_scalar($text) ? (string) $text : '', ENT_QUOTES, 'UTF-8');
+            return trim(preg_replace('/\s+/u', ' ', sanitize_text_field($text)));
+        };
+        $raw_first = get_user_meta($user_id, 'first_name', true);
+        $raw_last = get_user_meta($user_id, 'last_name', true);
+        if (!is_scalar($raw_first) || !is_scalar($raw_last) || trim((string) $raw_first) === '' || trim((string) $raw_last) === '') {
+            return '';
+        }
+        $first = $clean($raw_first);
+        $last = $clean($raw_last);
+        if ($first !== '' && $last !== '') {
+            return $first . ' ' . $last;
+        }
+        $user = get_userdata($user_id);
+        return $user ? $clean($user->display_name) : '';
     }
 
-    /** Design 4.6: '' or why a typed player name is refused ($name already through sanitize_text_field()). */
-    public static function player_problem($name) {
-        $name = (string) $name;
-        $length = function_exists('mb_strlen') ? mb_strlen($name, 'UTF-8') : strlen($name);
-        if ($length < self::PLAYER_MIN || $length > self::PLAYER_MAX
-            || preg_match('/^[\p{L}\p{M}\s\'\x{2019}\-]+$/u', $name) !== 1
-            || preg_match('/\p{L}/u', $name) !== 1) {
-            return 'Enter the player\'s first and last name (' . self::PLAYER_MIN . ' to ' . self::PLAYER_MAX . ' letters; spaces, hyphens and apostrophes are fine).';
+    /**
+     * 1.86.1: where a member changes the name on their account: Ultimate
+     * Member's Account page when it has one, else WooCommerce's Account
+     * details ('' when neither is there).
+     */
+    public static function account_details_url() {
+        if (function_exists('um_get_core_page')) {
+            $url = um_get_core_page('account');
+            if (is_string($url) && $url !== '') {
+                return $url;
+            }
         }
-        return TeamOversight_Program_Sessions::contact_problem($name);
+        if (function_exists('wc_get_account_endpoint_url')) {
+            $url = wc_get_account_endpoint_url('edit-account');
+            return is_string($url) ? $url : '';
+        }
+        return '';
     }
 
     /** The ids of a program's dated products (current, prepared and earlier). */
@@ -381,8 +435,9 @@ class TeamOversight_Program_Booking {
      * dated products, read ONCE through WooCommerce (never the analytics
      * tables, which lag): orders processing, completed, on-hold or pending
      * created since the earliest of those products. Each line: item_id,
-     * order_id, product_id, variation_id, date, player, player_key, qty
-     * (places after refunds), state (paid / awaiting) and created. Fully
+     * order_id, product_id, variation_id, date, player, player_key (the
+     * line's Player and, on 1.86.0's lines, its key: shown, never checked),
+     * qty (places after refunds), state (paid / awaiting) and created. Fully
      * refunded lines are left out (4.9.1). Request cached per key and user.
      */
     public static function account_lines($key, $user_id) {
@@ -431,9 +486,6 @@ class TeamOversight_Program_Booking {
                 }
                 $player = trim((string) $item->get_meta(self::META_PLAYER, true));
                 $player_key = (string) $item->get_meta(self::META_PLAYER_KEY, true);
-                if ($player_key === '' && $player !== '') {
-                    $player_key = self::player_key($player);
-                }
                 $raw[] = array(
                     'item_id' => intval($item_id),
                     'order_id' => intval($order->get_id()),
@@ -464,59 +516,6 @@ class TeamOversight_Program_Booking {
         }
         self::$lines_cache[$cache_key] = $out;
         return $out;
-    }
-
-    /**
-     * Design 7.1.2, C20: who may be coming, as rows of name, key, ref and
-     * source (cart, order, self): this program's cart players (newest
-     * first), the account's earlier players of the program (newest
-     * first), then the account holder's own name, each key once, at most
-     * MAX_PLAYERS. Empty for a program that asks no player name.
-     */
-    public static function account_players($key, $user_id) {
-        $key = (string) $key;
-        $user_id = intval($user_id);
-        $rows = array();
-        if ($user_id <= 0 || TeamOversight_Program_Setup::get($key)['player_name'] !== 'required') {
-            return $rows;
-        }
-        $seen = array();
-        $add = function ($name, $source) use (&$rows, &$seen, $user_id) {
-            $name = trim((string) $name);
-            $player_key = self::player_key($name);
-            if ($name === '' || isset($seen[$player_key]) || count($rows) >= self::MAX_PLAYERS) {
-                return;
-            }
-            $seen[$player_key] = true;
-            $rows[] = array('name' => $name, 'key' => $player_key, 'ref' => self::player_ref($player_key, $user_id), 'source' => $source);
-        };
-        if ($user_id === get_current_user_id()) {
-            foreach (array_reverse(self::cart_lines($key), true) as $line) {
-                $add($line['player'], 'cart');
-            }
-        }
-        $lines = self::account_lines($key, $user_id);
-        usort($lines, function ($a, $b) {
-            if ($a['created'] !== $b['created']) {
-                return $b['created'] - $a['created'];
-            }
-            return $b['item_id'] - $a['item_id'];
-        });
-        foreach ($lines as $line) {
-            $add($line['player'], 'order');
-        }
-        $user = get_userdata($user_id);
-        if ($user) {
-            $own = trim(trim((string) get_user_meta($user_id, 'first_name', true)) . ' ' . trim((string) get_user_meta($user_id, 'last_name', true)));
-            if ($own === '' || self::player_problem($own) !== '') {
-                $own = trim(html_entity_decode((string) $user->display_name, ENT_QUOTES, 'UTF-8'));
-            }
-            $own = sanitize_text_field(preg_replace('/\s+/u', ' ', $own));
-            if ($own !== '' && self::player_problem($own) === '') {
-                $add($own, 'self');
-            }
-        }
-        return $rows;
     }
 
     /** WooCommerce's cart, loaded when it isn't yet (front end, AJAX and WP-CLI only), else null. */
@@ -555,8 +554,9 @@ class TeamOversight_Program_Booking {
 
     /**
      * The program's lines in the cart ($key '' = every program): cart item
-     * key => program, variation_id, date, slot, end, player, player_key,
-     * ref ('none' where no player is asked), qty and full_cents.
+     * key => program, variation_id, date, slot, end, player (the name the
+     * line was added with), player_key (1.86.0's lines only), qty and
+     * full_cents.
      */
     public static function cart_lines($key = '') {
         $out = array();
@@ -564,7 +564,6 @@ class TeamOversight_Program_Booking {
         if (!$cart) {
             return $out;
         }
-        $user_id = get_current_user_id();
         foreach ($cart->get_cart() as $cart_key => $item) {
             $line_key = self::program_key_of_line($item);
             if ($line_key === '' || ((string) $key !== '' && $line_key !== (string) $key)) {
@@ -581,7 +580,6 @@ class TeamOversight_Program_Booking {
                 'end' => self::product_end($product),
                 'player' => $booking['player'],
                 'player_key' => $booking['player_key'],
-                'ref' => $booking['player_key'] !== '' ? self::player_ref($booking['player_key'], $user_id) : 'none',
                 'qty' => max(1, isset($item['quantity']) ? intval($item['quantity']) : 1),
                 'full_cents' => $product ? self::full_cents($product) : 0,
             );
@@ -673,7 +671,7 @@ class TeamOversight_Program_Booking {
      * Places a booker can still take on a session: its stock, less the
      * places held by checkouts in progress (the retried order excluded,
      * as WooCommerce's own check), less every line of it already in this
-     * cart (siblings too). 0 at least.
+     * cart. 0 at least.
      */
     public static function free_places($variation) {
         $product = $variation instanceof WC_Product ? $variation : wc_get_product(intval($variation));
@@ -1032,34 +1030,15 @@ class TeamOversight_Program_Booking {
     }
 
     /**
-     * The GET contract (7.1.3), whitelisted: time, p (an index into the
-     * account's own players, or new), places, range, from, to. With no p,
-     * the first earlier or cart player is chosen (C20), never the account
-     * holder by default.
+     * The GET contract (7.1.3), whitelisted: time, places, range, from, to.
+     * Nothing about who is booking (1.86.1: always the account holder); a
+     * p left in an older link is ignored.
      */
-    private static function view_args(array $groups, array $players, $max_places, $player_program, array $blocks) {
+    private static function view_args(array $groups, $max_places, array $blocks) {
         $get = function ($name) {
             return isset($_GET[$name]) && is_scalar($_GET[$name]) ? trim(wp_unslash((string) $_GET[$name])) : '';
         };
-        $view = array('time' => self::chosen_time($groups), 'p' => '', 'chosen' => null, 'is_new' => false, 'places' => 1, 'range' => '', 'from' => '', 'to' => '');
-        if ($player_program) {
-            $p = $get('p');
-            if ($p === 'new') {
-                $view['p'] = 'new';
-                $view['is_new'] = true;
-            } elseif ($p !== '' && ctype_digit($p) && isset($players[intval($p)])) {
-                $view['p'] = (string) intval($p);
-                $view['chosen'] = $players[intval($p)];
-            } elseif ($p === '') {
-                foreach ($players as $i => $row) {
-                    if ($row['source'] !== 'self') {
-                        $view['p'] = (string) $i;
-                        $view['chosen'] = $row;
-                        break;
-                    }
-                }
-            }
-        }
+        $view = array('time' => self::chosen_time($groups), 'places' => 1, 'range' => '', 'from' => '', 'to' => '');
         $places = $get('places');
         $view['places'] = ($places !== '' && ctype_digit($places)) ? max(1, min(intval($max_places), intval($places))) : 1;
         $range = $get('range');
@@ -1075,7 +1054,7 @@ class TeamOversight_Program_Booking {
     /** The view's GET arguments, for links and form actions (never a name). */
     private static function view_query(array $view, array $override = array()) {
         $args = array();
-        foreach (array('time', 'p', 'places', 'range', 'from', 'to') as $name) {
+        foreach (array('time', 'places', 'range', 'from', 'to') as $name) {
             $value = array_key_exists($name, $override) ? $override[$name] : (isset($view[$name]) ? $view[$name] : '');
             if ($name === 'places' && intval($value) <= 1) {
                 continue;
@@ -1133,8 +1112,9 @@ class TeamOversight_Program_Booking {
     }
 
     /**
-     * "Sam: 24 Sundays at $23.10 = $554.40 (23% off, you save $165.60)" for
-     * the ticked dates ('' with none); with $places above 1 "10 Tuesdays,
+     * "24 Sundays at $23.10 = $554.40 (23% off, you save $165.60)" for the
+     * ticked dates ('' with none; a $who before it, which the Book page no
+     * longer passes, reads "Sam: 24 ..."); with $places above 1 "10 Tuesdays,
      * 2 places each, at $14.85 a place = $297.00 (...)": the money counts
      * every place, the tier only the sessions (4.7.1), as the cart does.
      */
@@ -1156,32 +1136,31 @@ class TeamOversight_Program_Booking {
         return $text;
     }
 
-    /** The logged-in Book page (7.1.2, 7.1.4). */
+    /**
+     * The logged-in Book page (7.1.2, 7.1.4). 1.86.1: every booking is for
+     * the account holder, so the page is drawn for the account: above the
+     * Add button it says who the booking is for, with a required tick and a
+     * link to change the account's name; an account with no first or last
+     * name is asked to add them and gets no Add form.
+     */
     private static function render_member($key, array $setup, array $rows, array $groups, array $unit) {
         $user_id = get_current_user_id();
         $name = self::program_name($key);
-        $player_program = $setup['player_name'] === 'required';
         $max_places = max(1, intval($setup['max_places']));
+        // One place per booking: a session the account already holds is booked; above 1, a single date adds places.
+        $one_place = $max_places === 1;
         $current = TeamOversight_Program_Sessions::target_product($key, 'current');
-        $players = self::account_players($key, $user_id);
+        $holder = self::holder_name($user_id);
+        $account_url = self::account_details_url();
         $blocks = array_values($setup['blocks']);
-        $view = self::view_args($groups, $players, $max_places, $player_program, $blocks);
+        $view = self::view_args($groups, $max_places, $blocks);
         $url = self::page_url();
         $out = '';
         if (function_exists('wc_print_notices') && WC()->session) {
             $out .= (string) wc_print_notices(true);
         }
 
-        // Who the list is drawn for: '' where no player is asked, null while nobody is chosen.
-        $who_key = null;
-        $who_name = '';
-        if (!$player_program) {
-            $who_key = '';
-        } elseif ($view['chosen'] !== null) {
-            $who_key = $view['chosen']['key'];
-            $who_name = $view['chosen']['name'];
-        }
-
+        // This account's own lines (one player per account: keyed on the session).
         $lines = self::account_lines($key, $user_id);
         $paid = array();
         $awaiting = array();
@@ -1190,51 +1169,42 @@ class TeamOversight_Program_Booking {
             if ($line['product_id'] !== $current) {
                 continue;
             }
-            $index = $player_program ? $line['variation_id'] . '|' . $line['player_key'] : (string) $line['variation_id'];
+            $index = (string) $line['variation_id'];
             if ($line['state'] === 'paid') {
                 $paid[$index] = (isset($paid[$index]) ? $paid[$index] : 0) + $line['qty'];
+                $mine['paid'][] = $line;
             } else {
                 $awaiting[$index] = (isset($awaiting[$index]) ? $awaiting[$index] : 0) + $line['qty'];
-            }
-            if ($who_key !== null && (!$player_program || $line['player_key'] === $who_key)) {
-                if ($line['state'] === 'paid') {
-                    $mine['paid'][] = $line;
-                } else {
-                    $mine['awaiting']++;
-                }
+                $mine['awaiting']++;
             }
         }
         $cart_lines = self::cart_lines($key);
         $in_cart = array();
         $cart_cents = array();
         $cart_qty = array();
-        $cart_players = array();
         foreach ($cart_lines as $line) {
-            $in_cart[$player_program ? $line['variation_id'] . '|' . $line['player_key'] : (string) $line['variation_id']] = true;
+            $in_cart[(string) $line['variation_id']] = true;
             $cart_cents[] = $line['full_cents'];
             $cart_qty[] = $line['qty'];
-            if ($line['player'] !== '') {
-                $cart_players[$line['player_key']] = $line['player'];
-            }
         }
 
-        // Each listed session's state for the chosen player (all time groups: the nudge counts them all).
+        // Each listed session's state for this account (all time groups: the nudge counts them all).
         $info = array();
         $available = 0;
         foreach ($rows as $row) {
             $vid = $row['id'];
-            $index = $player_program ? ($who_key === null ? null : $vid . '|' . $who_key) : (string) $vid;
+            $index = (string) $vid;
             $free = self::free_places($vid);
-            $have = (!$player_program && isset($paid[$index])) ? intval($paid[$index]) : 0;
+            $have = (!$one_place && isset($paid[$index])) ? intval($paid[$index]) : 0;
             if ($row['state'] === 'cancelled') {
                 $state = 'cancelled';
             } elseif ($row['state'] === 'closed' || $row['status'] !== 'publish') {
                 $state = 'closed';
-            } elseif ($player_program && $index !== null && isset($paid[$index])) {
+            } elseif ($one_place && isset($paid[$index])) {
                 $state = 'booked';
-            } elseif ($index !== null && isset($in_cart[$index])) {
+            } elseif (isset($in_cart[$index])) {
                 $state = 'cart';
-            } elseif ($index !== null && isset($awaiting[$index])) {
+            } elseif (isset($awaiting[$index])) {
                 $state = 'awaiting';
             } elseif ($free < $view['places']) {
                 $state = 'full';
@@ -1244,21 +1214,15 @@ class TeamOversight_Program_Booking {
                 $state = 'open';
             }
             $info[$vid] = array('state' => $state, 'free' => $free, 'have' => $have);
-            if (($state === 'open' || $state === 'have') && ($index !== null || $view['is_new'])) {
+            if ($state === 'open' || $state === 'have') {
                 $available++;
             }
         }
-        $can_tick = !$player_program || $who_key !== null || $view['is_new'];
+        // An account with no first or last name can see the sessions but not tick them.
+        $can_tick = $holder !== '';
 
-        // Choose: who is coming, time, places (a GET form; a name never goes in it).
+        // Choose: time and places (a GET form; a name never goes in it).
         $out .= '<form method="get" action="' . esc_url($url) . '" class="murvc-book-choose" id="murvc-book-choose">' . self::url_hidden_fields($url);
-        if ($player_program) {
-            $out .= '<fieldset><legend>Who is coming?</legend>';
-            foreach ($players as $i => $row) {
-                $out .= '<label class="murvc-book-pick"><input type="radio" name="p" value="' . intval($i) . '"' . checked($view['p'], (string) $i, false) . '> ' . esc_html($row['name']) . '</label> ';
-            }
-            $out .= '<label class="murvc-book-pick"><input type="radio" name="p" value="new"' . checked($view['p'], 'new', false) . '> Someone else</label></fieldset>';
-        }
         if (count($groups) > 1) {
             $out .= '<fieldset><legend>Time</legend>';
             foreach ($groups as $group => $label) {
@@ -1280,7 +1244,7 @@ class TeamOversight_Program_Booking {
         $out .= '<p><button type="submit" class="button murvc-book-secondary">Show ' . esc_html($unit[1]) . '</button></p></form>';
 
         // Already booked, awaiting payment, in the cart.
-        if ($who_key !== null && !empty($mine['paid'])) {
+        if (!empty($mine['paid'])) {
             usort($mine['paid'], function ($a, $b) {
                 return strcmp($a['date'], $b['date']);
             });
@@ -1288,19 +1252,19 @@ class TeamOversight_Program_Booking {
             $first = $mine['paid'][0]['date'];
             $last = $mine['paid'][$n - 1]['date'];
             $span = $first === $last ? self::day_month($first) : self::day_month($first) . ' to ' . self::day_month($last);
-            $out .= '<details class="murvc-book-booked"><summary>' . esc_html('Already booked' . ($who_name !== '' ? ' for ' . $who_name : '') . ': ' . $n . ' ' . ($n === 1 ? $unit[0] : $unit[1]) . ', ' . $span) . '</summary><ul>';
+            $out .= '<details class="murvc-book-booked"><summary>' . esc_html('Already booked: ' . $n . ' ' . ($n === 1 ? $unit[0] : $unit[1]) . ', ' . $span) . '</summary><ul>';
             foreach ($mine['paid'] as $line) {
                 $out .= '<li>' . esc_html(TeamOversight_Program_Sessions::date_label($line['date']) . ($line['qty'] > 1 ? ' (' . $line['qty'] . ' places)' : '')) . '</li>';
             }
             $out .= '</ul></details>';
         }
-        if ($who_key !== null && $mine['awaiting'] > 0) {
+        if ($mine['awaiting'] > 0) {
             $out .= '<p class="murvc-book-note">' . esc_html($mine['awaiting'] . ' awaiting payment: pay or cancel ' . ($mine['awaiting'] === 1 ? 'it' : 'them') . ' in ')
                 . '<a href="' . esc_url(wc_get_account_endpoint_url('orders')) . '">My account</a>.</p>';
         }
         if (!empty($cart_lines)) {
             $n = count($cart_lines);
-            $out .= '<p class="murvc-book-incart">' . esc_html('In your cart: ' . $n . ' ' . ($n === 1 ? $unit[0] : $unit[1]) . ' of ' . $name . (!empty($cart_players) ? ' (' . implode(', ', array_values($cart_players)) . ')' : '') . '.')
+            $out .= '<p class="murvc-book-incart">' . esc_html('In your cart: ' . $n . ' ' . ($n === 1 ? $unit[0] : $unit[1]) . ' of ' . $name . '.')
                 . ' <a href="' . esc_url(wc_get_cart_url()) . '">View cart</a></p>';
         }
 
@@ -1324,9 +1288,12 @@ class TeamOversight_Program_Booking {
         list($ticked, $more) = self::shortcut_dates($view, $blocks, $tickable);
         $ticked = array_flip($ticked);
 
-        // Shortcuts (GET links), or who first.
+        // Shortcuts (GET links), or the account's name first.
         if (!$can_tick) {
-            $out .= '<p class="murvc-book-who-first"><strong>Choose who is coming first.</strong></p>';
+            $add_name = 'Add your first and last name to your account';
+            $out .= '<p class="murvc-book-noname"><strong>'
+                . ($account_url !== '' ? '<a href="' . esc_url($account_url) . '">' . esc_html($add_name) . '</a>' : esc_html($add_name))
+                . ' before booking.</strong></p>';
         } else {
             $links = array('next' => 'Next ' . $unit[0], 'month' => 'Rest of this month', 'nextmonth' => 'Next month');
             $today = current_time('Y-m-d');
@@ -1409,7 +1376,7 @@ class TeamOversight_Program_Booking {
         }
         // Money counts places (the ticked dates' and each cart line's own), the tier only sessions.
         $places = max(1, intval($view['places']));
-        $total = self::total_text($who_name, $ticked_cents, $cart_cents, $setup['tiers'], $unit, $places);
+        $total = self::total_text('', $ticked_cents, $cart_cents, $setup['tiers'], $unit, $places);
         $weights = array_merge($cart_qty, empty($ticked_cents) ? array() : array_fill(0, count($ticked_cents), $places));
         $nudge = self::nudge($setup['tiers'], array_merge($cart_cents, $ticked_cents), $unit, null, max(0, $available - count($ticked_cents)), $weights, $places);
         $n = count($ticked_cents);
@@ -1425,7 +1392,6 @@ class TeamOversight_Program_Booking {
             . ' data-in-cart="' . esc_attr(implode(',', $cart_attr)) . '"'
             . ' data-places="' . $places . '"'
             . ' data-unit="' . esc_attr($unit[0] . '|' . $unit[1]) . '"'
-            . ' data-who="' . esc_attr($who_name) . '"'
             . ' data-open="' . intval($available) . '">'
             . '<input type="hidden" name="' . self::ACTION_FIELD . '" value="add">'
             . '<input type="hidden" name="program" value="' . esc_attr($key) . '">'
@@ -1435,17 +1401,20 @@ class TeamOversight_Program_Booking {
             . ($view['from'] !== '' ? '<input type="hidden" name="from" value="' . esc_attr($view['from']) . '">' : '')
             . ($view['to'] !== '' ? '<input type="hidden" name="to" value="' . esc_attr($view['to']) . '">' : '')
             . wp_nonce_field(self::NONCE_PREFIX . $key, self::NONCE_FIELD, false, false);
-        if ($player_program) {
-            if ($view['is_new']) {
-                $out .= '<input type="hidden" name="player_ref" value="new">'
-                    . '<p><label for="murvc-book-new"><strong>First and last name</strong></label><br><input type="text" id="murvc-book-new" name="player_new" maxlength="' . self::PLAYER_MAX . '" required autocomplete="off"></p>';
-            } else {
-                $out .= '<input type="hidden" name="player_ref" value="' . esc_attr($view['chosen']['ref']) . '">';
-            }
-        }
+        // 1.86.1: who the booking is for (the account holder), a required tick, and where to change the name.
+        $guests = $max_places - 1;
+        $confirm = 'These sessions are for ' . $holder . ', the name on this account'
+            . ($guests > 0 ? ', and up to ' . $guests . ' guest' . ($guests === 1 ? '' : 's') : '') . '.';
+        $change = 'Change the name on your account';
         $out .= $list
             . '<p class="murvc-book-total" aria-live="polite">' . esc_html($total) . '</p>'
             . '<p class="murvc-book-nudge">' . esc_html($nudge) . '</p>'
+            . '<div class="murvc-book-for">'
+            . '<p class="murvc-book-holder"><strong>' . esc_html('Booking for ' . $holder) . '</strong></p>'
+            . '<p><label><input type="checkbox" name="' . self::HOLDER_FIELD . '" value="1" required> ' . esc_html($confirm) . '</label></p>'
+            . '<p class="murvc-book-note">Not the player? '
+            . ($account_url !== '' ? '<a href="' . esc_url($account_url) . '">' . esc_html($change) . '</a>' : esc_html($change))
+            . ' first.</p></div>'
             . '<p><button type="submit" class="button murvc-book-submit">' . esc_html($button) . '</button></p></form>';
         return $out . self::script();
     }
@@ -1471,6 +1440,8 @@ class TeamOversight_Program_Booking {
         .murvc-book .murvc-book-nudge { color: var(--mb-good); font-weight: 600; }
         .murvc-book .murvc-book-dates { margin: 0 0 10px; }
         .murvc-book .murvc-book-dates label { margin-right: 8px; }
+        .murvc-book .murvc-book-for { border-top: 1px solid var(--mb-line); margin-top: 12px; padding-top: 8px; }
+        .murvc-book .murvc-book-for p { margin: 0 0 6px; }
         .murvc-book-box { border: 1px solid #dcdcde; border-radius: 6px; padding: 12px 16px; margin: 0 0 18px; }
         .murvc-book-box h3 { margin-top: 0; }
         .murvc-book-box ul { list-style: none; margin: 0 0 8px; padding: 0; }
@@ -1506,8 +1477,6 @@ class TeamOversight_Program_Booking {
             var places = Math.max(1, parseInt(form.getAttribute("data-places") || "1", 10) || 1);
             var unit = (form.getAttribute("data-unit") || "session|sessions").split("|");
             var open = parseInt(form.getAttribute("data-open") || "0", 10) || 0;
-            var whoFixed = form.getAttribute("data-who") || "";
-            var newName = document.getElementById("murvc-book-new");
             var totalEl = form.querySelector(".murvc-book-total");
             var nudgeEl = form.querySelector(".murvc-book-nudge");
             var button = form.querySelector(".murvc-book-submit");
@@ -1537,11 +1506,11 @@ class TeamOversight_Program_Booking {
             function redraw() {
                 var boxes = form.querySelectorAll("input[name=\'dates[]\']"), ticked = [], i;
                 for (i = 0; i < boxes.length; i++) { if (boxes[i].checked) { ticked.push(parseInt(boxes[i].getAttribute("data-cents"), 10) || 0); } }
-                var n = ticked.length, who = whoFixed || (newName ? newName.value.trim() : ""), text = "";
+                var n = ticked.length, text = "";
                 if (n > 0) {
                     var p = pct(n + inCart.length), each = [], total = 0, full = 0, same = true;
                     for (i = 0; i < n; i++) { each.push(disc(ticked[i], p)); total += each[i] * places; full += ticked[i] * places; if (each[i] !== each[0]) { same = false; } }
-                    text = (who !== "" ? who + ": " : "") + n + " " + word(n)
+                    text = n + " " + word(n)
                         + (places > 1 ? ", " + places + " places each" + (same ? "," : "") : "")
                         + (same ? " at " + money(each[0]) + (places > 1 ? " a place" : "") : "") + " = " + money(total);
                     if (p > 0) { text += " (" + p + "% off" + (inCart.length > 0 ? " with the " + inCart.length + " already in your cart" : "") + ", you save " + money(full - total) + ")"; }
@@ -1604,7 +1573,7 @@ class TeamOversight_Program_Booking {
         if (!$cart) {
             return $refuse('The shop isn\'t available. Try again in a minute.');
         }
-        $result = $action === 'add' ? self::add_range($key, $post, $user_id) : self::remove_player($key, $post, $user_id);
+        $result = $action === 'add' ? self::add_range($key, $post, $user_id) : self::remove_all($key, $post, $user_id);
         return array_merge($out, $result);
     }
 
@@ -1613,12 +1582,16 @@ class TeamOversight_Program_Booking {
         return isset($post[$name]) && is_scalar($post[$name]) ? trim((string) wp_unslash((string) $post[$name])) : '';
     }
 
-    /** Design 4.6's steps, exactly. */
+    /**
+     * Design 4.6's steps, exactly; 1.86.1: the booking is for the account
+     * holder (an account with no first or last name is refused, and so is
+     * a post without the tick), and every check keys on the account.
+     */
     private static function add_range($key, array $post, $user_id) {
         $name = self::program_name($key);
         $setup = TeamOversight_Program_Setup::get($key);
-        $player_program = $setup['player_name'] === 'required';
         $max_places = max(1, intval($setup['max_places']));
+        $one_place = $max_places === 1;
         $result = array('ok' => false, 'added' => 0, 'skipped' => array(), 'message' => '', 'redirect' => self::page_url());
         $refuse = function ($message) use (&$result) {
             $result['message'] = $message;
@@ -1664,43 +1637,21 @@ class TeamOversight_Program_Booking {
         if ($places < 1 || $places > $max_places) {
             return $refuse($max_places === 1 ? 'Choose 1 place.' : 'Choose 1 to ' . $max_places . ' places.');
         }
-        $player = '';
-        $player_key = '';
-        $p_index = '';
-        if ($player_program) {
-            $ref = self::posted($post, 'player_ref');
-            if ($ref === 'new') {
-                $typed = sanitize_text_field(self::posted($post, 'player_new'));
-                $typed = trim(preg_replace('/\s+/u', ' ', $typed));
-                $problem = self::player_problem($typed);
-                if ($problem !== '') {
-                    return $refuse($problem);
-                }
-                $player = $typed;
-                $player_key = self::player_key($typed);
-                $p_index = 'new';
-            } else {
-                foreach (self::account_players($key, $user_id) as $i => $row) {
-                    if ($ref !== '' && strlen($ref) === self::REF_LENGTH && hash_equals($row['ref'], $ref)) {
-                        $player = $row['name'];
-                        $player_key = $row['key'];
-                        $p_index = (string) $i;
-                        break;
-                    }
-                }
-                if ($player_key === '') {
-                    return $refuse('Choose who is coming.');
-                }
-            }
-        }
         $result['redirect'] = add_query_arg(self::view_query(array(
             'time' => $time,
-            'p' => $p_index === 'new' ? '' : $p_index,
             'places' => $places,
             'range' => preg_match('/^(next|month|nextmonth|season|dates|b\d{1,2})$/D', self::posted($post, 'range')) ? self::posted($post, 'range') : '',
             'from' => TeamOversight_Program_Sessions::parse_input_date(self::posted($post, 'from')),
             'to' => TeamOversight_Program_Sessions::parse_input_date(self::posted($post, 'to')),
         )), self::page_url());
+        // 1.86.1: the booking is the account holder's, by the name on the account, ticked.
+        $holder = self::holder_name($user_id);
+        if ($holder === '') {
+            return $refuse('Add your first and last name to your account before booking.');
+        }
+        if (self::posted($post, self::HOLDER_FIELD) !== '1') {
+            return $refuse('Tick the box to confirm these sessions are for ' . $holder . ', the name on this account.');
+        }
 
         // 2. The cart's limit for one program.
         $cart_lines = self::cart_lines($key);
@@ -1708,7 +1659,7 @@ class TeamOversight_Program_Booking {
             return $refuse('Your cart can hold at most ' . self::MAX_IN_CART . ' sessions of ' . $name . '. Check out the ones in it first.');
         }
 
-        // 3. This account's own lines, read once.
+        // 3. This account's own lines, read once (one player per account: keyed on the session).
         $paid = array();
         $awaiting = array();
         $current = TeamOversight_Program_Sessions::target_product($key, 'current');
@@ -1716,7 +1667,7 @@ class TeamOversight_Program_Booking {
             if ($line['product_id'] !== $current) {
                 continue;
             }
-            $index = $player_program ? $line['variation_id'] . '|' . $line['player_key'] : (string) $line['variation_id'];
+            $index = (string) $line['variation_id'];
             if ($line['state'] === 'paid') {
                 $paid[$index] = (isset($paid[$index]) ? $paid[$index] : 0) + $line['qty'];
             } else {
@@ -1725,7 +1676,7 @@ class TeamOversight_Program_Booking {
         }
         $in_cart = array();
         foreach ($cart_lines as $line) {
-            $in_cart[$player_program ? $line['variation_id'] . '|' . $line['player_key'] : (string) $line['variation_id']] = true;
+            $in_cart[(string) $line['variation_id']] = true;
         }
 
         // 4. Each date in order: the first rule that applies is the reason.
@@ -1766,25 +1717,15 @@ class TeamOversight_Program_Booking {
                     continue;
                 }
                 $vid = intval($row['id']);
-                $index = $player_program ? $vid . '|' . $player_key : (string) $vid;
-                if ($player_program) {
-                    if (isset($in_cart[$index])) {
-                        $skipped[$date] = 'already in your cart';
-                        continue;
-                    }
-                    if (isset($paid[$index])) {
-                        $skipped[$date] = 'already booked';
-                        continue;
-                    }
-                } else {
-                    if (isset($in_cart[$index])) {
-                        $skipped[$date] = 'already in your cart: change its places in the cart';
-                        continue;
-                    }
-                    if (isset($paid[$index]) && count($dates) > 1) {
-                        $skipped[$date] = 'already booked';
-                        continue;
-                    }
+                $index = (string) $vid;
+                // Never two lines of one session in a cart; one place per booking: never a session already held.
+                if (isset($in_cart[$index])) {
+                    $skipped[$date] = $one_place ? 'already in your cart' : 'already in your cart: change its places in the cart';
+                    continue;
+                }
+                if (isset($paid[$index]) && ($one_place || count($dates) > 1)) {
+                    $skipped[$date] = 'already booked';
+                    continue;
                 }
                 if (isset($awaiting[$index])) {
                     $skipped[$date] = 'awaiting payment: pay or cancel it in My account';
@@ -1795,13 +1736,13 @@ class TeamOversight_Program_Booking {
                     $skipped[$date] = $free <= 0 ? 'full' : 'only ' . $free . ' place' . ($free === 1 ? '' : 's') . ' left';
                     continue;
                 }
-                if (!self::add_line($key, $variation, $places, $player, $player_key)) {
+                if (!self::add_line($key, $variation, $places, $holder)) {
                     $skipped[$date] = 'couldn\'t be added';
                     continue;
                 }
                 $added[] = $date;
                 $in_cart[$index] = true;
-                if (!$player_program && isset($paid[$index])) {
+                if (!$one_place && isset($paid[$index])) {
                     $now_have[$date] = intval($paid[$index]) + $places;
                 }
             }
@@ -1827,8 +1768,8 @@ class TeamOversight_Program_Booking {
         if ($n > 0) {
             $first = TeamOversight_Program_Sessions::date_label(reset($added));
             $last = TeamOversight_Program_Sessions::date_label(end($added));
-            if ($player_program) {
-                $text = $n === 1 ? 'Added ' . $first . ' for ' . $player . '.' : 'Added ' . $n . ' ' . $unit[1] . ' for ' . $player . ': ' . $first . ' to ' . $last . '.';
+            if ($one_place) {
+                $text = $n === 1 ? 'Added ' . $first . ' for ' . $holder . '.' : 'Added ' . $n . ' ' . $unit[1] . ' for ' . $holder . ': ' . $first . ' to ' . $last . '.';
             } else {
                 $time_words = self::group_label($start, $end);
                 $place_words = $places . ' place' . ($places === 1 ? '' : 's');
@@ -1867,11 +1808,12 @@ class TeamOversight_Program_Booking {
 
     /**
      * One line per session (4.6 "Adding a line"): add_to_cart() runs no add
-     * validation (D17) and checks stock against the cart. The cart id
-     * hashes the booking data, so the same Sunday for two players is two
-     * lines (D3).
+     * validation (D17) and checks stock against the cart. 1.86.1: the line
+     * carries the account holder's name as added (v 2, no player key); the
+     * caller never adds a session already in the cart, so one session is
+     * one line.
      */
-    private static function add_line($key, $variation, $places, $player, $player_key) {
+    private static function add_line($key, $variation, $places, $holder) {
         $cart = self::cart();
         if (!$cart || !($variation instanceof WC_Product_Variation)) {
             return false;
@@ -1882,7 +1824,7 @@ class TeamOversight_Program_Booking {
                 intval($places),
                 $variation->get_id(),
                 $variation->get_variation_attributes(),
-                array(self::CART_KEY => array('program' => (string) $key, 'player' => (string) $player, 'player_key' => (string) $player_key, 'v' => 1))
+                array(self::CART_KEY => array('program' => (string) $key, 'player' => (string) $holder, 'v' => self::BOOKING_V))
             );
         } catch (Exception $e) {
             return false;
@@ -1890,10 +1832,12 @@ class TeamOversight_Program_Booking {
         return is_string($cart_key) && $cart_key !== '';
     }
 
-    /** Design 7.2: Remove all for one player (player_ref), or every line of a program that asks no player (none, C19). */
-    private static function remove_player($key, array $post, $user_id) {
-        $setup = TeamOversight_Program_Setup::get($key);
-        $player_program = $setup['player_name'] === 'required';
+    /**
+     * Design 7.2: Remove all, every line of one program in the cart (1.86.1:
+     * one player per account, so no player reference; a Remove all form
+     * from 1.86.0 carries the old nonce and reads as expired).
+     */
+    private static function remove_all($key, array $post, $user_id) {
         $result = array('ok' => false, 'added' => 0, 'skipped' => array(), 'message' => '', 'redirect' => wc_get_cart_url());
         $referer = wp_get_referer();
         if (is_string($referer) && $referer !== '') {
@@ -1904,22 +1848,13 @@ class TeamOversight_Program_Booking {
                 }
             }
         }
-        $ref = self::posted($post, 'player_ref');
-        $ok_ref = $player_program ? preg_match('/^[0-9a-f]{16}$/D', $ref) === 1 : $ref === 'none';
-        if (!$ok_ref || !wp_verify_nonce(self::posted($post, self::NONCE_FIELD), self::REMOVE_NONCE_PREFIX . $key . '_' . $ref)) {
+        if (!wp_verify_nonce(self::posted($post, self::NONCE_FIELD), self::REMOVE_NONCE_PREFIX . $key)) {
             $result['message'] = 'This page has expired. Reload it and try again.';
             wc_add_notice(esc_html($result['message']), 'error');
             return $result;
         }
         $cart = self::cart();
-        $remove = array();
-        $who = '';
-        foreach (self::cart_lines($key) as $cart_key => $line) {
-            if ($ref === 'none' || hash_equals($line['ref'], $ref)) {
-                $remove[] = $cart_key;
-                $who = $line['player'];
-            }
-        }
+        $remove = array_keys(self::cart_lines($key));
         if (empty($remove)) {
             $result['message'] = 'Nothing to remove.';
             wc_add_notice(esc_html($result['message']), 'notice');
@@ -1931,7 +1866,7 @@ class TeamOversight_Program_Booking {
         $unit = self::unit_words($key);
         $n = count($remove);
         $result['ok'] = true;
-        $result['message'] = 'Removed ' . $n . ' ' . ($n === 1 ? $unit[0] : $unit[1]) . ($who !== '' ? ' for ' . $who : ' of ' . self::program_name($key)) . '.';
+        $result['message'] = 'Removed ' . $n . ' ' . ($n === 1 ? $unit[0] : $unit[1]) . ' of ' . self::program_name($key) . '.';
         wc_add_notice(esc_html($result['message']), 'success');
         return $result;
     }
@@ -1987,7 +1922,7 @@ class TeamOversight_Program_Booking {
         return $label !== '' ? $label : $product->get_name();
     }
 
-    /** program key => the number of its counted lines (4.7.1: distinct session-player pairs, or sessions). */
+    /** program key => the number of its counted lines (4.7.1: distinct sessions; 1.86.1: one player per account). */
     private static function program_counts(array $items) {
         $pairs = array();
         foreach ($items as $item) {
@@ -1995,9 +1930,7 @@ class TeamOversight_Program_Booking {
             if ($key === '') {
                 continue;
             }
-            $booking = self::booking_data($item);
-            $pair = intval($item['variation_id']) . (TeamOversight_Program_Setup::get($key)['player_name'] === 'required' ? '|' . $booking['player_key'] : '');
-            $pairs[$key][$pair] = true;
+            $pairs[$key][intval($item['variation_id'])] = true;
         }
         $counts = array();
         foreach ($pairs as $key => $set) {
@@ -2020,9 +1953,10 @@ class TeamOversight_Program_Booking {
     /**
      * woocommerce_check_cart_items, priority 0 (before WooCommerce's own
      * checks): each program line that lost its booking data, is no longer
-     * on sale, closed, was cancelled, passed its cut-off, is already booked
-     * for that player (another order, finding 2) or sits twice in the cart
-     * is taken out with a notice naming it; places above the program's
+     * on sale, closed, was cancelled, passed its cut-off, sits twice in the
+     * cart (1.86.1: one line per session for the account) or, where a
+     * booking is one place, is already in another order of this account
+     * (finding 2) is taken out with a notice naming it; places above the program's
      * places per booking are set back; a session short of places loses
      * lines from the last added until it fits. Then, per program touched,
      * the new discount. Without this one full session would block the
@@ -2054,11 +1988,9 @@ class TeamOversight_Program_Booking {
             $product = (isset($item['data']) && $item['data'] instanceof WC_Product) ? $item['data'] : wc_get_product($vid > 0 ? $vid : $pid);
             $label = self::product_label($product);
             $booking = self::booking_data($item);
-            $for = ($booking !== null && $booking['player'] !== '') ? ' for ' . $booking['player'] : '';
             $reason = '';
             if ($booking === null || $key === '' || $booking['program'] !== $key) {
                 $reason = 'book sessions on the Book page';
-                $for = '';
             } elseif ($role === 'stop') {
                 $reason = 'no longer on sale';
             } else {
@@ -2071,18 +2003,19 @@ class TeamOversight_Program_Booking {
                     $reason = 'bookings have closed';
                 }
             }
-            if ($reason === '' && TeamOversight_Program_Setup::get($key)['player_name'] === 'required') {
-                $pair = $vid . '|' . $booking['player_key'];
-                if (isset($seen[$pair])) {
+            // 1.86.1: one player per account. A second line of one session goes; where a booking is
+            // one place, so does a session this account already holds in another order.
+            if ($reason === '') {
+                if (isset($seen[$vid])) {
                     $reason = 'already in your cart';
                 } else {
-                    $seen[$pair] = true;
-                    if ($user_id > 0) {
+                    $seen[$vid] = true;
+                    if ($user_id > 0 && intval(TeamOversight_Program_Setup::get($key)['max_places']) === 1) {
                         if (!isset($lines_by_key[$key])) {
                             $lines_by_key[$key] = self::account_lines($key, $user_id);
                         }
                         foreach ($lines_by_key[$key] as $line) {
-                            if ($line['variation_id'] !== $vid || $line['player_key'] !== $booking['player_key'] || $line['order_id'] === $retry) {
+                            if ($line['variation_id'] !== $vid || $line['order_id'] === $retry) {
                                 continue;
                             }
                             $reason = $line['state'] === 'paid' ? 'already booked' : 'already in an unpaid order: pay or cancel it in My account';
@@ -2095,7 +2028,7 @@ class TeamOversight_Program_Booking {
             }
             if ($reason !== '') {
                 $cart->remove_cart_item($cart_key);
-                wc_add_notice(esc_html('Removed ' . $label . $for . ': ' . $reason . '.'), 'error');
+                wc_add_notice(esc_html('Removed ' . $label . ': ' . $reason . '.'), 'error');
                 if ($key !== '') {
                     $touched[$key] = true;
                 }
@@ -2130,10 +2063,9 @@ class TeamOversight_Program_Booking {
             while ($sum > $limit && !empty($keys)) {
                 $cart_key = array_pop($keys);
                 $line = $cart->get_cart_item($cart_key);
-                $booking = self::booking_data($line);
                 $sum -= isset($line['quantity']) ? intval($line['quantity']) : 0;
                 $cart->remove_cart_item($cart_key);
-                wc_add_notice(esc_html('Removed ' . self::product_label($product) . ($booking !== null && $booking['player'] !== '' ? ' for ' . $booking['player'] : '') . ': now full.'), 'error');
+                wc_add_notice(esc_html('Removed ' . self::product_label($product) . ': now full.'), 'error');
                 $touched[self::key_of_product($vid)] = true;
             }
         }
@@ -2179,8 +2111,8 @@ class TeamOversight_Program_Booking {
         $key = self::key_of_product($pid);
         self::$session_removed[] = array(
             'key' => $key,
-            'text' => 'Removed ' . self::product_label($product) . (($booking !== null && $booking['player'] !== '') ? ' for ' . $booking['player'] : '') . ': ' . $reason . '.',
-            'pair' => $vid . (($booking !== null && $key !== '' && TeamOversight_Program_Setup::get($key)['player_name'] === 'required') ? '|' . $booking['player_key'] : ''),
+            'text' => 'Removed ' . self::product_label($product) . ': ' . $reason . '.',
+            'pair' => (string) $vid,
             'booked' => $booking !== null && $booking['program'] === $key,
         );
         return true;
@@ -2320,15 +2252,26 @@ class TeamOversight_Program_Booking {
         return '<del>' . wc_price($tier['full_cents'] / 100) . '</del> <ins>' . wc_price($each / 100) . '</ins>';
     }
 
-    /** woocommerce_get_item_data: "Player" and "Multi-session discount: 28% off (34 sessions)" under a line (C30). */
+    /**
+     * woocommerce_get_item_data: "Player" and "Multi-session discount: 28%
+     * off (34 sessions)" under a line (C30). 1.86.1: Player is the account
+     * holder's name as it is now (what checkout records), else the name
+     * the line was added with.
+     */
     public static function item_data($data, $cart_item) {
         if (!is_array($cart_item) || !isset($cart_item[self::CART_KEY])) {
             return $data;
         }
         $data = is_array($data) ? $data : array();
         $booking = self::booking_data($cart_item);
-        if ($booking !== null && $booking['player'] !== '') {
-            $data[] = array('key' => self::META_PLAYER, 'value' => esc_html($booking['player']));
+        if ($booking !== null) {
+            $who = self::holder_name(get_current_user_id());
+            if ($who === '') {
+                $who = $booking['player'];
+            }
+            if ($who !== '') {
+                $data[] = array('key' => self::META_PLAYER, 'value' => esc_html($who));
+            }
         }
         $tier = self::line_tier($cart_item);
         if ($tier !== null && $tier['pct'] > 0 && self::program_key_of_line($cart_item) !== '') {
@@ -2381,11 +2324,11 @@ class TeamOversight_Program_Booking {
 
     /**
      * Design 7.2: the Your bookings box as HTML ('' when the cart holds no
-     * program line): per program, per player (or "You" where no player is
-     * asked) the count, first and last dates, the time when the program
-     * has more than one, the discount and a Remove all form carrying the
-     * player's ref, never the name; then the program's nudge and a Book
-     * more link.
+     * program line): per program one row, "You" (1.86.1: every booking is
+     * the account holder's), with the count, first and last dates, the
+     * time when the program has more than one, the discount and a Remove
+     * all form (no name in it); then the program's nudge and a Book more
+     * link.
      */
     public static function bookings_box() {
         $lines = self::cart_lines();
@@ -2401,7 +2344,6 @@ class TeamOversight_Program_Booking {
             $setup = TeamOversight_Program_Setup::get($key);
             $unit = self::unit_words($key);
             $year = self::season_year($key);
-            $player_program = $setup['player_name'] === 'required';
             $counts = self::program_counts(self::cart_items_of($plines));
             $count = isset($counts[$key]) ? $counts[$key] : count($plines);
             $pct = self::tier_for($key, $count);
@@ -2410,42 +2352,33 @@ class TeamOversight_Program_Booking {
                 $times[$line['slot'] . '-' . $line['end']] = true;
             }
             $multi = count($times) > 1;
-            $people = array();
-            foreach ($plines as $line) {
-                $ref = $player_program ? $line['ref'] : 'none';
-                $people[$ref][] = $line;
-            }
-            $out .= '<h4>' . esc_html(self::program_name($key) . ($year > 0 ? ' ' . $year : '')) . '</h4><ul>';
-            foreach ($people as $ref => $plist) {
-                usort($plist, function ($a, $b) {
-                    $c = strcmp($a['date'], $b['date']);
-                    return $c !== 0 ? $c : strcmp($a['slot'], $b['slot']);
-                });
-                $n = count($plist);
-                $first = $plist[0];
-                $last = $plist[$n - 1];
-                $who = $player_program ? $first['player'] : 'You';
-                $dates = TeamOversight_Program_Sessions::short_date($first['date']) . ($first['date'] !== $last['date'] ? ' to ' . TeamOversight_Program_Sessions::short_date($last['date']) : '');
-                $time = '';
-                if ($multi) {
-                    $own = array();
-                    foreach ($plist as $line) {
-                        $own[self::group_label($line['slot'], $line['end'])] = true;
-                    }
-                    $time = implode(', ', array_keys($own));
+            $plist = array_values($plines);
+            usort($plist, function ($a, $b) {
+                $c = strcmp($a['date'], $b['date']);
+                return $c !== 0 ? $c : strcmp($a['slot'], $b['slot']);
+            });
+            $n = count($plist);
+            $first = $plist[0];
+            $last = $plist[$n - 1];
+            $dates = TeamOversight_Program_Sessions::short_date($first['date']) . ($first['date'] !== $last['date'] ? ' to ' . TeamOversight_Program_Sessions::short_date($last['date']) : '');
+            $time = '';
+            if ($multi) {
+                $own = array();
+                foreach ($plist as $line) {
+                    $own[self::group_label($line['slot'], $line['end'])] = true;
                 }
-                $out .= '<li><strong>' . esc_html($who) . '</strong> <span>' . esc_html($n . ' ' . ($n === 1 ? $unit[0] : $unit[1])) . '</span>'
-                    . ($time !== '' ? ' <span>' . esc_html($time) . '</span>' : '')
-                    . ' <span>' . esc_html($dates) . '</span>'
-                    . ($pct > 0 ? ' <span>' . esc_html($pct . '% off (' . $count . ' ' . ($count === 1 ? $unit[0] : $unit[1]) . ' in the cart)') . '</span>' : '')
-                    . ' <form method="post" action="' . esc_url(wc_get_cart_url()) . '">'
-                    . '<input type="hidden" name="' . self::ACTION_FIELD . '" value="remove">'
-                    . '<input type="hidden" name="program" value="' . esc_attr($key) . '">'
-                    . '<input type="hidden" name="player_ref" value="' . esc_attr($ref) . '">'
-                    . wp_nonce_field(self::REMOVE_NONCE_PREFIX . $key . '_' . $ref, self::NONCE_FIELD, false, false)
-                    . '<button type="submit" class="button">' . esc_html('Remove all' . ($player_program ? ' for ' . $who : '')) . '</button></form></li>';
+                $time = implode(', ', array_keys($own));
             }
-            $out .= '</ul>';
+            $out .= '<h4>' . esc_html(self::program_name($key) . ($year > 0 ? ' ' . $year : '')) . '</h4><ul>'
+                . '<li><strong>You</strong> <span>' . esc_html($n . ' ' . ($n === 1 ? $unit[0] : $unit[1])) . '</span>'
+                . ($time !== '' ? ' <span>' . esc_html($time) . '</span>' : '')
+                . ' <span>' . esc_html($dates) . '</span>'
+                . ($pct > 0 ? ' <span>' . esc_html($pct . '% off (' . $count . ' ' . ($count === 1 ? $unit[0] : $unit[1]) . ' in the cart)') . '</span>' : '')
+                . ' <form method="post" action="' . esc_url(wc_get_cart_url()) . '">'
+                . '<input type="hidden" name="' . self::ACTION_FIELD . '" value="remove">'
+                . '<input type="hidden" name="program" value="' . esc_attr($key) . '">'
+                . wp_nonce_field(self::REMOVE_NONCE_PREFIX . $key, self::NONCE_FIELD, false, false)
+                . '<button type="submit" class="button">Remove all</button></form></li></ul>';
             $cents = wp_list_pluck($plines, 'full_cents');
             $open = 0;
             foreach (self::listed_sessions($key) as $row) {
@@ -2509,10 +2442,12 @@ class TeamOversight_Program_Booking {
     /**
      * woocommerce_checkout_create_order_line_item: a session line gets its
      * session date, slot and end (D8: history survives a later change of
-     * the variation); a booked line also gets its program, player, full
-     * price and tier (3.8) and, with a tier, the visible discount. The
-     * tiers in force are kept on the order once per program (finding 5),
-     * so a withdrawal is priced by the rule the family booked under.
+     * the variation); a booked line also gets its program, Player (1.86.1:
+     * the account holder's name as it is at checkout; no player key, so
+     * history and every check key on the account), full price and tier
+     * (3.8) and, with a tier, the visible discount. The tiers in force are
+     * kept on the order once per program (finding 5), so a withdrawal is
+     * priced by the rule the family booked under.
      */
     public static function order_line_meta($item, $cart_item_key, $values, $order) {
         if (!($item instanceof WC_Order_Item_Product)) {
@@ -2537,11 +2472,13 @@ class TeamOversight_Program_Booking {
         $booking = self::booking_data($values);
         $key = $booking['program'];
         $item->add_meta_data(self::META_PROGRAM, $key, true);
-        if ($booking['player'] !== '') {
-            $item->add_meta_data(self::META_PLAYER, $booking['player'], true);
+        $customer = ($order instanceof WC_Order) ? intval($order->get_customer_id()) : 0;
+        $who = self::holder_name($customer > 0 ? $customer : get_current_user_id());
+        if ($who === '') {
+            $who = $booking['player'];
         }
-        if ($booking['player_key'] !== '') {
-            $item->add_meta_data(self::META_PLAYER_KEY, $booking['player_key'], true);
+        if ($who !== '') {
+            $item->add_meta_data(self::META_PLAYER, $who, true);
         }
         $tier = self::line_tier($values);
         if ($tier === null || $tier['full_cents'] <= 0) {
@@ -2625,9 +2562,9 @@ class TeamOversight_Program_Booking {
      * '' when an order's session lines may still be paid, else one
      * sentence naming the first that can't: a session no longer on sale,
      * closed, cancelled by the club, past its booking cut-off, or (where a
-     * player is asked) already booked for that player in another paid
-     * order of the same customer. Orders with no session line are ''.
-     * Cached per order for the request (flush_cache()).
+     * booking is one place; 1.86.1: one player per account) already in
+     * another paid order of the same customer. Orders with no session line
+     * are ''. Cached per order for the request (flush_cache()).
      */
     public static function pay_problem($order) {
         if (!($order instanceof WC_Order)) {
@@ -2638,7 +2575,7 @@ class TeamOversight_Program_Booking {
             return self::$pay_cache[$order_id];
         }
         $problem = '';
-        $player_lines = array();
+        $held_lines = array();
         foreach ($order->get_items() as $item) {
             if (!($item instanceof WC_Order_Item_Product)) {
                 continue;
@@ -2651,8 +2588,10 @@ class TeamOversight_Program_Booking {
             }
             $date = self::line_session_date($item);
             $label = $date !== '' ? TeamOversight_Program_Sessions::date_label($date) : $item->get_name();
+            // A 1.86.0 line naming a typed player (it carries a player key) says who; the holder's own lines don't.
             $player = trim((string) $item->get_meta(self::META_PLAYER, true));
-            $about = $label . ($player !== '' ? ' for ' . $player : '');
+            $named = $player !== '' && (string) $item->get_meta(self::META_PLAYER_KEY, true) !== '';
+            $about = $label . ($named ? ' for ' . $player : '');
             $variation = $vid > 0 ? wc_get_product($vid) : null;
             $key = self::key_of_product($pid);
             $reason = '';
@@ -2679,20 +2618,16 @@ class TeamOversight_Program_Booking {
                 $problem = 'This order can\'t be paid now: ' . $about . ' ' . $reason . '. Book again on the Book page.';
                 break;
             }
-            $player_key = (string) $item->get_meta(self::META_PLAYER_KEY, true);
-            if ($player_key === '' && $player !== '') {
-                $player_key = self::player_key($player);
-            }
-            if ($player_key !== '' && TeamOversight_Program_Setup::get($key)['player_name'] === 'required') {
-                $player_lines[] = array('key' => $key, 'vid' => $vid, 'player_key' => $player_key, 'about' => $about);
+            // 1.86.1: one player per account; where a booking is one place, a session held in another paid order can't be paid twice.
+            if (intval(TeamOversight_Program_Setup::get($key)['max_places']) === 1) {
+                $held_lines[] = array('key' => $key, 'vid' => $vid, 'about' => $about);
             }
         }
         $customer = intval($order->get_customer_id());
-        if ($problem === '' && !empty($player_lines) && $customer > 0) {
-            foreach ($player_lines as $mine) {
+        if ($problem === '' && !empty($held_lines) && $customer > 0) {
+            foreach ($held_lines as $mine) {
                 foreach (self::account_lines($mine['key'], $customer) as $line) {
-                    if ($line['state'] === 'paid' && $line['order_id'] !== $order_id
-                        && $line['variation_id'] === $mine['vid'] && $line['player_key'] === $mine['player_key']) {
+                    if ($line['state'] === 'paid' && $line['order_id'] !== $order_id && $line['variation_id'] === $mine['vid']) {
                         $problem = 'This order can\'t be paid now: ' . $mine['about'] . ' is already booked in another order. Book again on the Book page.';
                         break 2;
                     }
@@ -3018,9 +2953,10 @@ class TeamOversight_Program_Booking {
 
     /**
      * The refund helper box (read only): per program, what its lines cost
-     * (the club-cancel figure) and, per player (or the whole program where
-     * no player is asked), what to refund if they stop after each of their
-     * dates (4.9.3). Names are the order's own (the committee's screen).
+     * (the club-cancel figure) and, per name on the lines (the account
+     * holder's, 1.86.1; a 1.86.0 line's typed player apart; the whole
+     * program for lines with none), what to refund if they stop after each
+     * of their dates (4.9.3). Names are the order's own (the committee's screen).
      */
     public static function render_refund_box($post_or_order) {
         if (!current_user_can('manage_options')) {

@@ -2325,14 +2325,22 @@ class TeamOversight_Programs {
         return $cards;
     }
 
+    /** A name for comparing: entities decoded, trimmed, spaces squeezed, lowercased. */
+    private static function name_key($name) {
+        $name = trim(preg_replace('/\s+/u', ' ', html_entity_decode((string) $name, ENT_QUOTES, 'UTF-8')));
+        return function_exists('mb_strtolower') ? mb_strtolower($name, 'UTF-8') : strtolower($name);
+    }
+
     /**
      * The roll of a program selling dated sessions (design 4.12): a picker
      * of session dates (one Tuesday is one entry), a slot filter when the
-     * date has more than one slot, one card per order line (siblings and
-     * both slots of a night separate) with the player's name and "Booked
-     * by", a cancelled session's Refund due / Refunded chips (B12), per-line
-     * ticks, and Earlier seasons: the program's date-label products, each
-     * with today's legacy roll (B13).
+     * date has more than one slot, one card per order line (both slots of a
+     * night separate) with the name on the booking (1.86.1: the account
+     * holder's, as the line recorded it at checkout; "Booked by" the
+     * account only when a 1.86.0 line names someone else), a cancelled
+     * session's Refund due / Refunded chips (B12), per-line ticks, and
+     * Earlier seasons: the program's date-label products, each with today's
+     * legacy roll (B13).
      */
     private static function render_dated_roster($program, $key, $selected_date, $base_url, $options) {
         $pid = intval($program['product_id']);
@@ -2522,6 +2530,8 @@ class TeamOversight_Programs {
                     $prior = $card['prior'];
                     $is_first = ($prior === 0 && $card['refund_state'] !== 'full');
                     $shown_name = $card['player'] !== '' ? $card['player'] : $card['name'];
+                    // The holder's own line (its Player is the account's name) needs no "Booked by".
+                    $booked_by = $card['player'] !== '' && self::name_key($card['player']) !== self::name_key($card['name']);
                     ?>
                     <div class="coach-applicant-card<?php echo $is_first ? ' murvc-first-timer' : ''; ?><?php echo !empty($card['attended']) ? ' murvc-attended' : ''; ?>"
                          data-item="<?php echo intval($card['order_item_id']); ?>"
@@ -2554,7 +2564,7 @@ class TeamOversight_Programs {
                             </span>
                         </div>
                         <div class="cac-meta">
-                            <?php if ($card['player'] !== ''): ?>
+                            <?php if ($booked_by): ?>
                                 Booked by <?php echo esc_html($card['name']); ?> &middot;
                             <?php endif; ?>
                             <?php if ($card['email']): ?>
