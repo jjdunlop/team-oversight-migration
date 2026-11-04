@@ -974,8 +974,8 @@ class TeamOversight_Fees {
      * failed (the next run resumes). States: skipped (not a 2027+ season,
      * no query), already (its before-copy entry is finished: nothing read
      * or written), nothing (also a season an earlier run split whose flag and
-     * before-copy entry are gone: JPL or YSL rows, no active JPL/YSL data and
-     * an inactive JPL/YSL fee row; split_earlier true), refused (reason
+     * before-copy entry are gone: JPL or YSL rows, no active JPL/YSL fee row
+     * or limit, an inactive JPL/YSL fee row; split_earlier true), refused (reason
      * released, invoiced, conflict or duplicate; nothing written), converted.
      * In order: the refusal (a fresh
      * run only), the before-copy, JPL and YSL fee rows and upper limits
@@ -1093,12 +1093,14 @@ class TeamOversight_Fees {
             return self::finish_season_jpl_ysl($season, $resume, $counts);
         }
 
-        // Split already: JPL or YSL data, nothing JPL/YSL left, and the JPL/YSL
-        // fee rows an earlier run took out (inactive). That run's flag and
-        // before-copy entry are gone (deleted by hand, or a restore that put
-        // no rows back), so this is not a conflict: refusing would put the
-        // season back on a JPL/YSL row that no longer exists. Nothing to do.
-        if (!$resume && !$has_old) {
+        // Split already: JPL or YSL data, no active JPL/YSL fee row or limit,
+        // and the JPL/YSL fee rows an earlier run took out (inactive). That
+        // run's flag and before-copy entry are gone (deleted by hand, or a
+        // restore that put no rows back), so this is not a conflict: refusing
+        // would put the season back on a JPL/YSL row that no longer exists.
+        // An offer quote or a bucket still JPL/YSL is one that run left (its
+        // team has no type) and prices the same. Nothing to do.
+        if (!$resume && $has_new && empty($old_rows) && empty($old_limits)) {
             $retired = $wpdb->get_var($wpdb->prepare(
                 "SELECT COUNT(*) FROM {$p}fee_matrix WHERE season = %s AND fee_class = %s AND is_active = 0",
                 $season, self::CLASS_JPL_YSL
