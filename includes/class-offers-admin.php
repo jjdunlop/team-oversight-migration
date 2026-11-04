@@ -1605,7 +1605,7 @@ class TeamOversight_Offers_Admin {
                 echo self::cover_chip($live_cover);
                 if (!TeamOversight_Fee_Cover::same(TeamOversight_Fee_Cover::stored_cover($offer), $live_cover)) {
                     $invoice = TeamOversight_Offers::invoice_for($offer);
-                    $credit = $invoice ? max(0.0, -floatval($invoice->outstanding_amount)) : 0.0;
+                    $credit = $invoice ? max(0.0, TeamOversight_Payments::get_ledger_paid($invoice->id) - floatval($invoice->invoice_amount)) : 0.0;
                     echo '<br><span class="mo-amber mo-small">Cover changed after lock-in (' . self::h($live_cover ? 'fee covered: ' . $live_cover['reason'] : 'fee cover ended') . '): their fee follows it. Anything paid above the fee shows as credit on Payment Management.'
                         . ($credit >= 0.01 ? ' In credit now: ' . self::h(TeamOversight_Offers::money($credit)) . '.' : '') . '</span>';
                 }
