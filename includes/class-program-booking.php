@@ -1162,9 +1162,13 @@ class TeamOversight_Program_Booking {
     /**
      * The logged-in Book page (7.1.2, 7.1.4). 1.86.1: every booking is for
      * the account holder, so the page is drawn for the account: above the
-     * Add button it says who the booking is for, with a required tick and a
-     * link to change the account's name; an account with no first or last
-     * name is asked to add them and gets no Add form.
+     * list it says who the booking is for, with a required tick and a link
+     * to change the account's name, then the running total, the nudge and an
+     * Add button; below the list the total, the nudge and the Add button come
+     * again (both buttons send the one form, so the tick is checked from
+     * either). An account with no first or last name is asked to add them
+     * and gets no Add form. The time and places form is drawn only when there
+     * is something to choose (two or more times, or more than one place).
      */
     private static function render_member($key, array $setup, array $rows, array $groups, array $unit) {
         $user_id = get_current_user_id();
@@ -1244,27 +1248,36 @@ class TeamOversight_Program_Booking {
         // An account with no first or last name can see the sessions but not tick them.
         $can_tick = $holder !== '';
 
-        // Choose: time and places (a GET form; a name never goes in it).
-        $out .= '<form method="get" action="' . esc_url($url) . '" class="murvc-book-choose" id="murvc-book-choose">' . self::url_hidden_fields($url);
-        if (count($groups) > 1) {
-            $out .= '<fieldset><legend>Time</legend>';
-            foreach ($groups as $group => $label) {
-                $out .= '<label class="murvc-book-pick"><input type="radio" name="time" value="' . esc_attr($group) . '"' . checked($view['time'], $group, false) . '> ' . esc_html($label) . '</label> ';
+        // Choose: time and places (a GET form; a name never goes in it), drawn only when there is
+        // something to choose: two or more times, or more than one place per booking. With one time
+        // and one place there is no form: the time is plain text and the list below is already that
+        // time's. The script sends the form as soon as a time or the places change and hides its Show
+        // button, which stays for a browser without JavaScript.
+        $choose_time = count($groups) > 1;
+        if (!empty($rows) && ($choose_time || $max_places > 1)) {
+            $out .= '<form method="get" action="' . esc_url($url) . '" class="murvc-book-choose" id="murvc-book-choose">' . self::url_hidden_fields($url);
+            if ($choose_time) {
+                $out .= '<fieldset><legend>Time</legend>';
+                foreach ($groups as $group => $label) {
+                    $out .= '<label class="murvc-book-pick"><input type="radio" name="time" value="' . esc_attr($group) . '"' . checked($view['time'], $group, false) . '> ' . esc_html($label) . '</label> ';
+                }
+                $out .= '</fieldset>';
+            } elseif ($view['time'] !== '') {
+                $out .= '<input type="hidden" name="time" value="' . esc_attr($view['time']) . '"><p class="murvc-book-times">' . esc_html($groups[$view['time']]) . '</p>';
             }
-            $out .= '</fieldset>';
+            if ($max_places > 1) {
+                $out .= '<p><label>Places <input type="number" name="places" min="1" max="' . $max_places . '" value="' . intval($view['places']) . '" style="width: 70px;"></label> '
+                    . '<span class="murvc-book-note">' . esc_html('(you plus up to ' . ($max_places - 1) . ' guest' . ($max_places - 1 === 1 ? '' : 's') . ')') . '</span></p>';
+            }
+            foreach (array('range', 'from', 'to') as $carry) {
+                if ($view[$carry] !== '') {
+                    $out .= '<input type="hidden" name="' . $carry . '" value="' . esc_attr($view[$carry]) . '">';
+                }
+            }
+            $out .= '<p class="murvc-book-show"><button type="submit" class="button murvc-book-secondary">Show ' . esc_html($unit[1]) . '</button></p></form>';
         } elseif ($view['time'] !== '') {
-            $out .= '<input type="hidden" name="time" value="' . esc_attr($view['time']) . '"><p class="murvc-book-times">' . esc_html($groups[$view['time']]) . '</p>';
+            $out .= '<p class="murvc-book-times">' . esc_html($groups[$view['time']]) . '</p>';
         }
-        if ($max_places > 1) {
-            $out .= '<p><label>Places <input type="number" name="places" min="1" max="' . $max_places . '" value="' . intval($view['places']) . '" style="width: 70px;"></label> '
-                . '<span class="murvc-book-note">' . esc_html('(you plus up to ' . ($max_places - 1) . ' guest' . ($max_places - 1 === 1 ? '' : 's') . ')') . '</span></p>';
-        }
-        foreach (array('range', 'from', 'to') as $carry) {
-            if ($view[$carry] !== '') {
-                $out .= '<input type="hidden" name="' . $carry . '" value="' . esc_attr($view[$carry]) . '">';
-            }
-        }
-        $out .= '<p><button type="submit" class="button murvc-book-secondary">Show ' . esc_html($unit[1]) . '</button></p></form>';
 
         // Already booked, awaiting payment, in the cart.
         if (!empty($mine['paid'])) {
@@ -1425,21 +1438,36 @@ class TeamOversight_Program_Booking {
             . ($view['to'] !== '' ? '<input type="hidden" name="to" value="' . esc_attr($view['to']) . '">' : '')
             . wp_nonce_field(self::NONCE_PREFIX . $key, self::NONCE_FIELD, false, false);
         // 1.86.1: who the booking is for (the account holder), a required tick, and where to change the name.
+        // Above the list (once, before the first Add button), then the total, the nudge and Add; below a
+        // long list the total, the nudge and Add again, with no second tick: both buttons send this one
+        // form, so a browser's required check at the bottom takes the member up to the tick.
         $guests = $max_places - 1;
         $confirm = 'These sessions are for ' . $holder . ', the name on this account'
             . ($guests > 0 ? ', and up to ' . $guests . ' guest' . ($guests === 1 ? '' : 's') : '') . '.';
         $change = 'Change the name on your account';
-        $out .= $list
-            . '<p class="murvc-book-total" aria-live="polite">' . esc_html($total) . '</p>'
-            . '<p class="murvc-book-nudge">' . esc_html($nudge) . '</p>'
-            . '<div class="murvc-book-for">'
+        $out .= '<div class="murvc-book-for">'
             . '<p class="murvc-book-holder"><strong>' . esc_html('Booking for ' . $holder) . '</strong></p>'
             . '<p><label><input type="checkbox" name="' . self::HOLDER_FIELD . '" value="1" required> ' . esc_html($confirm) . '</label></p>'
             . '<p class="murvc-book-note">Not the player? '
             . ($account_url !== '' ? '<a href="' . esc_url($account_url) . '">' . esc_html($change) . '</a>' : esc_html($change))
             . ' first.</p></div>'
-            . '<p><button type="submit" class="button murvc-book-submit">' . esc_html($button) . '</button></p></form>';
+            . self::summary_html($total, $nudge, $button, true)
+            . $list
+            . self::summary_html($total, $nudge, $button, false)
+            . '</form>';
         return $out . self::script();
+    }
+
+    /**
+     * The running total, the nudge and an Add button, drawn above and below
+     * the list inside the Add form (the script redraws every copy). Only the
+     * first total is a live region, so a screen reader hears it once.
+     */
+    private static function summary_html($total, $nudge, $button, $live) {
+        return '<div class="murvc-book-summary">'
+            . '<p class="murvc-book-total"' . ($live ? ' aria-live="polite"' : '') . '>' . esc_html($total) . '</p>'
+            . '<p class="murvc-book-nudge">' . esc_html($nudge) . '</p>'
+            . '<p><button type="submit" class="button murvc-book-submit">' . esc_html($button) . '</button></p></div>';
     }
 
     private static function styles() {
@@ -1465,6 +1493,10 @@ class TeamOversight_Program_Booking {
         .murvc-book .murvc-book-dates label { margin-right: 8px; }
         .murvc-book .murvc-book-for { border-top: 1px solid var(--mb-line); margin-top: 12px; padding-top: 8px; }
         .murvc-book .murvc-book-for p { margin: 0 0 6px; }
+        .murvc-book .murvc-book-summary { margin: 10px 0; }
+        .murvc-book .murvc-book-summary p { margin: 0 0 6px; }
+        .murvc-book .murvc-book-summary p:empty { margin: 0; }
+        .murvc-book [hidden] { display: none !important; }
         .murvc-book-box { border: 1px solid #dcdcde; border-radius: 6px; padding: 12px 16px; margin: 0 0 18px; }
         .murvc-book-box h3 { margin-top: 0; }
         .murvc-book-box ul { list-style: none; margin: 0 0 8px; padding: 0; }
@@ -1475,9 +1507,12 @@ class TeamOversight_Program_Booking {
     }
 
     /**
-     * The Book page's script, once: submits the Choose form on change, and
-     * redraws the total, the nudge and the button as dates are ticked with
-     * the same formula as totals() and nudge() (textContent only).
+     * The Book page's script, once: sends the Choose form (a GET, the same
+     * address its Show button gives) as soon as a time or the places change
+     * and hides that button, which a browser without JavaScript keeps; and
+     * redraws every total, nudge and Add button (above and below the list)
+     * as dates are ticked, with the same formula as totals() and nudge()
+     * (textContent only).
      */
     private static function script() {
         static $done = false;
@@ -1491,6 +1526,8 @@ class TeamOversight_Program_Booking {
                 choose.addEventListener("change", function (e) {
                     if (e.target && (e.target.type === "radio" || e.target.type === "number")) { choose.submit(); }
                 });
+                var show = choose.querySelector(".murvc-book-show");
+                if (show) { show.hidden = true; }
             }
             var form = document.getElementById("murvc-book-add");
             if (!form) { return; }
@@ -1500,9 +1537,10 @@ class TeamOversight_Program_Booking {
             var places = Math.max(1, parseInt(form.getAttribute("data-places") || "1", 10) || 1);
             var unit = (form.getAttribute("data-unit") || "session|sessions").split("|");
             var open = parseInt(form.getAttribute("data-open") || "0", 10) || 0;
-            var totalEl = form.querySelector(".murvc-book-total");
-            var nudgeEl = form.querySelector(".murvc-book-nudge");
-            var button = form.querySelector(".murvc-book-submit");
+            var totals = form.querySelectorAll(".murvc-book-total");
+            var nudges = form.querySelectorAll(".murvc-book-nudge");
+            var buttons = form.querySelectorAll(".murvc-book-submit");
+            function fill(list, text) { for (var j = 0; j < list.length; j++) { list[j].textContent = text; } }
             function pct(n) { var best = null, p = 0; tiers.forEach(function (t) { if (t[0] <= n && (best === null || t[0] > best)) { best = t[0]; p = t[1]; } }); return p; }
             function disc(c, p) { return Math.floor((c * (100 - p) + 50) / 100); }
             function money(c) {
@@ -1538,9 +1576,9 @@ class TeamOversight_Program_Booking {
                         + (same ? " at " + money(each[0]) + (places > 1 ? " a place" : "") : "") + " = " + money(total);
                     if (p > 0) { text += " (" + p + "% off" + (inCart.length > 0 ? " with the " + inCart.length + " already in your cart" : "") + ", you save " + money(full - total) + ")"; }
                 }
-                if (totalEl) { totalEl.textContent = text; }
-                if (nudgeEl) { nudgeEl.textContent = nudge(inCart.concat(ticked.map(function (c) { return [c, places]; })), Math.max(0, open - n)); }
-                if (button) { button.textContent = n > 0 ? "Add " + n + " " + word(n) + " to cart" : "Add the ticked " + unit[1] + " to cart"; }
+                fill(totals, text);
+                fill(nudges, nudge(inCart.concat(ticked.map(function (c) { return [c, places]; })), Math.max(0, open - n)));
+                fill(buttons, n > 0 ? "Add " + n + " " + word(n) + " to cart" : "Add the ticked " + unit[1] + " to cart");
             }
             form.addEventListener("change", redraw);
             form.addEventListener("input", redraw);
