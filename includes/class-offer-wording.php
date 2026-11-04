@@ -506,8 +506,30 @@ class TeamOversight_Offer_Wording {
             array_merge($season, $amount), 3);
         $c['cover_limit_note'] = self::item('cover', 'Covered, quoted on the supporter upper limit',
             'Under the opening sentence when the supporter fee wasn\'t entered yet, so the offer quotes the supporter upper limit (the covered wording has no Early Offer text).',
-            'The {season} supporter fee is set in {fee_month}. You pay {amount} now, the most it can be, and if it\'s set lower the club refunds the difference.',
+            'The {season} supporter fee is set in {fee_month}. You pay {amount} now, the most it can be. If it\'s set lower, the difference stays on your account as credit.',
             array_merge($season, $amount, array('{fee_month}' => 'the month fees are released, e.g. January')), 3);
+        // 1.88.0 review: the same note once fees are released, and for a player who has already paid (locked in).
+        $c['cover_limit_note_released'] = self::item('cover', 'Covered, quoted on the supporter upper limit (fees released)',
+            'The same, once the season\'s fees are released and before the player has paid.',
+            'You pay {amount} now, the most the {season} supporter fee can be. If the fee is lower, the difference stays on your account as credit.',
+            array_merge($season, $amount), 2);
+        $c['cover_limit_note_paid'] = self::item('cover', 'Covered and paid on the supporter upper limit',
+            'The "you\'re locked in" email and the locked-in offer page, when the player paid the supporter upper limit before the fee was set.',
+            'You paid {amount}, the most the {season} supporter fee can be. It is set in {fee_month}, and if it is lower the difference stays on your account as credit.',
+            array_merge($season, $amount, array('{fee_month}' => 'the month fees are released, e.g. January')), 2);
+        $c['cover_limit_note_paid_released'] = self::item('cover', 'Covered and paid on the supporter upper limit (fees released)',
+            'The same once the season\'s fees are released.',
+            'You paid {amount}, the most the {season} supporter fee could be. Anything you paid above the fee stays on your account as credit.',
+            array_merge($season, $amount), 2);
+        $c['terms_cover_title'] = self::item('cover', 'Covered offer: the heading of the supporter fee terms',
+            'The covered offer email, its reminders and the offer page, in place of the deposit list ("Your deposit and fee").',
+            'Your supporter fee', array(), 1);
+        $c['terms_cover_whole'] = self::item('cover', 'Covered offer terms: the supporter fee is the whole fee',
+            'The first line under that heading.',
+            'The club covers your {season} playing fee, so the supporter fee is all you pay for the season.', $season, 2);
+        $c['terms_cover_credit'] = self::item('cover', 'Covered offer terms: paying more than the supporter fee',
+            'The second line under that heading (the money policy line about pulling out follows it).',
+            'If you pay more than the supporter fee, the extra stays on your account as credit.', array(), 2);
         $c['cover_fee_words'] = self::item('cover', 'Covered: the fee as the player is told it',
             'The Fee row of the offer box (emails and offer page) for a covered offer.',
             '{amount}, the supporter fee (your playing fee is covered)', $amount, 1);
@@ -537,6 +559,22 @@ class TeamOversight_Offer_Wording {
         $c['email_cover_due_paid'] = self::item('email', 'Covered offer: the supporter fee is already paid',
             '{cover_due} for a covered player whose supporter fee for the season is already paid (an offer for a second team).',
             'You have already paid the {season} supporter fee, so accepting locks in your place straight away.', $season, 2);
+        // 1.88.0 review: the covered offer email's preview line (inbox previews show it), and the locked-in email's reason.
+        $c['email_cover_preheader'] = self::item('email', 'Covered offer: the preview line',
+            'The line inbox previews show for the covered offer email.',
+            'Accept by {reply_by} and pay the supporter fee by {deposit_due} to lock in your place.',
+            array('{reply_by}' => 'the reply-by date', '{deposit_due}' => 'the date the supporter fee is due'), 1);
+        $c['email_cover_preheader_paid'] = self::item('email', 'Covered offer: the preview line, supporter fee already paid',
+            'The same for an offer for a second team whose supporter fee is already paid.',
+            'Accept by {reply_by} to lock in your place. Your {season} supporter fee is already paid.',
+            array_merge(array('{reply_by}' => 'the reply-by date'), $season), 1);
+        $c['email_cover_why_mark'] = self::item('email', 'Covered and locked in: why (marked)',
+            '{cover_why} in the covered "you\'re locked in" email, for a player the committee marked.',
+            'The club is covering your {season} playing fee because you were named {reason}.',
+            array_merge($season, array('{reason}' => 'the reason, e.g. Premier League MVP 2026')), 2);
+        $c['email_cover_why_life'] = self::item('email', 'Covered and locked in: why (life member)',
+            'The same for a life member.',
+            'As a life member of the club, you don\'t pay a playing fee for {season}.', $season, 2);
         $c['email_cover_whole_fee'] = self::item('email', 'Covered offer: the payment is the whole fee',
             '{cover_settled} in the covered offer and locked-in emails, when the quote is the supporter fee itself.',
             'That payment is your whole {season} fee.', $season, 1);
@@ -564,7 +602,7 @@ class TeamOversight_Offer_Wording {
         $c['page_cover_pay_intro'] = self::item('page', 'Covered offer: under the pay box heading',
             'Under that heading when the quote is the supporter fee itself.', 'It is one payment, and it is your whole {season} fee.', $season, 1);
         $c['page_cover_pay_intro_limit'] = self::item('page', 'Covered offer: under the pay box heading (supporter upper limit)',
-            'Under that heading when the quote is the supporter upper limit.', 'It is one payment. If the {season} supporter fee is set lower, the club refunds the difference.', $season, 2);
+            'Under that heading when the quote is the supporter upper limit.', 'It is one payment. If the {season} supporter fee is set lower, the difference stays on your account as credit.', $season, 2);
         $c['page_cover_paid'] = self::item('page', 'Covered offer: the supporter fee is paid',
             'The pay box once the supporter fee is paid in full.',
             '**The supporter fee of {deposit} is paid.** The club is confirming your place and will email you when you are locked in.', $deposit, 2);
@@ -580,7 +618,7 @@ class TeamOversight_Offer_Wording {
             'You are locked in for {team}. The {paid} you paid is your whole {season} fee.', array_merge($team_vars, array('{paid}' => 'what they paid'), $season), 2);
         $c['stage_cover_locked_limit'] = self::item('page', 'Covered and locked in: paid the supporter upper limit',
             'The same when they paid the supporter upper limit because the supporter fee wasn\'t set yet.',
-            'You are locked in for {team}. You paid {paid}, the most the {season} supporter fee can be. It is set in {fee_month}, and if it is lower the club refunds the difference.',
+            'You are locked in for {team}. You paid {paid}, the most the {season} supporter fee can be. It is set in {fee_month}, and if it is lower the difference stays on your account as credit.',
             array_merge($team_vars, array('{paid}' => 'what they paid'), $season, array('{fee_month}' => 'the month fees are released, e.g. January')), 3);
         $c['checklist_cover_title'] = self::item('page', 'Player Checklist: the covered pay step\'s title',
             'The Player Checklist once a covered offer is accepted.', 'Pay the supporter fee to lock in your place', array(), 1);
@@ -593,6 +631,28 @@ class TeamOversight_Offer_Wording {
         $c['page_changed_by_club'] = self::item('page', 'Accepting after the club changed the offer',
             'The answer to Accept when the club changed the offer (its fee cover) after the player opened the page.',
             'The club changed your offer after you opened this page. Your deposit is now {deposit}. Check it and accept again.', $deposit, 2);
+        // 1.88.0 review: a covered player's pages say "supporter fee" wherever an ordinary offer says "deposit".
+        $c['page_changed_by_club_cover'] = self::item('page', 'Accepting after the club changed the offer (covered)',
+            'The same answer when the changed offer is a covered one.',
+            'The club changed your offer after you opened this page. The supporter fee to pay is now {deposit}. Check it and accept again.', $deposit, 2);
+        $c['page_cover_accepted_checklist'] = self::item('page', 'Covered offer accepted: the Player Checklist is ready',
+            'Under an accepted covered offer, above the Go to your Player Checklist button.',
+            '**Your Player Checklist is ready now.** It lists what you need to do before the season, like your registration and your kit, and you can tick things off there as you go. Your place is confirmed once the supporter fee is paid.', array(), 3);
+        $c['page_cover_late'] = self::item('page', 'Covered offer: the supporter fee date has passed',
+            'The pay box of a covered offer when the date is behind.',
+            'The supporter fee was due on {date}. Please pay it as soon as you can, or talk to your coach.', array('{date}' => 'the date it was due'), 2);
+        $c['page_cover_terms_summary'] = self::item('page', 'Covered offer: the commitments link',
+            'The fold-out under an accepted or locked-in covered offer (an ordinary offer reads "The commitments and the deposit policy").',
+            'The commitments and the supporter fee', array(), 1);
+        $c['page_cover_changed_locked'] = self::item('page', 'Locked in, then the fee cover changed',
+            'The offer page of a player who was locked in before the club started or stopped covering their playing fee, in place of the old fee and cover lines.',
+            'Your {season} fee changed after you locked in. Your Player Checklist shows your fee now.', $season, 2);
+        $c['checklist_cover_accepted'] = self::item('page', 'Player Checklist: accepted a covered offer, supporter fee still to pay',
+            'The top of the Player Checklist for a covered player who has accepted and not yet paid the supporter fee.',
+            '**You\'ve accepted a place with {team}.** Pay the supporter fee to lock it in. Until then your place isn\'t confirmed.', $team_vars, 2);
+        $c['checklist_cover_link'] = self::item('page', 'Player Checklist: the covered pay step\'s button',
+            'The button on the covered pay step that jumps to the box above.',
+            'Go to the supporter fee', array(), 1);
 
         $c['cell_missing_cover'] = self::item('coach', 'Can\'t send yet: a covered player\'s supporter fee isn\'t set',
             'Beside a greyed Send offer or Offer again, in the Send offers to all list and as the answer to Send offer, for a player whose playing fee the club covers when the fee matrix has neither a supporter fee nor a supporter upper limit for their category. Administrators see which one to set instead.',

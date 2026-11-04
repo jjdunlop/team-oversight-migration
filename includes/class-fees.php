@@ -2151,6 +2151,48 @@ class TeamOversight_Fees {
     }
 
     /**
+     * 1.88.0 review: the matrix cells a fee_breakdown() needed and found
+     * blank: one array(class, column, fee_cover) per cell, for every bucket
+     * priced at nothing (the supporter column for a place the club's fee
+     * cover charges there: fee_cover true). Empty when every bucket was
+     * priced. Reads the breakdown only.
+     */
+    public static function unpriced_cells($breakdown) {
+        $out = array();
+        if (!is_array($breakdown) || empty($breakdown['stretches'])) {
+            return $out;
+        }
+        foreach ($breakdown['stretches'] as $s) {
+            foreach ((array) $s['buckets'] as $b) {
+                if (!array_key_exists('rate', $b) || $b['rate'] !== null) {
+                    continue;
+                }
+                $column = isset($b['charged_as']) ? (string) $b['charged_as'] : self::charged_as($b['role']);
+                $key = $b['class'] . '|' . $column;
+                if (!isset($out[$key])) {
+                    $out[$key] = array('class' => (string) $b['class'], 'column' => $column, 'fee_cover' => !empty($b['fee_cover']));
+                }
+            }
+        }
+        return array_values($out);
+    }
+
+    /** unpriced_cells() in words: "supporter fee for Other Student", two or more joined with "and" (cells_words() is the JPL/YSL step's own). */
+    public static function unpriced_words(array $cells) {
+        $words = array();
+        foreach ($cells as $cell) {
+            $words[] = strtolower(self::role_label($cell['column'])) . ' fee for ' . $cell['class'];
+        }
+        $last = array_pop($words);
+        return empty($words) ? (string) $last : implode(', ', $words) . ' and ' . $last;
+    }
+
+    /** 1.88.0 review: priced_total() for other classes: the fee a breakdown sets, or null when it sets none. */
+    public static function breakdown_fee($breakdown) {
+        return self::priced_total($breakdown);
+    }
+
+    /**
      * A fee_breakdown()'s total, or null when it has no stretches or none
      * of them could be priced (no matrix entries for any bucket).
      */
@@ -2209,7 +2251,7 @@ class TeamOversight_Fees {
     public function reprice_person($email, $season, $context = '') {
         global $wpdb;
         $season = (string) $season;
-        $out = array('ok' => true, 'released' => self::fees_released($season), 'repriced' => false, 'before' => null, 'after' => null, 'manual' => false, 'message' => '');
+        $out = array('ok' => true, 'released' => self::fees_released($season), 'repriced' => false, 'before' => null, 'after' => null, 'manual' => false, 'message' => '', 'gap' => array());
         $uid = self::resolve_user_id($email);
         $find = function () use ($wpdb, $uid, $email, $season) {
             return $wpdb->get_row($wpdb->prepare("
@@ -2234,10 +2276,28 @@ class TeamOversight_Fees {
         $money = function ($v) {
             return '$' . number_format((float) $v, 2);
         };
+        // 1.88.0 review: a covered person whose supporter cell is blank can't be charged at it: the invoice keeps what it
+        // had (a matrix gap), so say which cell, raise an offer alert, and never say the fee simply "stays".
+        $gap = array();
+        if ($out['released'] && !$out['manual']) {
+            $breakdown = $this->fee_breakdown($email, $season);
+            if (!empty($breakdown['fee_cover'])) {
+                foreach (self::unpriced_cells($breakdown) as $cell) {
+                    if ($cell['fee_cover']) {
+                        $gap[] = $cell;
+                    }
+                }
+            }
+        }
+        $out['gap'] = $gap;
         if (!$out['released']) {
             $out['message'] = 'The ' . $season . ' fees aren\'t released yet, so their fee is worked out when they are.';
         } elseif ($out['manual']) {
             $out['message'] = 'Their ' . $season . ' fee was set with Edit Fee, so it stays ' . $money($out['after']) . ' (Use calculated fee on Payment Management applies the new calculation).';
+        } elseif (!empty($gap)) {
+            $out['message'] = 'The ' . $season . ' ' . self::unpriced_words($gap) . ' isn\'t set, so their ' . $season . ' fee couldn\'t be charged at it and is ' . $money($out['after']) . '. Set it on Configuration, Fee matrix: the daily check then works their fee out again.';
+            TeamOversight_Log::add('offer_alert', $season . ' fee cover: user #' . intval($uid) . '\'s fee is covered by the club, but the ' . self::unpriced_words($gap) . ' isn\'t set, so their invoice stays ' . $money($out['after']) . ($context !== '' ? ' (' . $context . ')' : '') . '. Set it on Configuration, Fee matrix: the daily check then works their fee out again.',
+                $uid > 0 ? array('user_id' => $uid) : array());
         } elseif ($out['repriced']) {
             $out['message'] = 'Their ' . $season . ' fee was worked out again: ' . $money($out['before']) . ' to ' . $money($out['after']) . '.';
         } else {

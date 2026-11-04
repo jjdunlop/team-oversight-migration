@@ -629,8 +629,9 @@ class TeamOversight_Readiness {
         }
 
         $lines = array();
-        foreach (array_keys($accepted) as $code) {
-            $lines[] = TeamOversight_Offer_Wording::html('checklist_accepted', array('{team}' => TeamOversight_Offers::team_name($season, $code)));
+        foreach ($accepted as $code => $accepted_offer) {
+            // 1.88.0 review: a covered offer's payment is the supporter fee, never a deposit.
+            $lines[] = TeamOversight_Offer_Wording::html(TeamOversight_Offers::is_covered($accepted_offer) ? 'checklist_cover_accepted' : 'checklist_accepted', array('{team}' => TeamOversight_Offers::team_name($season, $code)));
         }
         foreach (array_keys($locked) as $code) {
             $lines[] = TeamOversight_Offer_Wording::html('checklist_locked', array('{team}' => TeamOversight_Offers::team_name($season, $code)));
@@ -758,7 +759,7 @@ class TeamOversight_Readiness {
         // Paid but not locked in yet: waiting on the club, like a fee not released.
         $step['waiting'] = $paid;
         $step['url'] = '#' . TeamOversight_Offers_Player::deposit_anchor($target);
-        $step['url_label'] = TeamOversight_Offers::wording('checklist_deposit_link');
+        $step['url_label'] = TeamOversight_Offers::wording($covered ? 'checklist_cover_link' : 'checklist_deposit_link');
         // The deposit sentence only: no fee table, no pay box, no dollar figure (1.79.1).
         $step['detail'] = $lead;
         $step['has_invoice'] = false;

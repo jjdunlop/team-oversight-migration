@@ -1604,10 +1604,17 @@ class TeamOversight_Offers_Admin {
                 $live_cover = TeamOversight_Fee_Cover::normalise(TeamOversight_Fee_Cover::for_person($offer->user_id, $offer->season));
                 echo self::cover_chip($live_cover);
                 if (!TeamOversight_Fee_Cover::same(TeamOversight_Fee_Cover::stored_cover($offer), $live_cover)) {
-                    $invoice = TeamOversight_Offers::invoice_for($offer);
-                    $credit = $invoice ? max(0.0, TeamOversight_Payments::get_ledger_paid($invoice->id) - floatval($invoice->invoice_amount)) : 0.0;
-                    echo '<br><span class="mo-amber mo-small">Cover changed after lock-in (' . self::h($live_cover ? 'fee covered: ' . $live_cover['reason'] : 'fee cover ended') . '): their fee follows it. Anything paid above the fee shows as credit on Payment Management.'
-                        . ($credit >= 0.01 ? ' In credit now: ' . self::h(TeamOversight_Offers::money($credit)) . '.' : '') . '</span>';
+                    $why = 'Cover changed after lock-in (' . ($live_cover ? 'fee covered: ' . $live_cover['reason'] : 'fee cover ended') . '): their fee follows it.';
+                    if (TeamOversight_Fees::fees_released($offer->season)) {
+                        $invoice = TeamOversight_Offers::invoice_for($offer);
+                        $credit = $invoice ? max(0.0, TeamOversight_Payments::get_ledger_paid($invoice->id) - floatval($invoice->invoice_amount)) : 0.0;
+                        echo '<br><span class="mo-amber mo-small">' . self::h($why . ' Anything paid above the fee shows as credit on Payment Management.')
+                            . ($credit >= 0.01 ? ' In credit now: ' . self::h(TeamOversight_Offers::money($credit)) . '.' : '') . '</span>';
+                    } else {
+                        // 1.88.0 review: before the release the holding invoice is $0, so ledger minus invoice is the whole
+                        // deposit, not a credit: the fee (and any credit) is only known once the fees are released.
+                        echo '<br><span class="mo-amber mo-small">' . self::h($why . ' Their ' . $offer->season . ' fee is worked out when the fees are released; anything they paid above it shows as credit on Payment Management then. Refund nothing before that.') . '</span>';
+                    }
                 }
             }
             echo '</td>';

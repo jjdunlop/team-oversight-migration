@@ -1345,6 +1345,10 @@ class TeamOversight_Members_Page {
         if ($this->memberships->grant_manual($user->ID, $tier, $end_date, $note)) {
             $tiers = TeamOversight_Memberships::get_tiers();
             echo '<div class="notice notice-success"><p>Granted ' . esc_html($tiers[$tier]) . ' to ' . esc_html($user->display_name) . ' until ' . esc_html($end_date) . '.</p></div>';
+            // 1.88.0 review: a life grant re-quotes their open offers and works their fee out again at once: say what changed.
+            if (class_exists('TeamOversight_Fee_Cover')) {
+                echo TeamOversight_Fee_Cover::life_notice_html($this->memberships->last_fee_cover, true);
+            }
         } else {
             echo '<div class="notice notice-error"><p>Failed to save the membership grant.</p></div>';
         }
@@ -1377,6 +1381,10 @@ class TeamOversight_Members_Page {
 
         $this->memberships->revoke_all($user_id);
         echo '<div class="notice notice-success"><p>Membership revoked for ' . esc_html($user->display_name) . '.</p></div>';
+        // 1.88.0 review: revoking a life membership re-quotes their open offers and works their fee out again: say what changed.
+        if (class_exists('TeamOversight_Fee_Cover')) {
+            echo TeamOversight_Fee_Cover::life_notice_html($this->memberships->last_fee_cover, false);
+        }
     }
 
     private function action_seed($apply) {

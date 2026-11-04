@@ -1675,8 +1675,19 @@ class TeamOversight_Offers {
         );
     }
 
-    /** The terms in force: the saved wording (one item per line) over the built-in; blank = built in. group => array(title, items). */
-    public static function terms() {
+    /**
+     * The terms in force: the saved wording (one item per line) over the
+     * built-in; blank = built in. group => array(title, items).
+     *
+     * 1.88.0 review: $covered (an offer for a player whose playing fee the
+     * club covers: is_covered()) swaps the deposit group for the cover group,
+     * from the wording registry (terms_cover_title, terms_cover_whole,
+     * terms_cover_credit, then policy_player for pulling out), because a
+     * covered offer has no deposit that comes off a later fee and no "up to"
+     * fee. $season fills {season}. Called with no arguments it is exactly
+     * what it was.
+     */
+    public static function terms($covered = false, $season = '') {
         $terms = self::terms_defaults();
         $saved = get_option(self::TERMS_OPTION, array());
         if (is_array($saved)) {
@@ -1688,6 +1699,18 @@ class TeamOversight_Offers {
                     }
                 }
             }
+        }
+        if ($covered) {
+            unset($terms['deposit']);
+            $vars = array('{season}' => (string) $season);
+            $terms['cover'] = array(
+                'title' => self::wording('terms_cover_title', $vars),
+                'items' => array(
+                    self::wording('terms_cover_whole', $vars),
+                    self::wording('terms_cover_credit', $vars),
+                    self::wording('policy_player'),
+                ),
+            );
         }
         return $terms;
     }
@@ -3156,7 +3179,8 @@ class TeamOversight_Offers {
         if (isset($shown['shown_target']) && $shown['shown_target'] !== null && $shown['shown_target'] !== '' && self::to_cents($shown['shown_target']) !== self::to_cents($target)) {
             // 1.88.0: the club re-quoted the offer (its fee cover changed) after this page was drawn.
             if ($offer->requote_count > 0 && self::to_cents($shown['shown_target']) !== self::to_cents($offer->deposit_target)) {
-                return self::res(false, 'target_changed', self::wording('page_changed_by_club', array('{deposit}' => self::money($target))),
+                // 1.88.0 review: a covered offer's payment is the supporter fee, not a deposit (page_changed_by_club_cover).
+                return self::res(false, 'target_changed', self::wording(self::is_covered($offer) ? 'page_changed_by_club_cover' : 'page_changed_by_club', array('{deposit}' => self::money($target))),
                     array('offer_id' => $offer->id, 'state' => $offer->state, 'target' => $target));
             }
             $why = self::to_cents($target) < self::to_cents($offer->deposit_target) ? 'because the season fee has now been set' : 'because of your other offers';
@@ -3207,7 +3231,7 @@ class TeamOversight_Offers {
                 }
                 if ($now->requote_count > $offer->requote_count) {
                     // 1.88.0: the club re-quoted it (a fee cover change) while the player was accepting.
-                    return self::res(false, 'target_changed', self::wording('page_changed_by_club', array('{deposit}' => self::money($again['target']))),
+                    return self::res(false, 'target_changed', self::wording(self::is_covered($now) ? 'page_changed_by_club_cover' : 'page_changed_by_club', array('{deposit}' => self::money($again['target']))),
                         array('offer_id' => $now->id, 'state' => $now->state, 'target' => $again['target']));
                 }
                 $why = self::to_cents($again['target']) < self::to_cents($offer->deposit_target) ? 'because the season fee has now been set' : 'because of your other offers';
@@ -3326,7 +3350,10 @@ class TeamOversight_Offers {
             // (the release drop applied at the same moment as the other places).
             $dropped = min($new['target_cents'], $real['target_cents']);
             // The fee the player is told once fees are out. An upper-limit quote is a promise: the invoice is capped at it, so the figure shown never exceeds it.
-            $out['quote_released'] = $offer->quote_basis === 'upper' ? min($real['amount'], round($out['amount'], 2)) : $real['amount'];
+            // 1.88.0 review: so is a quote made with the club's fee cover, on either basis (cap_offers() holds it), so a supporter
+            // fee raised after the quote is never shown above what the player will be charged.
+            $capped = $offer->quote_basis === 'upper' || self::is_covered($offer);
+            $out['quote_released'] = $capped ? min($real['amount'], round($out['amount'], 2)) : $real['amount'];
             $out['dropped'] = $dropped < self::to_cents($stored_target);
             $out['target'] = $dropped / 100.0;
         } else {

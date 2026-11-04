@@ -1071,9 +1071,10 @@ class TeamOversight_Account_Merge {
             }
             $out[] = '#' . intval($m->user_id) . '\'s ' . $season . ' trial application carries the club\'s fee cover (' . $m->fee_cover_reason . '). After the merge it covers #' . intval($keep_id) . ': their open ' . $season . ' offers are re-quoted and their ' . $season . ' fee is worked out again straight after the merge.';
         }
+        // A grant counts for a season when it is held on 31 December of it (TeamOversight_Fee_Cover::season_index()).
         $life = $wpdb->get_col($wpdb->prepare(
-            "SELECT DISTINCT user_id FROM {$wpdb->prefix}team_memberships WHERE user_id IN ($in) AND tier = %s AND end_date >= %s",
-            TeamOversight_Memberships::TIER_LIFE, $from . '-01-01'
+            "SELECT DISTINCT user_id FROM {$wpdb->prefix}team_memberships WHERE user_id IN ($in) AND tier = %s AND end_date >= %s AND end_date >= start_date",
+            TeamOversight_Memberships::TIER_LIFE, TeamOversight_Fee_Cover::year_end($from)
         ));
         $year = (string) max(intval($from), intval(current_time('Y')));
         foreach ((array) $life as $uid) {
@@ -1894,6 +1895,24 @@ class TeamOversight_Account_Merge {
         }
         $row['summary'] = json_decode((string) $row['summary'], true);
         return $row;
+    }
+
+    /**
+     * 1.88.0 review: add one key to a merge record's summary, for a listener
+     * of murvc_account_merged to note what it did, so its listener of
+     * murvc_account_merge_undone can do the same again (the fee cover notes
+     * the seasons it brought into line: 'fee_cover_seasons'). Never touches
+     * the backup or anything undo() reads. Returns true when written.
+     */
+    public static function add_to_summary($merge_id, $key, $value) {
+        global $wpdb;
+        $row = self::get($merge_id);
+        if (!$row || !is_string($key) || $key === '') {
+            return false;
+        }
+        $summary = is_array($row['summary']) ? $row['summary'] : array();
+        $summary[$key] = $value;
+        return $wpdb->update(self::table(), array('summary' => wp_json_encode($summary)), array('id' => intval($merge_id))) !== false;
     }
 
     public static function recent($limit = 50) {

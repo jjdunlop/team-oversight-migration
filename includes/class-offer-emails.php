@@ -480,7 +480,7 @@ class TeamOversight_Offer_Emails {
                 'program' => 'Offers · {season}',
                 'subject' => 'Your offer to join {team} for {season}',
                 'heading' => 'Your offer to join {team}',
-                'preheader' => 'Accept by {reply_by} and pay the supporter fee by {deposit_due} to lock in your place.',
+                'preheader' => '{cover_preheader}',
                 'button' => 'See your offer',
                 'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
                 'blocks' => array('offer', 'terms', 'extras', 'button'),
@@ -656,7 +656,7 @@ class TeamOversight_Offer_Emails {
                 'blocks' => array('offer', 'extras', 'button'),
                 'required' => array(),
                 'body' => "Hi {first_name},\n\n"
-                    . "You've paid the {season} supporter fee, so your place in {team} for the {season} season is locked in.\n\n"
+                    . "You've paid the {season} supporter fee, so your place in {team} for the {season} season is locked in. {cover_why}\n\n"
                     . "{offer}\n\n"
                     . "{button:See your offer}\n\n"
                     . "{cover_settled}\n\n"
@@ -959,6 +959,8 @@ class TeamOversight_Offer_Emails {
             // and for "offer changed" why the cover ended (change_kind: cleared or life_ended).
             'cover' => false, 'cover_reason' => '', 'cover_source' => '', 'cover_limit' => false, 'supporter_fee' => '',
             'cover_paid' => false, 'change_kind' => '', 'fee_month' => 'January',
+            // 1.88.0 review: the season's fees are released (the covered limit note then says nothing about when).
+            'fees_released' => false,
         );
     }
 
@@ -1000,7 +1002,10 @@ class TeamOversight_Offer_Emails {
         $offer_name = !empty($f['early']) ? 'Early Offer' : 'offer';
 
         // 1.88.0: the club covers the playing fee. Every {cover_*} placeholder is '' for anyone else, so the other emails read exactly as before.
-        $cover = array('{cover_reason}' => '', '{cover_lead}' => '', '{cover_due}' => '', '{cover_limit_note}' => '', '{cover_settled}' => '', '{supporter_fee}' => '', '{change_line}' => '');
+        // 1.88.0 review: {cover_preheader} (the covered offer email's preview line, which knows when the supporter fee is
+        // already paid) and {cover_why} (the covered "you're locked in" email names the reason).
+        $cover = array('{cover_reason}' => '', '{cover_lead}' => '', '{cover_due}' => '', '{cover_limit_note}' => '', '{cover_settled}' => '', '{supporter_fee}' => '', '{change_line}' => '',
+            '{cover_preheader}' => '', '{cover_why}' => '');
         if (!empty($f['cover'])) {
             $amount = (string) $f['supporter_fee'];
             $cover['{cover_reason}'] = (string) $f['cover_reason'];
@@ -1008,6 +1013,10 @@ class TeamOversight_Offer_Emails {
             $cover['{cover_lead}'] = $f['cover_source'] === 'life'
                 ? TeamOversight_Offers::wording('cover_lead_life', array('{season}' => $f['season'], '{amount}' => $amount))
                 : TeamOversight_Offers::wording('cover_lead_mark', array('{reason}' => (string) $f['cover_reason'], '{season}' => $f['season'], '{amount}' => $amount));
+            $cover['{cover_why}'] = $f['cover_source'] === 'life'
+                ? TeamOversight_Offers::wording('email_cover_why_life', array('{season}' => $f['season']))
+                : TeamOversight_Offers::wording('email_cover_why_mark', array('{reason}' => (string) $f['cover_reason'], '{season}' => $f['season']));
+            $cover['{cover_preheader}'] = !empty($f['cover_paid']) ? $w('email_cover_preheader_paid', array('{season}' => $f['season'])) : $w('email_cover_preheader');
             if ($f['state'] === 'sent') {
                 if (!empty($f['cover_paid'])) {
                     $cover['{cover_due}'] = $w('email_cover_due_paid', array('{season}' => $f['season']));
@@ -1018,7 +1027,14 @@ class TeamOversight_Offer_Emails {
                 $cover['{cover_due}'] = $due_late ? $w('email_cover_due_accepted_late') : $w('email_cover_due_accepted');
             }
             if (!empty($f['cover_limit'])) {
-                $cover['{cover_limit_note}'] = TeamOversight_Offers::wording('cover_limit_note', array('{season}' => $f['season'], '{amount}' => $amount, '{fee_month}' => (string) $f['fee_month']));
+                // 1.88.0 review: a player who has paid (locked in) reads "You paid", and once the fees are out the
+                // note no longer says when the fee is set.
+                $paid = $f['state'] === 'locked_in';
+                $note_key = $paid ? 'cover_limit_note_paid' : 'cover_limit_note';
+                if (!empty($f['fees_released'])) {
+                    $note_key .= '_released';
+                }
+                $cover['{cover_limit_note}'] = TeamOversight_Offers::wording($note_key, array('{season}' => $f['season'], '{amount}' => $amount, '{fee_month}' => (string) $f['fee_month']));
             } else {
                 $cover['{cover_settled}'] = TeamOversight_Offers::wording('email_cover_whole_fee', array('{season}' => $f['season']));
             }
@@ -1188,11 +1204,16 @@ class TeamOversight_Offer_Emails {
         return '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 0 16px;">' . $html . '</td></tr></table>';
     }
 
-    /** The {terms} block: the commitments and the deposit policy, from the one source the offer page uses too. */
-    public static function terms_block() {
+    /**
+     * The {terms} block: the commitments and the deposit policy, from the one
+     * source the offer page uses too. 1.88.0 review: $covered (a covered
+     * offer) has the supporter fee terms in place of the deposit list
+     * (TeamOversight_Offers::terms()).
+     */
+    public static function terms_block($covered = false, $season = '') {
         $html = '';
         $text = array();
-        foreach (TeamOversight_Offers::terms() as $group) {
+        foreach (TeamOversight_Offers::terms($covered, $season) as $group) {
             if (empty($group['items'])) {
                 continue;
             }
@@ -1454,7 +1475,7 @@ class TeamOversight_Offer_Emails {
             $blocks['offer'] = self::offer_block($facts);
         }
         if (in_array('terms', $events[$key]['blocks'], true)) {
-            $blocks['terms'] = self::terms_block();
+            $blocks['terms'] = self::terms_block(!empty($facts['cover']), (string) $facts['season']);
         }
         if (in_array('extras', $events[$key]['blocks'], true)) {
             $blocks['extras'] = self::extras_block($facts);
@@ -1657,6 +1678,7 @@ class TeamOversight_Offer_Emails {
             $facts['cover_limit'] = $offer->quote_basis === 'upper' && !$released;
             $facts['supporter_fee'] = TeamOversight_Offers::money($released ? $offer->quote_released : $offer->quote_amount);
             $facts['fee_month'] = TeamOversight_Offers::fee_month($offer->season);
+            $facts['fees_released'] = TeamOversight_Fees::fees_released($offer->season);
             $facts['cover_paid'] = $offer->state === 'sent' && TeamOversight_Offers::remaining_cents($offer) <= 0;
         } elseif ($type === 'offer_changed') {
             $facts['change_kind'] = class_exists('TeamOversight_Fee_Cover') && TeamOversight_Fee_Cover::life_ended($offer->user_id, $offer->season) ? 'life_ended' : 'cleared';
@@ -1786,7 +1808,7 @@ class TeamOversight_Offer_Emails {
             $blocks['offer'] = self::offer_block($facts);
         }
         if (in_array('terms', $events[$key]['blocks'], true)) {
-            $blocks['terms'] = self::terms_block();
+            $blocks['terms'] = self::terms_block(!empty($facts['cover']), (string) $facts['season']);
         }
         if (in_array('extras', $events[$key]['blocks'], true)) {
             $blocks['extras'] = self::extras_block($facts);

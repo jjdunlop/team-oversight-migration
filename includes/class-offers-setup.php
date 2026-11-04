@@ -380,24 +380,36 @@ class TeamOversight_Offers_Setup {
                 }
             }
             if ($summary['people'] > 0 || $stale > 0) {
+                // 1.88.0 review: judged on the cells the covered places and offers are really charged on (a junior on a
+                // JPL team pays the JPL supporter fee: TeamOversight_Fee_Cover::covered_classes()), and once the
+                // season's fees are released the supporter FEE itself is needed (an upper limit prices no invoice).
                 $fees_engine = TeamOversight_Fees::shared();
+                $released = TeamOversight_Fees::fees_released($season);
                 $missing_classes = array();
+                $limit_only = array();
                 foreach ($summary['user_ids'] as $uid) {
-                    $person = get_userdata($uid);
-                    if (!$person) {
-                        continue;
-                    }
-                    $class = $fees_engine->determine_person_fee_class($person->user_email, $season);
-                    if ($fees_engine->get_fee($class, 'supporter', $season) === null && TeamOversight_Fees::get_limit($class, 'supporter', $season) === null) {
-                        $missing_classes[$class] = true;
+                    foreach (array_keys(TeamOversight_Fee_Cover::covered_classes($uid, $season, $fees_engine)) as $class) {
+                        $fee = $fees_engine->get_fee($class, 'supporter', $season);
+                        $limit = TeamOversight_Fees::get_limit($class, 'supporter', $season);
+                        if ($fee === null && ($released || $limit === null)) {
+                            $missing_classes[$class] = true;
+                        } elseif ($fee === null) {
+                            $limit_only[$class] = true;
+                        }
                     }
                 }
+                $join = function ($names) {
+                    $last = array_pop($names);
+                    return empty($names) ? $last : implode(', ', $names) . ' and ' . $last;
+                };
                 $who = $summary['people'] . ' player' . ($summary['people'] === 1 ? ' is' : 's are') . ' covered for ' . $season . ': ' . $summary['marked'] . ' marked, ' . $summary['life'] . ' life member' . ($summary['life'] === 1 ? '' : 's') . '.';
                 if (!empty($missing_classes)) {
-                    $names = array_keys($missing_classes);
-                    $last = array_pop($names);
-                    $list = empty($names) ? $last : implode(', ', $names) . ' and ' . $last;
-                    $rows[] = self::row('fee_cover', 'bad', 'Fee covered by the club', $who . ' Covered players in ' . $list . ' have no supporter fee or supporter upper limit for ' . $season . ', so their offers can\'t be sent and their fee can\'t be worked out.', self::config_url($season, 'fee-matrix'), 'Fee matrix');
+                    $list = $join(array_keys($missing_classes));
+                    $rows[] = self::row('fee_cover', 'bad', 'Fee covered by the club', $released
+                        ? $who . ' The ' . $season . ' fees are released, but there is no ' . $season . ' supporter fee for ' . $list . ', where covered players have places or offers, so their fee can\'t be charged at it. Once it is set, the daily check works their fee out again.'
+                        : $who . ' Covered players in ' . $list . ' have no supporter fee or supporter upper limit for ' . $season . ', so their offers can\'t be sent and their fee can\'t be worked out.', self::config_url($season, 'fee-matrix'), 'Fee matrix');
+                } elseif (!empty($limit_only)) {
+                    $rows[] = self::row('fee_cover', 'warn', 'Fee covered by the club', $who . ' Covered players in ' . $join(array_keys($limit_only)) . ' are quoted the supporter upper limit, because the ' . $season . ' supporter fee isn\'t set. Set it before the fees are released, or their fee can\'t be worked out then.', self::config_url($season, 'fee-matrix'), 'Fee matrix');
                 } elseif ($stale > 0) {
                     $rows[] = self::row('fee_cover', 'warn', 'Fee covered by the club', $who . ' ' . $stale . ' open offer' . ($stale === 1 ? ' still carries' : 's still carry') . ' an old fee cover: the daily check re-quotes ' . ($stale === 1 ? 'it' : 'them') . ' (Logs, Offer alert, says why when it can\'t).', TeamOversight_Offers_Admin::page_url(array('tab' => 'out', 'season' => $season)), 'Offers');
                 } else {

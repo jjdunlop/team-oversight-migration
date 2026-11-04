@@ -39,6 +39,14 @@ class TeamOversight_Memberships {
     // refunded or cancelled, so each grant is flagged once.
     const REVERSAL_FLAG_META = '_murvc_membership_reversal_flagged';
 
+    /**
+     * 1.88.0 review: what the club's fee cover did after the last life grant
+     * or revoke this object wrote (TeamOversight_Fee_Cover::life_changed()'s
+     * result: re-quoted offers, the fee worked out again), or null. The
+     * Members page prints it under its notice.
+     */
+    public $last_fee_cover = null;
+
     // Orders per page for the paid-order re-scan.
     const RESCAN_BATCH = 200;
 
@@ -786,9 +794,10 @@ class TeamOversight_Memberships {
         }
         // 1.88.0: a life member's playing fee is covered by the club from 2027 (TeamOversight_Fee_Cover): their open
         // offers are re-quoted and their fee worked out again at once. Never allowed to break the grant (an order hook).
+        $this->last_fee_cover = null;
         if ($ok && $data['tier'] === self::TIER_LIFE && class_exists('TeamOversight_Fee_Cover')) {
             try {
-                TeamOversight_Fee_Cover::life_changed(intval($data['user_id']), 'life membership granted');
+                $this->last_fee_cover = TeamOversight_Fee_Cover::life_changed(intval($data['user_id']), 'life membership granted');
             } catch (\Throwable $e) {
                 error_log('Team Oversight: the fee cover could not follow a life membership grant for user #' . intval($data['user_id']) . ' (' . get_class($e) . ')');
             }
@@ -971,11 +980,13 @@ class TeamOversight_Memberships {
             $user->remove_role(self::TIER_ASSOCIATE);
         }
 
-        // 1.88.0: the club stops covering their playing fee from the next season their life membership no longer
-        // reaches (TeamOversight_Fee_Cover): their open offers are re-quoted and their fee worked out again at once.
+        // 1.88.0: the club stops covering their playing fee for every season whose 31 December the life membership no
+        // longer reaches, this year's included (TeamOversight_Fee_Cover): their open offers are re-quoted and their fee
+        // worked out again at once.
+        $this->last_fee_cover = null;
         if ($had_life && class_exists('TeamOversight_Fee_Cover')) {
             try {
-                TeamOversight_Fee_Cover::life_changed(intval($user_id), 'life membership revoked');
+                $this->last_fee_cover = TeamOversight_Fee_Cover::life_changed(intval($user_id), 'life membership revoked');
             } catch (\Throwable $e) {
                 error_log('Team Oversight: the fee cover could not follow a life membership revoke for user #' . intval($user_id) . ' (' . get_class($e) . ')');
             }

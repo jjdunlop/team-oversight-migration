@@ -2121,7 +2121,17 @@ class TeamOversight_Admin {
                                     <?php endif; ?>
                                 </td>
                                 <?php if ($fee_cover_on): ?>
-                                    <td><?php echo TeamOversight_Fee_Cover::render_application_cell($trial); ?></td>
+                                    <?php
+                                    // 1.88.0 review: how many offers of this application are out (sent or accepted), from the offers
+                                    // this page already read, so Cover playing fee can ask first without a query per row.
+                                    $cover_open = 0;
+                                    foreach (isset($chip_offer_index[$trial->id]) ? $chip_offer_index[$trial->id] : array() as $cover_offer) {
+                                        if (in_array($cover_offer->state, array(TeamOversight_Offers::SENT, TeamOversight_Offers::ACCEPTED), true)) {
+                                            $cover_open++;
+                                        }
+                                    }
+                                    ?>
+                                    <td><?php echo TeamOversight_Fee_Cover::render_application_cell($trial, $chip_offers_on ? $cover_open : null); ?></td>
                                 <?php endif; ?>
                                 <td>
                                     <span class="status-<?php echo esc_attr($trial->application_status); ?>">

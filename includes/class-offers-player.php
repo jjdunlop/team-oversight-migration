@@ -420,6 +420,17 @@ class TeamOversight_Offers_Player {
         $early = TeamOversight_Offers::is_early($offer);
         // 1.88.0: the club covers this player's playing fee (the cover the offer carries).
         $cover = TeamOversight_Offers::cover_of($offer);
+        // 1.88.0 review: a locked-in offer is never re-quoted, so when the club started or stopped covering the fee after
+        // lock-in its stored cover and figures are out of date: none of them is shown, only one line saying the fee
+        // changed (deposit_stage() and the Player Checklist follow the cover the player has now).
+        $cover_moved = self::cover_moved($offer);
+        if ($cover_moved) {
+            $cover = null;
+            $early = false;
+        }
+        // 1.88.0 review: a second covered offer whose supporter fee is already paid (decision 6): nothing to pay, no date.
+        $cover_paid = $cover !== null && $state === TeamOversight_Offers::SENT && TeamOversight_Offers::remaining_cents($offer) <= 0
+            && TeamOversight_Offers::to_cents($target) <= TeamOversight_Offers::to_cents($offer->deposit_target);
 
         ob_start();
         ?>
@@ -432,14 +443,19 @@ class TeamOversight_Offers_Player {
                     <tr><th>Team</th><td><?php echo esc_html($name); ?></td></tr>
                     <tr><th>Role</th><td><?php echo esc_html(self::role_label($offer->role)); ?></td></tr>
                     <tr><th>Season</th><td><?php echo esc_html($offer->season); ?></td></tr>
-                    <?php $fee = self::fee_line($view); ?>
+                    <?php $fee = $cover_moved ? '' : self::fee_line($view); ?>
                     <?php if ($fee !== ''): ?>
                         <tr><th>Season fee</th><td><?php echo esc_html($fee); ?></td></tr>
                     <?php endif; ?>
-                    <?php if ($cover !== null): ?>
+                    <?php if ($cover_moved): ?>
+                        <?php // 1.88.0 review: the stored fee and deposit no longer apply (see cover_moved()). ?>
+                    <?php elseif ($cover !== null): ?>
                         <?php // 1.88.0: no 10% deposit: the whole supporter fee is paid at once. ?>
-                        <?php if ($state === TeamOversight_Offers::LOCKED_IN): ?>
+                        <?php if ($state === TeamOversight_Offers::LOCKED_IN || $cover_paid): ?>
                             <tr><th>Supporter fee</th><td>Paid</td></tr>
+                            <?php if ($cover_paid && $offer->reply_by): ?>
+                                <tr class="<?php echo ($status['overdue'] && $status['kind'] === 'reply') ? 'murvc-offer-late' : ''; ?>"><th>Reply by</th><td><?php echo esc_html(self::fmt($offer->reply_by)); ?></td></tr>
+                            <?php endif; ?>
                         <?php else: ?>
                             <tr><th>To pay</th><td><?php echo esc_html(TeamOversight_Offers::wording('cover_deposit_words', array('{deposit}' => TeamOversight_Offers::money($target)))); ?></td></tr>
                             <?php if ($state === TeamOversight_Offers::SENT && $offer->reply_by): ?>
@@ -461,18 +477,26 @@ class TeamOversight_Offers_Player {
                         <?php endif; ?>
                     <?php endif; ?>
                 </table>
+                <?php if ($cover_moved): ?>
+                    <p class="murvc-offer-note murvc-offer-cover-moved"><?php echo TeamOversight_Offer_Wording::e(TeamOversight_Offers::wording('page_cover_changed_locked', array('{season}' => $offer->season))); ?></p>
+                <?php endif; ?>
                 <?php if ($cover !== null && $offer->quote_amount !== null): ?>
                     <?php
                     $cover_amount = TeamOversight_Offers::money($offer->quote_released !== null ? $offer->quote_released : $view->quote_amount);
                     $cover_vars = array('{reason}' => $cover['reason'], '{season}' => $offer->season, '{amount}' => $cover_amount, '{fee_month}' => TeamOversight_Offers::fee_month($offer->season));
                     $cover_text = TeamOversight_Offers::wording($cover['source'] === 'life' ? 'cover_lead_life' : 'cover_lead_mark', $cover_vars);
                     if ($offer->quote_basis === 'upper' && $offer->quote_released === null) {
-                        $cover_text .= ' ' . TeamOversight_Offers::wording('cover_limit_note', $cover_vars);
+                        // 1.88.0 review: "You paid" once locked in, and no "set in January" once the fees are out (as in the emails).
+                        $note_key = $state === TeamOversight_Offers::LOCKED_IN ? 'cover_limit_note_paid' : 'cover_limit_note';
+                        if (TeamOversight_Fees::fees_released($offer->season)) {
+                            $note_key .= '_released';
+                        }
+                        $cover_text .= ' ' . TeamOversight_Offers::wording($note_key, $cover_vars);
                     }
                     ?>
                     <p class="murvc-offer-cover"><?php echo TeamOversight_Offer_Wording::e($cover_text); ?></p>
                 <?php endif; ?>
-                <?php $early_note = TeamOversight_Offers::early_note($view); ?>
+                <?php $early_note = $cover_moved ? '' : TeamOversight_Offers::early_note($view); ?>
                 <?php if ($early_note !== ''): ?>
                     <p class="murvc-offer-early"><strong>Early Offer.</strong> <?php echo esc_html($early_note); ?></p>
                 <?php endif; ?>
@@ -501,10 +525,46 @@ class TeamOversight_Offers_Player {
         return ob_get_clean();
     }
 
-    /** The commitments and the deposit policy: the three terms lists, the same text as the email. */
-    private static function terms_html() {
+    /**
+     * 1.88.0 review: a LOCKED-IN offer whose stored fee cover is not the
+     * player's cover now (the club started or stopped covering their playing
+     * fee after they locked in: the offer keeps its old quote). Never for any
+     * other state (a sent or accepted offer is re-quoted).
+     */
+    private static function cover_moved($offer) {
+        if (!is_object($offer) || $offer->state !== TeamOversight_Offers::LOCKED_IN || !class_exists('TeamOversight_Fee_Cover') || !TeamOversight_Offers::applies($offer->season)) {
+            return false;
+        }
+        return !TeamOversight_Fee_Cover::same(TeamOversight_Fee_Cover::stored_cover($offer), TeamOversight_Fee_Cover::for_person($offer->user_id, $offer->season));
+    }
+
+    /**
+     * Is the club covering this offer's fee as the page tells it? The offer's
+     * own cover (is_covered()), except for a locked-in offer whose cover
+     * changed afterwards, which follows the player's cover now.
+     */
+    private static function covered_now($offer) {
+        if (self::cover_moved($offer)) {
+            return TeamOversight_Fee_Cover::for_person($offer->user_id, $offer->season) !== null;
+        }
+        return TeamOversight_Offers::is_covered($offer);
+    }
+
+    /** The fold-out's summary under an accepted or locked-in offer. */
+    private static function terms_summary($offer) {
+        return self::covered_now($offer) ? TeamOversight_Offers::wording('page_cover_terms_summary') : 'The commitments and the deposit policy';
+    }
+
+    /**
+     * The commitments and the deposit policy: the three terms lists, the
+     * same text as the email. 1.88.0 review: a covered offer's terms carry
+     * the supporter fee list in place of the deposit list
+     * (TeamOversight_Offers::terms()).
+     */
+    private static function terms_html($offer = null) {
         $html = '';
-        foreach (TeamOversight_Offers::terms() as $group) {
+        $covered = $offer !== null && self::covered_now($offer);
+        foreach (TeamOversight_Offers::terms($covered, $offer !== null ? (string) $offer->season : '') as $group) {
             if (empty($group['items'])) {
                 continue;
             }
@@ -564,7 +624,7 @@ class TeamOversight_Offers_Player {
         if ($status['overdue'] && $status['kind'] === 'reply') {
             echo '<p class="murvc-offer-note murvc-offer-note-late">' . TeamOversight_Offer_Wording::e(TeamOversight_Offers::wording('page_late_reply')) . '</p>';
         }
-        echo '<div class="murvc-offer-terms">' . self::terms_html() . '</div>';
+        echo '<div class="murvc-offer-terms">' . self::terms_html($offer) . '</div>';
         echo self::training_html($offer);
         echo self::extras_html($offer);
         echo self::preview_html($user, $offer, $target);
@@ -612,10 +672,10 @@ class TeamOversight_Offers_Player {
             echo self::render_deposit_box($offer);
             echo '<p><a class="murvc-offer-decline-link" href="' . esc_url(add_query_arg('decline', 1, TeamOversight_Offers::offer_url($offer))) . '">Decline this offer</a></p>';
         }
-        echo '<details class="murvc-offer-more"><summary>The commitments and the deposit policy</summary><div class="murvc-offer-terms">' . self::terms_html() . '</div></details>';
+        echo '<details class="murvc-offer-more"><summary>' . esc_html(self::terms_summary($offer)) . '</summary><div class="murvc-offer-terms">' . self::terms_html($offer) . '</div></details>';
         echo self::training_html($offer);
         echo self::extras_html($offer);
-        echo '<div class="murvc-offer-checklist"><p class="murvc-offer-note">' . TeamOversight_Offer_Wording::html('page_accepted_checklist') . '</p>'
+        echo '<div class="murvc-offer-checklist"><p class="murvc-offer-note">' . TeamOversight_Offer_Wording::html(TeamOversight_Offers::is_covered($offer) ? 'page_cover_accepted_checklist' : 'page_accepted_checklist') . '</p>'
             . '<p><a class="button" href="' . esc_url(TeamOversight_Readiness::checklist_url()) . '">' . TeamOversight_Offer_Wording::e(TeamOversight_Offers::wording('page_checklist_button')) . '</a></p></div>';
         return ob_get_clean();
     }
@@ -636,7 +696,7 @@ class TeamOversight_Offers_Player {
             }
         }
         $html .= '<p><a class="button button-primary" href="' . esc_url(TeamOversight_Readiness::checklist_url()) . '">' . TeamOversight_Offer_Wording::e(TeamOversight_Offers::wording('page_checklist_button')) . '</a></p>';
-        $html .= '<details class="murvc-offer-more"><summary>The commitments and the deposit policy</summary><div class="murvc-offer-terms">' . self::terms_html() . '</div></details>';
+        $html .= '<details class="murvc-offer-more"><summary>' . esc_html(self::terms_summary($offer)) . '</summary><div class="murvc-offer-terms">' . self::terms_html($offer) . '</div></details>';
         return $html . self::training_html($offer) . self::extras_html($offer);
     }
 
@@ -779,7 +839,7 @@ class TeamOversight_Offers_Player {
             $html .= '<p class="murvc-offer-deposit-line">' . TeamOversight_Offer_Wording::html($paid > 0 ? 'page_deposit_amount_paid' : 'page_deposit_amount', $amount_vars) . '</p>';
         }
         if ($status['overdue'] && $status['kind'] === 'deposit') {
-            $html .= '<p class="murvc-offer-note murvc-offer-note-late">' . TeamOversight_Offer_Wording::e(TeamOversight_Offers::wording('page_deposit_late', array('{date}' => self::fmt($status['date'])))) . '</p>';
+            $html .= '<p class="murvc-offer-note murvc-offer-note-late">' . TeamOversight_Offer_Wording::e(TeamOversight_Offers::wording($covered ? 'page_cover_late' : 'page_deposit_late', array('{date}' => self::fmt($status['date'])))) . '</p>';
         } elseif ($offer->deposit_due) {
             $html .= '<p class="murvc-offer-note">' . TeamOversight_Offer_Wording::html('page_deposit_due', array('{date}' => self::fmt($offer->deposit_due))) . '</p>';
         }
