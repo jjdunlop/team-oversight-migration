@@ -619,6 +619,24 @@ class TeamOversight_Database {
             dbDelta(self::program_line_ticks_table_sql());
         }
 
+        // 1.88.0: the playing fee covered by the club (TeamOversight_Fee_Cover). The committee's mark on a trial
+        // application (fee_cover_reason NULL = not marked; who and when, like registration_override), and on an
+        // offer the cover its quote was made with and how often a cover change re-quoted it. One guarded ALTER per
+        // table, so a normal load issues none; nothing is backfilled and nobody is marked by the upgrade.
+        if (empty($wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}trial_applications LIKE 'fee_cover_reason'"))) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications
+                ADD COLUMN fee_cover_reason varchar(100) DEFAULT NULL,
+                ADD COLUMN fee_cover_by bigint(20) unsigned DEFAULT NULL,
+                ADD COLUMN fee_cover_at datetime DEFAULT NULL");
+        }
+        if ($wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_offers'") && empty($wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_offers LIKE 'quote_cover'"))) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}team_offers
+                ADD COLUMN quote_cover varchar(100) DEFAULT NULL AFTER target_dropped_at,
+                ADD COLUMN quote_cover_source varchar(8) DEFAULT NULL AFTER quote_cover,
+                ADD COLUMN requote_count tinyint(3) unsigned NOT NULL DEFAULT 0 AFTER quote_cover_source,
+                ADD COLUMN requoted_at datetime DEFAULT NULL AFTER requote_count");
+        }
+
         // 1.87.0: from 2027 JPL and YSL are separate fee classes (club decision, 4 Nov 2026). The one-off data step
         // (TeamOversight_Fees::split_jpl_ysl()) runs once per site behind its own autoloaded flag (one option read
         // once done); a season keeps the one JPL/YSL class until the step has split it. Last, so every table it
@@ -677,6 +695,10 @@ class TeamOversight_Database {
                 deposit_target decimal(10,2) DEFAULT NULL,
                 quote_released decimal(10,2) DEFAULT NULL,
                 target_dropped_at datetime DEFAULT NULL,
+                quote_cover varchar(100) DEFAULT NULL,
+                quote_cover_source varchar(8) DEFAULT NULL,
+                requote_count tinyint(3) unsigned NOT NULL DEFAULT 0,
+                requoted_at datetime DEFAULT NULL,
                 sent_at datetime DEFAULT NULL,
                 reply_by date DEFAULT NULL,
                 deposit_due date DEFAULT NULL,

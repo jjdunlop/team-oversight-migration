@@ -529,6 +529,11 @@ class TeamOversight_Fees {
     //     at the SUPPORTER rate (there's no coaching discount — the club
     //     handles that elsewhere — so someone who only coaches pays the
     //     supporter fee); team manager as a PLAYING MEMBER.
+    //  1b. 1.88.0, 2027 on: a person whose playing fee the club covers (a
+    //     Premier League MVP marked on their trial application, a life
+    //     member: TeamOversight_Fee_Cover) has their playing member and
+    //     training only buckets charged at the SUPPORTER rate too, for the
+    //     whole season; their team manager places are still playing members.
     //  2. The fee is the HIGHEST bucket. Buckets never add up.
     //  3. Pro-rata: the fee-segment history records the buckets for each
     //     stretch of the season; each stretch is charged for its share of
@@ -1506,14 +1511,16 @@ class TeamOversight_Fees {
     /**
      * Price one stretch's buckets: each bucket's rate (coaching roles at
      * the supporter rate, team manager as a player), the highest bucket,
-     * and so the rate charged.
+     * and so the rate charged. A bucket timeline_stretches() flagged
+     * 'fee_cover' (1.88.0: a playing or Training Only place of a person the
+     * club covers) is charged at the supporter column of its class.
      */
     public function price_buckets($buckets, $season, $source = self::RATE_FEE) {
         $priced = array();
         $top = null;
         $missing = false;
         foreach ($buckets as $b) {
-            $b['charged_as'] = self::charged_as($b['role']);
+            $b['charged_as'] = !empty($b['fee_cover']) ? 'supporter' : self::charged_as($b['role']);
             $rate = $this->rate($b['class'], $b['charged_as'], $season, $source);
             $b['rate'] = $rate === null ? null : floatval($rate);
             $priced[] = $b;
@@ -1552,15 +1559,32 @@ class TeamOversight_Fees {
      * the real matrix fee; RATE_UPPER prices the same stretches from the
      * upper limits (TeamOversight_Offers only). The result carries
      * 'rate_source' either way, and invoice writers refuse an upper one.
+     *
+     * $fee_cover (1.88.0, timeline seasons only): null (default, every
+     * existing caller) looks the person's cover up
+     * (TeamOversight_Fee_Cover::for_email(): the committee's mark on their
+     * trial application, or a life membership); false prices them as not
+     * covered; an array(reason, source) prices them as covered. A covered
+     * person's playing and Training Only places are charged at the supporter
+     * column, and the result then carries 'fee_cover' => array(reason,
+     * source). The key is there ONLY when covered, so everyone else's
+     * breakdown is exactly what it was.
      */
-    public function fee_breakdown($email, $season, $rows = null, $source = self::RATE_FEE) {
+    public function fee_breakdown($email, $season, $rows = null, $source = self::RATE_FEE, $fee_cover = null) {
         if (self::timeline_applies($season)) {
             if ($rows === null) {
                 $rows = TeamOversight_Fee_Timeline::rows($email, $season);
             }
-            $result = $this->price_stretches($this->timeline_stretches($email, $season, $rows), $season, $source);
+            if ($fee_cover === null) {
+                $fee_cover = class_exists('TeamOversight_Fee_Cover') ? TeamOversight_Fee_Cover::for_email($email, $season) : null;
+            }
+            $fee_cover = (is_array($fee_cover) && class_exists('TeamOversight_Fee_Cover')) ? TeamOversight_Fee_Cover::normalise($fee_cover) : null;
+            $result = $this->price_stretches($this->timeline_stretches($email, $season, $rows, null, $fee_cover), $season, $source);
             $result['engine'] = 'timeline';
             $result['rows'] = $rows;
+            if ($fee_cover !== null) {
+                $result['fee_cover'] = $fee_cover;
+            }
             // 1.76.0, the cap: a player whose place came from an offer quoted
             // on the upper limit is never invoiced above the quoted amount.
             // Only a breakdown priced on the real fee is capped (never one
@@ -1666,8 +1690,17 @@ class TeamOversight_Fees {
      * hypothetical person who holds that class throughout, with no class
      * history and no profile to read (fee_breakdown_for_class(), the How it
      * works page). Everything else is the same code.
+     *
+     * $fee_cover (1.88.0): a normalised cover (array(reason, source)) when
+     * the club covers this person's playing fee for the season: every bucket
+     * whose role is one of TeamOversight_Fee_Cover::COVERED_ROLES gets
+     * 'fee_cover' => true, which price_buckets() charges at the supporter
+     * column. Null adds no key at all, so an uncovered person's buckets are
+     * byte for byte what they were (the cover is season-wide, so the
+     * neighbour merge below still compares like with like).
      */
-    private function timeline_stretches($email, $season, $rows, $fixed_class = null) {
+    private function timeline_stretches($email, $season, $rows, $fixed_class = null, $fee_cover = null) {
+        $covered_roles = (is_array($fee_cover) && class_exists('TeamOversight_Fee_Cover')) ? TeamOversight_Fee_Cover::COVERED_ROLES : array();
         $places = array();
         $points = array();
         foreach ((array) $rows as $row) {
@@ -1724,11 +1757,15 @@ class TeamOversight_Fees {
             $buckets = array();
             foreach ($places as $place) {
                 if ($place['from'] <= $at && ($place['to'] === null || $place['to'] > $at)) {
-                    $buckets[$place['team'] . '|' . $place['role']] = array(
+                    $bucket = array(
                         'team' => $place['team'],
                         'role' => $place['role'],
                         'class' => $this->fee_class_for_team($class, $place['team'], $season),
                     );
+                    if ($covered_roles && in_array($place['role'], $covered_roles, true)) {
+                        $bucket['fee_cover'] = true;
+                    }
+                    $buckets[$place['team'] . '|' . $place['role']] = $bucket;
                 }
             }
             if (empty($buckets)) {
@@ -1762,14 +1799,24 @@ class TeamOversight_Fees {
      * takes it. TeamOversight_Offers prices an accepted offer's other places
      * on the class its quote was made on (a live profile change after
      * sending must not move the quote), with the same rate source.
+     *
+     * $fee_cover (1.88.0): null (default: the hypothetical person is not
+     * covered, so the calculator and the worked examples are unchanged) or
+     * array(reason, source) to price them as covered (an accepted covered
+     * offer's other places, on the cover its quote was made with). The
+     * result carries 'fee_cover' only when covered.
      */
-    public function fee_breakdown_for_class($season, $rows, $person_class, $source = self::RATE_FEE) {
+    public function fee_breakdown_for_class($season, $rows, $person_class, $source = self::RATE_FEE, $fee_cover = null) {
         if (!self::timeline_applies($season)) {
             return null;
         }
-        $result = $this->price_stretches($this->timeline_stretches('', $season, (array) $rows, (string) $person_class), $season, $source);
+        $fee_cover = (is_array($fee_cover) && class_exists('TeamOversight_Fee_Cover')) ? TeamOversight_Fee_Cover::normalise($fee_cover) : null;
+        $result = $this->price_stretches($this->timeline_stretches('', $season, (array) $rows, (string) $person_class, $fee_cover), $season, $source);
         $result['engine'] = 'timeline';
         $result['rows'] = $rows;
+        if ($fee_cover !== null) {
+            $result['fee_cover'] = $fee_cover;
+        }
         return $result;
     }
 
@@ -1876,7 +1923,7 @@ class TeamOversight_Fees {
                         <?php foreach ($s['buckets'] as $b): ?>
                             <li>
                                 <?php echo esc_html(($b['team'] !== '' ? $b['team'] . ' · ' : '') . $b['class'] . ' · ' . self::role_label($b['role'])); ?>
-                                <?php if ($b['charged_as'] !== $b['role']): ?><span class="description">(charged as <?php echo esc_html(strtolower(self::role_label($b['charged_as']))); ?>)</span><?php endif; ?>
+                                <?php if ($b['charged_as'] !== $b['role']): ?><span class="description">(charged as <?php echo esc_html(strtolower(self::role_label($b['charged_as']))); ?><?php echo !empty($b['fee_cover']) ? ': fee covered' : ''; ?>)</span><?php endif; ?>
                                 — <?php echo $b['rate'] === null ? '<em>no amount in the fee matrix</em>' : esc_html($money($b['rate'])); ?>
                             </li>
                         <?php endforeach; ?>
@@ -1898,6 +1945,9 @@ class TeamOversight_Fees {
                 <?php if (!empty($stretches)): ?>
                     <p class="fee-breakdown-total"><strong>Season fee: <?php echo esc_html($money($breakdown['total'])); ?></strong>
                         <?php if (!$breakdown['has_dates']): ?><span class="description">(no season dates — no pro-rata)</span><?php endif; ?></p>
+                    <?php if (!empty($breakdown['fee_cover']['reason'])): ?>
+                        <p class="description">Fee covered by the club: <?php echo esc_html($breakdown['fee_cover']['reason']); ?>. Playing and Training Only places are charged at the supporter fee for the class.</p>
+                    <?php endif; ?>
                     <?php if (!empty($breakdown['capped'])): ?>
                         <p class="fee-breakdown-warn">Capped at the maximum quoted in the offer (<?php echo esc_html($money($breakdown['capped']['amount'])); ?>; the calculation gave <?php echo esc_html($money(isset($breakdown['uncapped_total']) ? $breakdown['uncapped_total'] : 0)); ?>).</p>
                     <?php endif; ?>
@@ -2142,6 +2192,58 @@ class TeamOversight_Fees {
         } else {
             $this->checkpoint_fee_role($email, $season);
         }
+    }
+
+    /**
+     * 1.88.0: work a person's season fee out again because something other
+     * than their teams changed (the club's fee cover was set or cleared, a
+     * life membership granted or revoked, an account merge). The same path as
+     * a team change (recalculate_after_assignment_change(): no invoice is
+     * created for someone who has none, nothing is re-priced before the fee
+     * release, a fee set with Edit Fee is kept and its log line names the
+     * calculated figure), with $context in brackets on the log line. Returns
+     * array(ok, released, repriced (the invoice amount changed), before,
+     * after (invoice amounts, null with no invoice), manual (an Edit Fee kept),
+     * message (one plain sentence for the admin's notice, '' with no invoice)).
+     */
+    public function reprice_person($email, $season, $context = '') {
+        global $wpdb;
+        $season = (string) $season;
+        $out = array('ok' => true, 'released' => self::fees_released($season), 'repriced' => false, 'before' => null, 'after' => null, 'manual' => false, 'message' => '');
+        $uid = self::resolve_user_id($email);
+        $find = function () use ($wpdb, $uid, $email, $season) {
+            return $wpdb->get_row($wpdb->prepare("
+                SELECT id, invoice_amount FROM {$wpdb->prefix}team_invoices WHERE (user_id = %d OR email = %s) AND season = %s ORDER BY id LIMIT 1
+            ", $uid, $email, $season));
+        };
+        $invoice = $find();
+        $out['before'] = $invoice ? round(floatval($invoice->invoice_amount), 2) : null;
+        $this->reprice_context = (string) $context;
+        try {
+            $this->recalculate_after_assignment_change($email, $season);
+        } finally {
+            $this->reprice_context = '';
+        }
+        if (!$invoice) {
+            return $out;
+        }
+        $now = $find();
+        $out['after'] = $now ? round(floatval($now->invoice_amount), 2) : null;
+        $out['manual'] = self::fee_is_manual($invoice->id);
+        $out['repriced'] = $out['after'] !== null && abs($out['after'] - $out['before']) >= 0.005;
+        $money = function ($v) {
+            return '$' . number_format((float) $v, 2);
+        };
+        if (!$out['released']) {
+            $out['message'] = 'The ' . $season . ' fees aren\'t released yet, so their fee is worked out when they are.';
+        } elseif ($out['manual']) {
+            $out['message'] = 'Their ' . $season . ' fee was set with Edit Fee, so it stays ' . $money($out['after']) . ' (Use calculated fee on Payment Management applies the new calculation).';
+        } elseif ($out['repriced']) {
+            $out['message'] = 'Their ' . $season . ' fee was worked out again: ' . $money($out['before']) . ' to ' . $money($out['after']) . '.';
+        } else {
+            $out['message'] = 'Their ' . $season . ' fee stays ' . $money($out['after']) . '.';
+        }
+        return $out;
     }
 
     /**

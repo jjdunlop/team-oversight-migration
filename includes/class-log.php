@@ -55,6 +55,10 @@ class TeamOversight_Log {
                 'offer_money' => 'Offer money',
                 'offer_alert' => 'Offer alert',
                 'email_offer' => 'Offer email',
+                // 1.88.0: the club covering a player's playing fee (a mark
+                // set, changed or cleared on a trial application, and a
+                // locked-in offer whose cover changed afterwards).
+                'fee_cover' => 'Fee covered by the club',
             ),
             'membership' => array(
                 'membership_granted' => 'Granted',

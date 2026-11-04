@@ -45,6 +45,7 @@ class TeamOversight_Offer_Wording {
     public static function groups() {
         return array(
             'early' => array('Early Offer and the fee', 'What an Early Offer is, and how the fee is described before it is set.'),
+            'cover' => array('Fee covered by the club', 'What a player whose playing fee the club covers reads: a Premier League MVP the committee marks on their trial application, or a life member (automatic). Their offer quotes the supporter fee and the deposit is all of it.'),
             'policy' => array('Money policy', 'What happens to a deposit. These sentences are quoted by the commitments list and by the notes on a withdrawal, a decline and a finished offer, so a change here reaches all of them.'),
             'email' => array('Sentences used inside the offer emails', 'The short sentences the email wording fills in with {reply_sentence}, {deposit_sentence}, {deposit_status}, {reason_line}, {deposit_line}, {deposit_note} and {overdue_what}, and the "not selected" email\'s {other_teams}, its suggestions for what to do next and its sign-off ({reply_line}, {coach_title}, and {coach_name} when no coach can be named).'),
             'page' => array('The offer page', 'What the player reads on their offer page, in the deposit box, in the offers banner at the top of the Player Checklist, and on the Player Checklist once they have accepted an offer.'),
@@ -488,6 +489,132 @@ class TeamOversight_Offer_Wording {
             '{n} "not selected" email(s) on their way for {team}.', array_merge($team, array('{n}' => 'how many')), 1);
         $c['ns_bulk_done_waiting'] = self::item('coach', 'After Send "not selected" emails: waiting for the club', 'The same while this website may not send offer emails yet.',
             '{n} "not selected" email(s) queued for {team}: they wait until the club allows offer emails.', array_merge($team, array('{n}' => 'how many')), 2);
+
+        // ---- 1.88.0: the playing fee covered by the club (club decision, 5 Nov 2026) ----
+        $season = array('{season}' => 'the season, e.g. 2027');
+        $amount = array('{amount}' => 'the supporter fee quoted, e.g. $35.00');
+        $deposit = array('{deposit}' => 'the supporter fee to pay, e.g. $35.00');
+        $by_date = array('{by_date}' => '" by" and the date it is due, e.g. " by 20 Jan 2027" (empty when there is none)');
+        $team_vars = array('{team}' => 'the team, e.g. Premier League 1 Women');
+        $c['cover_lead_mark'] = self::item('cover', 'Covered by the club: the opening sentence',
+            'The covered offer email, its reminders, the "offer changed" email and the box at the top of the offer page, for a player the committee marked on their trial application.',
+            'Congratulations again on being named {reason}. The club is covering your {season} playing fee, so you only pay the supporter fee of {amount}.',
+            array_merge(array('{reason}' => 'the reason the committee typed, e.g. Premier League MVP 2026'), $season, $amount), 3);
+        $c['cover_lead_life'] = self::item('cover', 'Covered as a life member: the opening sentence',
+            'The same places, for a life member of the club (covered automatically).',
+            'As a life member of the club, you don\'t pay a playing fee for {season}. You only pay the supporter fee of {amount}.',
+            array_merge($season, $amount), 3);
+        $c['cover_limit_note'] = self::item('cover', 'Covered, quoted on the supporter upper limit',
+            'Under the opening sentence when the supporter fee wasn\'t entered yet, so the offer quotes the supporter upper limit (the covered wording has no Early Offer text).',
+            'The {season} supporter fee is set in {fee_month}. You pay {amount} now, the most it can be, and if it\'s set lower the club refunds the difference.',
+            array_merge($season, $amount, array('{fee_month}' => 'the month fees are released, e.g. January')), 3);
+        $c['cover_fee_words'] = self::item('cover', 'Covered: the fee as the player is told it',
+            'The Fee row of the offer box (emails and offer page) for a covered offer.',
+            '{amount}, the supporter fee (your playing fee is covered)', $amount, 1);
+        $c['cover_fee_words_limit'] = self::item('cover', 'Covered: the fee, quoted on the supporter upper limit',
+            'The same, when the quote is the supporter upper limit and the supporter fee isn\'t set yet.',
+            'up to {amount}, the supporter fee (your playing fee is covered)', $amount, 1);
+        $c['cover_deposit_words'] = self::item('cover', 'Covered: what there is to pay',
+            'The To pay row of the offer box (emails and offer page) for a covered offer: the deposit is all of the supporter fee.',
+            '{deposit}, the whole supporter fee', $deposit, 1);
+
+        $c['email_cover_due_sent'] = self::item('email', 'Covered offer: accepting and paying (dates ahead)',
+            '{cover_due} in the covered offer email and its reminder.',
+            'Accept by {reply_by}, then pay the supporter fee of {deposit} by {deposit_due}. That one payment locks in your place. If it isn\'t paid by then, your place may be offered to someone else.',
+            array_merge(array('{reply_by}' => 'the reply-by date'), $deposit, array('{deposit_due}' => 'the date the supporter fee is due')), 3);
+        $c['email_cover_due_sent_late'] = self::item('email', 'Covered offer: accepting and paying (reply date passed)',
+            '{cover_due} once the reply-by date has passed.',
+            'Your reply was due by {reply_by}. Accept and pay the supporter fee of {deposit} as soon as you can to lock in your place.',
+            array_merge(array('{reply_by}' => 'the reply-by date'), $deposit), 2);
+        $c['email_cover_due_accepted'] = self::item('email', 'Covered offer accepted: paying (date ahead)',
+            '{cover_due} in the reminder to a player who accepted a covered offer.',
+            'Pay the supporter fee of {deposit} by {deposit_due} to lock in your place.',
+            array_merge($deposit, array('{deposit_due}' => 'the date the supporter fee is due')), 2);
+        $c['email_cover_due_accepted_late'] = self::item('email', 'Covered offer accepted: paying (date passed)',
+            'The same once the date has passed.',
+            'The supporter fee of {deposit} was due by {deposit_due}. Pay it as soon as you can to lock in your place.',
+            array_merge($deposit, array('{deposit_due}' => 'the date the supporter fee was due')), 2);
+        $c['email_cover_due_paid'] = self::item('email', 'Covered offer: the supporter fee is already paid',
+            '{cover_due} for a covered player whose supporter fee for the season is already paid (an offer for a second team).',
+            'You have already paid the {season} supporter fee, so accepting locks in your place straight away.', $season, 2);
+        $c['email_cover_whole_fee'] = self::item('email', 'Covered offer: the payment is the whole fee',
+            '{cover_settled} in the covered offer and locked-in emails, when the quote is the supporter fee itself.',
+            'That payment is your whole {season} fee.', $season, 1);
+        $c['email_changed_cleared'] = self::item('email', 'Offer changed: the club no longer covers the fee',
+            '{change_line} of the "offer changed" email after the committee cleared the mark.',
+            'The club is no longer covering your {season} playing fee, so your offer to join {team} now quotes the playing fee.',
+            array_merge($season, $team_vars), 2);
+        $c['email_changed_life_ended'] = self::item('email', 'Offer changed: the life membership ended',
+            '{change_line} of the "offer changed" email after a life membership was revoked.',
+            'Your life membership has ended, so your {season} offer to join {team} now quotes the playing fee.',
+            array_merge($season, $team_vars), 2);
+
+        $c['page_cover_consent'] = self::item('page', 'Covered offer: above the Accept button',
+            'The offer page of a covered offer, above Accept.',
+            'By accepting you agree to the commitments above and to pay the supporter fee of {deposit}{by_date}.',
+            array_merge($deposit, $by_date), 2);
+        $c['page_cover_consent_paid'] = self::item('page', 'Covered offer: above the Accept button, supporter fee already paid',
+            'The same when the player\'s supporter fee for the season is already paid (an offer for a second team).',
+            'By accepting you agree to the commitments above. Your {season} supporter fee is already paid, so accepting locks in your place straight away.', $season, 2);
+        $c['page_cover_accepted_lead'] = self::item('page', 'Covered offer accepted: pay the supporter fee',
+            'The offer page once a covered offer is accepted.',
+            '**You have accepted this offer.** Pay the supporter fee{by_date} to lock in your place.', $by_date, 2);
+        $c['page_cover_pay_heading'] = self::item('page', 'Covered offer: the pay box heading',
+            'The heading of the pay box on a covered offer.', 'Pay the supporter fee', array(), 1);
+        $c['page_cover_pay_intro'] = self::item('page', 'Covered offer: under the pay box heading',
+            'Under that heading when the quote is the supporter fee itself.', 'It is one payment, and it is your whole {season} fee.', $season, 1);
+        $c['page_cover_pay_intro_limit'] = self::item('page', 'Covered offer: under the pay box heading (supporter upper limit)',
+            'Under that heading when the quote is the supporter upper limit.', 'It is one payment. If the {season} supporter fee is set lower, the club refunds the difference.', $season, 2);
+        $c['page_cover_paid'] = self::item('page', 'Covered offer: the supporter fee is paid',
+            'The pay box once the supporter fee is paid in full.',
+            '**The supporter fee of {deposit} is paid.** The club is confirming your place and will email you when you are locked in.', $deposit, 2);
+        $c['stage_cover_due'] = self::item('page', 'Covered offer accepted: what to pay (the fees step)',
+            'The fees step of the Player Checklist and the player\'s fees page for an accepted covered offer.',
+            'The supporter fee for {team} is {deposit}. Pay it{by_date} to lock in your place.', array_merge($team_vars, $deposit, $by_date), 2);
+        $c['stage_cover_due_part'] = self::item('page', 'Covered offer accepted: what to pay, part already paid',
+            'The same when some of what the player has paid this season counts towards it.',
+            'The supporter fee for {team} is {deposit}. {paid} of what you have already paid counts towards it, so pay the remaining {remaining}{by_date} to lock in your place.',
+            array_merge($team_vars, $deposit, array('{paid}' => 'what already counts, e.g. $20.00', '{remaining}' => 'what is left to pay'), $by_date), 3);
+        $c['stage_cover_locked'] = self::item('page', 'Covered and locked in: the supporter fee was the whole fee',
+            'The player\'s fees page and checklist for a covered player who is locked in, before the season\'s fees are released.',
+            'You are locked in for {team}. The {paid} you paid is your whole {season} fee.', array_merge($team_vars, array('{paid}' => 'what they paid'), $season), 2);
+        $c['stage_cover_locked_limit'] = self::item('page', 'Covered and locked in: paid the supporter upper limit',
+            'The same when they paid the supporter upper limit because the supporter fee wasn\'t set yet.',
+            'You are locked in for {team}. You paid {paid}, the most the {season} supporter fee can be. It is set in {fee_month}, and if it is lower the club refunds the difference.',
+            array_merge($team_vars, array('{paid}' => 'what they paid'), $season, array('{fee_month}' => 'the month fees are released, e.g. January')), 3);
+        $c['checklist_cover_title'] = self::item('page', 'Player Checklist: the covered pay step\'s title',
+            'The Player Checklist once a covered offer is accepted.', 'Pay the supporter fee to lock in your place', array(), 1);
+        $c['checklist_cover_step'] = self::item('page', 'Player Checklist: the covered pay step',
+            'Under that title until the supporter fee is paid.',
+            'The supporter fee for {team} is in the box above. Paying it locks in your place, and it is your whole {season} fee.', array_merge($team_vars, $season), 2);
+        $c['checklist_cover_paid'] = self::item('page', 'Player Checklist: the supporter fee is paid',
+            'Under that title, and on the player\'s fees page, once it is paid and the club is confirming the place.',
+            'The supporter fee for {team} is paid. The club is confirming your place.', $team_vars, 2);
+        $c['page_changed_by_club'] = self::item('page', 'Accepting after the club changed the offer',
+            'The answer to Accept when the club changed the offer (its fee cover) after the player opened the page.',
+            'The club changed your offer after you opened this page. Your deposit is now {deposit}. Check it and accept again.', $deposit, 2);
+
+        $c['cell_missing_cover'] = self::item('coach', 'Can\'t send yet: a covered player\'s supporter fee isn\'t set',
+            'Beside a greyed Send offer or Offer again, in the Send offers to all list and as the answer to Send offer, for a player whose playing fee the club covers when the fee matrix has neither a supporter fee nor a supporter upper limit for their category. Administrators see which one to set instead.',
+            'Can\'t send yet: the club covers this player\'s playing fee, and the supporter fee for their category isn\'t set. The committee needs to set it first.', array(), 2);
+        $c['cell_cover_conflict'] = self::item('coach', 'Can\'t send yet: a covered player\'s fee needs checking',
+            'The same places, for a covered player whose team manager place would set their fee (administrators see the place).',
+            'Can\'t send yet: the committee needs to check this player\'s fee first.', array(), 1);
+        $c['cover_badge'] = self::item('coach', 'The covered player\'s badge',
+            'On the player\'s card in the coach portal (applicants, confirmed players and the team list), read only.',
+            'Fee covered: {reason}', array('{reason}' => 'the reason, e.g. Premier League MVP 2026, or Life member'), 1);
+        $c['requote_why_set'] = self::item('coach', 'Offer changed: why (the fee is now covered)',
+            'The {why} of the two lines below.', 'fee covered: {reason}', array('{reason}' => 'the reason, e.g. Premier League MVP 2026'), 1);
+        $c['requote_why_cleared'] = self::item('coach', 'Offer changed: why (the cover ended)',
+            'The {why} of the two lines below.', 'fee cover ended', array(), 1);
+        $c['requote_card_waiting'] = self::item('coach', 'Offer changed: the player hasn\'t been told',
+            'On the card of a player whose offer the club changed (their fee cover changed) until an administrator emails it.',
+            'The club changed this offer on {date} ({why}). The player hasn\'t been emailed about the change.',
+            array('{date}' => 'the day, e.g. 6 Nov', '{why}' => 'why, from the two lines above'), 2);
+        $c['requote_card_emailed'] = self::item('coach', 'Offer changed: the player was emailed',
+            'The same card once the new offer was emailed.',
+            'The club changed this offer on {date} ({why}). The player was emailed about it on {emailed}.',
+            array('{date}' => 'the day it changed', '{why}' => 'why', '{emailed}' => 'the day it was emailed'), 2);
 
         self::$catalogue_cache = $c;
         return $c;

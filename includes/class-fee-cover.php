@@ -1,0 +1,716 @@
+<?php
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+/**
+ * 1.88.0 (club decision, 5 Nov 2026): the playing fee covered by the club.
+ *
+ * A person is FEE-COVERED for a season S (a fee-timeline season, 2027 on) when
+ *  - mark: one of their trial applications for S (by account id) carries the
+ *    committee's mark (trial_applications.fee_cover_reason, e.g. Premier
+ *    League MVP 2026), set and cleared by an administrator on Trial
+ *    Applications; or
+ *  - life: they hold a life-member grant in team_memberships whose dates
+ *    overlap the calendar year S (start_date <= 'S-12-31' AND end_date >=
+ *    'S-01-01': active on 1 January of S, or granted during S). Automatic,
+ *    with no tick; it ends only when the grant is revoked on the Members page.
+ * Life wins when both apply (it can't be cleared, so clearing a redundant
+ * mark changes nothing).
+ *
+ * Why the calendar-year overlap: it reads only stored grant dates, never
+ * "today", so a season's cover never drifts with the clock. The plugin's
+ * only writers of grant dates are TeamOversight_Memberships::insert_grant()
+ * (start today) and revoke_all() (end yesterday, only grants still running),
+ * so once a year has ended nothing done through the plugin can change its
+ * cover: a later grant starts after it and a later revoke ends after its
+ * 1 January. The life-member role alone (no ledger grant) has no dates and
+ * does not count.
+ *
+ * What it changes (TeamOversight_Fees::fee_breakdown() is the only place a
+ * rate changes): for that person and season every playing_member and
+ * training_only place, on every team, is charged at the SUPPORTER column of
+ * that place's fee class. Coach and assistant coach places already are;
+ * a team manager place is still charged as a playing member. Fees never add
+ * up, so a covered person pays one supporter fee for the season. An offer
+ * for a covered player quotes the supporter cell (the fee if entered, else
+ * the upper limit) and the deposit is all of it (DEPOSIT_PERCENT). Trial
+ * fees and Club Programs never use the fee engine and are not affected.
+ *
+ * The cover is per person and season, not dated: setting or clearing it
+ * re-prices the whole season and re-quotes the person's open offers at once
+ * (TeamOversight_Offers::requote(); no email: an administrator presses
+ * Email the new offer). Seasons before 2027 are never covered and no query
+ * is made for them.
+ *
+ * Readers are pure and cheap: season_index() loads a season once per request
+ * with two queries; for_person() / for_email() are array lookups. Every
+ * writer calls flush_cache().
+ */
+class TeamOversight_Fee_Cover {
+
+    /** The deposit of a covered offer: all of the quote (the supporter fee is small). */
+    const DEPOSIT_PERCENT = 100.0;
+
+    /** The places the cover charges at the supporter column. */
+    const COVERED_ROLES = array('playing_member', 'training_only');
+
+    /** The longest reason an administrator may type (characters). */
+    const REASON_MAX = 100;
+
+    /** The reason a life member's cover carries. */
+    const LIFE_REASON = 'Life member';
+
+    /** The activity log type (registered in class-log.php). */
+    const LOG_TYPE = 'fee_cover';
+
+    const SOURCE_MARK = 'mark';
+    const SOURCE_LIFE = 'life';
+
+    /** season => array(marks => user id => mark, life => user id => true). */
+    private static $index = array();
+
+    private static $hooks_added = false;
+
+    /** The two account-merge hooks (once per request, statically). */
+    public static function register_hooks() {
+        if (self::$hooks_added) {
+            return;
+        }
+        self::$hooks_added = true;
+        add_action('murvc_account_merged', array(__CLASS__, 'after_merge'), 20, 3);
+        add_action('murvc_account_merge_undone', array(__CLASS__, 'after_merge_undone'), 20, 3);
+    }
+
+    // ------------------------------------------------------------------
+    // Readers (pure: they never write)
+    // ------------------------------------------------------------------
+
+    /** Can a person be fee-covered in this season? (A fee-timeline season, 2027 on.) */
+    public static function applies($season) {
+        return class_exists('TeamOversight_Fees') && TeamOversight_Fees::timeline_applies($season);
+    }
+
+    /** Forget what this request read (every writer calls it, and so do the tests). */
+    public static function flush_cache() {
+        self::$index = array();
+    }
+
+    /**
+     * Who is covered in a season: array(marks => user id => array(reason,
+     * application_id, by, at), life => user id => true). Two queries the
+     * first time a season is asked for in a request, none after; nothing at
+     * all for a season before 2027. Marks only count on applications with an
+     * account (strict identity); when one account has two marked
+     * applications in a season the older one is read.
+     */
+    public static function season_index($season) {
+        global $wpdb;
+        $season = is_scalar($season) ? (string) $season : '';
+        $empty = array('marks' => array(), 'life' => array());
+        if (!self::applies($season)) {
+            return $empty;
+        }
+        if (isset(self::$index[$season])) {
+            return self::$index[$season];
+        }
+        $index = $empty;
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, user_id, fee_cover_reason, fee_cover_by, fee_cover_at FROM {$wpdb->prefix}trial_applications WHERE season = %s AND fee_cover_reason IS NOT NULL AND user_id > 0 ORDER BY id",
+            $season
+        ));
+        foreach ((array) $rows as $row) {
+            $uid = intval($row->user_id);
+            $reason = trim((string) $row->fee_cover_reason);
+            if ($uid <= 0 || $reason === '' || isset($index['marks'][$uid])) {
+                continue;
+            }
+            $index['marks'][$uid] = array('reason' => $reason, 'application_id' => intval($row->id), 'by' => intval($row->fee_cover_by), 'at' => (string) $row->fee_cover_at);
+        }
+        $life = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT user_id FROM {$wpdb->prefix}team_memberships WHERE tier = %s AND start_date <= %s AND end_date >= %s",
+            self::life_tier(), $season . '-12-31', $season . '-01-01'
+        ));
+        foreach ((array) $life as $uid) {
+            if (intval($uid) > 0) {
+                $index['life'][intval($uid)] = true;
+            }
+        }
+        self::$index[$season] = $index;
+        return $index;
+    }
+
+    /** The life-member tier key. */
+    private static function life_tier() {
+        return class_exists('TeamOversight_Memberships') ? TeamOversight_Memberships::TIER_LIFE : 'life-member';
+    }
+
+    /**
+     * A person's cover for a season, or null: array(reason, source (mark or
+     * life), application_id (the marked application, 0 when none), by, at,
+     * mark (the mark itself when there is one, also under a life cover, so a
+     * screen can say a redundant mark is there)). By account id only.
+     */
+    public static function for_person($user_id, $season) {
+        $uid = intval($user_id);
+        if ($uid <= 0) {
+            return null;
+        }
+        $index = self::season_index($season);
+        $mark = isset($index['marks'][$uid]) ? $index['marks'][$uid] : null;
+        if (isset($index['life'][$uid])) {
+            return array('reason' => self::LIFE_REASON, 'source' => self::SOURCE_LIFE, 'application_id' => $mark ? $mark['application_id'] : 0, 'by' => 0, 'at' => '', 'mark' => $mark);
+        }
+        if ($mark) {
+            return array('reason' => $mark['reason'], 'source' => self::SOURCE_MARK, 'application_id' => $mark['application_id'], 'by' => $mark['by'], 'at' => $mark['at'], 'mark' => $mark);
+        }
+        return null;
+    }
+
+    /**
+     * for_person() by email (the fee engine's identity): null at once, with
+     * the email never resolved, when nobody in the season is covered.
+     */
+    public static function for_email($email, $season) {
+        $index = self::season_index($season);
+        if (empty($index['marks']) && empty($index['life'])) {
+            return null;
+        }
+        $uid = TeamOversight_Fees::resolve_user_id((string) $email);
+        return $uid > 0 ? self::for_person($uid, $season) : null;
+    }
+
+    /** Is the person a life member for the season (the overlap rule)? */
+    public static function life_in($user_id, $season) {
+        $index = self::season_index($season);
+        return intval($user_id) > 0 && isset($index['life'][intval($user_id)]);
+    }
+
+    /** A cover reduced to what pricing and offers keep: array(reason, source), or null. */
+    public static function normalise($cover) {
+        if (!is_array($cover) || !isset($cover['reason']) || trim((string) $cover['reason']) === '') {
+            return null;
+        }
+        $source = (isset($cover['source']) && $cover['source'] === self::SOURCE_LIFE) ? self::SOURCE_LIFE : self::SOURCE_MARK;
+        return array('reason' => trim((string) $cover['reason']), 'source' => $source);
+    }
+
+    /** Two covers are the same: both none, or the same reason and source. */
+    public static function same($a, $b) {
+        $a = self::normalise($a);
+        $b = self::normalise($b);
+        if ($a === null || $b === null) {
+            return $a === $b;
+        }
+        return $a['reason'] === $b['reason'] && $a['source'] === $b['source'];
+    }
+
+    /** The cover an offer's quote was made with (quote_cover), or null for an ordinary quote. */
+    public static function stored_cover($offer) {
+        if (!is_object($offer) || !isset($offer->quote_cover) || $offer->quote_cover === null || trim((string) $offer->quote_cover) === '') {
+            return null;
+        }
+        $source = (isset($offer->quote_cover_source) && $offer->quote_cover_source === self::SOURCE_LIFE) ? self::SOURCE_LIFE : self::SOURCE_MARK;
+        return array('reason' => trim((string) $offer->quote_cover), 'source' => $source);
+    }
+
+    /** The mark an application carries: array(reason, by, at), or null. */
+    public static function mark_of_application($application) {
+        if (!is_object($application) || !isset($application->fee_cover_reason) || $application->fee_cover_reason === null || trim((string) $application->fee_cover_reason) === '') {
+            return null;
+        }
+        return array(
+            'reason' => trim((string) $application->fee_cover_reason),
+            'by' => isset($application->fee_cover_by) ? intval($application->fee_cover_by) : 0,
+            'at' => isset($application->fee_cover_at) ? (string) $application->fee_cover_at : '',
+        );
+    }
+
+    /** The reason a mark gets when none is typed: Premier League MVP and the season before (Premier League MVP 2026 for 2027). */
+    public static function default_reason($season) {
+        return 'Premier League MVP ' . (intval($season) - 1);
+    }
+
+    /** The words "fee covered: <reason>" (log lines, notes, the re-price context). */
+    public static function words($cover) {
+        $cover = self::normalise($cover);
+        return $cover ? 'fee covered: ' . $cover['reason'] : 'fee cover ended';
+    }
+
+    /**
+     * Did this account ever hold a life membership that has since ended for
+     * the season (so a re-quote away from the cover is the life membership
+     * ending, not a mark cleared)? One query; the email wording only.
+     */
+    public static function life_ended($user_id, $season) {
+        global $wpdb;
+        if (intval($user_id) <= 0 || self::life_in($user_id, $season)) {
+            return false;
+        }
+        return (bool) $wpdb->get_var($wpdb->prepare(
+            "SELECT 1 FROM {$wpdb->prefix}team_memberships WHERE user_id = %d AND tier = %s LIMIT 1",
+            intval($user_id), self::life_tier()
+        ));
+    }
+
+    /**
+     * How many are covered in a season: array(marked (marked people who are
+     * not life members), life (life members for the season), people (both),
+     * user_ids (every covered account)). One season_index().
+     */
+    public static function season_summary($season) {
+        $index = self::season_index($season);
+        $marked = 0;
+        foreach (array_keys($index['marks']) as $uid) {
+            if (!isset($index['life'][$uid])) {
+                $marked++;
+            }
+        }
+        $ids = array_values(array_unique(array_merge(array_keys($index['marks']), array_keys($index['life']))));
+        sort($ids);
+        return array('marked' => $marked, 'life' => count($index['life']), 'people' => count($ids), 'user_ids' => $ids);
+    }
+
+    /** Payment Management's tag for a covered person ('' when not covered). Escaped HTML, no figure. */
+    public static function tag_html($user_id, $season) {
+        $cover = self::for_person($user_id, $season);
+        if (!$cover) {
+            return '';
+        }
+        $title = $cover['source'] === self::SOURCE_LIFE
+            ? 'A life member: their playing and Training Only places are charged at the supporter fee, automatically.'
+            : 'Marked on their trial application: their playing and Training Only places are charged at the supporter fee.';
+        return '<span class="murvc-fee-cover-tag" style="display:inline-block;margin-left:4px;padding:1px 6px;border-radius:8px;background:#e7f5ea;color:#1e6b34;font-size:11px;" title="' . esc_attr($title) . '">' . esc_html('Fee covered: ' . $cover['reason']) . '</span>';
+    }
+
+    /** The coach portal's read-only badge text for a covered player ('' when not covered). Plain text, no figure. */
+    public static function coach_badge($user_id, $season) {
+        $cover = self::for_person($user_id, $season);
+        if (!$cover) {
+            return '';
+        }
+        return TeamOversight_Offers::wording('cover_badge', array('{reason}' => $cover['reason']));
+    }
+
+    /**
+     * The Trial Applications cell (administrators only; 2027 on). Not covered
+     * with an account: a reason box (the default filled in) and Cover playing
+     * fee. Marked: the reason, who set it and when, the box to change it and
+     * Clear. A life member: covered automatically, no form (and a Clear for
+     * a mark that is also there). No account: says so. Escaped HTML.
+     */
+    public static function render_application_cell($trial) {
+        if (!is_object($trial) || !self::applies(isset($trial->season) ? $trial->season : '')) {
+            return '';
+        }
+        $season = (string) $trial->season;
+        $uid = isset($trial->user_id) ? intval($trial->user_id) : 0;
+        if ($uid <= 0) {
+            return '<small style="color:#646970;">No account, so the fee can\'t be covered.</small>';
+        }
+        $mark = self::mark_of_application($trial);
+        $life = self::life_in($uid, $season);
+        $form = function ($action, $value, $button, $confirm = '') use ($trial) {
+            $out = '<form method="post" style="margin:2px 0;"' . ($confirm !== '' ? ' onsubmit="return confirm(\'' . esc_js($confirm) . '\');"' : '') . '>';
+            $out .= '<input type="hidden" name="trial_id" value="' . intval($trial->id) . '">';
+            $out .= '<input type="hidden" name="action" value="' . esc_attr($action) . '">';
+            $out .= wp_nonce_field('process_trial', 'trial_nonce', true, false);
+            if ($value !== null) {
+                $out .= '<input type="text" name="fee_cover_reason" value="' . esc_attr($value) . '" maxlength="' . intval(self::REASON_MAX) . '" style="font-size:12px;width:100%;max-width:170px;" aria-label="Reason the player reads">';
+            }
+            $out .= '<input type="submit" class="button button-small" value="' . esc_attr($button) . '">';
+            return $out . '</form>';
+        };
+        $html = '';
+        if ($life) {
+            $html .= '<strong style="color:#1e6b34;">Covered automatically: ' . esc_html(self::LIFE_REASON) . '</strong><br><small>Ends only if the life membership is revoked on the Members page.</small>';
+            if ($mark) {
+                $html .= '<br><small>Also marked: ' . esc_html($mark['reason']) . '</small>'
+                    . $form('clear_fee_cover', null, 'Clear the mark', 'Clear the mark? This player stays covered as a life member, so nothing else changes.');
+            }
+            return $html;
+        }
+        $hint = 'The club covers this player\'s ' . $season . ' playing fee: their playing and Training Only places are charged at the supporter fee for their category, their offer quotes the supporter fee and the deposit is all of it. The player reads: Congratulations again on being named <reason>.';
+        if ($mark) {
+            $by = $mark['by'] > 0 ? get_userdata($mark['by']) : false;
+            $html .= '<strong style="color:#1e6b34;">Covered: ' . esc_html($mark['reason']) . '</strong><br><small style="color:#996800;">Set by ' . esc_html($by ? $by->display_name : 'an admin') . ($mark['at'] !== '' ? ', ' . esc_html(mysql2date('j M Y', $mark['at'])) : '') . '</small>';
+            $html .= '<span title="' . esc_attr($hint) . '">' . $form('set_fee_cover', $mark['reason'], 'Save reason') . '</span>';
+            $html .= $form('clear_fee_cover', null, 'Clear', 'Clear the fee cover? Their open offers are re-quoted at the playing fee and their ' . $season . ' fee is worked out again.');
+            return $html;
+        }
+        return '<span title="' . esc_attr($hint) . '">' . $form('set_fee_cover', self::default_reason($season), 'Cover playing fee') . '</span>';
+    }
+
+    // ------------------------------------------------------------------
+    // Writers
+    // ------------------------------------------------------------------
+
+    private static function res($ok, $code, $message, array $extra = array()) {
+        return array_merge(array('ok' => (bool) $ok, 'code' => (string) $code, 'message' => (string) $message, 'changed' => false), $extra);
+    }
+
+    private static function application($application_id) {
+        global $wpdb;
+        return $wpdb->get_row($wpdb->prepare("SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d", intval($application_id)));
+    }
+
+    /**
+     * Check a typed reason: trimmed plain text, blank = the default for the
+     * season, more than REASON_MAX characters refused (never clipped), a
+     * dollar figure refused (coaches see the reason on the player's card).
+     * $raw must already be unslashed. Returns array(ok, reason, error).
+     */
+    public static function check_reason($raw, $season) {
+        $reason = trim(preg_replace('/\s+/u', ' ', sanitize_text_field((string) $raw)));
+        if ($reason === '') {
+            $reason = self::default_reason($season);
+        }
+        $length = function_exists('mb_strlen') ? mb_strlen($reason, 'UTF-8') : strlen($reason);
+        if ($length > self::REASON_MAX) {
+            return array('ok' => false, 'reason' => $reason, 'error' => 'The reason can be at most ' . self::REASON_MAX . ' characters (this one has ' . $length . '). Shorten it: nothing was saved.');
+        }
+        if (TeamOversight_Offer_Wording::has_money($reason)) {
+            return array('ok' => false, 'reason' => $reason, 'error' => 'The reason can\'t hold a dollar figure: coaches see it on the player\'s card. Nothing was saved.');
+        }
+        return array('ok' => true, 'reason' => $reason, 'error' => '');
+    }
+
+    /**
+     * Price the person's open offers (sent or accepted) of the season with
+     * $cover (null = none) as a re-quote would, writing nothing. Returns the
+     * admin sentences of every offer that couldn't be re-quoted (a missing
+     * supporter cell, a team manager place that sets the rate), or array().
+     */
+    private static function dry_run($user_id, $season, $cover) {
+        $problems = array();
+        foreach (TeamOversight_Offers::for_user($user_id, $season, array(TeamOversight_Offers::SENT, TeamOversight_Offers::ACCEPTED)) as $offer) {
+            if (self::same(self::stored_cover($offer), $cover)) {
+                continue;
+            }
+            $quote = TeamOversight_Offers::compute_quote($offer->user_id, $offer->season, $offer->team, $offer->role, array('offer' => $offer, 'mode' => 'requote', 'fee_cover' => $cover ? $cover : false));
+            if (empty($quote['ok'])) {
+                $problems[] = $offer->season . ' ' . $offer->team . ' offer #' . intval($offer->id) . ': ' . ($quote['error_admin'] !== '' ? $quote['error_admin'] : $quote['error_public']);
+            }
+        }
+        return $problems;
+    }
+
+    /** One fee_cover log line about the player. */
+    private static function log($user_id, $message) {
+        TeamOversight_Log::add(self::LOG_TYPE, $message, intval($user_id) > 0 ? array('user_id' => intval($user_id)) : array());
+    }
+
+    /** A permanent note on the application (team_trial_notes is never pruned, unlike the log). */
+    private static function note($application_id, $text, $author_id) {
+        global $wpdb;
+        if (intval($application_id) <= 0 || trim((string) $text) === '') {
+            return;
+        }
+        $wpdb->insert($wpdb->prefix . 'team_trial_notes', array(
+            'application_id' => intval($application_id),
+            'author_id' => intval($author_id),
+            'note' => (string) $text,
+        ), array('%d', '%d', '%s'));
+    }
+
+    /**
+     * Mark an application: the club covers the player's playing fee for its
+     * season. Administrators only (TeamOversight_Offers::can_approve()). The
+     * application must exist, be for 2027 or later and carry an account; the
+     * reason is checked (check_reason(); blank = the default). Every open
+     * offer of the player in the season is priced with the cover first, and
+     * any that couldn't be re-quoted refuses the mark with nothing written.
+     * Then ONE compare-and-set UPDATE (a second press with the same reason is
+     * 'already'), a fee_cover log line (set, or the reason changed), a note
+     * on the application, and sync_person(): open offers re-quoted (no email),
+     * the season fee worked out again. $reason is unslashed text.
+     * Returns array(ok, code, message, changed, sync (sync_person()'s result)).
+     */
+    public static function set_mark($application_id, $reason, $actor_id) {
+        global $wpdb;
+        if (!TeamOversight_Offers::can_approve($actor_id)) {
+            return self::res(false, 'forbidden', 'Only administrators can cover a player\'s fee.');
+        }
+        $app = self::application($application_id);
+        if (!$app) {
+            return self::res(false, 'not_found', 'Application not found.');
+        }
+        if (!self::applies($app->season)) {
+            return self::res(false, 'refused', 'The club covers playing fees from the ' . TeamOversight_Fees::FEE_TIMELINE_FROM . ' season.');
+        }
+        $uid = intval($app->user_id);
+        if ($uid <= 0) {
+            return self::res(false, 'refused', 'This application has no account, so its fee can\'t be covered.');
+        }
+        $check = self::check_reason($reason, $app->season);
+        if (!$check['ok']) {
+            return self::res(false, 'invalid', $check['error']);
+        }
+        $reason = $check['reason'];
+        $old = self::mark_of_application($app);
+        if ($old && $old['reason'] === $reason) {
+            return self::res(true, 'already', 'This application already carries that fee cover.');
+        }
+        $season = (string) $app->season;
+        self::flush_cache();
+        $live = self::for_person($uid, $season);
+        $after = ($live && $live['source'] === self::SOURCE_LIFE) ? $live : array('reason' => $reason, 'source' => self::SOURCE_MARK);
+        $problems = self::dry_run($uid, $season, self::normalise($after));
+        if (!empty($problems)) {
+            return self::res(false, 'no_price', 'Not covered: ' . implode(' ', $problems) . ' Nothing was changed.');
+        }
+        $changed = $wpdb->query($wpdb->prepare(
+            "UPDATE {$wpdb->prefix}trial_applications SET fee_cover_reason = %s, fee_cover_by = %d, fee_cover_at = %s WHERE id = %d AND (fee_cover_reason IS NULL OR fee_cover_reason <> %s)",
+            $reason, intval($actor_id), current_time('mysql'), intval($app->id), $reason
+        ));
+        self::flush_cache();
+        if (!$changed) {
+            return self::res(true, 'already', 'This application already carries that fee cover.');
+        }
+        $where = 'trial application #' . intval($app->id) . ' (trial #' . intval($app->trial_number) . ')';
+        if ($old) {
+            self::log($uid, $season . ' fee cover on ' . $where . ': reason changed from ' . $old['reason'] . ' to ' . $reason);
+            self::note($app->id, 'The reason for the club covering the ' . $season . ' playing fee changed from ' . $old['reason'] . ' to ' . $reason . '.', $actor_id);
+        } else {
+            self::log($uid, $season . ' fee cover set on ' . $where . ': ' . $reason);
+            self::note($app->id, 'Playing fee covered by the club for ' . $season . ': ' . $reason . '.', $actor_id);
+        }
+        $sync = self::sync_person($uid, self::words($after), array($season), $actor_id);
+        $message = $old ? 'The reason is now ' . $reason . '.' : 'The ' . $season . ' playing fee is covered: ' . $reason . '.';
+        if ($live && $live['source'] === self::SOURCE_LIFE) {
+            $message .= ' They are a life member, so they were covered already and nothing else changes.';
+        }
+        return self::res(true, 'done', $message, array('changed' => true, 'sync' => $sync, 'reason' => $reason));
+    }
+
+    /**
+     * Clear an application's mark (administrators only): the player's open
+     * offers are priced without the cover first (a missing playing cell
+     * refuses the clear with nothing written), then ONE compare-and-set
+     * UPDATE, a log line, a note and sync_person(). A life member stays
+     * covered, so nothing else changes for them.
+     */
+    public static function clear_mark($application_id, $actor_id) {
+        global $wpdb;
+        if (!TeamOversight_Offers::can_approve($actor_id)) {
+            return self::res(false, 'forbidden', 'Only administrators can clear a fee cover.');
+        }
+        $app = self::application($application_id);
+        if (!$app) {
+            return self::res(false, 'not_found', 'Application not found.');
+        }
+        $old = self::mark_of_application($app);
+        if (!$old) {
+            return self::res(true, 'already', 'This application carries no fee cover.');
+        }
+        $season = (string) $app->season;
+        $uid = intval($app->user_id);
+        self::flush_cache();
+        $life = $uid > 0 && self::life_in($uid, $season);
+        $after = $life ? array('reason' => self::LIFE_REASON, 'source' => self::SOURCE_LIFE) : null;
+        if ($uid > 0 && self::applies($season)) {
+            $problems = self::dry_run($uid, $season, $after);
+            if (!empty($problems)) {
+                return self::res(false, 'no_price', 'Not cleared: ' . implode(' ', $problems) . ' Nothing was changed.');
+            }
+        }
+        $changed = $wpdb->query($wpdb->prepare(
+            "UPDATE {$wpdb->prefix}trial_applications SET fee_cover_reason = NULL, fee_cover_by = NULL, fee_cover_at = NULL WHERE id = %d AND fee_cover_reason IS NOT NULL",
+            intval($app->id)
+        ));
+        self::flush_cache();
+        if (!$changed) {
+            return self::res(true, 'already', 'This application carries no fee cover.');
+        }
+        self::log($uid, $season . ' fee cover cleared on trial application #' . intval($app->id) . ' (trial #' . intval($app->trial_number) . ') (was: ' . $old['reason'] . ')');
+        self::note($app->id, 'The club no longer covers the ' . $season . ' playing fee (was: ' . $old['reason'] . ').', $actor_id);
+        $sync = ($uid > 0 && self::applies($season)) ? self::sync_person($uid, self::words($after), array($season), $actor_id) : self::empty_sync();
+        $message = 'The fee cover is cleared.';
+        if ($life) {
+            $message .= ' They are a life member, so they stay covered and nothing else changes.';
+        }
+        return self::res(true, 'done', $message, array('changed' => true, 'sync' => $sync));
+    }
+
+    private static function empty_sync() {
+        return array('requoted' => 0, 'unchanged' => 0, 'failed' => 0, 'locked' => 0, 'repriced' => 0, 'details' => array());
+    }
+
+    /** The 2027+ seasons a person has anything in: a live offer, an invoice, a place or an application. */
+    private static function seasons_of($user_id) {
+        global $wpdb;
+        $uid = intval($user_id);
+        $from = (string) TeamOversight_Fees::FEE_TIMELINE_FROM;
+        $seasons = array();
+        foreach (TeamOversight_Offers::for_user($uid, null, array(TeamOversight_Offers::SENT, TeamOversight_Offers::ACCEPTED, TeamOversight_Offers::LOCKED_IN)) as $offer) {
+            $seasons[(string) $offer->season] = true;
+        }
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT season FROM {$wpdb->prefix}team_invoices WHERE user_id = %d AND season >= %s
+             UNION SELECT season FROM {$wpdb->prefix}team_assignments WHERE user_id = %d AND season >= %s
+             UNION SELECT season FROM {$wpdb->prefix}trial_applications WHERE user_id = %d AND season >= %s",
+            $uid, $from, $uid, $from, $uid, $from
+        ));
+        foreach ((array) $rows as $season) {
+            $seasons[(string) $season] = true;
+        }
+        $out = array();
+        foreach (array_keys($seasons) as $season) {
+            if (self::applies($season)) {
+                $out[] = (string) $season;
+            }
+        }
+        sort($out, SORT_STRING);
+        return $out;
+    }
+
+    /**
+     * Bring a person's offers and fee into line with their cover now, after
+     * it changed (a mark set or cleared, a life grant written or revoked, an
+     * account merge or its undo). Per season ($seasons, else every 2027+
+     * season they hold anything in): each SENT or ACCEPTED offer whose stored
+     * cover differs from the live one is re-quoted
+     * (TeamOversight_Offers::requote(); no email is queued); a LOCKED-IN offer
+     * whose cover differs stays locked in and gets one log line (from then on
+     * the fee follows the cover; anything paid above it is credit); then the
+     * season fee is worked out again (TeamOversight_Fees::reprice_person():
+     * before the fee release that only checkpoints). Each season in its own
+     * try/catch (an offer_alert on failure; the daily reconcile tries the
+     * offers again). Returns array(requoted, unchanged, failed, locked,
+     * repriced, details (list of plain sentences)).
+     */
+    public static function sync_person($user_id, $context, $seasons = null, $actor_id = 0) {
+        $out = self::empty_sync();
+        $uid = intval($user_id);
+        if ($uid <= 0 || !class_exists('TeamOversight_Offers')) {
+            return $out;
+        }
+        self::flush_cache();
+        $seasons = $seasons === null ? self::seasons_of($uid) : array_values(array_filter(array_map('strval', (array) $seasons), array(__CLASS__, 'applies')));
+        foreach ($seasons as $season) {
+            try {
+                $cover = self::normalise(self::for_person($uid, $season));
+                foreach (TeamOversight_Offers::for_user($uid, $season) as $offer) {
+                    if (self::same(self::stored_cover($offer), $cover)) {
+                        if (in_array($offer->state, array(TeamOversight_Offers::SENT, TeamOversight_Offers::ACCEPTED), true)) {
+                            $out['unchanged']++;
+                        }
+                        continue;
+                    }
+                    if (in_array($offer->state, array(TeamOversight_Offers::SENT, TeamOversight_Offers::ACCEPTED), true)) {
+                        $r = TeamOversight_Offers::requote($offer->id, $actor_id, (string) $context);
+                        if (!empty($r['ok']) && !empty($r['requoted'])) {
+                            $out['requoted']++;
+                            $out['details'][] = $r['message'];
+                        } elseif (!empty($r['ok'])) {
+                            $out['unchanged']++;
+                        } else {
+                            $out['failed']++;
+                            $out['details'][] = $offer->team . ' offer #' . intval($offer->id) . ' was not re-quoted: ' . $r['message'];
+                        }
+                    } elseif ($offer->state === TeamOversight_Offers::LOCKED_IN) {
+                        $out['locked']++;
+                        $line = $season . ' ' . $offer->team . ' offer #' . intval($offer->id) . ' was locked in before the cover changed (' . $context . '): the ' . $season . ' fee now follows the cover; anything paid above it is credit on Payment Management.';
+                        self::log($uid, $line);
+                        $out['details'][] = 'The ' . $offer->team . ' offer was already locked in: it stays locked in, and their fee follows the cover. Anything paid above it shows as credit on Payment Management.';
+                    }
+                }
+                $user = get_userdata($uid);
+                if ($user && is_email($user->user_email)) {
+                    $repriced = TeamOversight_Fees::shared()->reprice_person($user->user_email, $season, $cover ? self::words($cover) : 'fee cover ended');
+                    if (!empty($repriced['repriced'])) {
+                        $out['repriced']++;
+                    }
+                    if (!empty($repriced['message'])) {
+                        $out['details'][] = $repriced['message'];
+                    }
+                }
+            } catch (\Throwable $e) {
+                $out['failed']++;
+                TeamOversight_Log::add('offer_alert', $season . ' fee cover: the offers or the fee of user #' . $uid . ' could not be brought into line after the cover changed (' . get_class($e) . ' in ' . basename($e->getFile()) . ':' . $e->getLine() . '). The daily check re-quotes their offers; their fee is worked out again at the next re-price.', array('user_id' => $uid));
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * A life membership was granted or revoked (TeamOversight_Memberships):
+     * the cache is dropped and the person's offers and fee follow at once.
+     */
+    public static function life_changed($user_id, $context) {
+        self::flush_cache();
+        return self::sync_person($user_id, (string) $context);
+    }
+
+    /**
+     * The daily step (TeamOversight_Offers::run_daily(), 'fee_cover'): every
+     * open offer of a 2027+ season whose stored cover differs from the live
+     * one is re-quoted (a life grant written outside the hooks, a failed
+     * hook, the upgrade). Never re-quotes for any other difference. Returns
+     * array(checked, requoted, failed).
+     */
+    public static function reconcile() {
+        $out = array('checked' => 0, 'requoted' => 0, 'failed' => 0);
+        $seasons = array();
+        foreach (TeamOversight_Offers::open_offers() as $offer) {
+            $seasons[(string) $offer->season] = true;
+        }
+        foreach (array_keys($seasons) as $season) {
+            $r = self::reconcile_season($season);
+            foreach ($out as $k => $v) {
+                $out[$k] += isset($r[$k]) ? intval($r[$k]) : 0;
+            }
+        }
+        return $out;
+    }
+
+    /** reconcile() for one season (the tests call this, never run_daily()). */
+    public static function reconcile_season($season) {
+        $out = array('checked' => 0, 'requoted' => 0, 'failed' => 0);
+        $season = (string) $season;
+        if (!self::applies($season)) {
+            return $out;
+        }
+        self::flush_cache();
+        foreach (TeamOversight_Offers::open_offers($season) as $offer) {
+            $out['checked']++;
+            if (self::same(self::stored_cover($offer), self::for_person($offer->user_id, $season))) {
+                continue;
+            }
+            try {
+                $r = TeamOversight_Offers::requote($offer->id, 0, 'daily check');
+                if (!empty($r['requoted'])) {
+                    $out['requoted']++;
+                } elseif (empty($r['ok'])) {
+                    $out['failed']++;
+                }
+            } catch (\Throwable $e) {
+                $out['failed']++;
+            }
+        }
+        return $out;
+    }
+
+    /** After an account merge (murvc_account_merged): the kept account's cover may have come with a merged account. */
+    public static function after_merge($keep_id, $merged_ids, $merge_id) {
+        try {
+            self::flush_cache();
+            self::sync_person($keep_id, 'account merge record ' . intval($merge_id));
+        } catch (\Throwable $e) {
+            TeamOversight_Log::add('offer_alert', 'Fee cover: the offers and fee of user #' . intval($keep_id) . ' could not be brought into line after merge record ' . intval($merge_id) . '. The daily check re-quotes their offers.', array('user_id' => intval($keep_id)));
+        }
+    }
+
+    /** After an account merge was undone (murvc_account_merge_undone): the kept and the restored accounts. */
+    public static function after_merge_undone($keep_id, $merged_ids, $merge_id) {
+        self::flush_cache();
+        foreach (array_merge(array(intval($keep_id)), array_map('intval', (array) $merged_ids)) as $uid) {
+            try {
+                self::sync_person($uid, 'account merge record ' . intval($merge_id) . ' undone');
+            } catch (\Throwable $e) {
+                TeamOversight_Log::add('offer_alert', 'Fee cover: the offers and fee of user #' . intval($uid) . ' could not be brought into line after merge record ' . intval($merge_id) . ' was undone. The daily check re-quotes their offers.', array('user_id' => intval($uid)));
+            }
+        }
+    }
+}

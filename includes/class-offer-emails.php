@@ -69,9 +69,18 @@ class TeamOversight_Offer_Emails {
      *  locked_in        locked_in:<offer id>                       the player's "you're locked in" note when the
      *                                                              deposit completes (queued by lock_in(); sent
      *                                                              only while the offer is locked_in)
+     *  offer_changed    offer_changed:<offer id>:<requote number>  1.88.0: the player's changed offer after the
+     *                                                              club's fee cover changed (context: requote, by);
+     *                                                              queued only when an administrator presses Email
+     *                                                              the new offer, sent only while the offer is open
+     *                                                              and still on that re-quote
+     *
+     * The offer, reminder, locked_in and offer_changed messages have a
+     * covered wording too (offer_covered, ...: wording_key()), picked at send
+     * time when the offer is for a player whose playing fee the club covers.
      */
     public static function types() {
-        return array('offer', 'reminder', 'withdrawn', 'coach_accepted', 'coach_declined', 'coach_overdue', 'not_selected', 'locked_in');
+        return array('offer', 'reminder', 'withdrawn', 'coach_accepted', 'coach_declined', 'coach_overdue', 'not_selected', 'locked_in', 'offer_changed');
     }
 
     public static function table() {
@@ -99,6 +108,8 @@ class TeamOversight_Offer_Emails {
                 return ($offer_id > 0 && !empty($context['reminder_number'])) ? 'reminder:' . $offer_id . ':' . intval($context['reminder_number']) : '';
             case 'coach_overdue':
                 return ($offer_id > 0 && isset($context['kind']) && in_array($context['kind'], array('reply', 'deposit'), true)) ? 'coach_overdue:' . $offer_id . ':' . $context['kind'] : '';
+            case 'offer_changed':
+                return ($offer_id > 0 && !empty($context['requote']) && intval($context['requote']) > 0) ? 'offer_changed:' . $offer_id . ':' . intval($context['requote']) : '';
             case 'not_selected':
                 $team = (isset($context['team']) && class_exists('TeamOversight_Not_Selected')) ? TeamOversight_Not_Selected::clean_team($context['team']) : '';
                 return (!empty($context['application_id']) && $team !== '') ? TeamOversight_Not_Selected::dedupe_key($context['application_id'], $team) : '';
@@ -459,6 +470,35 @@ class TeamOversight_Offer_Emails {
                     . "{terms}\n\n"
                     . self::sign_off(),
             ),
+            // 1.88.0: the same email for a player whose playing fee the club covers (picked at send time: wording_key()).
+            'offer_covered' => array(
+                'label' => 'Offer (playing fee covered by the club)',
+                'type' => 'offer',
+                'switch' => false,
+                'when' => 'The committee approves an offer for a player whose playing fee the club covers (marked on their trial application, or a life member).',
+                'who' => 'The same as the offer.',
+                'program' => 'Offers · {season}',
+                'subject' => 'Your offer to join {team} for {season}',
+                'heading' => 'Your offer to join {team}',
+                'preheader' => 'Accept by {reply_by} and pay the supporter fee by {deposit_due} to lock in your place.',
+                'button' => 'See your offer',
+                'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
+                'blocks' => array('offer', 'terms', 'extras', 'button'),
+                'required' => array('offer' => 'the box with the supporter fee and dates would be missing.', 'terms' => 'the commitments and deposit policy would be missing.', 'button' => 'there would be no button to the offer page.'),
+                'body' => "Hi {first_name},\n\n"
+                    . self::thanks() . "\n\n"
+                    . "The coaching panel would love you to join {team} for the {season} season.\n\n"
+                    . "{cover_lead}\n\n"
+                    . "{offer}\n\n"
+                    . "{cover_limit_note}\n\n"
+                    . "{button:See your offer}\n\n"
+                    . "Your offer page shows what you'll need to do before the season, including the uniform. You can accept or decline the offer there. " . self::training_line() . "\n\n"
+                    . "{extras}\n\n"
+                    . "## Locking in your place\n"
+                    . "{cover_due} {cover_settled}\n\n"
+                    . "{terms}\n\n"
+                    . self::sign_off(),
+            ),
             'reminder' => array(
                 'label' => 'Reminder (no reply yet)',
                 'type' => 'reminder',
@@ -484,6 +524,32 @@ class TeamOversight_Offer_Emails {
                     . "{terms}\n\n"
                     . self::sign_off(),
             ),
+            'reminder_covered' => array(
+                'label' => 'Reminder (no reply yet, playing fee covered)',
+                'type' => 'reminder',
+                'switch' => false,
+                'when' => 'A coach or administrator presses Remind on an offer the player has not answered, when the club covers their playing fee.',
+                'who' => 'The same as the offer.',
+                'program' => 'Offers · {season}',
+                'subject' => 'Reminder: Your offer to join {team} for {season}',
+                'heading' => 'A reminder about your offer to join {team}',
+                'preheader' => '{cover_due}',
+                'button' => 'See your offer',
+                'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
+                'blocks' => $offer_blocks,
+                'required' => array('offer' => 'the box with the supporter fee and dates would be missing.', 'button' => 'there would be no button to the offer page.'),
+                'body' => "Hi {first_name},\n\n"
+                    . "This is a reminder about your offer to join {team} for the {season} season. We haven't heard from you yet, and we'd love to know either way.\n\n"
+                    . "{cover_lead}\n\n"
+                    . "{offer}\n\n"
+                    . "{cover_limit_note}\n\n"
+                    . "{button:See your offer}\n\n"
+                    . "You can accept or decline on your offer page. " . self::training_line() . "\n\n"
+                    . "## Locking in your place\n"
+                    . "{cover_due}\n\n"
+                    . "{terms}\n\n"
+                    . self::sign_off(),
+            ),
             'reminder_accepted' => array(
                 'label' => 'Reminder (deposit still due)',
                 'type' => 'reminder',
@@ -505,6 +571,31 @@ class TeamOversight_Offer_Emails {
                     . "{button:See your offer}\n\n"
                     . "## Your deposit\n"
                     . "You've accepted this offer. {deposit_sentence} It's paid in one payment and comes off your season fee. If it isn't paid in time, your place may be offered to someone else. Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
+                    . "{terms}\n\n"
+                    . self::sign_off(),
+            ),
+            'reminder_accepted_covered' => array(
+                'label' => 'Reminder (supporter fee still due, playing fee covered)',
+                'type' => 'reminder',
+                'switch' => false,
+                'when' => 'A coach or administrator presses Remind on a covered offer the player has accepted but not paid the supporter fee for.',
+                'who' => 'The same as the offer.',
+                'program' => 'Offers · {season}',
+                'subject' => 'Reminder: Your supporter fee for {team} in {season}',
+                'heading' => 'A reminder about your supporter fee',
+                'preheader' => '{cover_due}',
+                'button' => 'See your offer',
+                'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
+                'blocks' => $offer_blocks,
+                'required' => array('offer' => 'the box with the supporter fee and dates would be missing.', 'button' => 'there would be no button to the offer page.'),
+                'body' => "Hi {first_name},\n\n"
+                    . "This is a reminder about your place in {team} for the {season} season. You've accepted the offer, but the supporter fee isn't paid yet.\n\n"
+                    . "{cover_lead}\n\n"
+                    . "{offer}\n\n"
+                    . "{cover_limit_note}\n\n"
+                    . "{button:See your offer}\n\n"
+                    . "## Paying the supporter fee\n"
+                    . "{cover_due}\n\n"
                     . "{terms}\n\n"
                     . self::sign_off(),
             ),
@@ -548,6 +639,75 @@ class TeamOversight_Offer_Emails {
                     . "{button:See your offer}\n\n"
                     . "Your deposit comes off your season fee, and the rest is paid as it falls due. You can see what's coming up on your Player Checklist. " . self::training_line() . "\n\n"
                     . "{extras}\n\n"
+                    . self::sign_off(),
+            ),
+            'locked_in_covered' => array(
+                'label' => 'You\'re locked in (playing fee covered)',
+                'type' => 'locked_in',
+                'switch' => true,
+                'when' => 'A player whose playing fee the club covers has paid the supporter fee and is placed on the team.',
+                'who' => 'The same as "You\'re locked in".',
+                'program' => 'Offers · {season}',
+                'subject' => 'You\'re locked in for {team}, {season}',
+                'heading' => 'You\'re locked in',
+                'preheader' => 'The supporter fee is paid and your place in {team} is locked in.',
+                'button' => 'See your offer',
+                'why' => 'You\'re getting this because of your {team} offer.',
+                'blocks' => array('offer', 'extras', 'button'),
+                'required' => array(),
+                'body' => "Hi {first_name},\n\n"
+                    . "You've paid the {season} supporter fee, so your place in {team} for the {season} season is locked in.\n\n"
+                    . "{offer}\n\n"
+                    . "{button:See your offer}\n\n"
+                    . "{cover_settled}\n\n"
+                    . "{cover_limit_note}\n\n"
+                    . "You can see what's coming up on your Player Checklist. " . self::training_line() . "\n\n"
+                    . "{extras}\n\n"
+                    . self::sign_off(),
+            ),
+            // 1.88.0: sent only when an administrator presses Email the new offer, after the club's fee cover changed while the offer was open.
+            'offer_changed' => array(
+                'label' => 'Offer changed (fee cover ended)',
+                'type' => 'offer_changed',
+                'switch' => false,
+                'when' => 'An administrator presses Email the new offer after the club\'s cover of a player\'s playing fee ended while their offer was open (the mark cleared, or their life membership revoked).',
+                'who' => 'The same as the offer.',
+                'program' => 'Offers · {season}',
+                'subject' => 'Your offer to join {team} for {season} has changed',
+                'heading' => 'Your offer has changed',
+                'preheader' => '{change_line}',
+                'button' => 'See your offer',
+                'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
+                'blocks' => array('offer', 'button'),
+                'required' => array('offer' => 'the box with the new fee, deposit and dates would be missing.', 'button' => 'there would be no button to the offer page.'),
+                'body' => "Hi {first_name},\n\n"
+                    . "{change_line}\n\n"
+                    . "{offer}\n\n"
+                    . "{early_note}\n\n"
+                    . "{button:See your offer}\n\n"
+                    . "{reply_sentence} {deposit_sentence}\n\n"
+                    . self::sign_off(),
+            ),
+            'offer_changed_covered' => array(
+                'label' => 'Offer changed (playing fee now covered)',
+                'type' => 'offer_changed',
+                'switch' => false,
+                'when' => 'An administrator presses Email the new offer after the club started covering a player\'s playing fee while their offer was open.',
+                'who' => 'The same as the offer.',
+                'program' => 'Offers · {season}',
+                'subject' => 'Your offer to join {team} for {season} has changed',
+                'heading' => 'Your offer has changed',
+                'preheader' => 'Your {season} playing fee is covered.',
+                'button' => 'See your offer',
+                'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
+                'blocks' => array('offer', 'button'),
+                'required' => array('offer' => 'the box with the supporter fee and dates would be missing.', 'button' => 'there would be no button to the offer page.'),
+                'body' => "Hi {first_name},\n\n"
+                    . "{cover_lead} Your offer to join {team} has been changed to match.\n\n"
+                    . "{offer}\n\n"
+                    . "{cover_limit_note}\n\n"
+                    . "{button:See your offer}\n\n"
+                    . "{cover_due}\n\n"
                     . self::sign_off(),
             ),
             'coach_accepted' => array(
@@ -666,13 +826,23 @@ class TeamOversight_Offer_Emails {
      * Which wording an outbox message uses for an offer in its CURRENT
      * state: the outbox type, except a reminder, which has one wording for
      * an unanswered offer and one for an accepted offer. '' when the type
-     * is unknown.
+     * is unknown. 1.88.0: the offer, its reminders, "you're locked in" and
+     * "offer changed" use their covered wording (<key>_covered) when the
+     * offer is for a player whose playing fee the club covers
+     * (TeamOversight_Offers::is_covered(), from the cover the offer carries).
      */
     public static function wording_key($type, $offer = null) {
         if ($type === 'reminder') {
-            return ($offer && $offer->state === 'accepted') ? 'reminder_accepted' : 'reminder';
+            $key = ($offer && $offer->state === 'accepted') ? 'reminder_accepted' : 'reminder';
+        } elseif (isset(self::get_events()[$type])) {
+            $key = $type;
+        } else {
+            return '';
         }
-        return isset(self::get_events()[$type]) ? $type : '';
+        if (in_array($key, array('offer', 'reminder', 'reminder_accepted', 'locked_in', 'offer_changed'), true) && $offer && TeamOversight_Offers::is_covered($offer)) {
+            return $key . '_covered';
+        }
+        return $key;
     }
 
     /** Things in an email's text that will not come out as meant (the placeholders this email can fill, its blocks, the blocks it needs). */
@@ -783,6 +953,12 @@ class TeamOversight_Offer_Emails {
             'held_cents' => 0, 'kind' => '', 'overdue_date' => '', 'rejected_teams' => '', 'multi' => false, 'placed' => false,
             'early' => false, 'early_note' => '', 'fee_limit' => '',
             'extras' => array(),
+            // 1.88.0: the club covers the player's playing fee (cover), why (cover_reason; source mark or life), the
+            // supporter fee quoted (supporter_fee), whether that is the supporter upper limit still to be set
+            // (cover_limit), whether the season's supporter fee is already paid (cover_paid: an offer for a second team),
+            // and for "offer changed" why the cover ended (change_kind: cleared or life_ended).
+            'cover' => false, 'cover_reason' => '', 'cover_source' => '', 'cover_limit' => false, 'supporter_fee' => '',
+            'cover_paid' => false, 'change_kind' => '', 'fee_month' => 'January',
         );
     }
 
@@ -823,6 +999,33 @@ class TeamOversight_Offer_Emails {
         // An Early Offer (quoted on the upper limit, sent before fees were out) is called one everywhere; TeamOversight_Offers::is_early() decides and the facts carry its answer.
         $offer_name = !empty($f['early']) ? 'Early Offer' : 'offer';
 
+        // 1.88.0: the club covers the playing fee. Every {cover_*} placeholder is '' for anyone else, so the other emails read exactly as before.
+        $cover = array('{cover_reason}' => '', '{cover_lead}' => '', '{cover_due}' => '', '{cover_limit_note}' => '', '{cover_settled}' => '', '{supporter_fee}' => '', '{change_line}' => '');
+        if (!empty($f['cover'])) {
+            $amount = (string) $f['supporter_fee'];
+            $cover['{cover_reason}'] = (string) $f['cover_reason'];
+            $cover['{supporter_fee}'] = $amount;
+            $cover['{cover_lead}'] = $f['cover_source'] === 'life'
+                ? TeamOversight_Offers::wording('cover_lead_life', array('{season}' => $f['season'], '{amount}' => $amount))
+                : TeamOversight_Offers::wording('cover_lead_mark', array('{reason}' => (string) $f['cover_reason'], '{season}' => $f['season'], '{amount}' => $amount));
+            if ($f['state'] === 'sent') {
+                if (!empty($f['cover_paid'])) {
+                    $cover['{cover_due}'] = $w('email_cover_due_paid', array('{season}' => $f['season']));
+                } elseif ($reply !== '') {
+                    $cover['{cover_due}'] = $reply_late ? $w('email_cover_due_sent_late') : $w('email_cover_due_sent');
+                }
+            } elseif ($f['state'] === 'accepted' && $due !== '') {
+                $cover['{cover_due}'] = $due_late ? $w('email_cover_due_accepted_late') : $w('email_cover_due_accepted');
+            }
+            if (!empty($f['cover_limit'])) {
+                $cover['{cover_limit_note}'] = TeamOversight_Offers::wording('cover_limit_note', array('{season}' => $f['season'], '{amount}' => $amount, '{fee_month}' => (string) $f['fee_month']));
+            } else {
+                $cover['{cover_settled}'] = TeamOversight_Offers::wording('email_cover_whole_fee', array('{season}' => $f['season']));
+            }
+        } elseif ($f['change_kind'] !== '') {
+            $cover['{change_line}'] = TeamOversight_Offers::wording($f['change_kind'] === 'life_ended' ? 'email_changed_life_ended' : 'email_changed_cleared', array('{season}' => $f['season'], '{team}' => $f['team']));
+        }
+
         return array(
             '{name}' => $f['name'],
             '{player_name}' => $f['name'],
@@ -853,7 +1056,7 @@ class TeamOversight_Offer_Emails {
             '{deposit_note}' => intval($f['held_cents']) > 0 ? TeamOversight_Offers::wording('deposit_back_note', array('{held}' => $held)) : '',
             '{overdue_what}' => TeamOversight_Offers::wording($f['kind'] === 'deposit' ? 'email_overdue_deposit' : 'email_overdue_reply', array('{team}' => $f['team'], '{offer_name}' => $offer_name)),
             '{overdue_date}' => self::date_words($f['overdue_date']),
-        );
+        ) + $cover;
     }
 
     /**
@@ -902,7 +1105,27 @@ class TeamOversight_Offer_Emails {
         if ($f['fee'] !== '') {
             $rows[] = array('Fee', $f['fee']);
         }
-        if ($f['state'] === 'locked_in') {
+        if (!empty($f['cover'])) {
+            // 1.88.0: the club covers the playing fee, so there is no 10% deposit: the whole supporter fee is paid at once.
+            if ($f['state'] === 'locked_in' || !empty($f['cover_paid'])) {
+                $rows[] = array('Paid', $f['deposit']);
+                if ($f['state'] === 'sent' && self::date_words($f['reply_by']) !== '') {
+                    $rows[] = array('Reply by', self::date_words($f['reply_by']));
+                }
+            } else {
+                $rows[] = array('To pay', TeamOversight_Offers::wording('cover_deposit_words', array('{deposit}' => $f['deposit'])));
+                if ($f['state'] === 'accepted' && intval($f['paid_cents']) > 0) {
+                    $rows[] = array('Paid so far', self::cents_words($f['paid_cents']));
+                    $rows[] = array('Still to pay', self::cents_words($f['left_cents']));
+                }
+                if ($f['state'] === 'sent' && self::date_words($f['reply_by']) !== '') {
+                    $rows[] = array('Reply by', self::date_words($f['reply_by']));
+                }
+                if (self::date_words($f['deposit_due']) !== '') {
+                    $rows[] = array('Pay by', self::date_words($f['deposit_due']));
+                }
+            }
+        } elseif ($f['state'] === 'locked_in') {
             $rows[] = array('Deposit', $f['deposit'] . ', paid');
         } else {
             $rows[] = array('Deposit', $f['deposit']);
@@ -1046,8 +1269,43 @@ class TeamOversight_Offer_Emails {
         return array('offer', 'reminder', 'reminder_accepted');
     }
 
+    /** 1.88.0: the covered wordings' previews / test sends ('lower' is each one's first shape, as for every email). */
+    private static function cover_variants() {
+        return array(
+            'offer_covered' => array(
+                'lower' => array('Preview: Premier League MVP, the supporter fee is set', ' (MVP)'),
+                'limit' => array('Preview: Premier League MVP, quoted on the supporter upper limit', ' (MVP, upper limit)'),
+                'life' => array('Preview: life member', ' (life member)'),
+                'paid' => array('Preview: a second team, the supporter fee already paid', ' (second team, already paid)'),
+            ),
+            'reminder_covered' => array(
+                'lower' => array('Preview: Premier League MVP', ' (MVP)'),
+                'life' => array('Preview: life member', ' (life member)'),
+            ),
+            'reminder_accepted_covered' => array(
+                'lower' => array('Preview: Premier League MVP', ' (MVP)'),
+            ),
+            'locked_in_covered' => array(
+                'lower' => array('Preview: the supporter fee is set', ''),
+                'limit' => array('Preview: paid the supporter upper limit', ' (upper limit)'),
+            ),
+            'offer_changed' => array(
+                'lower' => array('Preview: the committee cleared the cover', ' (cover cleared)'),
+                'life_ended' => array('Preview: the life membership ended', ' (life membership ended)'),
+            ),
+            'offer_changed_covered' => array(
+                'lower' => array('Preview: marked Premier League MVP after the offer was sent', ' (MVP)'),
+                'life' => array('Preview: became a life member after the offer was sent', ' (life member)'),
+            ),
+        );
+    }
+
     /** The previews / test sends of one email: variant key => array(preview label, test-send suffix). */
     private static function variants_for($key) {
+        $covered = self::cover_variants();
+        if (isset($covered[$key])) {
+            return $covered[$key];
+        }
         if ($key === 'not_selected') {
             // 1.80.0: one team per email, so it reads differently for a player who applied for one team and one who applied for several.
             return array(
@@ -1144,6 +1402,36 @@ class TeamOversight_Offer_Emails {
             }
             // The extra training / extra games line: 18 and over unless the 'junior' variant asks for a player under 18.
             $facts['extras'] = TeamOversight_Offers::extras_for_kind($variant === 'junior' ? 'junior' : 'adult', true);
+        }
+        // 1.88.0: the covered wordings and "offer changed" (cover_variants()): never an Early Offer.
+        if (isset(self::cover_variants()[$key])) {
+            $base = preg_replace('/_covered$/', '', $key);
+            $facts['state'] = $base === 'reminder_accepted' ? 'accepted' : ($base === 'locked_in' ? 'locked_in' : 'sent');
+            if ($base === 'reminder' || $base === 'reminder_accepted') {
+                $facts['reply_by'] = $shift(-3);
+                $facts['deposit_due'] = $base === 'reminder_accepted' ? $shift(-2) : $shift(4);
+            }
+            $facts['early'] = false;
+            $facts['early_note'] = '';
+            $facts['fee_limit'] = '';
+            if ($key === 'offer_changed') {
+                // An ordinary offer again (the cover ended), quoted on the real fee.
+                $facts['change_kind'] = $variant === 'life_ended' ? 'life_ended' : 'cleared';
+                $facts['fee'] = '$480.00';
+                $facts['deposit'] = '$48.00';
+            } else {
+                $life = $variant === 'life';
+                $limit = $variant === 'limit';
+                $amount = $limit ? '$40.00' : '$35.00';
+                $facts['cover'] = true;
+                $facts['cover_source'] = $life ? 'life' : 'mark';
+                $facts['cover_reason'] = $life ? 'Life member' : 'Premier League MVP ' . (intval($facts['season']) - 1);
+                $facts['cover_limit'] = $limit;
+                $facts['cover_paid'] = $variant === 'paid';
+                $facts['supporter_fee'] = $amount;
+                $facts['deposit'] = $amount;
+                $facts['fee'] = TeamOversight_Offers::wording($limit ? 'cover_fee_words_limit' : 'cover_fee_words', array('{amount}' => $amount));
+            }
         }
         return $facts;
     }
@@ -1359,6 +1647,20 @@ class TeamOversight_Offer_Emails {
             // The one extra training / extra games line (the player's own emails only: the offer and "you're locked in").
             'extras' => in_array($type, array('offer', 'locked_in'), true) ? TeamOversight_Offers::extras_line($offer->user_id, $offer->season) : array(),
         ));
+        // 1.88.0: the club covers the playing fee (the cover the offer carries).
+        $cover = TeamOversight_Offers::cover_of($offer);
+        if ($cover !== null && $offer->quote_amount !== null) {
+            $released = $offer->quote_released !== null;
+            $facts['cover'] = true;
+            $facts['cover_reason'] = (string) $cover['reason'];
+            $facts['cover_source'] = (string) $cover['source'];
+            $facts['cover_limit'] = $offer->quote_basis === 'upper' && !$released;
+            $facts['supporter_fee'] = TeamOversight_Offers::money($released ? $offer->quote_released : $offer->quote_amount);
+            $facts['fee_month'] = TeamOversight_Offers::fee_month($offer->season);
+            $facts['cover_paid'] = $offer->state === 'sent' && TeamOversight_Offers::remaining_cents($offer) <= 0;
+        } elseif ($type === 'offer_changed') {
+            $facts['change_kind'] = class_exists('TeamOversight_Fee_Cover') && TeamOversight_Fee_Cover::life_ended($offer->user_id, $offer->season) ? 'life_ended' : 'cleared';
+        }
         return $facts;
     }
 
@@ -1380,13 +1682,22 @@ class TeamOversight_Offer_Emails {
         };
         switch ($type) {
             case 'offer':
-                return in_array($state, array('sent', 'accepted'), true) ? array('ok' => true, 'note' => '', 'key' => 'offer') : $no('The offer is no longer open (' . $now . ').');
+                return in_array($state, array('sent', 'accepted'), true) ? array('ok' => true, 'note' => '', 'key' => self::wording_key('offer', $offer)) : $no('The offer is no longer open (' . $now . ').');
             case 'reminder':
                 return in_array($state, array('sent', 'accepted'), true) ? array('ok' => true, 'note' => '', 'key' => self::wording_key('reminder', $offer)) : $no('The offer is no longer open (' . $now . ').');
             case 'withdrawn':
                 return $state === 'withdrawn' ? array('ok' => true, 'note' => '', 'key' => 'withdrawn') : $no('The offer is not withdrawn (' . $now . ').');
             case 'locked_in':
-                return $state === 'locked_in' ? array('ok' => true, 'note' => '', 'key' => 'locked_in') : $no('The player is not locked in (' . $now . ').');
+                return $state === 'locked_in' ? array('ok' => true, 'note' => '', 'key' => self::wording_key('locked_in', $offer)) : $no('The player is not locked in (' . $now . ').');
+            case 'offer_changed':
+                // 1.88.0: only while the offer is open and still on the re-quote this email is about.
+                if (!in_array($state, array('sent', 'accepted'), true)) {
+                    return $no('The offer is no longer open (' . $now . ').');
+                }
+                if (!isset($ctx['requote']) || intval($ctx['requote']) !== intval(isset($offer->requote_count) ? $offer->requote_count : 0)) {
+                    return $no('The offer changed again since; email the newest change instead.');
+                }
+                return array('ok' => true, 'note' => '', 'key' => self::wording_key('offer_changed', $offer));
             case 'coach_accepted':
                 return in_array($state, array('accepted', 'locked_in'), true) ? array('ok' => true, 'note' => '', 'key' => 'coach_accepted') : $no('The offer is no longer accepted (' . $now . ').');
             case 'coach_declined':
@@ -1436,7 +1747,7 @@ class TeamOversight_Offer_Emails {
         if (empty($settings[$key]['enabled'])) {
             return self::skip('This email is switched off on the Emails page.');
         }
-        $player_side = in_array($type, array('offer', 'reminder', 'withdrawn', 'locked_in'), true);
+        $player_side = in_array($type, array('offer', 'reminder', 'withdrawn', 'locked_in', 'offer_changed'), true);
         $user = intval($offer->user_id) > 0 ? get_userdata(intval($offer->user_id)) : false;
         if ($player_side && (!$user || !is_email($user->user_email))) {
             return self::skip('The player\'s account, or its email address, is gone.');

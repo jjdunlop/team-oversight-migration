@@ -146,6 +146,8 @@ class TeamOversight_Account_Merge {
             array('team_trial_selections', 'created_by'),
             array('team_trial_selections', 'offer_accepted_by'),
             array('trial_applications', 'registration_override_by'),
+            // 1.88.0: who set the club's fee cover on an application (the mark itself moves with the application).
+            array('trial_applications', 'fee_cover_by'),
             array('team_positions', 'updated_by'),
             // 1.76.0: who requested, decided, closed and settled an offer,
             // and who last set a fee matrix upper limit.
@@ -1003,6 +1005,15 @@ class TeamOversight_Account_Merge {
             }
         }
 
+        // 1.88.0: a merged account that brings the club's fee cover (a marked 2027+ trial application, or a life
+        // membership) covers the kept account once merged. A warning, never a blocker: the merge itself changes no
+        // amount; straight after it the kept account's open offers are re-quoted and its fee worked out again.
+        if (class_exists('TeamOversight_Fee_Cover')) {
+            foreach (self::fee_cover_warnings($keep_id, array_keys($extras)) as $line) {
+                $warnings[] = $line;
+            }
+        }
+
         $plan = array(
             'keep' => self::account_summary($keep),
             'merge' => array_values(array_map(array(__CLASS__, 'account_summary'), $extras)),
@@ -1032,6 +1043,46 @@ class TeamOversight_Account_Merge {
             array_keys($profile['set']), $plan['roles_after'],
         )));
         return $plan;
+    }
+
+    /**
+     * 1.88.0: plan()'s warnings when a merged account brings the club's fee
+     * cover (TeamOversight_Fee_Cover) that the kept account doesn't have: a
+     * marked trial application for a 2027+ season, or a life-member grant
+     * reaching 2027 or later. Reads only. Plain sentences, account ids only.
+     */
+    private static function fee_cover_warnings($keep_id, array $merge_ids) {
+        global $wpdb;
+        $ids = array_values(array_filter(array_map('intval', $merge_ids)));
+        if (empty($ids)) {
+            return array();
+        }
+        $in = implode(',', $ids);
+        $from = (string) TeamOversight_Fees::FEE_TIMELINE_FROM;
+        $out = array();
+        $marks = $wpdb->get_results($wpdb->prepare(
+            "SELECT user_id, season, fee_cover_reason FROM {$wpdb->prefix}trial_applications WHERE user_id IN ($in) AND fee_cover_reason IS NOT NULL AND season >= %s ORDER BY season, id",
+            $from
+        ));
+        foreach ((array) $marks as $m) {
+            $season = (string) $m->season;
+            if (!TeamOversight_Fee_Cover::applies($season) || TeamOversight_Fee_Cover::for_person($keep_id, $season) !== null) {
+                continue;
+            }
+            $out[] = '#' . intval($m->user_id) . '\'s ' . $season . ' trial application carries the club\'s fee cover (' . $m->fee_cover_reason . '). After the merge it covers #' . intval($keep_id) . ': their open ' . $season . ' offers are re-quoted and their ' . $season . ' fee is worked out again straight after the merge.';
+        }
+        $life = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT user_id FROM {$wpdb->prefix}team_memberships WHERE user_id IN ($in) AND tier = %s AND end_date >= %s",
+            TeamOversight_Memberships::TIER_LIFE, $from . '-01-01'
+        ));
+        $year = (string) max(intval($from), intval(current_time('Y')));
+        foreach ((array) $life as $uid) {
+            if (TeamOversight_Fee_Cover::life_in($keep_id, $year)) {
+                continue;
+            }
+            $out[] = '#' . intval($uid) . ' is a life member, so the club covers their playing fee from ' . $from . '. After the merge it covers #' . intval($keep_id) . ': their open offers are re-quoted and their fees worked out again straight after the merge.';
+        }
+        return $out;
     }
 
     /** The highest tier after a merge: from the merged grants, else the highest tier role held. */
@@ -2194,6 +2245,9 @@ class TeamOversight_Account_Merge {
                 $skipped ? ', ' . count($skipped) . ' left as they were (changed since)' : ''
             ), array('user_id' => $keep_id));
         }
+        // 1.88.0: after an undo, like murvc_account_merged after a merge: what follows identity (the fee cover's re-quotes
+        // and re-pricing) runs as its own step. Additive; a listener must never throw.
+        do_action('murvc_account_merge_undone', $keep_id, array_map('intval', array_keys($backup['users'])), $merge_id);
         return array('restored' => $restored, 'skipped' => $skipped);
     }
 }

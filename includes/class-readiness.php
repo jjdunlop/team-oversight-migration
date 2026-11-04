@@ -742,11 +742,17 @@ class TeamOversight_Readiness {
         if ($target === null) {
             $target = $accepted[0];
         }
-        $vars = array('{team}' => implode(' and ', $names));
-        $lead = TeamOversight_Offers::wording($paid ? 'checklist_deposit_paid' : 'checklist_deposit_step', $vars);
+        $vars = array('{team}' => implode(' and ', $names), '{season}' => (string) $season);
+        // 1.88.0: a covered offer's deposit is the whole supporter fee, so the step says so.
+        $covered = TeamOversight_Offers::is_covered($target);
+        if ($covered) {
+            $lead = TeamOversight_Offers::wording($paid ? 'checklist_cover_paid' : 'checklist_cover_step', $vars);
+        } else {
+            $lead = TeamOversight_Offers::wording($paid ? 'checklist_deposit_paid' : 'checklist_deposit_step', $vars);
+        }
 
         $step = $fees;
-        $step['title'] = TeamOversight_Offers::wording('checklist_deposit_title');
+        $step['title'] = TeamOversight_Offers::wording($covered ? 'checklist_cover_title' : 'checklist_deposit_title');
         $step['done'] = false;
         $step['manual'] = false;
         // Paid but not locked in yet: waiting on the club, like a fee not released.

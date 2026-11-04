@@ -2554,7 +2554,7 @@ class TeamOversight_Fee_Timeline {
             $places = array();
             foreach ($s['buckets'] as $b) {
                 $text = trim($b['team'] . ' ' . strtolower(TeamOversight_Fees::role_label($b['role']))) . ' (' . $b['class'] . ')'
-                    . ($b['charged_as'] !== $b['role'] ? ', charged as ' . strtolower(TeamOversight_Fees::role_label($b['charged_as'])) : '')
+                    . ($b['charged_as'] !== $b['role'] ? ', charged as ' . strtolower(TeamOversight_Fees::role_label($b['charged_as'])) . (!empty($b['fee_cover']) ? ' (fee covered)' : '') : '')
                     . ': ' . ($b['rate'] === null ? 'no amount in the fee matrix' : self::money($b['rate']));
                 $top = $s['top'] && count($s['buckets']) > 1 && $b['team'] === $s['top']['team'] && $b['role'] === $s['top']['role'];
                 $places[] = $top ? '<strong>' . esc_html($text) . '</strong>' : esc_html($text);
@@ -2651,6 +2651,13 @@ class TeamOversight_Fee_Timeline {
             $cap_text = 'Held to the maximum quoted in the offer (' . self::money($breakdown['capped']['amount']) . '): the calculation gave '
                 . self::money(isset($breakdown['uncapped_total']) ? $breakdown['uncapped_total'] : 0) . '.';
             array_splice($lines, 1, 0, array(array('Cap', '<span class="murvc-muted">' . esc_html($cap_text) . '</span>')));
+        }
+
+        // 1.88.0: the club covers this person's playing fee for the season (a mark on their trial application, or a life membership).
+        if (!empty($breakdown['fee_cover']['reason'])) {
+            $cover_text = 'Fee covered by the club for ' . $season . ': ' . $breakdown['fee_cover']['reason']
+                . ($breakdown['fee_cover']['source'] === 'life' ? ', automatic' : '') . '. Playing and Training Only places are charged at the supporter fee.';
+            array_splice($lines, 1, 0, array(array('Fee cover', '<span class="murvc-muted">' . esc_html($cover_text) . '</span>')));
         }
 
         $standings = TeamOversight_Payments::get_fee_standings(array('me' => array('user_id' => intval($user->ID), 'email' => (string) $user->user_email)), $season);

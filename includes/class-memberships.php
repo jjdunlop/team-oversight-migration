@@ -784,6 +784,15 @@ class TeamOversight_Memberships {
 
             TeamOversight_Log::add($type, $message, array('user_id' => intval($data['user_id'])));
         }
+        // 1.88.0: a life member's playing fee is covered by the club from 2027 (TeamOversight_Fee_Cover): their open
+        // offers are re-quoted and their fee worked out again at once. Never allowed to break the grant (an order hook).
+        if ($ok && $data['tier'] === self::TIER_LIFE && class_exists('TeamOversight_Fee_Cover')) {
+            try {
+                TeamOversight_Fee_Cover::life_changed(intval($data['user_id']), 'life membership granted');
+            } catch (\Throwable $e) {
+                error_log('Team Oversight: the fee cover could not follow a life membership grant for user #' . intval($data['user_id']) . ' (' . get_class($e) . ')');
+            }
+        }
         return $ok;
     }
 
@@ -934,6 +943,10 @@ class TeamOversight_Memberships {
         $prev_tier = $this->get_active_tier($user_id);
 
         $today = current_time('Y-m-d');
+        // 1.88.0: was a life grant still running (so the club's cover of their playing fee ends with it)?
+        $had_life = (bool) $wpdb->get_var($wpdb->prepare("
+            SELECT 1 FROM {$wpdb->prefix}team_memberships WHERE user_id = %d AND tier = %s AND end_date >= %s LIMIT 1
+        ", $user_id, self::TIER_LIFE, $today));
         $wpdb->query($wpdb->prepare("
             UPDATE {$wpdb->prefix}team_memberships
             SET end_date = %s
@@ -956,6 +969,16 @@ class TeamOversight_Memberships {
             $user->remove_role(self::TIER_LIFE);
             $user->remove_role(self::TIER_FULL);
             $user->remove_role(self::TIER_ASSOCIATE);
+        }
+
+        // 1.88.0: the club stops covering their playing fee from the next season their life membership no longer
+        // reaches (TeamOversight_Fee_Cover): their open offers are re-quoted and their fee worked out again at once.
+        if ($had_life && class_exists('TeamOversight_Fee_Cover')) {
+            try {
+                TeamOversight_Fee_Cover::life_changed(intval($user_id), 'life membership revoked');
+            } catch (\Throwable $e) {
+                error_log('Team Oversight: the fee cover could not follow a life membership revoke for user #' . intval($user_id) . ' (' . get_class($e) . ')');
+            }
         }
     }
 

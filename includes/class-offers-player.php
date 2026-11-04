@@ -418,6 +418,8 @@ class TeamOversight_Offers_Player {
         $view = self::view_offer($offer, $amount);
         // An Early Offer (quoted on the upper limit, sent before fees were out): one helper decides, the page and the email say the same thing.
         $early = TeamOversight_Offers::is_early($offer);
+        // 1.88.0: the club covers this player's playing fee (the cover the offer carries).
+        $cover = TeamOversight_Offers::cover_of($offer);
 
         ob_start();
         ?>
@@ -434,7 +436,20 @@ class TeamOversight_Offers_Player {
                     <?php if ($fee !== ''): ?>
                         <tr><th>Season fee</th><td><?php echo esc_html($fee); ?></td></tr>
                     <?php endif; ?>
-                    <?php if ($state === TeamOversight_Offers::LOCKED_IN): ?>
+                    <?php if ($cover !== null): ?>
+                        <?php // 1.88.0: no 10% deposit: the whole supporter fee is paid at once. ?>
+                        <?php if ($state === TeamOversight_Offers::LOCKED_IN): ?>
+                            <tr><th>Supporter fee</th><td>Paid</td></tr>
+                        <?php else: ?>
+                            <tr><th>To pay</th><td><?php echo esc_html(TeamOversight_Offers::wording('cover_deposit_words', array('{deposit}' => TeamOversight_Offers::money($target)))); ?></td></tr>
+                            <?php if ($state === TeamOversight_Offers::SENT && $offer->reply_by): ?>
+                                <tr class="<?php echo ($status['overdue'] && $status['kind'] === 'reply') ? 'murvc-offer-late' : ''; ?>"><th>Reply by</th><td><?php echo esc_html(self::fmt($offer->reply_by)); ?></td></tr>
+                            <?php endif; ?>
+                            <?php if ($offer->deposit_due && TeamOversight_Offers::to_cents($target) > 0): ?>
+                                <tr class="<?php echo ($status['overdue'] && $status['kind'] === 'deposit') ? 'murvc-offer-late' : ''; ?>"><th>Pay by</th><td><?php echo esc_html(self::fmt($offer->deposit_due)); ?></td></tr>
+                            <?php endif; ?>
+                        <?php endif; ?>
+                    <?php elseif ($state === TeamOversight_Offers::LOCKED_IN): ?>
                         <tr><th>Deposit</th><td>Complete</td></tr>
                     <?php else: ?>
                         <tr><th>Deposit</th><td><?php echo esc_html(self::deposit_words($offer, $target)); ?></td></tr>
@@ -446,6 +461,17 @@ class TeamOversight_Offers_Player {
                         <?php endif; ?>
                     <?php endif; ?>
                 </table>
+                <?php if ($cover !== null && $offer->quote_amount !== null): ?>
+                    <?php
+                    $cover_amount = TeamOversight_Offers::money($offer->quote_released !== null ? $offer->quote_released : $view->quote_amount);
+                    $cover_vars = array('{reason}' => $cover['reason'], '{season}' => $offer->season, '{amount}' => $cover_amount, '{fee_month}' => TeamOversight_Offers::fee_month($offer->season));
+                    $cover_text = TeamOversight_Offers::wording($cover['source'] === 'life' ? 'cover_lead_life' : 'cover_lead_mark', $cover_vars);
+                    if ($offer->quote_basis === 'upper' && $offer->quote_released === null) {
+                        $cover_text .= ' ' . TeamOversight_Offers::wording('cover_limit_note', $cover_vars);
+                    }
+                    ?>
+                    <p class="murvc-offer-cover"><?php echo TeamOversight_Offer_Wording::e($cover_text); ?></p>
+                <?php endif; ?>
                 <?php $early_note = TeamOversight_Offers::early_note($view); ?>
                 <?php if ($early_note !== ''): ?>
                     <p class="murvc-offer-early"><strong>Early Offer.</strong> <?php echo esc_html($early_note); ?></p>
@@ -550,9 +576,16 @@ class TeamOversight_Offers_Player {
                 <input type="hidden" name="<?php echo esc_attr(self::NONCE_FIELD); ?>" value="<?php echo esc_attr(wp_create_nonce('murvc_offer_accept_' . $offer->id)); ?>">
                 <input type="hidden" name="shown_state" value="sent">
                 <input type="hidden" name="shown_target" value="<?php echo esc_attr(number_format((float) $target, 2, '.', '')); ?>">
+                <?php if (TeamOversight_Offers::is_covered($offer)): ?>
+                    <?php // 1.88.0: the whole supporter fee; a second covered team whose fee is already paid locks in on accepting. ?>
+                    <p><?php echo TeamOversight_Offer_Wording::e(TeamOversight_Offers::remaining_cents($offer) <= 0 && TeamOversight_Offers::to_cents($target) <= TeamOversight_Offers::to_cents($offer->deposit_target)
+                        ? TeamOversight_Offers::wording('page_cover_consent_paid', array('{season}' => $offer->season))
+                        : TeamOversight_Offers::wording('page_cover_consent', array('{deposit}' => TeamOversight_Offers::money($target), '{by_date}' => $offer->deposit_due ? ' by ' . self::fmt($offer->deposit_due) : ''))); ?></p>
+                <?php else: ?>
                 <p><?php echo TeamOversight_Offer_Wording::e(TeamOversight_Offers::to_cents($target) > 0
                     ? TeamOversight_Offers::wording('page_consent_deposit', array('{deposit}' => TeamOversight_Offers::money($target), '{by_date}' => $offer->deposit_due ? ' by ' . self::fmt($offer->deposit_due) : ''))
                     : TeamOversight_Offers::wording('page_consent')); ?></p>
+                <?php endif; ?>
                 <p>
                     <button type="submit" class="button button-primary murvc-offer-accept-button">Accept and commit</button>
                     <a class="murvc-offer-decline-link" href="<?php echo esc_url(add_query_arg('decline', 1, TeamOversight_Offers::offer_url($offer))); ?>">Decline this offer</a>
@@ -575,7 +608,7 @@ class TeamOversight_Offers_Player {
         if ($decline) {
             echo self::decline_panel($offer, $name);
         } else {
-            echo '<p class="murvc-offer-lead">' . TeamOversight_Offer_Wording::html('page_accepted_lead', array('{by_date}' => $offer->deposit_due ? ' by ' . self::fmt($offer->deposit_due) : '')) . '</p>';
+            echo '<p class="murvc-offer-lead">' . TeamOversight_Offer_Wording::html(TeamOversight_Offers::is_covered($offer) ? 'page_cover_accepted_lead' : 'page_accepted_lead', array('{by_date}' => $offer->deposit_due ? ' by ' . self::fmt($offer->deposit_due) : '')) . '</p>';
             echo self::render_deposit_box($offer);
             echo '<p><a class="murvc-offer-decline-link" href="' . esc_url(add_query_arg('decline', 1, TeamOversight_Offers::offer_url($offer))) . '">Decline this offer</a></p>';
         }
@@ -726,9 +759,11 @@ class TeamOversight_Offers_Player {
         $paid = $invoice ? max(0, intval(TeamOversight_Offers::free_paid_cents($invoice))) : 0;
         $status = TeamOversight_Offers::deadline_status($offer);
 
+        // 1.88.0: a covered offer's deposit is the whole supporter fee, with its own lines.
+        $covered = TeamOversight_Offers::is_covered($offer);
         $html = '<div class="murvc-offer-deposit">';
         if ($remaining <= 0) {
-            $html .= '<p class="murvc-offer-deposit-line">' . TeamOversight_Offer_Wording::html('page_deposit_paid', array('{deposit}' => self::money_cents($target_cents))) . '</p>';
+            $html .= '<p class="murvc-offer-deposit-line">' . TeamOversight_Offer_Wording::html($covered ? 'page_cover_paid' : 'page_deposit_paid', array('{deposit}' => self::money_cents($target_cents))) . '</p>';
             return $html . '</div>';
         }
         // 1.79.1: every sentence of the box comes from the wording registry (the built-in text is what was here before).
@@ -736,7 +771,13 @@ class TeamOversight_Offers_Player {
         if ($paid > 0) {
             $amount_vars['{paid}'] = self::money_cents(min($paid, $target_cents));
         }
-        $html .= '<p class="murvc-offer-deposit-line">' . TeamOversight_Offer_Wording::html($paid > 0 ? 'page_deposit_amount_paid' : 'page_deposit_amount', $amount_vars) . '</p>';
+        if ($covered) {
+            $amount_vars['{team}'] = self::team_name($offer->season, $offer->team);
+            $amount_vars['{by_date}'] = '';
+            $html .= '<p class="murvc-offer-deposit-line">' . TeamOversight_Offer_Wording::html($paid > 0 ? 'stage_cover_due_part' : 'stage_cover_due', $amount_vars) . '</p>';
+        } else {
+            $html .= '<p class="murvc-offer-deposit-line">' . TeamOversight_Offer_Wording::html($paid > 0 ? 'page_deposit_amount_paid' : 'page_deposit_amount', $amount_vars) . '</p>';
+        }
         if ($status['overdue'] && $status['kind'] === 'deposit') {
             $html .= '<p class="murvc-offer-note murvc-offer-note-late">' . TeamOversight_Offer_Wording::e(TeamOversight_Offers::wording('page_deposit_late', array('{date}' => self::fmt($status['date'])))) . '</p>';
         } elseif ($offer->deposit_due) {
@@ -752,8 +793,10 @@ class TeamOversight_Offers_Player {
             'hidden' => array($form['offer_field'] => intval($offer->id)),
             'amount' => $remaining / 100,
             // Plain text there (the pay box escapes it), so a **bold** marker is dropped.
-            'heading' => str_replace('**', '', TeamOversight_Offers::wording('page_deposit_heading')),
-            'intro' => str_replace('**', '', TeamOversight_Offers::wording('page_deposit_intro')),
+            'heading' => str_replace('**', '', TeamOversight_Offers::wording($covered ? 'page_cover_pay_heading' : 'page_deposit_heading')),
+            'intro' => str_replace('**', '', $covered
+                ? TeamOversight_Offers::wording($offer->quote_basis === 'upper' && $offer->quote_released === null ? 'page_cover_pay_intro_limit' : 'page_cover_pay_intro', array('{season}' => $offer->season))
+                : TeamOversight_Offers::wording('page_deposit_intro')),
         ));
         return $html . '</div>';
     }
@@ -892,6 +935,7 @@ class TeamOversight_Offers_Player {
         .murvc-offer-note { color: #555; font-size: 14px; margin: 8px 0; }
         .murvc-offer-note-late { color: #a00; }
         .murvc-offer-early { background: #fff4e5; border: 1px solid #f5c58b; border-radius: 6px; padding: 10px 14px; margin: 10px 0; font-size: 15px; }
+        .murvc-offer-cover { background: #e7f5ea; border: 1px solid #9fd3ab; border-radius: 6px; padding: 10px 14px; margin: 10px 0; font-size: 15px; }
         .murvc-offer-lead { font-size: 16px; margin: 8px 0; }
         .murvc-offer-terms ul { margin: 4px 0 4px 20px; }
         .murvc-offer-more { margin: 14px 0; }

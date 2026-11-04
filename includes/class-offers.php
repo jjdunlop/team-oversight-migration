@@ -480,15 +480,68 @@ class TeamOversight_Offers {
      * (TeamOversight_Fees::fee_class_for_team()). Returns array(fee_class, column)
      * or null when the account can't be read. $fees: an optional
      * TeamOversight_Fees (pass one with enable_rate_cache() for a list).
+     *
+     * $fee_cover (1.88.0): null looks the player's cover up
+     * (TeamOversight_Fee_Cover::for_person()), false = not covered, an array
+     * = this cover. A covered player's playing or Training Only place is
+     * priced on the SUPPORTER column of the same class.
      */
-    public static function fee_cell($user_id, $season, $team, $role, $fees = null) {
+    public static function fee_cell($user_id, $season, $team, $role, $fees = null, $fee_cover = null) {
         $user = intval($user_id) > 0 ? get_userdata(intval($user_id)) : false;
         if (!$user || !is_email($user->user_email)) {
             return null;
         }
         $fees = $fees instanceof TeamOversight_Fees ? $fees : self::fees();
         $person = $fees->determine_person_fee_class($user->user_email, $season);
-        return array($fees->fee_class_for_team($person, $team, $season), TeamOversight_Fees::charged_as($role));
+        $cover = self::resolve_cover($fee_cover, $user->ID, $season);
+        $column = ($cover !== null && in_array((string) $role, TeamOversight_Fee_Cover::COVERED_ROLES, true)) ? 'supporter' : TeamOversight_Fees::charged_as($role);
+        return array($fees->fee_class_for_team($person, $team, $season), $column);
+    }
+
+    /**
+     * 1.88.0: a cover argument as the pricing code takes it: null = look the
+     * player up now, false = none, an array = that cover. Returns a
+     * normalised cover (array(reason, source)) or null.
+     */
+    private static function resolve_cover($fee_cover, $user_id, $season) {
+        if (!class_exists('TeamOversight_Fee_Cover') || $fee_cover === false) {
+            return null;
+        }
+        if ($fee_cover === null) {
+            $fee_cover = TeamOversight_Fee_Cover::for_person($user_id, $season);
+        }
+        return TeamOversight_Fee_Cover::normalise($fee_cover);
+    }
+
+    /**
+     * 1.88.0: is this offer for a player whose playing fee the club covers?
+     * A quoted offer (sent and after) by the cover its quote was made with
+     * (quote_cover), so a later change shows only once it is re-quoted; one
+     * nobody has approved yet by the player's cover now (it is what approving
+     * would quote). False for a season before 2027 and anything not an offer.
+     */
+    public static function is_covered($offer) {
+        return self::cover_of($offer) !== null;
+    }
+
+    /** 1.88.0: the cover of an offer as is_covered() judges it: array(reason, source), or null. */
+    public static function cover_of($offer) {
+        if (!is_object($offer) || !class_exists('TeamOversight_Fee_Cover')) {
+            return null;
+        }
+        $season = isset($offer->season) ? (string) $offer->season : '';
+        if ($season === '' || !self::applies($season)) {
+            return null;
+        }
+        $basis = isset($offer->quote_basis) ? (string) $offer->quote_basis : '';
+        if ($basis !== '') {
+            return TeamOversight_Fee_Cover::stored_cover($offer);
+        }
+        $role = isset($offer->role) ? (string) $offer->role : '';
+        if (!in_array($role, TeamOversight_Fee_Cover::COVERED_ROLES, true) || empty($offer->user_id)) {
+            return null;
+        }
+        return TeamOversight_Fee_Cover::normalise(TeamOversight_Fee_Cover::for_person(intval($offer->user_id), $season));
     }
 
     /** The person fee class behind a matrix cell's class: any junior-league cell (JPL, YSL, JPL/YSL) belongs to a Junior U/19 (VVL) person on a junior-league team (1.87.0). */
@@ -502,30 +555,57 @@ class TeamOversight_Offers {
      * the bulk panel can ask cheaply. A blank limit NEVER falls back to a
      * fee. Returns array(ok, error_public (safe for coaches: no class, no
      * amount), error_admin (names the class and role), basis, fee_class,
-     * column, limit, fee).
+     * column, limit, fee, fee_cover).
+     *
+     * 1.88.0, the fee cover ($fee_cover: null = the player's cover now,
+     * false = none, an array = that cover): a covered playing or Training
+     * Only place is priced on the SUPPORTER column, and with no basis given
+     * the basis is chosen per offer: the supporter FEE when one is entered
+     * for the season (before or after the release: the supporter fee is
+     * small and known early), else the supporter upper limit, else refused
+     * (error_public is the registry's cell_missing_cover, error_admin says
+     * which supporter fee to set). An uncovered player's basis is
+     * basis_now(), exactly as before. 'fee_cover' is the cover used, or null.
      */
-    public static function cell_check($user_id, $season, $team, $role, $basis = null, $fees = null) {
-        $out = array('ok' => false, 'error_public' => '', 'error_admin' => '', 'basis' => '', 'fee_class' => '', 'column' => '', 'limit' => null, 'fee' => null);
+    public static function cell_check($user_id, $season, $team, $role, $basis = null, $fees = null, $fee_cover = null) {
+        $out = array('ok' => false, 'error_public' => '', 'error_admin' => '', 'basis' => '', 'fee_class' => '', 'column' => '', 'limit' => null, 'fee' => null, 'fee_cover' => null);
         if (!self::applies($season)) {
             $out['error_public'] = $out['error_admin'] = 'Offers apply from the ' . TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM . ' season.';
             return $out;
         }
-        $cell = self::fee_cell($user_id, $season, $team, $role, $fees);
+        $cover = intval($user_id) > 0 ? self::resolve_cover($fee_cover, intval($user_id), $season) : null;
+        $cell = self::fee_cell($user_id, $season, $team, $role, $fees, $cover === null ? false : $cover);
         if ($cell === null) {
             $out['error_public'] = $out['error_admin'] = 'This player\'s account can\'t be found, so no offer can be priced.';
             return $out;
         }
         list($class, $column) = $cell;
-        $basis = $basis === 'fee' || $basis === 'upper' ? $basis : self::basis_now($season);
-        $out['basis'] = $basis;
+        $covered = $cover !== null && $column === 'supporter' && in_array((string) $role, TeamOversight_Fee_Cover::COVERED_ROLES, true);
         $out['fee_class'] = $class;
         $out['column'] = $column;
+        $out['fee_cover'] = $covered ? $cover : null;
         $out['limit'] = TeamOversight_Fees::get_limit($class, $column, $season);
         $fee = ($fees instanceof TeamOversight_Fees ? $fees : self::fees())->get_fee($class, $column, $season);
         $out['fee'] = $fee === null ? null : floatval($fee);
+        if ($covered && $basis !== 'fee' && $basis !== 'upper') {
+            $basis = $out['fee'] !== null ? 'fee' : ($out['limit'] !== null ? 'upper' : '');
+            if ($basis === '') {
+                $out['basis'] = $out['fee'] !== null ? 'fee' : 'upper';
+                $out['error_public'] = self::wording('cell_missing_cover');
+                $out['error_admin'] = 'Set the ' . $season . ' supporter fee for ' . $class . ' first: this player\'s playing fee is covered (' . $cover['reason'] . '), so they pay the supporter fee, and the ' . $season . ' fee matrix has neither a supporter fee nor a supporter upper limit for ' . $class . '.';
+                return $out;
+            }
+        }
+        $basis = $basis === 'fee' || $basis === 'upper' ? $basis : self::basis_now($season);
+        $out['basis'] = $basis;
         $has = $basis === 'upper' ? $out['limit'] !== null : $out['fee'] !== null;
         if ($has) {
             $out['ok'] = true;
+            return $out;
+        }
+        if ($covered) {
+            $out['error_public'] = self::wording('cell_missing_cover');
+            $out['error_admin'] = 'Set the ' . $season . ' supporter ' . ($basis === 'upper' ? 'upper limit' : 'fee') . ' for ' . $class . ' first: this player\'s playing fee is covered (' . $cover['reason'] . '), so they pay the supporter fee.';
             return $out;
         }
         // Coach-safe (no class, no figure), from the wording registry: before the release an Early Offer needs the upper limit, after it the fee.
@@ -606,17 +686,36 @@ class TeamOversight_Offers {
      *    fee-release drop; stored start and percent)
      *  - fees: a TeamOversight_Fees to price with (give one with
      *    enable_rate_cache() when quoting a whole list)
+     *  - mode 'requote' (1.88.0): as 'send', but from the offer's STORED
+     *    quote_start, for an offer whose fee cover changed after it was sent
+     *    (requote(); reply-by and deposit dates are kept)
+     *  - fee_cover (1.88.0): false = price as not covered, an array = this
+     *    cover; when absent, send and requote read the player's cover now
+     *    and accept and real use the cover the quote was made with
+     *    (quote_cover), so those two stay on stored data
+     *
+     * The fee cover (1.88.0): a covered player's place is priced on the
+     * supporter column (cell_check() picks the basis: the supporter fee if
+     * entered, else its upper limit), the deposit percent is
+     * TeamOversight_Fee_Cover::DEPOSIT_PERCENT (all of it) in send and
+     * requote, and a quote whose rate a non-supporter place sets (a team
+     * manager place, still charged as a playing member) is refused with code
+     * 'cover_conflict'.
      *
      * Returns array(ok, error_public, error_admin, basis, amount, fee_class,
      * start, percent, target, amount_cents, target_cents, places (labels
-     * of the other places counted), mode). error_public is safe for coaches
-     * (no class, no amount); error_admin names the class and role.
+     * of the other places counted), mode, column (the matrix column of this
+     * place), fee_cover (the cover priced with, or null), code ('' when ok;
+     * 'cover_conflict', or 'no_price' for any other refusal)). error_public
+     * is safe for coaches (no class, no amount); error_admin names the class
+     * and role.
      */
     public static function compute_quote($user_id, $season, $team, $role, $opts = array()) {
-        $mode = (isset($opts['mode']) && in_array($opts['mode'], array('send', 'accept', 'real'), true)) ? $opts['mode'] : 'send';
+        $mode = (isset($opts['mode']) && in_array($opts['mode'], array('send', 'accept', 'real', 'requote'), true)) ? $opts['mode'] : 'send';
         $offer = isset($opts['offer']) ? $opts['offer'] : null;
         $out = array('ok' => false, 'error_public' => '', 'error_admin' => '', 'basis' => '', 'amount' => 0.0, 'fee_class' => '', 'start' => '',
-            'percent' => 0.0, 'target' => 0.0, 'amount_cents' => 0, 'target_cents' => 0, 'places' => array(), 'mode' => $mode);
+            'percent' => 0.0, 'target' => 0.0, 'amount_cents' => 0, 'target_cents' => 0, 'places' => array(), 'mode' => $mode,
+            'column' => '', 'fee_cover' => null, 'code' => 'no_price');
         if (!self::applies($season)) {
             $out['error_public'] = $out['error_admin'] = 'Offers apply from the ' . TeamOversight_Coach_Portal::OFFER_ACCEPTANCE_FROM . ' season.';
             return $out;
@@ -630,21 +729,40 @@ class TeamOversight_Offers {
         $settings = self::settings($season);
         $today = current_time('Y-m-d');
 
+        // The fee cover this quote is made with (1.88.0).
+        $given = array_key_exists('fee_cover', $opts) ? $opts['fee_cover'] : null;
+        if ($given === null && in_array($mode, array('accept', 'real'), true) && $offer && !empty($offer->quote_basis)) {
+            $cover = class_exists('TeamOversight_Fee_Cover') ? TeamOversight_Fee_Cover::stored_cover($offer) : null;
+        } else {
+            $cover = self::resolve_cover($given, $user->ID, $season);
+        }
+        if ($cover !== null && !in_array((string) $role, TeamOversight_Fee_Cover::COVERED_ROLES, true)) {
+            $cover = null;
+        }
+        $out['fee_cover'] = $cover;
+        $out['column'] = $cover !== null ? 'supporter' : TeamOversight_Fees::charged_as($role);
+
         if ($mode === 'real') {
             $basis = 'fee';
         } elseif ($mode === 'accept' && $offer && $offer->quote_basis) {
             $basis = $offer->quote_basis === 'fee' ? 'fee' : 'upper';
+        } elseif ($cover !== null) {
+            $basis = null; // chosen per offer by cell_check(): the supporter fee if entered, else its upper limit
         } else {
             $basis = self::basis_now($season);
         }
-        $stored = ($mode !== 'send' && $offer);
-        $start = ($stored && $offer->quote_start) ? $offer->quote_start : $today;
-        $percent = ($stored && $offer->deposit_percent !== null) ? floatval($offer->deposit_percent) : floatval($settings['percent']);
+        $start = ($mode !== 'send' && $offer && $offer->quote_start) ? $offer->quote_start : $today;
+        if (in_array($mode, array('accept', 'real'), true) && $offer && $offer->deposit_percent !== null) {
+            $percent = floatval($offer->deposit_percent);
+        } elseif ($cover !== null) {
+            $percent = TeamOversight_Fee_Cover::DEPOSIT_PERCENT;
+        } else {
+            $percent = floatval($settings['percent']);
+        }
 
-        $out['basis'] = $basis;
+        $out['basis'] = $basis === null ? '' : $basis;
         $out['start'] = $start;
         $out['percent'] = $percent;
-        $source = $basis === 'upper' ? TeamOversight_Fees::RATE_UPPER : TeamOversight_Fees::RATE_FEE;
 
         // Accept mode (3.5 of the design): the quote was FIXED when it was
         // sent, so only the player's other accepted or locked-in places may
@@ -659,6 +777,7 @@ class TeamOversight_Offers {
             $out['fee_class'] = (string) $offer->quote_fee_class;
             if (empty($places)) {
                 $out['ok'] = true;
+                $out['code'] = '';
                 $out['amount'] = round(floatval($offer->quote_amount), 2);
                 $out['amount_cents'] = self::to_cents($out['amount']);
                 $out['target_cents'] = self::to_cents($offer->deposit_target);
@@ -667,8 +786,12 @@ class TeamOversight_Offers {
             }
             $fixed_class = self::person_class_for_cell($offer->quote_fee_class);
         } else {
-            $check = self::cell_check($user_id, $season, $team, $role, $basis, $fees);
+            $check = self::cell_check($user_id, $season, $team, $role, $basis, $fees, $cover === null ? false : $cover);
             $out['fee_class'] = $check['fee_class'];
+            if ($basis === null) {
+                $basis = $check['basis'] === 'upper' ? 'upper' : 'fee';
+                $out['basis'] = $basis;
+            }
             if (!$check['ok']) {
                 $out['error_public'] = $check['error_public'];
                 $out['error_admin'] = $check['error_admin'];
@@ -676,9 +799,10 @@ class TeamOversight_Offers {
             }
             list($rows, $places) = self::quote_rows($user, $season, $team, $role, $start, $offer);
         }
+        $source = $basis === 'upper' ? TeamOversight_Fees::RATE_UPPER : TeamOversight_Fees::RATE_FEE;
         $breakdown = $fixed_class !== null
-            ? $fees->fee_breakdown_for_class($season, $rows, $fixed_class, $source)
-            : $fees->fee_breakdown($user->user_email, $season, $rows, $source);
+            ? $fees->fee_breakdown_for_class($season, $rows, $fixed_class, $source, $cover)
+            : $fees->fee_breakdown($user->user_email, $season, $rows, $source, $cover === null ? false : $cover);
         $priced = false;
         if (is_array($breakdown)) {
             foreach ($breakdown['stretches'] as $s) {
@@ -693,7 +817,21 @@ class TeamOversight_Offers {
             $out['error_admin'] = 'The fee engine priced nothing for ' . $team . ' (' . $out['fee_class'] . ' / ' . $role . '): check the ' . $season . ' season dates, the late-join cutoff and the fee matrix.';
             return $out;
         }
+        // 1.88.0: a covered quote must be the supporter fee. A place the cover leaves alone (a team manager place, still
+        // charged as a playing member: decision 2) that sets the rate would make it the playing fee at 100%: refused.
+        if ($cover !== null) {
+            foreach ($breakdown['stretches'] as $s) {
+                if (!empty($s['top']) && isset($s['top']['charged_as']) && $s['top']['charged_as'] !== 'supporter') {
+                    $place = strtolower(TeamOversight_Fees::role_label($s['top']['role'])) . ' place on ' . $s['top']['team'];
+                    $out['code'] = 'cover_conflict';
+                    $out['error_public'] = self::wording('cell_cover_conflict');
+                    $out['error_admin'] = 'This player\'s fee is covered (' . $cover['reason'] . '), but their ' . $place . ' is charged as a ' . strtolower(TeamOversight_Fees::role_label($s['top']['charged_as'])) . ', so this offer can\'t quote the supporter fee. Stop or change that place on the Fee timeline' . ($cover['source'] === TeamOversight_Fee_Cover::SOURCE_LIFE ? '' : ', or clear the cover') . '.';
+                    return $out;
+                }
+            }
+        }
         $out['ok'] = true;
+        $out['code'] = '';
         $out['amount'] = round(floatval($breakdown['total']), 2);
         $out['amount_cents'] = self::to_cents($out['amount']);
         $out['target_cents'] = self::target_cents($out['amount'], $percent);
@@ -711,7 +849,7 @@ class TeamOversight_Offers {
             return null;
         }
         $row = (object) $row;
-        foreach (array('id', 'application_id', 'extended_count', 'reminder_count') as $c) {
+        foreach (array('id', 'application_id', 'extended_count', 'reminder_count', 'requote_count') as $c) {
             $row->$c = isset($row->$c) ? intval($row->$c) : 0;
         }
         foreach (array('user_id', 'live', 'requested_by', 'decided_by', 'invoice_id', 'place_id', 'closed_by', 'settled_by') as $c) {
@@ -894,6 +1032,21 @@ class TeamOversight_Offers {
             $index[$offer->application_id] = $offer;
         }
         return $index;
+    }
+
+    /**
+     * 1.88.0: every open offer (sent or accepted), oldest first, optionally
+     * for one season: the fee cover's daily check
+     * (TeamOversight_Fee_Cover::reconcile()) and the Offers page's problems
+     * compare each one's stored cover with the live one.
+     */
+    public static function open_offers($season = null) {
+        global $wpdb;
+        $where = "state IN ('" . self::SENT . "', '" . self::ACCEPTED . "')";
+        if ($season !== null) {
+            $where .= $wpdb->prepare(' AND season = %s', (string) $season);
+        }
+        return self::normalise_all($wpdb->get_results('SELECT * FROM ' . self::table() . ' WHERE ' . $where . ' ORDER BY id'));
     }
 
     /** A player's offers (newest first), optionally for one season and/or only some states. Matched by account id. */
@@ -1273,12 +1426,24 @@ class TeamOversight_Offers {
      * an upper-limit offer once the real fee is known (quote_released) that
      * real fee. After release with no real fee worked out yet it reads
      * "up to $612.00". Empty before the offer is sent.
+     *
+     * 1.88.0: a covered offer (is_covered()) says the supporter fee and that
+     * the playing fee is covered (the registry's cover_fee_words, or
+     * cover_fee_words_limit for a quote on the supporter upper limit whose
+     * real fee isn't known yet).
      */
     public static function fee_words($offer) {
         if (!$offer || $offer->quote_amount === null) {
             return '';
         }
         $quoted = self::money($offer->quote_amount);
+        if (self::is_covered($offer)) {
+            $released = isset($offer->quote_released) && $offer->quote_released !== null;
+            if ($offer->quote_basis === 'upper' && !$released) {
+                return self::wording('cover_fee_words_limit', array('{amount}' => $quoted));
+            }
+            return self::wording('cover_fee_words', array('{amount}' => $released ? self::money($offer->quote_released) : $quoted));
+        }
         if ($offer->quote_basis !== 'upper') {
             return $quoted;
         }
@@ -1343,6 +1508,12 @@ class TeamOversight_Offers {
      * offer. EVERY screen and email takes its wording from this function
      * (and offer_name() / early_note()); none of them reads quote_basis for
      * wording itself.
+     *
+     * 1.88.0: never for a covered offer (is_covered()). A covered quote on
+     * the supporter upper limit is still 'upper' for the money (the release
+     * drop and the cap read quote_basis directly), but the club decided the
+     * covered wording carries no Early Offer text: it explains the limit
+     * itself (the registry's cover_limit_note).
      */
     public static function is_early($offer) {
         if (!is_object($offer)) {
@@ -1350,6 +1521,9 @@ class TeamOversight_Offers {
         }
         $season = isset($offer->season) ? (string) $offer->season : '';
         if ($season === '' || !self::applies($season)) {
+            return false;
+        }
+        if (self::is_covered($offer)) {
             return false;
         }
         $basis = isset($offer->quote_basis) ? (string) $offer->quote_basis : '';
@@ -1422,14 +1596,24 @@ class TeamOversight_Offers {
      * upper limit of one fee-matrix cell. Changing that limit later never
      * moves them (each offer stores its own quote), so the Fee Matrix save
      * says so. A pure read; the only place outside the offers code that asks.
+     *
+     * 1.88.0: an offer quoted with the club's fee cover was quoted on the
+     * SUPPORTER column, so it counts only for the supporter cell, and the
+     * playing and Training Only counts leave it out.
      */
     public static function quoted_on_limit_count($season, $fee_class, $team_role) {
         global $wpdb;
+        $live = "'" . implode("','", array(self::SENT, self::ACCEPTED, self::LOCKED_IN)) . "'";
+        if ($team_role === 'supporter') {
+            return intval($wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM " . self::table() . " WHERE season = %s AND quote_basis = 'upper' AND quote_fee_class = %s AND quote_cover IS NOT NULL AND quote_cover <> '' AND state IN ($live)",
+                (string) $season, (string) $fee_class
+            )));
+        }
         $roles = $team_role === 'training_only' ? array('training_only') : array('playing_member', 'team_manager');
         $in = "'" . implode("','", array_map('esc_sql', $roles)) . "'";
-        $live = "'" . implode("','", array(self::SENT, self::ACCEPTED, self::LOCKED_IN)) . "'";
         return intval($wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM " . self::table() . " WHERE season = %s AND quote_basis = 'upper' AND quote_fee_class = %s AND role IN ($in) AND state IN ($live)",
+            "SELECT COUNT(*) FROM " . self::table() . " WHERE season = %s AND quote_basis = 'upper' AND quote_fee_class = %s AND role IN ($in) AND state IN ($live) AND (quote_cover IS NULL OR quote_cover = '')",
             (string) $season, (string) $fee_class
         )));
     }
@@ -2631,6 +2815,11 @@ class TeamOversight_Offers {
             'decided_by' => intval($admin_id),
             'decided_at' => current_time('mysql'),
         );
+        // 1.88.0: the cover the quote was made with, stored with it (accept and the release drop then stay on it).
+        if (!empty($quote['fee_cover'])) {
+            $set['quote_cover'] = (string) $quote['fee_cover']['reason'];
+            $set['quote_cover_source'] = (string) $quote['fee_cover']['source'];
+        }
         list($where, $args) = self::pin($offer, array(self::AWAITING));
         // The verdict row must still exist and still match the offer's role.
         $where .= " AND EXISTS (SELECT 1 FROM {$wpdb->prefix}team_trial_selections s WHERE s.application_id = " . self::table() . ".application_id AND s.team = " . self::table() . ".team AND s.status = %s)";
@@ -2643,7 +2832,8 @@ class TeamOversight_Offers {
         self::queue('offer', $offer, array('approved_by' => intval($admin_id), 'no_coach' => $contacts['none']));
         self::note($offer->application_id, 'Offer for ' . $offer->team . ' approved and sent (reply by ' . self::fmt_date($reply_by) . ').', $admin_id);
         self::log_flow($offer, 'approved and sent (' . $quote['basis'] . ' basis, reply by ' . $reply_by . ', deposit due ' . $deposit_due . ')');
-        TeamOversight_Log::add('offer_money', $offer->season . ' ' . $offer->team . ' offer #' . $offer->id . ': quoted ' . self::money($quote['amount']) . ' on the ' . ($quote['basis'] === 'upper' ? 'upper limit' : 'real fee') . ', deposit ' . self::money($quote['target']) . ' (' . rtrim(rtrim(number_format($quote['percent'], 2), '0'), '.') . '%)',
+        TeamOversight_Log::add('offer_money', $offer->season . ' ' . $offer->team . ' offer #' . $offer->id . ': quoted ' . self::money($quote['amount']) . ' on the ' . ($quote['basis'] === 'upper' ? 'upper limit' : 'real fee') . ', deposit ' . self::money($quote['target']) . ' (' . rtrim(rtrim(number_format($quote['percent'], 2), '0'), '.') . '%)'
+            . (!empty($quote['fee_cover']) ? ' (fee covered: ' . $quote['fee_cover']['reason'] . ')' : ''),
             $offer->user_id ? array('user_id' => $offer->user_id, 'amount' => $quote['target']) : array());
         self::refresh_badge();
         // 1.79.1: with the email permission closed the offer is still live (its dates run and the player can see it); only the email waits. Say so.
@@ -2719,6 +2909,182 @@ class TeamOversight_Offers {
     }
 
     // ------------------------------------------------------------------
+    // 1.88.0: re-quotes when the club's fee cover changes
+    //
+    // An offer's figures are fixed when it is approved, and a fee matrix,
+    // limit or settings change never moves them. The ONE exception is a
+    // change of the player's fee cover for the season (a mark set, its
+    // reason changed or cleared on Trial Applications; a life membership
+    // granted or revoked; an account merge or its undo; the daily check
+    // finding the stored cover differs from the live one): a sent or
+    // accepted offer is re-quoted at once (TeamOversight_Fee_Cover::
+    // sync_person() and reconcile() call requote()). Nobody is emailed: an
+    // administrator presses Email the new offer on the Offers page
+    // (admin_email_requote()). A locked-in offer is never re-quoted.
+    // ------------------------------------------------------------------
+
+    /**
+     * Re-quote one SENT or ACCEPTED offer whose stored fee cover
+     * (quote_cover) differs from the player's cover now. compute_quote()
+     * in 'requote' mode: the live cover, its basis (covered: the supporter
+     * fee if entered, else its limit; not covered: basis_now()), the STORED
+     * quote_start, the live class, the player's other accepted or locked-in
+     * places, percent 100 when covered else the season setting. Refused
+     * (nothing written, an offer_alert, the daily check tries again) when it
+     * can't be priced. When only the reason or source differs and the
+     * figures are the same, only quote_cover / quote_cover_source change (no
+     * count, nothing to email). Otherwise ONE compare-and-set UPDATE pinned
+     * to the state, quote, target and cover as read: basis, amount, class,
+     * percent, target, cover, quote_released and target_dropped_at cleared,
+     * requote_count + 1, requoted_at now (reply_by, deposit_due, sent_at and
+     * accepted_at are kept). The winner logs the old and new figures, notes
+     * the application, and for an accepted offer makes sure of the holding
+     * invoice and locks the player in when what they paid already meets the
+     * new target. NO email is queued. Returns res() with requoted (bool),
+     * before / after (array(amount, target, percent, basis)).
+     */
+    public static function requote($offer_id, $actor_id = 0, $context = '') {
+        $offer = self::get($offer_id);
+        if (!$offer) {
+            return self::not_found();
+        }
+        $base = array('offer_id' => $offer->id, 'state' => $offer->state, 'requoted' => false);
+        if (!in_array($offer->state, array(self::SENT, self::ACCEPTED), true) || !self::applies($offer->season) || !class_exists('TeamOversight_Fee_Cover')) {
+            return self::res(true, 'not_open', 'Only an offer that is sent or accepted (not locked in) is re-quoted.', $base);
+        }
+        $live = TeamOversight_Fee_Cover::normalise(TeamOversight_Fee_Cover::for_person($offer->user_id, $offer->season));
+        $stored = TeamOversight_Fee_Cover::stored_cover($offer);
+        if (TeamOversight_Fee_Cover::same($stored, $live)) {
+            return self::res(true, 'unchanged', 'The offer already carries the player\'s fee cover.', $base);
+        }
+        $why = TeamOversight_Fee_Cover::words($live);
+        $quote = self::compute_quote($offer->user_id, $offer->season, $offer->team, $offer->role, array('offer' => $offer, 'mode' => 'requote', 'fee_cover' => $live === null ? false : $live));
+        if (!$quote['ok']) {
+            self::log_alert($offer, 'the fee cover changed (' . ($context !== '' ? $context : $why) . ') but the offer can\'t be re-quoted: ' . ($quote['error_admin'] !== '' ? $quote['error_admin'] : $quote['error_public']) . ' It keeps its old figures; the daily check tries again.');
+            return self::res(false, $quote['code'] !== '' ? $quote['code'] : 'no_price', $quote['error_admin'] !== '' ? $quote['error_admin'] : $quote['error_public'], $base);
+        }
+        $before = array('amount' => $offer->quote_amount, 'target' => $offer->deposit_target, 'percent' => $offer->deposit_percent, 'basis' => (string) $offer->quote_basis);
+        $after = array('amount' => $quote['amount'], 'target' => $quote['target'], 'percent' => $quote['percent'], 'basis' => $quote['basis']);
+        $new_cover = $quote['fee_cover'];
+        $same_figures = (string) $offer->quote_basis === $quote['basis']
+            && self::to_cents($offer->quote_amount) === $quote['amount_cents']
+            && self::to_cents($offer->deposit_target) === $quote['target_cents']
+            && abs(floatval($offer->deposit_percent) - floatval($quote['percent'])) < 0.005;
+
+        list($where, $args) = self::pin($offer, array($offer->state));
+        if ($stored === null) {
+            $where .= ' AND (quote_cover IS NULL OR quote_cover = \'\')';
+        } else {
+            $where .= ' AND quote_cover = %s';
+            $args[] = $stored['reason'];
+        }
+        if ($same_figures) {
+            // Only the reason (or where the cover comes from) changed: nothing the player pays moves, so nothing to tell them.
+            $set = array('quote_cover' => $new_cover ? $new_cover['reason'] : null, 'quote_cover_source' => $new_cover ? $new_cover['source'] : null);
+            if (!self::update_where($set, $where, $args)) {
+                return self::stale(self::get($offer->id));
+            }
+            self::log_flow($offer, 'fee cover now ' . $why . ' (' . ($context !== '' ? $context : 'cover changed') . '); the figures are unchanged');
+            return self::res(true, 'cover_only', 'The offer\'s figures are unchanged.', $base);
+        }
+        $where .= $offer->quote_amount === null ? ' AND quote_amount IS NULL' : ' AND quote_amount = %s';
+        if ($offer->quote_amount !== null) {
+            $args[] = number_format(self::to_cents($offer->quote_amount) / 100, 2, '.', '');
+        }
+        $where .= $offer->deposit_target === null ? ' AND deposit_target IS NULL' : ' AND deposit_target = %s';
+        if ($offer->deposit_target !== null) {
+            $args[] = number_format(self::to_cents($offer->deposit_target) / 100, 2, '.', '');
+        }
+        $set = array(
+            'quote_basis' => $quote['basis'],
+            'quote_amount' => $quote['amount'],
+            'quote_fee_class' => $quote['fee_class'],
+            'deposit_percent' => $quote['percent'],
+            'deposit_target' => $quote['target'],
+            'quote_cover' => $new_cover ? $new_cover['reason'] : null,
+            'quote_cover_source' => $new_cover ? $new_cover['source'] : null,
+            'quote_released' => null,
+            'target_dropped_at' => null,
+            'requote_count' => array('raw' => 'requote_count + 1'),
+            'requoted_at' => current_time('mysql'),
+        );
+        if (!self::update_where($set, $where, $args)) {
+            return self::stale(self::get($offer->id));
+        }
+        self::flush_money_caches();
+        $pct = function ($p) {
+            return rtrim(rtrim(number_format((float) $p, 2), '0'), '.') . '%';
+        };
+        self::log_money($offer, 're-quoted: ' . self::money($before['amount']) . ' (deposit ' . self::money($before['target']) . ', ' . $pct($before['percent']) . ') to '
+            . self::money($after['amount']) . ' (deposit ' . self::money($after['target']) . ', ' . $pct($after['percent']) . '): ' . $why
+            . ($context !== '' && $context !== $why ? ' (' . $context . ')' : ''), $after['target']);
+        self::note($offer->application_id, 'The club changed the ' . $offer->team . ' offer: ' . $why . '. Not emailed yet.', $actor_id);
+        $fresh = self::get($offer->id);
+        $locked = false;
+        if ($fresh && $fresh->state === self::ACCEPTED) {
+            try {
+                self::ensure_holding_invoice($fresh);
+                $r = self::lock_in_if_met($fresh);
+                $locked = !empty($r['locked']);
+            } catch (\Throwable $e) {
+                self::log_alert($offer, 'the holding invoice or lock-in check failed after the offer was re-quoted.');
+            }
+        }
+        self::refresh_badge();
+        $message = $offer->team . ' offer re-quoted: ' . self::money($before['amount']) . ' (deposit ' . self::money($before['target']) . ') to '
+            . self::money($after['amount']) . ' (deposit ' . self::money($after['target']) . ', ' . $pct($after['percent']) . ')'
+            . ($locked ? '; what they had paid already covers it, so they are locked in' : '') . '. Not emailed: use Email the new offer on the Offers page.';
+        return self::done($offer, $message, array('requoted' => true, 'before' => $before, 'after' => $after, 'locked_in' => $locked));
+    }
+
+    /** The outbox key of the email about an offer's latest re-quote ('' when it was never re-quoted). One reader for the coach card and the Offers page. */
+    public static function requote_email_key($offer) {
+        if (!$offer || empty($offer->requote_count) || !class_exists('TeamOversight_Offer_Emails')) {
+            return '';
+        }
+        return TeamOversight_Offer_Emails::dedupe_key('offer_changed', intval($offer->id), array('requote' => intval($offer->requote_count)));
+    }
+
+    /**
+     * Email the player their re-quoted offer ("Email the new offer",
+     * administrators only). The offer must be sent or accepted and
+     * re-quoted; $shown (state, requote) must match what the page showed, so
+     * a stale page changes nothing. Queues ONE 'offer_changed' message for
+     * the current re-quote number (a second press is 'already'; a later
+     * re-quote makes an unsent older one skip at send time). Its wording
+     * follows the cover the offer carries now.
+     */
+    public static function admin_email_requote($offer_id, $admin_id, $shown = array()) {
+        if (!self::can_approve($admin_id)) {
+            return self::forbidden();
+        }
+        $offer = self::get($offer_id);
+        if (!$offer) {
+            return self::not_found();
+        }
+        if (!in_array($offer->state, array(self::SENT, self::ACCEPTED), true)) {
+            return self::res(false, 'refused', 'This offer is no longer open, so there is nothing to email.', array('offer_id' => $offer->id, 'state' => $offer->state));
+        }
+        if ($offer->requote_count <= 0) {
+            return self::res(false, 'refused', 'This offer has not been changed since it was sent.', array('offer_id' => $offer->id, 'state' => $offer->state));
+        }
+        if ((isset($shown['state']) && $shown['state'] !== '' && $shown['state'] !== $offer->state)
+            || (isset($shown['requote']) && $shown['requote'] !== '' && intval($shown['requote']) !== $offer->requote_count)) {
+            return self::stale($offer);
+        }
+        $r = self::queue('offer_changed', $offer, array('requote' => $offer->requote_count, 'by' => intval($admin_id)));
+        if (!is_array($r) || empty($r['queued'])) {
+            if (is_array($r) && !empty($r['id'])) {
+                return self::already($offer, 'The new offer was already emailed (or is waiting to send).');
+            }
+            return self::res(false, 'error', 'The email could not be queued. Try again.', array('offer_id' => $offer->id, 'state' => $offer->state));
+        }
+        self::log_flow($offer, 'the new offer (change ' . $offer->requote_count . ') emailed by an administrator');
+        self::note($offer->application_id, 'The changed ' . $offer->team . ' offer was emailed to the player.', $admin_id);
+        return self::done($offer, self::emails_live() ? 'The new offer is queued to the player.' : 'The new offer is queued, but this website may not send offer emails yet: it waits until you allow it.');
+    }
+
+    // ------------------------------------------------------------------
     // Transitions: the player (ownership is checked here, by account id)
     // ------------------------------------------------------------------
 
@@ -2788,6 +3154,11 @@ class TeamOversight_Offers {
             $extra_set['target_dropped_at'] = current_time('mysql');
         }
         if (isset($shown['shown_target']) && $shown['shown_target'] !== null && $shown['shown_target'] !== '' && self::to_cents($shown['shown_target']) !== self::to_cents($target)) {
+            // 1.88.0: the club re-quoted the offer (its fee cover changed) after this page was drawn.
+            if ($offer->requote_count > 0 && self::to_cents($shown['shown_target']) !== self::to_cents($offer->deposit_target)) {
+                return self::res(false, 'target_changed', self::wording('page_changed_by_club', array('{deposit}' => self::money($target))),
+                    array('offer_id' => $offer->id, 'state' => $offer->state, 'target' => $target));
+            }
             $why = self::to_cents($target) < self::to_cents($offer->deposit_target) ? 'because the season fee has now been set' : 'because of your other offers';
             return self::res(false, 'target_changed', 'Your deposit is now ' . self::money($target) . ' ' . $why . '. Check it and accept again.',
                 array('offer_id' => $offer->id, 'state' => $offer->state, 'target' => $target));
@@ -2833,6 +3204,11 @@ class TeamOversight_Offers {
                 if (self::to_cents($again['target']) === self::to_cents($target) && empty($shown['retried'])) {
                     // The release stamp moved but not the deposit the player is accepting: accept again, once, on the fresh row.
                     return self::player_accept($offer_id, $user_id, array_merge($shown, array('retried' => true)));
+                }
+                if ($now->requote_count > $offer->requote_count) {
+                    // 1.88.0: the club re-quoted it (a fee cover change) while the player was accepting.
+                    return self::res(false, 'target_changed', self::wording('page_changed_by_club', array('{deposit}' => self::money($again['target']))),
+                        array('offer_id' => $now->id, 'state' => $now->state, 'target' => $again['target']));
                 }
                 $why = self::to_cents($again['target']) < self::to_cents($offer->deposit_target) ? 'because the season fee has now been set' : 'because of your other offers';
                 return self::res(false, 'target_changed', 'Your deposit is now ' . self::money($again['target']) . ' ' . $why . '. Check it and accept again.',
@@ -3057,7 +3433,9 @@ class TeamOversight_Offers {
      *  4. TeamOversight_Offer_Emails::daily_upkeep()   (stuck and failed outbox rows, then a flush)
      *  5. TeamOversight_Not_Selected::sweep()          (1.80.0: sends nothing by itself; it only re-queues a
      *                                                    "not selected" email someone pressed whose outbox row went missing)
-     *  6. refresh_badge()
+     *  6. TeamOversight_Fee_Cover::reconcile()         (1.88.0: an open offer whose stored fee cover differs from the
+     *                                                    live one is re-quoted; no email)
+     *  7. refresh_badge()
      * Returns array(step => summary) for the CLI and tests.
      */
     public static function run_daily() {
@@ -3076,6 +3454,7 @@ class TeamOversight_Offers {
                 'retry_money' => array(__CLASS__, 'daily_retry_money'),
                 'email_upkeep' => array('TeamOversight_Offer_Emails', 'daily_upkeep'),
                 'not_selected' => array('TeamOversight_Not_Selected', 'sweep'),
+                'fee_cover' => array('TeamOversight_Fee_Cover', 'reconcile'),
             );
             foreach ($steps as $name => $callable) {
                 if (!is_callable($callable)) {
@@ -4212,6 +4591,22 @@ class TeamOversight_Offers {
             }
         }
 
+        if ($accepted && self::is_covered($accepted)) {
+            // 1.88.0: a covered offer's deposit is the whole supporter fee (the registry's stage_cover_* lines).
+            $target = self::to_cents(self::effective_target($accepted));
+            $remaining = max(0, $target - $free);
+            $vars = array('{team}' => self::team_name($season, $accepted->team), '{deposit}' => self::money($target / 100),
+                '{by_date}' => $accepted->deposit_due ? ' by ' . self::fmt_date_year($accepted->deposit_due) : '');
+            if ($remaining <= 0) {
+                $words = self::wording('checklist_cover_paid', $vars);
+            } elseif ($free > 0) {
+                $words = self::wording('stage_cover_due_part', array_merge($vars, array('{paid}' => self::money(min($free, $target) / 100), '{remaining}' => self::money($remaining / 100))));
+            } else {
+                $words = self::wording('stage_cover_due', $vars);
+            }
+            return array('stage' => 'deposit_due', 'words' => $words, 'offer_id' => intval($accepted->id), 'paid_cents' => $free, 'target_cents' => $target);
+        }
+
         if ($accepted) {
             $target = self::to_cents(self::effective_target($accepted));
             $remaining = max(0, $target - $free);
@@ -4243,6 +4638,12 @@ class TeamOversight_Offers {
         if ($locked && $fee_cents <= 0 && $paid > 0) {
             $name = self::team_name($season, $locked->team);
             $target_cents = self::stored_target_cents($locked);
+            // 1.88.0: a covered player who paid the supporter fee (and is still covered) paid their whole fee.
+            if (self::is_covered($locked) && TeamOversight_Fee_Cover::same(TeamOversight_Fee_Cover::stored_cover($locked), TeamOversight_Fee_Cover::for_person($locked->user_id, $season)) && !TeamOversight_Fees::fees_released($season)) {
+                $vars = array('{team}' => $name, '{paid}' => self::money($paid / 100), '{season}' => $season, '{fee_month}' => self::fee_month($season));
+                return array('stage' => 'locked_in', 'offer_id' => intval($locked->id), 'paid_cents' => $free, 'target_cents' => $target_cents,
+                    'words' => self::wording($locked->quote_basis === 'upper' ? 'stage_cover_locked_limit' : 'stage_cover_locked', $vars));
+            }
             if (!TeamOversight_Fees::fees_released($season)) {
                 return array('stage' => 'locked_in', 'offer_id' => intval($locked->id), 'paid_cents' => $free, 'target_cents' => $target_cents,
                     'words' => 'You are locked in for ' . $name . '. You have paid ' . self::money($paid / 100) . ' toward your ' . $season . ' fee, which the club sets in January; what you have paid comes off it.');
@@ -5529,6 +5930,10 @@ class TeamOversight_Offers {
      * such offer, a season before 2027, or no invoice). The offers are
      * matched by account id (an invoice with no account, by its email),
      * whatever state they are in now, the way the cap itself finds them.
+     *
+     * 1.88.0: an offer quoted with the club's fee cover (quote_cover, on
+     * either basis) counts too, but only while the person is still covered
+     * for the season, as in cap_for_breakdown().
      */
     public static function cap_ceiling_for_invoice($invoice) {
         global $wpdb;
@@ -5544,11 +5949,25 @@ class TeamOversight_Offers {
         } else {
             return null;
         }
-        $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT id, quote_amount FROM " . self::table() . " WHERE season = %s AND $who AND quote_basis = 'upper' AND locked_in_at IS NOT NULL AND quote_amount IS NOT NULL ORDER BY quote_amount DESC, id LIMIT 1",
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, quote_amount, quote_cover FROM " . self::table() . " WHERE season = %s AND $who AND (quote_basis = 'upper' OR (quote_cover IS NOT NULL AND quote_cover <> '')) AND locked_in_at IS NOT NULL AND quote_amount IS NOT NULL ORDER BY quote_amount DESC, id",
             (string) $invoice->season, $who_arg
         ));
-        return $row ? array('amount' => floatval($row->quote_amount), 'offer_id' => intval($row->id)) : null;
+        $covered_now = null;
+        foreach ((array) $rows as $row) {
+            if ($row->quote_cover !== null && (string) $row->quote_cover !== '') {
+                if ($covered_now === null) {
+                    $covered_now = class_exists('TeamOversight_Fee_Cover') && (!empty($invoice->user_id) && intval($invoice->user_id) > 0
+                        ? TeamOversight_Fee_Cover::for_person(intval($invoice->user_id), $invoice->season) !== null
+                        : TeamOversight_Fee_Cover::for_email((string) $invoice->email, $invoice->season) !== null);
+                }
+                if (!$covered_now) {
+                    continue;
+                }
+            }
+            return array('amount' => floatval($row->quote_amount), 'offer_id' => intval($row->id));
+        }
+        return null;
     }
 
     /**
@@ -5559,7 +5978,15 @@ class TeamOversight_Offers {
      * offer with an account) and by the snapshot email (only an offer with no
      * account: strict identity); every write to the offers (flush_cache())
      * forgets it. Returns array(by_user => user id => rows, by_email => lower
-     * email => rows), a row being array(id, team, role, quote_cents).
+     * email => rows), a row being array(id, team, role, quote_cents,
+     * fee_cover).
+     *
+     * 1.88.0: an offer quoted with the club's fee cover (quote_cover set, on
+     * either basis: the supporter fee is often entered before the release) is
+     * one too, with fee_cover true, so a covered locked-in player is never
+     * charged above the supporter fee they paid, even if it is edited later.
+     * cap_for_breakdown() applies such an entry only while the breakdown is
+     * covered. Rows from before 1.88.0 have no cover: the same set as before.
      */
     private static function cap_offers($season) {
         global $wpdb;
@@ -5570,11 +5997,12 @@ class TeamOversight_Offers {
         }
         $cache = array('by_user' => array(), 'by_email' => array());
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT id, user_id, email, team, role, quote_amount FROM " . self::table() . " WHERE season = %s AND quote_basis = 'upper' AND locked_in_at IS NOT NULL AND quote_amount IS NOT NULL ORDER BY id",
+            "SELECT id, user_id, email, team, role, quote_amount, quote_cover FROM " . self::table() . " WHERE season = %s AND (quote_basis = 'upper' OR (quote_cover IS NOT NULL AND quote_cover <> '')) AND locked_in_at IS NOT NULL AND quote_amount IS NOT NULL ORDER BY id",
             $season
         ));
         foreach ((array) $rows as $row) {
-            $entry = array('id' => intval($row->id), 'team' => (string) $row->team, 'role' => (string) $row->role, 'quote_cents' => self::to_cents($row->quote_amount));
+            $entry = array('id' => intval($row->id), 'team' => (string) $row->team, 'role' => (string) $row->role, 'quote_cents' => self::to_cents($row->quote_amount),
+                'fee_cover' => $row->quote_cover !== null && (string) $row->quote_cover !== '');
             // Strict identity, as cap_ceiling_for_invoice(): an offer with an account belongs to that account only; only an
             // offer with none is matched by its email snapshot (a reused address must never inherit someone else's cap).
             if (intval($row->user_id) > 0) {
@@ -5622,9 +6050,14 @@ class TeamOversight_Offers {
         // capped only by that account's offers; only a person with no account by the account-less offers under the email.
         $uid = TeamOversight_Fees::resolve_user_id((string) $email);
         $mine = array();
+        // 1.88.0: an offer quoted with the fee cover caps only while this breakdown is covered (cover cleared = no cap at the supporter quote).
+        $covered = !empty($result['fee_cover']);
         if ($uid > 0) {
             if (isset($offers['by_user'][$uid])) {
                 foreach ($offers['by_user'][$uid] as $entry) {
+                    if (!empty($entry['fee_cover']) && !$covered) {
+                        continue;
+                    }
                     $mine[$entry['id']] = $entry;
                 }
             }
@@ -5632,6 +6065,9 @@ class TeamOversight_Offers {
             $lower = strtolower((string) $email);
             if (isset($offers['by_email'][$lower])) {
                 foreach ($offers['by_email'][$lower] as $entry) {
+                    if (!empty($entry['fee_cover']) && !$covered) {
+                        continue;
+                    }
                     $mine[$entry['id']] = $entry;
                 }
             }
