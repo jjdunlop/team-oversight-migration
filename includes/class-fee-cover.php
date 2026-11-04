@@ -476,9 +476,11 @@ class TeamOversight_Fee_Cover {
      * fee of their category, or of the JPL row a junior's place is charged
      * on) give one admin sentence; '' when everything can be priced, before
      * the release (nothing is invoiced then: the setup checklist asks for
-     * the cell), or for someone with no place in the season.
+     * the cell), or for someone with no place in the season. Only a gap the
+     * change itself makes counts: a cell already blank with $before (the
+     * cover they have now) is the matrix's problem, not this change's.
      */
-    private static function price_problem($user_id, $season, $cover) {
+    private static function price_problem($user_id, $season, $cover, $before) {
         if (!TeamOversight_Fees::fees_released($season)) {
             return '';
         }
@@ -486,12 +488,25 @@ class TeamOversight_Fee_Cover {
         if (!$user || !is_email($user->user_email)) {
             return '';
         }
-        $breakdown = TeamOversight_Fees::shared()->fee_breakdown($user->user_email, $season, null, TeamOversight_Fees::RATE_FEE, $cover === null ? false : $cover);
-        $cells = TeamOversight_Fees::unpriced_cells($breakdown);
+        $fees = TeamOversight_Fees::shared();
+        $cells = TeamOversight_Fees::unpriced_cells($fees->fee_breakdown($user->user_email, $season, null, TeamOversight_Fees::RATE_FEE, $cover === null ? false : $cover));
         if (empty($cells)) {
             return '';
         }
-        return 'the ' . $season . ' ' . TeamOversight_Fees::unpriced_words($cells) . ' isn\'t set, so their ' . $season . ' fee can\'t be worked out ' . ($cover === null ? 'without the cover' : 'at the supporter fee') . '. Set it on Configuration, Fee matrix first.';
+        $already = array();
+        foreach (TeamOversight_Fees::unpriced_cells($fees->fee_breakdown($user->user_email, $season, null, TeamOversight_Fees::RATE_FEE, $before === null ? false : $before)) as $cell) {
+            $already[$cell['class'] . '|' . $cell['column']] = true;
+        }
+        $new = array();
+        foreach ($cells as $cell) {
+            if (!isset($already[$cell['class'] . '|' . $cell['column']])) {
+                $new[] = $cell;
+            }
+        }
+        if (empty($new)) {
+            return '';
+        }
+        return 'the ' . $season . ' ' . TeamOversight_Fees::unpriced_words($new) . ' isn\'t set, so their ' . $season . ' fee can\'t be worked out ' . ($cover === null ? 'without the cover' : 'at the supporter fee') . '. Set it on Configuration, Fee matrix first.';
     }
 
     /** One fee_cover log line about the player. */
@@ -559,7 +574,7 @@ class TeamOversight_Fee_Cover {
         // would stay at the playing fee beside a "Fee covered" tag. Only when they weren't covered (a reason change
         // or a redundant mark on a life member prices nothing differently).
         if ($live === null) {
-            $gap = self::price_problem($uid, $season, self::normalise($after));
+            $gap = self::price_problem($uid, $season, self::normalise($after), null);
             if ($gap !== '') {
                 $problems[] = ucfirst($gap);
             }
@@ -620,7 +635,7 @@ class TeamOversight_Fee_Cover {
             $problems = self::dry_run($uid, $season, $after);
             // 1.88.0 review: after the release their fee must be priceable without the cover too.
             if ($after === null) {
-                $gap = self::price_problem($uid, $season, null);
+                $gap = self::price_problem($uid, $season, null, self::normalise(self::for_person($uid, $season)));
                 if ($gap !== '') {
                     $problems[] = ucfirst($gap);
                 }
