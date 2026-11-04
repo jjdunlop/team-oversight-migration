@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), and coach profiles (Coaches).
- * Version: 1.85.1
+ * Version: 1.86.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.85.1');
+define('TEAM_OVERSIGHT_VERSION', '1.86.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -308,6 +308,8 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-program-setup.php';
     // 1.85.0: Club Programs sessions (the generator, the writers, the guards, the Sessions tab, To refund).
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-program-sessions.php';
+    // 1.86.0: the Book page, the range add, the cart rules, the tier discount, the order-pay rule, the refund helper.
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-program-booking.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-committee-access.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coach-portal.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-payments.php';
@@ -383,6 +385,8 @@ function team_oversight_init() {
     TeamOversight_Programs::register_hooks();
     TeamOversight_Program_Setup::register_hooks();
     TeamOversight_Program_Sessions::register_hooks();
+    // 1.86.0: the Book page, the cart and checkout rules, the order-pay rule, the product page forward and the refund helper; it adds its hooks once, statically.
+    TeamOversight_Program_Booking::register_hooks();
     new TeamOversight_Payments();
     new TeamOversight_Readiness();
     

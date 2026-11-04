@@ -192,6 +192,12 @@ class TeamOversight_Memberships {
             'custom_attributes' => array('min' => '1', 'max' => '60', 'step' => '1'),
         ));
 
+        // 1.86.0 (C14): a Club Programs session product gives one grant per order. Read only: only Prepare sets it.
+        $product_id = intval(get_the_ID());
+        if ($product_id > 0 && class_exists('TeamOversight_Program_Booking') && TeamOversight_Program_Booking::grant_mode($product_id) === 'order') {
+            echo '<p class="form-field"><em>' . esc_html('Membership grant: one per order, from ' . TeamOversight_Program_Booking::GRANT_LEAD_DAYS . ' days before the first booked session to ' . TeamOversight_Program_Booking::GRANT_TAIL_DAYS . ' days after the last (set by Club Programs).') . '</em></p>';
+        }
+
         echo '</div>';
     }
 
@@ -290,8 +296,74 @@ class TeamOversight_Memberships {
         $start = $paid ? $paid->date('Y-m-d') : current_time('Y-m-d');
 
         $granted = 0;
+
+        // 1.86.0 (program bookings 4.11, D23): a Club Programs session product
+        // in grant mode 'order' gives ONE grant per order, from 7 days before
+        // its first booked session to 28 days after its last, whatever day it
+        // was paid. The claim is its lowest line (the UNIQUE order_item_id
+        // stays the dedupe, so a re-scan adds nothing). Every other product
+        // runs the per-line loop below exactly as before.
+        $groups = array();
+        if (class_exists('TeamOversight_Program_Booking')) {
+            foreach ($order->get_items() as $item_id => $item) {
+                $product_id = $item->get_product_id();
+                if (TeamOversight_Program_Booking::grant_mode($product_id) === 'order') {
+                    $groups[intval($product_id)][intval($item_id)] = $item;
+                }
+            }
+        }
+        foreach ($groups as $product_id => $lines) {
+            $mapping = $this->get_product_mapping($product_id);
+            if (!$mapping) {
+                continue;
+            }
+            $ids = array_keys($lines);
+            $claimed = false;
+            foreach ($ids as $line_id) {
+                if ($this->grant_exists_for_order_item($line_id)) {
+                    $claimed = true;
+                    break;
+                }
+            }
+            if ($claimed) {
+                continue;
+            }
+            $dates = array();
+            foreach ($lines as $line) {
+                $date = TeamOversight_Program_Booking::line_session_date($line);
+                if ($date !== '') {
+                    $dates[] = $date;
+                }
+            }
+            list($window_start, $window_end) = TeamOversight_Program_Booking::grant_window($dates, $start, $mapping['months']);
+            $note = '';
+            if (!empty($dates)) {
+                $sorted = $dates;
+                sort($sorted);
+                $label = function ($ymd) {
+                    return class_exists('TeamOversight_Program_Sessions') ? TeamOversight_Program_Sessions::date_label($ymd) : $ymd;
+                };
+                $note = 'one grant for ' . count($dates) . ' session' . (count($dates) === 1 ? '' : 's') . ', ' . $label(reset($sorted)) . ' to ' . $label(end($sorted));
+            }
+            $this->insert_grant(array(
+                'user_id' => $user_id,
+                'tier' => $mapping['tier'],
+                'start_date' => $window_start,
+                'end_date' => $window_end,
+                'source' => 'purchase',
+                'order_id' => $order_id,
+                'order_item_id' => min($ids),
+                'product_id' => $product_id,
+                'note' => $note,
+            ));
+            $granted++;
+        }
+
         foreach ($order->get_items() as $item_id => $item) {
             $product_id = $item->get_product_id();
+            if (isset($groups[intval($product_id)])) {
+                continue;
+            }
             $mapping = $this->get_product_mapping($product_id);
             if (!$mapping) {
                 continue;
@@ -429,10 +501,15 @@ class TeamOversight_Memberships {
      * Each grant is flagged once per order (order meta), so the status
      * change and the refund hook of one full refund log it once.
      * Returns how many grants were flagged.
+     *
+     * 1.86.0 (program bookings 4.11, C23): the grants of 'order'-mode
+     * session products are flagged by flag_order_grants() (refunded or
+     * cancelled, or every line of that product fully refunded; a part or
+     * amount-only refund flags nothing for them). Every other grant goes
+     * through flag_line_grants(), which is the body this method had, run
+     * over the lines of 'line'-mode products only. Both always run.
      */
     public function flag_reversed_grants($order_id, $reason, $refund_id = 0) {
-        global $wpdb;
-
         if (!function_exists('wc_get_order')) {
             return 0;
         }
@@ -440,8 +517,30 @@ class TeamOversight_Memberships {
         if (!$order || !is_a($order, 'WC_Order')) {
             return 0;
         }
+        return $this->flag_line_grants($order, $order_id, $reason, $refund_id)
+            + $this->flag_order_grants($order, $order_id, $reason, $refund_id);
+    }
 
-        $item_ids = array_map('intval', array_keys($order->get_items()));
+    /** The lines of an order whose product gives one grant per order (1.86.0), item id => product id. */
+    private function order_mode_items($order) {
+        $items = array();
+        if (!class_exists('TeamOversight_Program_Booking')) {
+            return $items;
+        }
+        foreach ($order->get_items() as $item_id => $item) {
+            $product_id = method_exists($item, 'get_product_id') ? intval($item->get_product_id()) : 0;
+            if ($product_id > 0 && TeamOversight_Program_Booking::grant_mode($product_id) === 'order') {
+                $items[intval($item_id)] = $product_id;
+            }
+        }
+        return $items;
+    }
+
+    /** flag_reversed_grants()'s body before 1.86.0, over the lines of 'line'-mode products. */
+    private function flag_line_grants($order, $order_id, $reason, $refund_id = 0) {
+        global $wpdb;
+
+        $item_ids = array_values(array_diff(array_map('intval', array_keys($order->get_items())), array_keys($this->order_mode_items($order))));
         $refund_amount = null;
         if ($refund_id) {
             $refund = wc_get_order($refund_id);
@@ -471,6 +570,112 @@ class TeamOversight_Memberships {
             return 0;
         }
 
+        $flagged = $order->get_meta(self::REVERSAL_FLAG_META, true);
+        $flagged = is_array($flagged) ? array_map('intval', $flagged) : array();
+
+        if ($reason === 'refund') {
+            $what = 'Order #' . intval($order_id) . ' had a refund' . ($refund_amount !== null ? ' of $' . number_format($refund_amount, 2) : '');
+        } elseif ($reason === 'cancelled') {
+            $what = 'Order #' . intval($order_id) . ' was cancelled after payment';
+        } else {
+            $what = 'Order #' . intval($order_id) . ' was refunded ($' . number_format((float) $order->get_total_refunded(), 2) . ')';
+        }
+
+        $tiers = self::get_tiers();
+        $new = 0;
+        foreach ($grants as $grant) {
+            if (in_array(intval($grant->id), $flagged, true)) {
+                continue;
+            }
+            $flagged[] = intval($grant->id);
+            $new++;
+            if (class_exists('TeamOversight_Log')) {
+                $label = isset($tiers[$grant->tier]) ? $tiers[$grant->tier] : $grant->tier;
+                $until = ($grant->end_date >= self::PERMANENT_FROM) ? 'no expiry' : $grant->end_date;
+                TeamOversight_Log::add(
+                    'membership_order_refunded',
+                    $what . ' — it granted ' . $label . ' until ' . $until . ' (grant #' . intval($grant->id) . '). The membership is unchanged: review it under Grants to review on the Members page.',
+                    array('user_id' => intval($grant->user_id), 'amount' => $refund_amount)
+                );
+            }
+        }
+
+        if ($new) {
+            $order->update_meta_data(self::REVERSAL_FLAG_META, $flagged);
+            $order->save_meta_data();
+        }
+        return $new;
+    }
+
+    /**
+     * 1.86.0 (C23): an 'order'-mode grant (one per order of a session
+     * product) is flagged when the order is refunded or cancelled, and on a
+     * refund only once every line of that product in the order is fully
+     * refunded (TeamOversight_Programs::refund_state(), from WooCommerce's
+     * own refund objects): a part or amount-only refund flags nothing for
+     * it, and the grant's end is never shortened. The same once-per-order
+     * meta and log line as flag_line_grants().
+     */
+    private function flag_order_grants($order, $order_id, $reason, $refund_id = 0) {
+        global $wpdb;
+
+        $mode_items = $this->order_mode_items($order);
+        if (empty($mode_items) || !class_exists('TeamOversight_Programs')) {
+            return 0;
+        }
+        $products = array();
+        foreach ($mode_items as $item_id => $product_id) {
+            $products[$product_id][] = $item_id;
+        }
+        $summary = null;
+        $flag_products = array();
+        foreach ($products as $product_id => $item_ids) {
+            if ($reason === 'refunded' || $reason === 'cancelled') {
+                $flag_products[] = intval($product_id);
+                continue;
+            }
+            if ($summary === null) {
+                $summary = TeamOversight_Programs::refund_summary_for_order($order_id);
+            }
+            $all_full = true;
+            foreach ($item_ids as $item_id) {
+                $item = $order->get_item($item_id);
+                if (!$item) {
+                    continue;
+                }
+                $qty = max(1, intval($item->get_quantity()));
+                $total = (float) $item->get_total() + (float) $item->get_total_tax();
+                $refund = isset($summary['lines'][$item_id]) ? $summary['lines'][$item_id] : null;
+                if (TeamOversight_Programs::refund_state($qty, $total, $refund) !== 'full') {
+                    $all_full = false;
+                    break;
+                }
+            }
+            if ($all_full) {
+                $flag_products[] = intval($product_id);
+            }
+        }
+        if (empty($flag_products)) {
+            return 0;
+        }
+
+        $in = implode(',', array_fill(0, count($flag_products), '%d'));
+        $grants = $wpdb->get_results($wpdb->prepare("
+            SELECT id, user_id, tier, end_date FROM {$wpdb->prefix}team_memberships
+            WHERE order_id = %d AND product_id IN ($in)
+            ORDER BY id
+        ", array_merge(array(intval($order_id)), $flag_products)));
+        if (empty($grants)) {
+            return 0;
+        }
+
+        $refund_amount = null;
+        if ($refund_id) {
+            $refund = wc_get_order($refund_id);
+            if ($refund) {
+                $refund_amount = abs((float) $refund->get_amount());
+            }
+        }
         $flagged = $order->get_meta(self::REVERSAL_FLAG_META, true);
         $flagged = is_array($flagged) ? array_map('intval', $flagged) : array();
 
@@ -969,6 +1174,12 @@ class TeamOversight_Memberships {
             }
 
             if (!$tier) {
+                continue;
+            }
+
+            // 1.86.0 (C14): a session product's one grant per order comes from handle_order(), never per line.
+            if (class_exists('TeamOversight_Program_Booking') && TeamOversight_Program_Booking::grant_mode(intval($item->product_id)) === 'order') {
+                $report['skipped_existing']++;
                 continue;
             }
 

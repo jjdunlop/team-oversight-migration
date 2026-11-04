@@ -46,6 +46,10 @@ class TeamOversight_Program_Sessions {
     const CANCEL_LATE_DAYS = 14;
     /** Design 4.15: places per session. */
     const MAX_PLACES = 500;
+    /** 1.86.0 (club 4): session times in one series (each a start, an end and places). */
+    const MAX_TIMES = 4;
+    /** 1.86.0 (C10): the shape of a stored series; a preview kept by an older version reads as expired. */
+    const SERIES_VERSION = 2;
     /** Design 4.2 step 5: the flash after a post. */
     const FLASH_TTL = 300;
     /** Design 4.3: the cancel reason's length. */
@@ -72,6 +76,8 @@ class TeamOversight_Program_Sessions {
     const META_CANCELLED_ON = '_murvc_session_cancelled_on';
     const META_CANCEL_REASON = '_murvc_session_cancel_reason';
     const META_SERIES = '_murvc_session_series';
+    /** 1.86.0 (club 4): the session's end (HH:MM); an older session's end is read from its time label. */
+    const META_END = '_murvc_session_end';
 
     const LOCK_BUSY = 'Someone else is changing these sessions. Try again in a minute.';
     const NOT_OURS = 'That session isn\'t one of this program\'s.';
@@ -272,9 +278,10 @@ class TeamOversight_Program_Sessions {
      * Every child of a product, sessions or not, in any status (the Bin
      * included), with its session meta: ONE direct query (design 4.2 step
      * 3a). Returns variation id => array(id, status, menu_order, date, slot,
-     * capacity, state, cancelled_on, cancel_reason, series, stock (int or
-     * null), price, date_label, time_label). A row with no session date is
-     * kept: the generator ignores it, the guard does not.
+     * end (1.86.0, '' for an older session: see session_end()), capacity,
+     * state, cancelled_on, cancel_reason, series, stock (int or null),
+     * price, date_label, time_label). A row with no session date is kept:
+     * the generator ignores it, the guard does not.
      */
     public static function children($product_id) {
         global $wpdb;
@@ -285,6 +292,7 @@ class TeamOversight_Program_Sessions {
         $keys = array(
             'session_date' => self::META_DATE,
             'session_slot' => self::META_SLOT,
+            'session_end' => self::META_END,
             'capacity' => self::META_CAPACITY,
             'state' => self::META_STATE,
             'cancelled_on' => self::META_CANCELLED_ON,
@@ -322,6 +330,7 @@ class TeamOversight_Program_Sessions {
                 'menu_order' => intval($row->sort_order),
                 'date' => self::ymd_parts($date) !== null ? $date : '',
                 'slot' => $row->session_slot !== null ? (string) $row->session_slot : '',
+                'end' => $row->session_end !== null ? trim((string) $row->session_end) : '',
                 'capacity' => intval($row->capacity),
                 'state' => in_array((string) $row->state, array('closed', 'cancelled'), true) ? (string) $row->state : '',
                 'cancelled_on' => $row->cancelled_on !== null ? (string) $row->cancelled_on : '',
@@ -435,8 +444,9 @@ class TeamOversight_Program_Sessions {
 
     /**
      * Whether a program's dated sessions may be sold (B3): Bookings open is
-     * ticked AND the Book page code (1.86.0) is installed. Until then no
-     * dated session is purchasable, whatever the tick says.
+     * ticked AND the Book page code (TeamOversight_Program_Booking, 1.86.0)
+     * is installed, so a rollback to 1.85.x keeps every dated session off
+     * sale whatever the tick says.
      */
     public static function selling($key) {
         $setup = TeamOversight_Program_Setup::get((string) $key);
@@ -460,6 +470,103 @@ class TeamOversight_Program_Sessions {
         } catch (Exception $e) {
             return 0;
         }
+    }
+
+    /** 1.86.0: the end (HH:MM, 24 hour) read from a time label "5:00pm - 7:00pm"; '' otherwise. */
+    public static function end_from_label($label) {
+        if (!is_string($label) || !preg_match('/^\d{1,2}:\d{2}[ap]m - (\d{1,2}):(\d{2})([ap]m)$/D', trim($label), $m)) {
+            return '';
+        }
+        $hour = intval($m[1]);
+        $minute = intval($m[2]);
+        if ($hour < 1 || $hour > 12 || $minute > 59) {
+            return '';
+        }
+        if ($m[3] === 'am') {
+            $hour = $hour === 12 ? 0 : $hour;
+        } else {
+            $hour = $hour === 12 ? 12 : $hour + 12;
+        }
+        return sprintf('%02d:%02d', $hour, $minute);
+    }
+
+    /**
+     * 1.86.0 (club 4): a session's end: its _murvc_session_end, else read
+     * from its time label (a session made before 1.86.0), else ''.
+     */
+    public static function session_end(array $row) {
+        $end = isset($row['end']) ? trim((string) $row['end']) : '';
+        if (preg_match('/^([01]\d|2[0-3]):[0-5]\d$/D', $end)) {
+            return $end;
+        }
+        return self::end_from_label(isset($row['time_label']) ? (string) $row['time_label'] : '');
+    }
+
+    /**
+     * 1.86.0 (club 2, C4): when a session stops taking bookings, as a
+     * timestamp (0 for an unreadable date). The setup's close_at: before
+     * (close_hours before the start), start, end (the session's end; its
+     * start when the end can't be read, the safer reading) or day (23:59
+     * on its date, site time; the default).
+     */
+    public static function cutoff_ts(array $setup, $date, $start, $end) {
+        if (self::ymd_parts($date) === null) {
+            return 0;
+        }
+        $close_at = (isset($setup['close_at']) && in_array($setup['close_at'], array('before', 'start', 'end', 'day'), true)) ? $setup['close_at'] : 'day';
+        $time = '/^([01]\d|2[0-3]):[0-5]\d$/D';
+        if ($close_at === 'day') {
+            try {
+                $when = new DateTimeImmutable($date . ' 23:59:00', wp_timezone());
+                return $when->getTimestamp();
+            } catch (Exception $e) {
+                return 0;
+            }
+        }
+        if ($close_at === 'end' && is_string($end) && preg_match($time, $end) && is_string($start) && preg_match($time, $start) && strcmp($end, $start) > 0) {
+            return self::start_ts($date, $end);
+        }
+        $begin = self::start_ts($date, $start);
+        if ($begin <= 0) {
+            return 0;
+        }
+        if ($close_at === 'before') {
+            return $begin - max(0, intval(isset($setup['close_hours']) ? $setup['close_hours'] : 0)) * HOUR_IN_SECONDS;
+        }
+        return $begin;
+    }
+
+    /**
+     * Whether a session (a row with date, slot, and end or time_label) is
+     * still before its program's booking cut-off. The ONE reader of the
+     * cut-off: the purchasable filter, the Book page's list, the cart
+     * (through is_purchasable()) and the order-pay rule.
+     */
+    public static function before_cutoff($key, array $row, $now = null) {
+        $now = $now === null ? time() : intval($now);
+        $cutoff = self::cutoff_ts(
+            TeamOversight_Program_Setup::get((string) $key),
+            isset($row['date']) ? (string) $row['date'] : '',
+            isset($row['slot']) ? (string) $row['slot'] : '',
+            self::session_end($row)
+        );
+        return $cutoff > 0 && $now < $cutoff;
+    }
+
+    /** The booking cut-off in words, for members. */
+    public static function cutoff_words(array $setup) {
+        $close_at = (isset($setup['close_at']) && in_array($setup['close_at'], array('before', 'start', 'end', 'day'), true)) ? $setup['close_at'] : 'day';
+        $hours = isset($setup['close_hours']) ? intval($setup['close_hours']) : 0;
+        if ($close_at === 'before' && $hours > 0) {
+            return 'Bookings close ' . $hours . ' hour' . ($hours === 1 ? '' : 's') . ' before each session starts.';
+        }
+        if ($close_at === 'before' || $close_at === 'start') {
+            return 'Bookings close when each session starts.';
+        }
+        if ($close_at === 'end') {
+            return 'Bookings close when each session ends.';
+        }
+        return 'Bookings stay open until the end of each session\'s day.';
     }
 
     /**
@@ -626,15 +733,11 @@ class TeamOversight_Program_Sessions {
         }
     }
 
-    /** "Sun 14 Mar 2027 5:00pm - 7:00pm" for a children() row. */
+    /** "Sun 14 Mar 2027 5:00pm - 7:00pm" for a children() row (1.86.0: from the row alone, never the setup). */
     private static function row_label(array $row, $key = '') {
         $time = $row['time_label'];
-        if ($time === '' && $key !== '') {
-            foreach (TeamOversight_Program_Setup::get($key)['slots'] as $slot) {
-                if ($slot['start'] === $row['slot']) {
-                    $time = self::slot_label($slot);
-                }
-            }
+        if ($time === '') {
+            $time = self::slot_label(array('start' => $row['slot'], 'end' => self::session_end($row)));
         }
         $date = $row['date'] !== '' ? self::date_label($row['date']) : $row['date_label'];
         return trim($date . ' ' . $time);
@@ -661,7 +764,21 @@ class TeamOversight_Program_Sessions {
     // The series generator (design 4.2, 5.4)
     // ------------------------------------------------------------------
 
-    /** The input fields a series reads, unslashed and reduced to scalars (the transient keeps them, B26). */
+    /** A posted time as HH:MM (a browser may add seconds), at most 5 characters kept. */
+    private static function posted_time($value) {
+        $value = is_scalar($value) ? trim((string) $value) : '';
+        if (preg_match('/^(\d{2}:\d{2}):\d{2}$/D', $value, $m)) {
+            return $m[1];
+        }
+        return substr($value, 0, 5);
+    }
+
+    /**
+     * The input fields a series reads, unslashed and reduced to scalars (the
+     * transient keeps them, B26). 1.86.0 (club 4): times[i][start, end,
+     * places], up to 10 rows kept (check_series() allows MAX_TIMES); the
+     * 1.85.x slots[] and places[] are ignored.
+     */
     private static function clean_input(array $input) {
         $text = function ($value, $max = 40) {
             return is_scalar($value) ? substr(trim((string) $value), 0, $max) : '';
@@ -669,35 +786,35 @@ class TeamOversight_Program_Sessions {
         $out = array(
             'season' => $text(isset($input['season']) ? $input['season'] : ''),
             'day' => $text(isset($input['day']) ? $input['day'] : ''),
-            'slots' => array(),
+            'times' => array(),
             'first' => $text(isset($input['first']) ? $input['first'] : ''),
             'last' => $text(isset($input['last']) ? $input['last'] : ''),
             'skips' => is_scalar(isset($input['skips']) ? $input['skips'] : '') ? substr((string) (isset($input['skips']) ? $input['skips'] : ''), 0, 2000) : '',
             'price' => $text(isset($input['price']) ? $input['price'] : ''),
-            'places' => array(),
         );
-        if (isset($input['slots']) && is_array($input['slots'])) {
-            foreach ($input['slots'] as $start) {
-                if (is_scalar($start) && count($out['slots']) < 10) {
-                    $out['slots'][] = $text($start, 5);
+        if (isset($input['times']) && is_array($input['times'])) {
+            foreach ($input['times'] as $row) {
+                if (!is_array($row) || count($out['times']) >= 10) {
+                    continue;
                 }
-            }
-        }
-        if (isset($input['places']) && is_array($input['places'])) {
-            foreach ($input['places'] as $start => $places) {
-                if (is_scalar($places) && count($out['places']) < 10) {
-                    $out['places'][$text((string) $start, 5)] = $text($places, 6);
-                }
+                $out['times'][] = array(
+                    'start' => self::posted_time(isset($row['start']) ? $row['start'] : ''),
+                    'end' => self::posted_time(isset($row['end']) ? $row['end'] : ''),
+                    'places' => $text(isset($row['places']) ? $row['places'] : '', 6),
+                );
             }
         }
         return $out;
     }
 
     /**
-     * Design 4.2's input rules. $input is unslashed (the form's shape:
-     * season, day, slots[], first, last, skips (a date a line), price,
-     * places[<start>]). Returns array($series, $errors); $series is null
-     * when there is any error.
+     * Design 4.2's input rules, 1.86.0 shape (club 4, C7, C8). $input is
+     * unslashed: season, day (1 Monday to 7 Sunday, any day), times[i]
+     * (start, end, places; one to MAX_TIMES rows, blank rows dropped),
+     * first, last, skips (a date a line), price (read only from the
+     * committee, manage_options: blank = the standard price; anyone else
+     * gets the standard price and a posted one is ignored). Returns
+     * array($series, $errors); $series is null when there is any error.
      */
     public static function check_series($key, array $input, $user_id) {
         $key = (string) $key;
@@ -728,37 +845,51 @@ class TeamOversight_Program_Sessions {
         $setup = TeamOversight_Program_Setup::get($key);
         $errors = array();
 
-        // Day (D10): one of the committee's days.
-        $day = ctype_digit($input['day']) ? intval($input['day']) : 0;
-        if (!in_array($day, $setup['days'], true)) {
-            $names = array();
-            foreach ($setup['days'] as $allowed) {
-                $names[] = self::day_name($allowed, true);
-            }
-            $errors[] = 'Choose a day the committee allows: ' . (empty($names) ? 'none is set yet' : implode(' or ', $names)) . '.';
+        // Day: any day of the week (club 4: D10's committee-allowed days dropped).
+        $day = ($input['day'] !== '' && ctype_digit($input['day'])) ? intval($input['day']) : 0;
+        if ($day < 1 || $day > 7) {
+            $errors[] = 'Choose a day of the week.';
         }
 
-        // Slots: the program's visible slots, by start time.
-        $visible = array();
-        foreach ($setup['slots'] as $slot) {
-            if (empty($slot['hidden'])) {
-                $visible[$slot['start']] = $slot;
+        // Session times (C7): blank rows dropped; one to MAX_TIMES; start and end like 17:00, the end
+        // after the start; starts unique; places 1 to MAX_PLACES.
+        $time = '/^([01]\d|2[0-3]):[0-5]\d$/D';
+        $rows = array();
+        foreach ($input['times'] as $row) {
+            if ($row['start'] === '' && $row['end'] === '' && $row['places'] === '') {
+                continue;
             }
+            $rows[] = $row;
         }
-        $slots = array();
-        if (empty($input['slots'])) {
-            $errors[] = 'Tick at least one time slot.';
+        $times = array();
+        if (empty($rows)) {
+            $errors[] = 'Add at least one session time.';
+        } elseif (count($rows) > self::MAX_TIMES) {
+            $errors[] = 'At most ' . self::MAX_TIMES . ' session times.';
         } else {
-            foreach ($input['slots'] as $start) {
-                if (!isset($visible[$start])) {
-                    $errors[] = 'That time slot isn\'t one of this program\'s.';
+            foreach ($rows as $i => $row) {
+                if (!preg_match($time, $row['start']) || !preg_match($time, $row['end'])) {
+                    $errors[] = 'Session time ' . ($i + 1) . ': the start and end must be times like 17:00.';
                     continue;
                 }
-                $slots[$start] = true;
+                if (strcmp($row['end'], $row['start']) <= 0) {
+                    $errors[] = 'Session time ' . $row['start'] . ': the end must be after the start.';
+                    continue;
+                }
+                if (isset($times[$row['start']])) {
+                    $errors[] = 'Two session times start at ' . $row['start'] . '.';
+                    continue;
+                }
+                $places = ($row['places'] !== '' && ctype_digit($row['places'])) ? intval($row['places']) : 0;
+                if ($places < 1 || $places > self::MAX_PLACES) {
+                    $errors[] = 'Session time ' . $row['start'] . ': places must be a whole number from 1 to ' . self::MAX_PLACES . '.';
+                    continue;
+                }
+                $times[$row['start']] = array('end' => $row['end'], 'places' => $places);
             }
-            $slots = array_keys($slots);
-            sort($slots);
+            ksort($times);
         }
+        $slots = array_keys($times);
 
         // First and last date: from today, inside the product's season year (D15).
         $today = current_time('Y-m-d');
@@ -800,28 +931,24 @@ class TeamOversight_Program_Sessions {
             $errors[] = 'At most ' . self::MAX_SKIPS . ' dates to skip.';
         }
 
-        // Price (D9): one of the committee's prices, kept as the approved string.
+        // Price (C8, D9): the standard price (prices[0]); only the committee may give these sessions
+        // another one (blank = the standard price). Anyone else's posted price is ignored.
+        $standard = !empty($setup['prices']) ? (string) $setup['prices'][0] : '';
+        $standard_cents = $standard !== '' ? TeamOversight_Program_Setup::money_cents($standard) : null;
         $price = '';
-        $cents = TeamOversight_Program_Setup::money_cents(ltrim($input['price'], '$'));
-        foreach ($setup['prices'] as $approved) {
-            if ($cents !== null && TeamOversight_Program_Setup::money_cents($approved) === $cents) {
-                $price = $approved;
+        if ($standard_cents === null) {
+            $errors[] = 'The committee hasn\'t set the standard price yet (the Setup tab).';
+        } else {
+            $price = TeamOversight_Program_Setup::cents_text($standard_cents);
+            $typed = ltrim(trim($input['price']), '$');
+            if ($typed !== '' && user_can(intval($user_id), 'manage_options')) {
+                $cents = TeamOversight_Program_Setup::money_cents($typed);
+                if ($cents === null || $cents < TeamOversight_Program_Setup::MIN_PRICE_CENTS || $cents > TeamOversight_Program_Setup::MAX_PRICE_CENTS) {
+                    $errors[] = 'The price must be from $' . TeamOversight_Program_Setup::cents_text(TeamOversight_Program_Setup::MIN_PRICE_CENTS) . ' to $' . TeamOversight_Program_Setup::cents_text(TeamOversight_Program_Setup::MAX_PRICE_CENTS) . ', with at most two decimals.';
+                } else {
+                    $price = TeamOversight_Program_Setup::cents_text($cents);
+                }
             }
-        }
-        if ($price === '') {
-            $errors[] = 'Choose one of the committee\'s prices.';
-        }
-
-        // Places (B8): one number per ticked slot; blank = that slot's places.
-        $places = array();
-        foreach ($slots as $start) {
-            $typed = isset($input['places'][$start]) ? trim((string) $input['places'][$start]) : '';
-            $n = $typed === '' ? intval($visible[$start]['places']) : (ctype_digit($typed) ? intval($typed) : 0);
-            if ($n < 1 || $n > self::MAX_PLACES) {
-                $errors[] = 'Places must be a whole number from 1 to ' . self::MAX_PLACES . '.';
-                continue;
-            }
-            $places[$start] = $n;
         }
 
         if (!empty($errors)) {
@@ -829,18 +956,19 @@ class TeamOversight_Program_Sessions {
         }
 
         $series = array(
-            'v' => 1,
+            'v' => self::SERIES_VERSION,
             'key' => $key,
             'season' => $season,
             'product_id' => $pid,
             'year' => $year,
             'day' => $day,
             'slots' => $slots,
+            'times' => $times,
             'first' => $first,
             'last' => $last,
             'skips' => $skips,
             'price' => $price,
-            'places' => $places,
+            'standard' => $standard_cents !== null ? TeamOversight_Program_Setup::cents_text($standard_cents) : '',
             'made_at' => current_time('mysql'),
         );
         $outcome = self::series_outcome($series, array());
@@ -905,7 +1033,14 @@ class TeamOversight_Program_Sessions {
                 $pair = self::pair_key($date, $start);
                 if (isset($by_pair[$pair])) {
                     $exists[] = $pair;
-                    $row['slots'][$start] = array('outcome' => 'exists', 'state' => self::state_word($by_pair[$pair]));
+                    // A session is (product, date, start): one already there stays as it is, whatever its end.
+                    $state = self::state_word($by_pair[$pair]);
+                    $want_end = isset($series['times'][$start]['end']) ? $series['times'][$start]['end'] : '';
+                    $has_end = self::session_end($by_pair[$pair]);
+                    if ($want_end !== '' && $has_end !== '' && $has_end !== $want_end) {
+                        $state .= ', ' . self::slot_label(array('start' => $start, 'end' => $has_end));
+                    }
+                    $row['slots'][$start] = array('outcome' => 'exists', 'state' => $state);
                 } else {
                     $create[] = array($date, $start);
                     $row['slots'][$start] = array('outcome' => 'create', 'state' => '');
@@ -924,19 +1059,26 @@ class TeamOversight_Program_Sessions {
         );
     }
 
-    /** Design 4.2: a hash of (product id, the sorted pairs to create, the price, the places per slot). */
-    public static function fingerprint($product_id, array $create, $price, array $places) {
+    /**
+     * Design 4.2: a hash of (product id, the sorted pairs to create, the
+     * price, each time's start, end and places), so a changed end, places
+     * or price between the preview and Create refuses the Create (1.86.0:
+     * the end added; $times is start => array(end, places)).
+     */
+    public static function fingerprint($product_id, array $create, $price, array $times) {
         $pairs = array();
         foreach ($create as $pair) {
             $pairs[] = self::pair_key($pair[0], $pair[1]);
         }
         sort($pairs);
-        ksort($places);
-        $per_slot = array();
-        foreach ($places as $start => $n) {
-            $per_slot[] = array((string) $start, intval($n));
+        ksort($times);
+        $per_time = array();
+        foreach ($times as $start => $row) {
+            $end = is_array($row) && isset($row['end']) ? (string) $row['end'] : '';
+            $places = is_array($row) && isset($row['places']) ? intval($row['places']) : intval($row);
+            $per_time[] = array((string) $start, $end, $places);
         }
-        return md5((string) wp_json_encode(array(intval($product_id), $pairs, TeamOversight_Program_Setup::money_cents((string) $price), $per_slot)));
+        return md5((string) wp_json_encode(array(intval($product_id), $pairs, TeamOversight_Program_Setup::money_cents((string) $price), $per_time)));
     }
 
     public static function series_transient($user_id, $key) {
@@ -958,10 +1100,11 @@ class TeamOversight_Program_Sessions {
         return array('ok' => true, 'message' => '');
     }
 
-    /** The user's stored series (with its input), or null. */
+    /** The user's stored series (with its input), or null; one kept by an older version (not SERIES_VERSION) reads as expired (C10). */
     public static function stored_series($key, $user_id) {
         $stored = get_transient(self::series_transient($user_id, $key));
-        return (is_array($stored) && isset($stored['input']) && is_array($stored['input'])) ? $stored : null;
+        return (is_array($stored) && isset($stored['input']) && is_array($stored['input'])
+            && isset($stored['v']) && intval($stored['v']) === self::SERIES_VERSION) ? $stored : null;
     }
 
     /**
@@ -1008,35 +1151,33 @@ class TeamOversight_Program_Sessions {
             if (empty($create)) {
                 return array('ok' => false, 'message' => 'Nothing new to create: every session in this series is already there.', 'step' => 'preview');
             }
-            $expected = self::fingerprint($pid, $create, $series['price'], $series['places']);
+            $expected = self::fingerprint($pid, $create, $series['price'], $series['times']);
             if (!is_string($posted_fingerprint) || !hash_equals($expected, $posted_fingerprint)) {
-                return array('ok' => false, 'message' => 'The sessions changed since your preview (someone else may have added some, or the price changed). Check the new preview.', 'step' => 'preview');
+                return array('ok' => false, 'message' => 'The sessions changed since your preview (someone else may have added some, or the price or a time changed). Check the new preview.', 'step' => 'preview');
             }
 
-            $setup = TeamOversight_Program_Setup::get($key);
-            $index = array();
-            $by_start = array();
-            foreach (array_values($setup['slots']) as $i => $slot) {
-                $index[$slot['start']] = $i;
-                $by_start[$slot['start']] = $slot;
-            }
+            // C11: each session's label, end and places come from the series' own times (1.86.0: never the setup).
+            $index = array_flip(array_values($series['slots']));
             $token = wp_generate_password(12, false);
             foreach ($create as $pair) {
                 list($ymd, $start) = $pair;
+                $end = $series['times'][$start]['end'];
+                $places = intval($series['times'][$start]['places']);
                 try {
                     $variation = new WC_Product_Variation();
                     $variation->set_parent_id($pid);
-                    $variation->set_attributes(array('date' => self::date_label($ymd), 'time' => self::slot_label($by_start[$start])));
+                    $variation->set_attributes(array('date' => self::date_label($ymd), 'time' => self::slot_label(array('start' => $start, 'end' => $end))));
                     $variation->set_regular_price($series['price']);
                     $variation->set_virtual(true);
                     $variation->set_manage_stock(true);
-                    $variation->set_stock_quantity($series['places'][$start]);
+                    $variation->set_stock_quantity($places);
                     $variation->set_backorders('no');
                     $variation->set_status('publish');
-                    $variation->set_menu_order(intval(str_replace('-', '', $ymd)) * 10 + (isset($index[$start]) ? $index[$start] : 0));
+                    $variation->set_menu_order(intval(str_replace('-', '', $ymd)) * 10 + (isset($index[$start]) ? intval($index[$start]) : 0));
                     $variation->update_meta_data(self::META_DATE, $ymd);
                     $variation->update_meta_data(self::META_SLOT, $start);
-                    $variation->update_meta_data(self::META_CAPACITY, intval($series['places'][$start]));
+                    $variation->update_meta_data(self::META_END, $end);
+                    $variation->update_meta_data(self::META_CAPACITY, $places);
                     $variation->update_meta_data(self::META_STATE, '');
                     $variation->update_meta_data(self::META_SERIES, $token);
                     if (intval($variation->save()) <= 0) {
@@ -1049,7 +1190,7 @@ class TeamOversight_Program_Sessions {
                 $made++;
             }
             if ($made > 0) {
-                self::rebuild_parent_options($pid, $key);
+                self::rebuild_parent_options($pid);
                 if (class_exists('WC_Product_Variable')) {
                     WC_Product_Variable::sync($pid);
                 }
@@ -1057,6 +1198,9 @@ class TeamOversight_Program_Sessions {
             }
         } finally {
             self::release_lock($pid);
+            if (class_exists('TeamOversight_Program_Booking')) {
+                TeamOversight_Program_Booking::flush_cache();
+            }
         }
 
         $total = count($outcome['create']);
@@ -1064,21 +1208,17 @@ class TeamOversight_Program_Sessions {
         foreach ($outcome['create'] as $pair) {
             $dates[] = $pair[0];
         }
-        $labels = array();
-        $place_parts = array();
-        $distinct_places = array_unique(array_values($series['places']));
-        foreach ($series['slots'] as $start) {
-            $label = isset($by_start[$start]) ? self::slot_label($by_start[$start]) : $start;
-            $labels[] = $label;
-            $place_parts[] = $label . ' ' . intval($series['places'][$start]) . ' places';
+        list($labels, $place_words) = self::series_words($series);
+        $price_words = self::money($series['price']);
+        if (isset($series['standard']) && $series['standard'] !== '' && TeamOversight_Program_Setup::money_cents($series['standard']) !== TeamOversight_Program_Setup::money_cents($series['price'])) {
+            $price_words .= ' (set by the committee; the standard price is ' . self::money($series['standard']) . ')';
         }
         $what = $made === $total
             ? 'added ' . $made . ' session' . ($made === 1 ? '' : 's')
             : 'added ' . $made . ' of ' . $total . ' sessions (stopped part way: run it again to add the rest)';
         $message = self::program_label($key, $pid) . ': ' . $what . ', '
             . self::date_label(min($dates)) . ' to ' . self::date_label(max($dates)) . ', '
-            . implode(', ', $labels) . ', ' . self::money($series['price']) . ', '
-            . (count($distinct_places) === 1 ? intval(reset($distinct_places)) . ' places each' : implode(', ', $place_parts))
+            . implode(', ', $labels) . ', ' . $price_words . ', ' . $place_words
             . '. Already there: ' . count($outcome['exists']) . '. Skipped as asked: ' . count($outcome['skipped']) . '.';
         if ($made > 0) {
             self::log($message);
@@ -1091,13 +1231,33 @@ class TeamOversight_Program_Sessions {
     }
 
     /**
+     * A series' time labels and its places in words: array(labels, "40
+     * places each" or "5:00pm - 7:30pm 60 places, ..."), from its own times.
+     */
+    private static function series_words(array $series) {
+        $labels = array();
+        $parts = array();
+        $distinct = array();
+        foreach ($series['slots'] as $start) {
+            $row = isset($series['times'][$start]) ? $series['times'][$start] : array('end' => '', 'places' => 0);
+            $label = self::slot_label(array('start' => $start, 'end' => $row['end']));
+            $label = $label !== '' ? $label : $start;
+            $labels[] = $label;
+            $parts[] = $label . ' ' . intval($row['places']) . ' places';
+            $distinct[intval($row['places'])] = true;
+        }
+        $words = count($distinct) === 1 ? intval(key($distinct)) . ' places each' : implode(', ', $parts);
+        return array($labels, $words);
+    }
+
+    /**
      * Design 4.2 step e (inside the lock): the parent's "date" options are
      * every child's label with a session date (any status, the Bin
-     * included, so never trimmed), by date then slot; "time" is the
-     * program's slot labels (hidden ones included) plus any a child
-     * carries, in start order. Any other attribute is kept.
+     * included, so never trimmed), by date then slot; "time" (1.86.0, C12)
+     * is the distinct time labels of those children, by start then end
+     * (the setup is not read). Any other attribute is kept.
      */
-    private static function rebuild_parent_options($pid, $key) {
+    private static function rebuild_parent_options($pid) {
         clean_post_cache($pid);
         $parent = wc_get_product($pid);
         if (!$parent) {
@@ -1121,16 +1281,13 @@ class TeamOversight_Program_Sessions {
             }
         }
         $times = array();
-        foreach (TeamOversight_Program_Setup::get($key)['slots'] as $slot) {
-            $label = self::slot_label($slot);
-            if ($label !== '') {
-                $times[$slot['start']] = $label;
-            }
-        }
         foreach ($rows as $row) {
-            if ($row['time_label'] !== '' && !in_array($row['time_label'], $times, true)) {
-                $times[$row['slot'] !== '' ? $row['slot'] : 'zz' . count($times)] = $row['time_label'];
+            $end = self::session_end($row);
+            $label = $row['time_label'] !== '' ? $row['time_label'] : self::slot_label(array('start' => $row['slot'], 'end' => $end));
+            if ($label === '' || in_array($label, $times, true)) {
+                continue;
             }
+            $times[($row['slot'] !== '' ? $row['slot'] : 'zz') . '|' . ($end !== '' ? $end : 'zz') . '|' . count($times)] = $label;
         }
         ksort($times);
 
@@ -1222,6 +1379,9 @@ class TeamOversight_Program_Sessions {
             }
         } finally {
             self::release_lock($parent);
+            if (class_exists('TeamOversight_Program_Booking')) {
+                TeamOversight_Program_Booking::flush_cache();
+            }
         }
         if (!empty($result['ok']) && !empty($result['log'])) {
             self::log(self::program_label($key, $parent) . ': ' . $result['log']);
@@ -1420,8 +1580,9 @@ class TeamOversight_Program_Sessions {
 
     /**
      * Change price (design 4.3, D9, B11): committee only. The regular
-     * price of each picked open session from today on becomes one of the
-     * approved prices; any other pick refuses the whole change. Paid lines
+     * price of each picked open session from today on becomes the price
+     * typed (1.86.0, C8: any price from $1.00 to $500.00; the approved
+     * list is gone); any other pick refuses the whole change. Paid lines
      * keep what they paid.
      */
     public static function change_price($key, array $variation_ids, $price, $user_id) {
@@ -1429,17 +1590,11 @@ class TeamOversight_Program_Sessions {
         if (!user_can(intval($user_id), 'manage_options')) {
             return array('ok' => false, 'message' => 'Only the committee can change prices.');
         }
-        $setup = TeamOversight_Program_Setup::get($key);
         $cents = TeamOversight_Program_Setup::money_cents(is_scalar($price) ? ltrim(trim((string) $price), '$') : '');
-        $approved = '';
-        foreach ($setup['prices'] as $candidate) {
-            if ($cents !== null && TeamOversight_Program_Setup::money_cents($candidate) === $cents) {
-                $approved = $candidate;
-            }
+        if ($cents === null || $cents < TeamOversight_Program_Setup::MIN_PRICE_CENTS || $cents > TeamOversight_Program_Setup::MAX_PRICE_CENTS) {
+            return array('ok' => false, 'message' => 'The price must be from $' . TeamOversight_Program_Setup::cents_text(TeamOversight_Program_Setup::MIN_PRICE_CENTS) . ' to $' . TeamOversight_Program_Setup::cents_text(TeamOversight_Program_Setup::MAX_PRICE_CENTS) . ', with at most two decimals.');
         }
-        if ($approved === '') {
-            return array('ok' => false, 'message' => 'Choose one of the committee\'s prices.');
-        }
+        $approved = TeamOversight_Program_Setup::cents_text($cents);
         $ids = array_values(array_unique(array_filter(array_map('intval', $variation_ids))));
         if (empty($ids)) {
             return array('ok' => false, 'message' => 'Tick at least one session.');
@@ -1491,6 +1646,9 @@ class TeamOversight_Program_Sessions {
             }
         } finally {
             self::release_locks($held);
+            if (class_exists('TeamOversight_Program_Booking')) {
+                TeamOversight_Program_Booking::flush_cache();
+            }
         }
         if (empty($changed)) {
             return array('ok' => false, 'message' => 'Nothing was changed.');
@@ -1677,9 +1835,13 @@ class TeamOversight_Program_Sessions {
         if ($date === '') {
             return false;
         }
-        $start = self::start_ts($date, (string) $variation->get_meta(self::META_SLOT, true));
-        $setup = TeamOversight_Program_Setup::get($entry['key']);
-        if ($start <= 0 || time() >= $start - intval($setup['close_hours']) * HOUR_IN_SECONDS) {
+        // 1.86.0 (club 2): the program's own booking cut-off, the one rule (before_cutoff()).
+        if (!self::before_cutoff($entry['key'], array(
+            'date' => $date,
+            'slot' => (string) $variation->get_meta(self::META_SLOT, true),
+            'end' => (string) $variation->get_meta(self::META_END, true),
+            'time_label' => (string) $variation->get_attribute('time'),
+        ))) {
             return false;
         }
         return $purchasable;
@@ -2040,13 +2202,11 @@ class TeamOversight_Program_Sessions {
         }
         if ($admin && $any_price_box) {
             $setup = TeamOversight_Program_Setup::get($key);
+            $standard = !empty($setup['prices']) ? (string) $setup['prices'][0] : '';
             $out .= self::form_open($key, $context, $base_url, 'price', ' id="murvc-price-form" class="murvc-st-box"')
-                . '<p><strong>Change price</strong> (committee only): tick open sessions from today on above, then choose one of the approved prices. Paid bookings keep what they paid.</p>'
-                . '<p><label>New price <select name="price">';
-            foreach ($setup['prices'] as $price) {
-                $out .= '<option value="' . esc_attr($price) . '">' . esc_html(self::money($price)) . '</option>';
-            }
-            $out .= '</select></label> <button type="submit" class="button">Change price of the ticked sessions</button></p></form>';
+                . '<p><strong>Change price</strong> (committee only): tick open sessions from today on above, then type their new price, including GST. Paid bookings keep what they paid.</p>'
+                . '<p><label>New price $<input type="text" inputmode="decimal" name="price" size="8" value="' . esc_attr($standard) . '"></label> <button type="submit" class="button">Change price of the ticked sessions</button>'
+                . ($standard !== '' ? ' <span class="murvc-st-note">' . esc_html('The standard price is ' . self::money($standard) . '.') . '</span>' : '') . '</p></form>';
         }
         $hold = intval(get_option('woocommerce_hold_stock_minutes', 60));
         $out .= '<p class="murvc-st-note">Places held by checkouts in progress come back within ' . ($hold > 0 ? $hold : 60) . ' minutes if not paid. A new unpaid order can take a few minutes to show here.</p>';
@@ -2253,31 +2413,56 @@ class TeamOversight_Program_Sessions {
         return $out . '</div>';
     }
 
-    /** The series form (design 5.4), filled from a refused preview, else the stored series, else defaults. */
+    /**
+     * The series form (design 5.4; 1.86.0, club 4: everything about the
+     * sessions is given here): Season, Day (any day of the week), one to
+     * MAX_TIMES session times (start, end, places), First and Last date,
+     * Dates to skip, and the Price (the standard price; only the committee
+     * may type another). Filled from a refused preview, else the stored
+     * series, else defaults: the day of the most recently made session
+     * (else the program's weekday, else Sunday) and one time, 17:00 to
+     * 19:00, with that session's places (else 40).
+     */
     private static function render_series_form($key, $context, $base_url, $flash) {
         $setup = TeamOversight_Program_Setup::get($key);
         $user_id = get_current_user_id();
         $current = self::target_product($key, 'current');
         $prepared = self::target_product($key, 'prepared');
-        $visible = array();
-        foreach ($setup['slots'] as $slot) {
-            if (empty($slot['hidden'])) {
-                $visible[$slot['start']] = $slot;
-            }
-        }
+        $committee = user_can($user_id, 'manage_options');
+        $standard = !empty($setup['prices']) ? (string) $setup['prices'][0] : '';
         $values = array(
             'season' => $prepared > 0 ? 'prepared' : 'current',
-            'day' => !empty($setup['days']) ? (string) $setup['days'][0] : '',
-            'slots' => array_keys($visible),
+            'day' => '',
+            'times' => array(),
             'first' => '',
             'last' => '',
             'skips' => '',
-            'price' => !empty($setup['prices']) ? $setup['prices'][0] : '',
-            'places' => array(),
+            'price' => $standard,
         );
         if (isset($_GET['season']) && in_array($_GET['season'], array('current', 'prepared'), true)) {
             $values['season'] = (string) $_GET['season'];
         }
+        // Defaults from the most recently made session (the highest variation id with a date).
+        $latest = null;
+        $target = $values['season'] === 'prepared' ? $prepared : $current;
+        foreach (array($target, $current, $prepared) as $pid) {
+            if ($pid <= 0) {
+                continue;
+            }
+            foreach (self::children($pid) as $row) {
+                if ($row['date'] !== '' && ($latest === null || $row['id'] > $latest['id'])) {
+                    $latest = $row;
+                }
+            }
+            if ($latest !== null) {
+                break;
+            }
+        }
+        $program = TeamOversight_Programs::get_program($key);
+        $weekday = is_array($program) ? intval(TeamOversight_Programs::get_program_weekday($program)) : 0;
+        $values['day'] = (string) ($latest !== null ? self::weekday_of($latest['date']) : ($weekday >= 1 && $weekday <= 7 ? $weekday : 7));
+        $places = ($latest !== null && intval($latest['capacity']) > 0) ? intval($latest['capacity']) : 40;
+        $values['times'] = array(array('start' => '17:00', 'end' => '19:00', 'places' => (string) $places));
         $prefill = null;
         if (is_array($flash) && isset($flash['input']) && is_array($flash['input'])) {
             $prefill = $flash['input'];
@@ -2293,11 +2478,8 @@ class TeamOversight_Program_Sessions {
                     $values[$field] = $prefill[$field];
                 }
             }
-            if (isset($prefill['slots']) && is_array($prefill['slots']) && !empty($prefill['slots'])) {
-                $values['slots'] = $prefill['slots'];
-            }
-            if (isset($prefill['places']) && is_array($prefill['places'])) {
-                $values['places'] = $prefill['places'];
+            if (isset($prefill['times']) && is_array($prefill['times']) && !empty($prefill['times'])) {
+                $values['times'] = $prefill['times'];
             }
         }
         foreach (array('first', 'last') as $field) {
@@ -2308,8 +2490,8 @@ class TeamOversight_Program_Sessions {
         }
 
         $out = '<h3>Add sessions</h3>';
-        if (empty($visible) || empty($setup['days']) || empty($setup['prices'])) {
-            return $out . '<p>The committee hasn\'t set this program\'s days, time slots and prices yet (the Setup tab).</p><p><a class="button coach-btn-secondary" href="' . esc_url($base_url) . '">Back to the sessions</a></p>';
+        if ($standard === '') {
+            return $out . '<p>The committee hasn\'t set this program\'s standard price yet (the Setup tab).</p><p><a class="button coach-btn-secondary" href="' . esc_url($base_url) . '">Back to the sessions</a></p>';
         }
         $out .= self::form_open($key, $context, $base_url, 'preview', ' class="murvc-st-box" id="murvc-series-form"');
         // Season: shown only when both products take sessions.
@@ -2320,25 +2502,23 @@ class TeamOversight_Program_Sessions {
         } else {
             $out .= '<input type="hidden" name="season" value="' . ($prepared > 0 ? 'prepared' : 'current') . '">';
         }
-        // Day: text for one allowed day, else a select.
-        if (count($setup['days']) === 1) {
-            $out .= '<div class="murvc-st-field"><span class="murvc-st-label">Day</span>' . esc_html(self::day_name($setup['days'][0], true))
-                . '<input type="hidden" name="day" value="' . intval($setup['days'][0]) . '"></div>';
-        } else {
-            $out .= '<div class="murvc-st-field"><label class="murvc-st-label" for="murvc-st-day">Day</label><select id="murvc-st-day" name="day">';
-            foreach ($setup['days'] as $day) {
-                $out .= '<option value="' . intval($day) . '"' . selected((string) $values['day'], (string) $day, false) . '>' . esc_html(self::day_name($day, true)) . '</option>';
-            }
-            $out .= '</select></div>';
+        // Day: any day of the week.
+        $out .= '<div class="murvc-st-field"><label class="murvc-st-label" for="murvc-st-day">Day</label><select id="murvc-st-day" name="day">';
+        for ($day = 1; $day <= 7; $day++) {
+            $out .= '<option value="' . $day . '"' . selected((string) $values['day'], (string) $day, false) . '>' . esc_html(self::day_name($day, true)) . '</option>';
         }
-        // Time slots and their places.
-        $out .= '<div class="murvc-st-field"><span class="murvc-st-label">Time slots and places per session</span>';
-        foreach ($visible as $start => $slot) {
-            $places = isset($values['places'][$start]) && $values['places'][$start] !== '' ? $values['places'][$start] : (string) intval($slot['places']);
-            $out .= '<p><label><input type="checkbox" name="slots[]" value="' . esc_attr($start) . '"' . (in_array($start, $values['slots'], true) ? ' checked' : '') . '> ' . esc_html(self::slot_label($slot)) . '</label> '
-                . '<label>places <input type="number" name="places[' . esc_attr($start) . ']" min="1" max="' . self::MAX_PLACES . '" value="' . esc_attr($places) . '" style="width: 80px;"></label></p>';
+        $out .= '</select></div>';
+        // Session times: up to MAX_TIMES rows of start, end and places.
+        $out .= '<div class="murvc-st-field"><span class="murvc-st-label">Session times</span>'
+            . '<table class="murvc-st" style="max-width: 480px;"><thead><tr><th>Start</th><th>End</th><th>Places per session</th></tr></thead><tbody>';
+        for ($i = 0; $i < self::MAX_TIMES; $i++) {
+            $row = isset($values['times'][$i]) && is_array($values['times'][$i]) ? $values['times'][$i] : array('start' => '', 'end' => '', 'places' => '');
+            $name = 'times[' . $i . ']';
+            $out .= '<tr><td><input type="time" name="' . $name . '[start]" value="' . esc_attr(isset($row['start']) ? (string) $row['start'] : '') . '" aria-label="' . esc_attr('Session time ' . ($i + 1) . ' start') . '"></td>'
+                . '<td><input type="time" name="' . $name . '[end]" value="' . esc_attr(isset($row['end']) ? (string) $row['end'] : '') . '" aria-label="' . esc_attr('Session time ' . ($i + 1) . ' end') . '"></td>'
+                . '<td><input type="number" name="' . $name . '[places]" min="1" max="' . self::MAX_PLACES . '" value="' . esc_attr(isset($row['places']) ? (string) $row['places'] : '') . '" style="width: 80px;" aria-label="' . esc_attr('Session time ' . ($i + 1) . ' places') . '"></td></tr>';
         }
-        $out .= '</div>';
+        $out .= '</tbody></table><span class="murvc-st-note">Add a second row for a second session on the same night (for example 5:00pm to 7:30pm and 7:30pm to 10:00pm). A session already there on a date and start time is left as it is.</span></div>';
         // Dates.
         $out .= '<div class="murvc-st-field"><label class="murvc-st-label" for="murvc-st-first">First date</label><input type="date" id="murvc-st-first" name="first" value="' . esc_attr($values['first']) . '"></div>'
             . '<div class="murvc-st-field"><label class="murvc-st-label" for="murvc-st-last">Last date</label><input type="date" id="murvc-st-last" name="last" value="' . esc_attr($values['last']) . '"></div>'
@@ -2346,16 +2526,13 @@ class TeamOversight_Program_Sessions {
             . '<textarea id="murvc-st-skips" name="skips" rows="4" placeholder="d/m/yyyy, one a line">' . esc_textarea($values['skips']) . '</textarea><br>'
             . '<input type="date" id="murvc-st-skip-pick" aria-label="Pick a date to skip"> <button type="button" class="button coach-btn-secondary" id="murvc-st-skip-add">Add</button>'
             . ' <span class="murvc-st-note">Up to ' . self::MAX_SKIPS . '. A date that isn\'t in the series is listed as ignored.</span></div>';
-        // Price: text for one approved price, else a select.
-        if (count($setup['prices']) === 1) {
-            $out .= '<div class="murvc-st-field"><span class="murvc-st-label">Price</span>' . esc_html(self::money($setup['prices'][0]))
-                . '<input type="hidden" name="price" value="' . esc_attr($setup['prices'][0]) . '"></div>';
+        // Price (C8, D9): the standard price; only the committee may type another.
+        if ($committee) {
+            $out .= '<div class="murvc-st-field"><label class="murvc-st-label" for="murvc-st-price">Price (incl. GST)</label>'
+                . '$<input type="text" inputmode="decimal" id="murvc-st-price" name="price" size="8" value="' . esc_attr($values['price']) . '"> '
+                . '<span class="murvc-st-note">' . esc_html('The standard price is ' . self::money($standard) . '. Change it only for these sessions.') . '</span></div>';
         } else {
-            $out .= '<div class="murvc-st-field"><label class="murvc-st-label" for="murvc-st-price">Price</label><select id="murvc-st-price" name="price">';
-            foreach ($setup['prices'] as $price) {
-                $out .= '<option value="' . esc_attr($price) . '"' . selected($values['price'], $price, false) . '>' . esc_html(self::money($price)) . '</option>';
-            }
-            $out .= '</select></div>';
+            $out .= '<div class="murvc-st-field"><span class="murvc-st-label">Price</span>' . esc_html(self::money($standard) . ' (the standard price; only the committee can change it)') . '</div>';
         }
         $out .= '<p><button type="submit" class="button">Preview</button> <a class="button coach-btn-secondary" href="' . esc_url($base_url) . '">Back to the sessions</a></p></form>';
         $out .= '<script>(function () {
@@ -2393,26 +2570,18 @@ class TeamOversight_Program_Sessions {
             return $out . '</ul></div><p><a class="button coach-btn-secondary" href="' . esc_url($form_url) . '">Change the series</a></p>';
         }
         $outcome = self::series_outcome($series);
-        $fingerprint = self::fingerprint($series['product_id'], $outcome['create'], $series['price'], $series['places']);
-        $setup = TeamOversight_Program_Setup::get($key);
-        $by_start = array();
-        foreach ($setup['slots'] as $slot) {
-            $by_start[$slot['start']] = $slot;
-        }
-        $labels = array();
-        $place_parts = array();
-        foreach ($series['slots'] as $start) {
-            $label = isset($by_start[$start]) ? self::slot_label($by_start[$start]) : $start;
-            $labels[] = $label;
-            $place_parts[] = $label . ' ' . intval($series['places'][$start]) . ' places';
-        }
-        $distinct = array_unique(array_values($series['places']));
+        $fingerprint = self::fingerprint($series['product_id'], $outcome['create'], $series['price'], $series['times']);
+        list($labels, $place_words) = self::series_words($series);
         $days_in = count($outcome['dates']) + count($outcome['skipped']);
         $all = array_merge($outcome['dates'], $outcome['skipped']);
         sort($all);
+        $price_words = self::money($series['price']);
+        if (isset($series['standard']) && $series['standard'] !== '' && TeamOversight_Program_Setup::money_cents($series['standard']) !== TeamOversight_Program_Setup::money_cents($series['price'])) {
+            $price_words .= ' (the standard price is ' . self::money($series['standard']) . ')';
+        }
         $headline = get_the_title($series['product_id']) . ': ' . $days_in . ' ' . self::day_name($series['day'], $days_in !== 1)
             . ' from ' . self::date_label(reset($all)) . ' to ' . self::date_label(end($all)) . ', ' . implode(', ', $labels) . ', '
-            . (count($distinct) === 1 ? intval(reset($distinct)) . ' places' : implode(', ', $place_parts)) . ', ' . self::money($series['price']);
+            . str_replace(' places each', ' places', $place_words) . ', ' . $price_words;
 
         $out = '<div class="murvc-st-box" id="murvc-series-preview" data-fingerprint="' . esc_attr($fingerprint) . '">';
         $out .= '<p><strong>' . esc_html($headline) . '</strong></p>';
@@ -2481,7 +2650,8 @@ class TeamOversight_Program_Sessions {
             return '';
         }
         $out = self::styles() . '<div class="murvc-sessions-tab coach-portal">';
-        $out .= '<p>Refund from the order screen, by quantity, never only in Square. Square allows at most 20 refunds on one payment and none after a year.</p>';
+        $out .= '<p>Refund from the order screen, by quantity, never only in Square. Square allows at most 20 refunds on one payment and none after a year.</p>'
+            . '<p>For a family that stops part way, the order screen\'s Club Programs refunds box works out the refund that keeps the rest at the right tier.</p>';
         $any = false;
         foreach (TeamOversight_Programs::program_products($key) as $product) {
             if ($product['kind'] !== 'dated') {

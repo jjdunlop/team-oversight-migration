@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
  *   another program's get(), so no check can recurse;
  * - validate(), the 3.7 table of the program bookings design, complete (the
  *   full pass adds the lookups that concern one field: the product and its
- *   shape, a published page, a used slot);
+ *   shape, a published page; 1.86.0 dropped the used-slot lookup);
  * - merged_problems(), the only place for checks across fields or programs,
  *   called only by save();
  * - the one writer, save(): ONE option-wide named lock (lock_name()), the
@@ -31,7 +31,7 @@ if (!defined('ABSPATH')) {
  * - the pure tier maths (tier_pct(), discounted_cents(), tier_dip()) that the
  *   booking code will call, so the rule lives in one place.
  *
- * 1.85.0 adds the Setup tab (render_tab(): Booking, Days and slots, Prices,
+ * 1.85.0 adds the Setup tab (render_tab(): Booking, Days and slots, Prices (both gone in 1.86.0),
  * Discount tiers with the price check, Blocks, Products; every box posts to
  * admin-post, handle_admin_post() / process_post(), Post/Redirect/Get) and
  * the product actions: prepare(), discard(), switch_over(), switch_back(),
@@ -42,6 +42,17 @@ if (!defined('ABSPATH')) {
  * (TeamOversight_Program_Sessions::lock_name()), never first. Switch writes
  * team_oversight_programs first, then this option, and undoes every step
  * in reverse when a later one fails.
+ *
+ * 1.86.0 (the club's decisions of 4 Nov 2026): a booking cut-off chosen per
+ * program (close_at: before / start / end / day, default day; close_hours
+ * is the N of before); price dips are allowed (merged_problems() never
+ * refuses one; save() returns dip_notes() for the committee); the Setup
+ * tab opens with a six-step guide (steps()) and holds only program-wide
+ * rules: Booking, Standard price (prices[0]), Discounts, Blocks, Products.
+ * Days, times, places and a session's own price are given when sessions
+ * are added (TeamOversight_Program_Sessions). The stored days, slots and
+ * prices are kept and still validated, so a rollback finds them, but
+ * nothing reads days or slots any more.
  *
  * No user id is ever stored in this option, so the account merge needs
  * nothing for it.
@@ -69,6 +80,8 @@ class TeamOversight_Program_Setup {
     const MAX_PRICE_CENTS = 50000;
     const MAX_MAX_PLACES = 6;
     const MAX_CLOSE_HOURS = 72;
+    /** 1.86.0 (club 2): when a session stops taking bookings. */
+    const CLOSE_AT = array('before', 'start', 'end', 'day');
     const MAX_TIERS = 6;
     const TIER_FROM_MIN = 2;
     const TIER_FROM_MAX = 100;
@@ -85,7 +98,7 @@ class TeamOversight_Program_Setup {
      */
     const FIELDS = array(
         'rev', 'prepared_product', 'past_products', 'days', 'slots', 'prices', 'player_name',
-        'max_places', 'close_hours', 'tiers', 'blocks', 'booking_page', 'portal_page',
+        'max_places', 'close_hours', 'close_at', 'tiers', 'blocks', 'booking_page', 'portal_page',
         'bookings_open', 'last_switch',
     );
 
@@ -131,6 +144,8 @@ class TeamOversight_Program_Setup {
             'player_name' => 'off',
             'max_places' => 1,
             'close_hours' => 0,
+            // 1.86.0 (club 2, C4): a stored setup with no close_at reads as the end of the day.
+            'close_at' => 'day',
             'tiers' => array(),
             'blocks' => array(),
             'booking_page' => 0,
@@ -260,6 +275,11 @@ class TeamOversight_Program_Setup {
                 return self::check_whole($field, $value, 1, self::MAX_MAX_PLACES);
             case 'close_hours':
                 return self::check_whole($field, $value, 0, self::MAX_CLOSE_HOURS);
+            case 'close_at':
+                if (is_string($value) && in_array($value, self::CLOSE_AT, true)) {
+                    return array(true, $value, array());
+                }
+                return array(false, null, array('Booking cut-off must be one of: hours before the start, at the start, at the end of the session, at the end of the day.'));
             case 'tiers':
                 return self::check_tiers($value, $full);
             case 'blocks':
@@ -295,7 +315,8 @@ class TeamOversight_Program_Setup {
             'prices' => 'Prices',
             'player_name' => 'Player name',
             'max_places' => 'Places per booking',
-            'close_hours' => 'Hours bookings close before the start',
+            'close_hours' => 'Hours before the start (for the first cut-off choice)',
+            'close_at' => 'Booking cut-off',
             'tiers' => 'Discount tiers',
             'blocks' => 'Blocks',
             'booking_page' => 'Book page',
@@ -509,24 +530,7 @@ class TeamOversight_Program_Setup {
         if ($full && empty($kept) && empty($problems)) {
             $problems[] = 'Time slots: add at least one slot.';
         }
-        // A slot that sessions already use keeps its start and end: it can only be hidden.
-        if ($full && empty($problems)) {
-            $new = array();
-            foreach ($kept as $slot) {
-                $new[$slot['start']] = $slot;
-            }
-            $stored = self::get($key);
-            foreach ($stored['slots'] as $old) {
-                if (!self::slot_in_use($key, $old['start'])) {
-                    continue;
-                }
-                if (!isset($new[$old['start']])) {
-                    $problems[] = 'Bookings carry the ' . $old['start'] . ' slot, so it can\'t be removed: hide it instead.';
-                } elseif ($new[$old['start']]['end'] !== $old['end']) {
-                    $problems[] = 'Bookings carry the ' . $old['start'] . ' slot, so its times can\'t change: hide it and add a new slot instead.';
-                }
-            }
-        }
+        // 1.86.0 (club 4): the used-slot rule went with the Days and slots box; each session keeps its own times.
         return array(true, $kept, array_values(array_unique($problems)));
     }
 
@@ -730,14 +734,51 @@ class TeamOversight_Program_Setup {
                 }
             }
         }
+        // 1.86.0 (club 1, C2): a price dip is allowed; save() returns it as a note (dip_notes()).
+        return array_values(array_unique($problems));
+    }
 
-        if (in_array('tiers', $changed, true) || in_array('prices', $changed, true)) {
-            $dip = self::tier_dip($m['tiers'], $m['prices']);
-            if ($dip !== null) {
-                $problems[] = $dip['message'];
+    /**
+     * Club 1: one sentence for the committee per price dip (more sessions
+     * costing less in total) at the standard price, from 1 to 100
+     * sessions. Empty without tiers or a price. A dip is allowed: the Book
+     * page and the cart tell families just below it, and a withdrawal
+     * never refunds money because of it (4.9.3).
+     */
+    public static function dip_notes(array $tiers, $price) {
+        $notes = array();
+        $cents = self::money_cents(is_scalar($price) ? (string) $price : '');
+        if (empty($tiers) || $cents === null) {
+            return $notes;
+        }
+        $money = function ($c) {
+            return '$' . number_format(intval($c) / 100, 2);
+        };
+        $previous = null;
+        foreach (self::price_check_rows($tiers, self::cents_text($cents), 100) as $row) {
+            if ($row['dip'] && $previous !== null) {
+                $n = intval($row['n']);
+                $notes[] = 'At ' . $money($cents) . ', ' . $n . ' sessions cost less than ' . ($n - 1) . ' (' . $money($row['total_cents']) . ' against ' . $money($previous['total_cents'])
+                    . '): families booking ' . ($n - 1) . ' will usually add one to reach the cheaper total.';
+            }
+            $previous = $row;
+        }
+        return $notes;
+    }
+
+    /** The session counts where the standard price dips (for the log line). */
+    private static function dip_points(array $tiers, $price) {
+        $points = array();
+        $cents = self::money_cents(is_scalar($price) ? (string) $price : '');
+        if (empty($tiers) || $cents === null) {
+            return $points;
+        }
+        foreach (self::price_check_rows($tiers, self::cents_text($cents), 100) as $row) {
+            if ($row['dip']) {
+                $points[] = intval($row['n']);
             }
         }
-        return array_values(array_unique($problems));
+        return $points;
     }
 
     /**
@@ -835,42 +876,6 @@ class TeamOversight_Program_Setup {
         return '';
     }
 
-    /**
-     * Whether a session (a variation, any status) of the program's current,
-     * prepared or dated earlier products carries this slot start. One query.
-     * True for nothing until 1.85.0 makes sessions.
-     */
-    public static function slot_in_use($key, $start) {
-        global $wpdb;
-        $key = (string) $key;
-        $setup = self::get($key);
-        $ids = array();
-        $program = TeamOversight_Programs::get_program($key);
-        if (is_array($program) && isset($program['product_id']) && is_scalar($program['product_id'])) {
-            $ids[] = intval($program['product_id']);
-        }
-        $ids[] = intval($setup['prepared_product']);
-        foreach ($setup['past_products'] as $past) {
-            if ($past['kind'] === 'dated') {
-                $ids[] = intval($past['product_id']);
-            }
-        }
-        $ids = array_values(array_unique(array_filter($ids)));
-        if (empty($ids) || !is_string($start) || $start === '') {
-            return false;
-        }
-        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
-        $args = array_merge(array($start), $ids);
-        $found = $wpdb->get_var($wpdb->prepare("
-            SELECT 1
-            FROM {$wpdb->posts} p
-            JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = '_murvc_session_slot' AND m.meta_value = %s
-            WHERE p.post_type = 'product_variation' AND p.post_parent IN ({$placeholders})
-            LIMIT 1
-        ", $args));
-        return intval($found) === 1;
-    }
-
     // ------------------------------------------------------------------
     // Tier maths (design 4.7): pure, so the booking code, the Setup tab's
     // price check and the tests all call the same rule.
@@ -900,12 +905,13 @@ class TeamOversight_Program_Setup {
     }
 
     /**
-     * 4.7.3: no price dips. At every tier boundary B (previous percent p_prev,
-     * 0 below the first tier) and every approved price, B sessions must cost
-     * at least as much as B - 1. Returns null when the set passes (or there
-     * are no tiers or prices), else the first failure: boundary, the largest
-     * whole percent at most the tier's that passes at every price, and the
-     * sentence to show.
+     * 4.7.3's dip test, kept pure (1.86.0, club 1: a dip is allowed, so
+     * nothing refuses on this any more; dip_notes() words it for the
+     * committee). At every tier boundary B (previous percent p_prev, 0
+     * below the first tier) and every given price, B sessions cost at least
+     * as much as B - 1. Returns null when the set has no dip (or there are
+     * no tiers or prices), else the first: boundary, the largest whole
+     * percent at most the tier's with no dip at every price, and a sentence.
      */
     public static function tier_dip(array $tiers, array $prices) {
         $cents = array();
@@ -999,7 +1005,9 @@ class TeamOversight_Program_Setup {
      * drop another program's entry. Stored fields this version doesn't know
      * are kept. Writes one program_setup log line.
      *
-     * Returns array('ok' => bool, 'errors' => array of sentences, 'rev' => int).
+     * Returns array('ok' => bool, 'errors' => array of sentences, 'rev' => int);
+     * 1.86.0: a successful save that touched tiers or prices also returns
+     * 'notes' (dip_notes(): a dip is saved, and noted for the committee).
      * 1.85.0: $message, when given, is the log line instead of the
      * generated one (the earlier-product actions write their own).
      */
@@ -1164,12 +1172,27 @@ class TeamOversight_Program_Setup {
             return self::refused(array('The setup couldn\'t be saved. Reload and try again.'), $stored_rev);
         }
 
+        // 1.86.0 (club 1, C2): a dip is saved, and noted for the committee.
+        $notes = array();
+        $dips = array();
+        if (array_key_exists('tiers', $clean) || array_key_exists('prices', $clean)) {
+            list($merged_clean) = self::validate($key, $merged, false);
+            $now = array_merge(self::defaults($key), $merged_clean);
+            $standard = !empty($now['prices']) ? $now['prices'][0] : '';
+            $notes = self::dip_notes($now['tiers'], $standard);
+            $dips = self::dip_points($now['tiers'], $standard);
+        }
+
         // f. One log line: the program's name and each changed field, old -> new
         // (or the product action's own line, 1.85.0).
         if (class_exists('TeamOversight_Log')) {
-            TeamOversight_Log::add(self::LOG_TYPE, (is_string($message) && $message !== '') ? $message : self::log_message($key, $program, $old, $clean));
+            $line = (is_string($message) && $message !== '') ? $message : self::log_message($key, $program, $old, $clean);
+            if (!empty($dips)) {
+                $line .= ' Price dips noted at ' . implode(', ', $dips) . '.';
+            }
+            TeamOversight_Log::add(self::LOG_TYPE, $line);
         }
-        return array('ok' => true, 'errors' => array(), 'rev' => $new_rev);
+        return array('ok' => true, 'errors' => array(), 'rev' => $new_rev, 'notes' => $notes);
     }
 
     /** "Name: setup saved: Field old -> new; ..." (lists shortened to counts past 500 characters). */
@@ -1206,6 +1229,9 @@ class TeamOversight_Program_Setup {
         if (!is_array($value)) {
             if (in_array($field, array('prepared_product', 'booking_page', 'portal_page'), true)) {
                 return intval($value) > 0 ? '#' . intval($value) : 'none';
+            }
+            if ($field === 'close_at') {
+                return self::close_at_words((string) $value);
             }
             return is_scalar($value) ? (string) $value : 'none';
         }
@@ -1253,12 +1279,30 @@ class TeamOversight_Program_Setup {
         return implode(', ', $parts);
     }
 
+    /** 1.86.0: a booking cut-off choice in words ("at the end of the day"). */
+    public static function close_at_words($value) {
+        $words = array(
+            'before' => 'hours before the start',
+            'start' => 'at the start',
+            'end' => 'at the end of the session',
+            'day' => 'at the end of the day',
+        );
+        return isset($words[$value]) ? $words[$value] : 'at the end of the day';
+    }
+
     // ------------------------------------------------------------------
     // 1.85.0: the Setup tab (design 6.1, 6.2) and its posts
     // ------------------------------------------------------------------
 
-    /** The boxes that save fields, and the product actions (design 6.4, 6.5). */
-    const BOXES = array('booking', 'slots', 'prices', 'tiers', 'blocks');
+    /**
+     * The boxes that save fields (1.86.0, club 4: Booking, Standard price,
+     * Discounts, Blocks; days, times and places are given when sessions
+     * are added), and the product actions (design 6.4, 6.5).
+     */
+    const BOXES = array('booking', 'price', 'tiers', 'blocks');
+    /** A post from a box that left the tab in 1.86.0 (a page opened before it) is refused, C9. */
+    const OLD_BOXES = array('slots', 'prices');
+    const OLD_BOX_REFUSAL = 'Days and times are set on the Sessions tab now, and the standard price in the Standard price box. Nothing was saved.';
     const DO_ACTIONS = array('prepare', 'discard', 'switch', 'switch_back', 'add_past', 'remove_past');
     const FLASH_PREFIX = 'murvc_program_setup_flash_';
     const TITLE_MAX = 100;
@@ -1355,6 +1399,7 @@ class TeamOversight_Program_Setup {
             'key' => $key,
             'ok' => !empty($result['ok']),
             'messages' => isset($result['messages']) ? $result['messages'] : array(),
+            'notes' => isset($result['notes']) ? $result['notes'] : array(),
             'links' => isset($result['links']) ? $result['links'] : array(),
         ), 300);
         $anchor = isset($result['anchor']) && $result['anchor'] !== '' ? '#' . $result['anchor'] : '';
@@ -1365,24 +1410,39 @@ class TeamOversight_Program_Setup {
     /**
      * One Setup post ($post unslashed): a box saves its own fields against
      * the posted rev; a product action runs with it. Returns array(ok,
-     * messages, links, anchor). Callable from tests.
+     * messages, notes (1.86.0: the committee's dip notes, shown apart),
+     * links, anchor). Callable from tests.
      */
     public static function process_post(array $post, $user_id) {
         $key = isset($post['key']) && is_scalar($post['key']) ? sanitize_key($post['key']) : '';
         $rev = isset($post['rev']) && is_scalar($post['rev']) ? (string) $post['rev'] : '';
-        $out = array('ok' => false, 'messages' => array(), 'links' => array(), 'anchor' => '');
+        $out = array('ok' => false, 'messages' => array(), 'notes' => array(), 'links' => array(), 'anchor' => '');
         if (!user_can(intval($user_id), 'manage_options') || intval($user_id) !== get_current_user_id()) {
             $out['messages'][] = 'Only the committee can change a program\'s setup.';
             return $out;
         }
         $box = isset($post['box']) && is_scalar($post['box']) ? sanitize_key($post['box']) : '';
         $do = isset($post['do']) && is_scalar($post['do']) ? sanitize_key($post['do']) : '';
+        if (in_array($box, self::OLD_BOXES, true)) {
+            $out['anchor'] = 'price';
+            $out['messages'][] = self::OLD_BOX_REFUSAL;
+            return $out;
+        }
         if (in_array($box, self::BOXES, true)) {
             $out['anchor'] = $box;
-            $fields = self::fields_from_post($box, $post);
+            if ($box === 'price') {
+                $typed = isset($post['standard_price']) && is_scalar($post['standard_price']) ? ltrim(trim((string) $post['standard_price']), '$') : '';
+                $cents = self::money_cents($typed);
+                if ($cents === null || $cents < self::MIN_PRICE_CENTS || $cents > self::MAX_PRICE_CENTS) {
+                    $out['messages'][] = 'The standard price must be from $' . self::cents_text(self::MIN_PRICE_CENTS) . ' to $' . self::cents_text(self::MAX_PRICE_CENTS) . ', with at most two decimals.';
+                    return $out;
+                }
+            }
+            $fields = self::fields_from_post($box, $post, $key);
             $result = self::save($key, $fields, $rev);
             $out['ok'] = !empty($result['ok']);
             $out['messages'] = $out['ok'] ? array('Saved.') : $result['errors'];
+            $out['notes'] = ($out['ok'] && !empty($result['notes'])) ? $result['notes'] : array();
             // B17: sold individually follows max_places (checked on every Booking save,
             // written only where it differs, so a save that missed a lock heals).
             if ($out['ok'] && $box === 'booking') {
@@ -1451,9 +1511,12 @@ class TeamOversight_Program_Setup {
      * One box's fields from the unslashed post: tick boxes '1' / '0',
      * numbers as typed, empty rows dropped, dates read as YYYY-MM-DD or
      * d/m/yyyy when they parse (else as typed, so validate() names the row).
-     * Every rule is validate()'s, on the server.
+     * Every rule is validate()'s, on the server. 1.86.0: the Booking box
+     * carries close_at only when posted (C5: a page opened before 1.86.0
+     * keeps the stored choice); the Standard price box writes prices as the
+     * typed price followed by the stored others (C9, kept for a rollback).
      */
-    private static function fields_from_post($box, array $post) {
+    private static function fields_from_post($box, array $post, $key = '') {
         $scalar = function ($name) use ($post) {
             return isset($post[$name]) && is_scalar($post[$name]) ? trim((string) $post[$name]) : '';
         };
@@ -1467,7 +1530,7 @@ class TeamOversight_Program_Setup {
         };
         switch ($box) {
             case 'booking':
-                return array(
+                $fields = array(
                     'bookings_open' => $scalar('bookings_open') === '1' ? '1' : '0',
                     'booking_page' => $scalar('booking_page'),
                     'portal_page' => $scalar('portal_page'),
@@ -1475,6 +1538,21 @@ class TeamOversight_Program_Setup {
                     'max_places' => $scalar('max_places'),
                     'close_hours' => $scalar('close_hours'),
                 );
+                if (isset($post['close_at'])) {
+                    $fields['close_at'] = $scalar('close_at');
+                }
+                return $fields;
+            case 'price':
+                $typed = ltrim($scalar('standard_price'), '$');
+                $typed_cents = self::money_cents($typed);
+                // The stored prices follow (the old standard price included), so a rollback keeps its approved list.
+                $prices = array($typed_cents !== null ? self::cents_text($typed_cents) : $typed);
+                foreach (self::get((string) $key)['prices'] as $other) {
+                    if (count($prices) < self::MAX_PRICES && self::money_cents($other) !== $typed_cents) {
+                        $prices[] = $other;
+                    }
+                }
+                return array('prices' => $prices);
             case 'slots':
                 $days = array();
                 foreach ($rows('days') as $day) {
@@ -1543,8 +1621,8 @@ class TeamOversight_Program_Setup {
      * Design 6.2: the price check, a row per number of sessions from 1 to
      * $max at one price: n, pct, each_cents, total_cents, boundary (a tier
      * starts at n) and dip (n costs less than n - 1). The same maths as
-     * tier_pct() and discounted_cents(); the server's tier_dip() at every
-     * approved price is what decides a save.
+     * tier_pct() and discounted_cents(). A dip is allowed (1.86.0, club 1):
+     * dip_notes() words it for the committee.
      */
     public static function price_check_rows(array $tiers, $price, $max = 45) {
         $cents = self::money_cents(is_string($price) ? $price : (string) $price);
@@ -1585,9 +1663,92 @@ class TeamOversight_Program_Setup {
         .murvc-setup-note { color: #646970; }
         .murvc-price-check { max-height: 320px; overflow: auto; max-width: 520px; margin-top: 8px; }
         .murvc-price-check tr.is-boundary td { font-weight: 600; }
-        .murvc-price-check tr.is-dip td { color: #b32d2e; }
+        .murvc-price-check tr.is-dip td { color: #996800; background: #fcf9e8; }
         .murvc-setup-flash ul { margin: 0 0 0 18px; list-style: disc; }
+        .murvc-setup-box p.description { margin: 2px 0 0; color: #646970; font-style: normal; }
+        .murvc-setup-rows th { width: 200px; }
+        .murvc-setup-steps { list-style: none; margin: 10px 0 0; padding: 0; counter-reset: none; }
+        .murvc-setup-steps li { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid #f0f0f1; }
+        .murvc-setup-steps .murvc-step-chip { display: inline-block; min-width: 46px; text-align: center; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 10px; }
+        .murvc-setup-steps li.is-done .murvc-step-chip { background: #edfaef; color: #1a7a2e; }
+        .murvc-setup-steps li.is-todo .murvc-step-chip { background: #fcf9e8; color: #996800; }
+        .murvc-setup-steps .murvc-step-note { color: #646970; }
+        .murvc-setup-confirm-lead { font-size: 14px; }
         </style>';
+    }
+
+    /**
+     * Club 3: the six steps at the top of a program's Setup tab, each done
+     * or to do from the setup's own state (read only). A list of n, title,
+     * done, note (what to do while it isn't done) and link (an anchor, or
+     * the Sessions tab).
+     */
+    public static function steps($key) {
+        $key = (string) $key;
+        $setup = self::get($key);
+        $has_entry = self::has_entry($key);
+        $sessions_class = class_exists('TeamOversight_Program_Sessions');
+        $dated = $sessions_class ? TeamOversight_Program_Sessions::target_product($key, 'current') : 0;
+        $prepared = $sessions_class ? TeamOversight_Program_Sessions::target_product($key, 'prepared') : 0;
+        $session_product = $prepared > 0 ? $prepared : $dated;
+        $sessions = 0;
+        if ($session_product > 0) {
+            foreach (TeamOversight_Program_Sessions::children($session_product) as $row) {
+                if ($row['date'] !== '' && $row['status'] !== 'trash') {
+                    $sessions++;
+                }
+            }
+        }
+        $published = function ($page) {
+            $page = intval($page);
+            return $page > 0 && get_post_type($page) === 'page' && get_post_status($page) === 'publish';
+        };
+        $switch_note = 'After steps 2 and 3.';
+        if ($prepared > 0) {
+            $program = TeamOversight_Programs::get_program($key);
+            $current_id = (is_array($program) && isset($program['product_id']) && is_scalar($program['product_id'])) ? intval($program['product_id']) : 0;
+            $weekday = is_array($program) ? intval(TeamOversight_Programs::get_program_weekday($program)) : 0;
+            $last = $current_id > 0 ? self::last_session_date($current_id, TeamOversight_Programs::detect_kind($current_id), $weekday) : '';
+            if ($last !== '' && $sessions_class) {
+                $parts = explode('-', $last);
+                $switch_note = 'From ' . TeamOversight_Program_Sessions::date_label(gmdate('Y-m-d', gmmktime(0, 0, 0, intval($parts[1]), intval($parts[2]) + 1, intval($parts[0])))) . ', the day after the current product\'s last session.';
+            } else {
+                $switch_note = 'When the current season has ended.';
+            }
+        }
+        return array(
+            array('n' => 1, 'title' => 'Set the standard price and the booking rules', 'done' => $has_entry && !empty($setup['prices']),
+                'note' => 'Save the Standard price box.', 'link' => '#price'),
+            array('n' => 2, 'title' => 'Prepare next season\'s product', 'done' => $prepared > 0 || $dated > 0,
+                'note' => 'Prepare it in the Products box.', 'link' => '#products'),
+            array('n' => 3, 'title' => 'Add sessions on the Sessions tab', 'done' => $sessions > 0,
+                'note' => $session_product > 0 ? 'Supervisors or the committee add them: day, times, places and dates.' : 'After step 2.', 'link' => $session_product > 0 ? 'sessions' : ''),
+            array('n' => 4, 'title' => 'Make the Book page and the portal page', 'done' => $published($setup['booking_page']) && $published($setup['portal_page']),
+                'note' => 'Make two pages holding [program_booking program="' . $key . '"] and [session_attendance program="' . $key . '"], publish them, then choose them in the Booking box.', 'link' => '#booking'),
+            array('n' => 5, 'title' => 'Switch when this season ends', 'done' => $dated > 0 && $prepared <= 0,
+                'note' => $switch_note, 'link' => '#products'),
+            array('n' => 6, 'title' => 'Tick Bookings open', 'done' => !empty($setup['bookings_open']) && $dated > 0,
+                'note' => $dated > 0 ? 'Tick it in the Booking box when you are ready.' : 'After the switch.', 'link' => '#booking'),
+        );
+    }
+
+    private static function render_steps($key, $base_url) {
+        $out = '<div class="murvc-setup-box" id="steps"><h2>Getting ready to sell sessions online</h2><ol class="murvc-setup-steps">';
+        foreach (self::steps($key) as $step) {
+            $link = '';
+            if ($step['link'] === 'sessions') {
+                $link = add_query_arg('tab', 'sessions', $base_url);
+            } elseif ($step['link'] !== '') {
+                $link = $step['link'];
+            }
+            $out .= '<li class="' . ($step['done'] ? 'is-done' : 'is-todo') . '"><span class="murvc-step-chip">' . ($step['done'] ? 'Done' : 'To do') . '</span>'
+                . '<strong>' . intval($step['n']) . '. ' . esc_html($step['title']) . '</strong>';
+            if (!$step['done']) {
+                $out .= ' <span class="murvc-step-note">' . esc_html($step['note']) . ($link !== '' ? ' <a href="' . esc_url($link) . '">Go there</a>' : '') . '</span>';
+            }
+            $out .= '</li>';
+        }
+        return $out . '</ol></div>';
     }
 
     /** A box's form: admin-post, the program key, the box, the rev and the program's nonce. */
@@ -1610,8 +1771,10 @@ class TeamOversight_Program_Setup {
     }
 
     /**
-     * The Setup tab (design 6.1): six boxes, each its own form posting to
-     * admin-post with the stored rev, and the confirm views for Switch,
+     * The Setup tab (design 6.1; 1.86.0, club 3 and 4): the six-step guide,
+     * then the Booking, Standard price, Discounts, Blocks and Products
+     * boxes, each its own form posting to admin-post with the stored rev,
+     * and the confirm views for Switch,
      * Switch back and Add an earlier product. manage_options only. It reads
      * and takes the user's flash; nothing else is written.
      */
@@ -1641,6 +1804,14 @@ class TeamOversight_Program_Setup {
                 $out .= '<li>' . esc_html((string) $message) . '</li>';
             }
             $out .= '</ul>';
+            if (!empty($flash['notes']) && is_array($flash['notes'])) {
+                // Club 1: a price dip is saved; the note stands out for the committee.
+                $out .= '</div><div class="notice notice-warning murvc-setup-flash"><ul>';
+                foreach ($flash['notes'] as $note) {
+                    $out .= '<li>' . esc_html((string) $note) . '</li>';
+                }
+                $out .= '</ul>';
+            }
             if (!empty($flash['links']) && is_array($flash['links'])) {
                 $out .= '<p><strong>These pages and menu items link to the old product. Point them at the Book page.</strong></p><ul>';
                 foreach ($flash['links'] as $link) {
@@ -1665,92 +1836,81 @@ class TeamOversight_Program_Setup {
             $kind = isset($_GET['kind']) && is_scalar($_GET['kind']) ? sanitize_key($_GET['kind']) : '';
             return $out . self::render_add_past_confirm($key, $base_url, $rev, absint($_GET['add_past']), $kind) . '</div>';
         }
-        $out .= self::box_booking($key, $setup, $rev)
-            . self::box_slots($key, $setup, $rev)
-            . self::box_prices($key, $setup, $rev)
+        $out .= self::render_steps($key, $base_url)
+            . self::box_booking($key, $setup, $rev)
+            . self::box_price($key, $setup, $rev)
             . self::box_tiers($key, $setup, $rev)
             . self::box_blocks($key, $setup, $rev)
             . self::box_products($key, $program, $setup, $rev, $base_url);
         return $out . '</div>';
     }
 
+    /** A form row: the label, the field and a one-line hint under it (club 3). */
+    private static function field_row($label, $field, $hint) {
+        return '<tr><th scope="row">' . $label . '</th><td>' . $field . '<p class="description">' . esc_html($hint) . '</p></td></tr>';
+    }
+
+    /**
+     * The Booking box (club 3: plainer labels and a hint on every field;
+     * club 2: the booking cut-off).
+     */
     private static function box_booking($key, array $setup, $rev) {
-        $out = '<div class="murvc-setup-box" id="booking"><h2>Booking</h2>' . self::form_open($key, 'box', 'booking', $rev);
-        if (!class_exists('TeamOversight_Program_Booking')) {
-            $out .= '<p class="murvc-setup-note">Bookings stay closed until the Book page is installed (1.86.0).</p>';
-        }
-        $out .= '<table class="murvc-setup-rows"><tbody>'
-            . '<tr><th>Bookings open</th><td><input type="hidden" name="bookings_open" value="0"><label><input type="checkbox" name="bookings_open" value="1"' . checked(!empty($setup['bookings_open']), true, false) . '> Sessions of the product on sale can be booked</label></td></tr>'
-            . '<tr><th>Book page</th><td>' . self::page_select('booking_page', $setup['booking_page']) . '</td></tr>'
-            . '<tr><th>Portal page</th><td>' . self::page_select('portal_page', $setup['portal_page']) . '</td></tr>'
-            . '<tr><th>Player name</th><td><select name="player_name"><option value="required"' . selected($setup['player_name'], 'required', false) . '>Required</option><option value="off"' . selected($setup['player_name'], 'off', false) . '>Not asked</option></select></td></tr>'
-            . '<tr><th>Places per booking</th><td><input type="number" name="max_places" min="1" max="' . self::MAX_MAX_PLACES . '" value="' . intval($setup['max_places']) . '"> <span class="murvc-setup-note">1 to ' . self::MAX_MAX_PLACES . ' (one place per booking makes the product sold individually)</span></td></tr>'
-            . '<tr><th>Bookings close</th><td><input type="number" name="close_hours" min="0" max="' . self::MAX_CLOSE_HOURS . '" value="' . intval($setup['close_hours']) . '"> hours before the start</td></tr>'
+        $close_at = in_array($setup['close_at'], self::CLOSE_AT, true) ? $setup['close_at'] : 'day';
+        $radio = function ($value, $label) use ($close_at) {
+            return '<label style="display: block; margin: 2px 0;"><input type="radio" name="close_at" value="' . esc_attr($value) . '"' . checked($close_at, $value, false) . '> ' . $label . '</label>';
+        };
+        $cutoff = $radio('before', '<input type="number" name="close_hours" min="0" max="' . self::MAX_CLOSE_HOURS . '" value="' . intval($setup['close_hours']) . '" style="width: 64px;" aria-label="Hours before the start"> hours before the start')
+            . $radio('start', 'At the start')
+            . $radio('end', 'At the end of the session')
+            . $radio('day', 'At the end of the day (11:59pm)');
+        $out = '<div class="murvc-setup-box" id="booking"><h2>Booking</h2>' . self::form_open($key, 'box', 'booking', $rev)
+            . '<table class="murvc-setup-rows"><tbody>'
+            . self::field_row('Bookings open', '<input type="hidden" name="bookings_open" value="0"><label><input type="checkbox" name="bookings_open" value="1"' . checked(!empty($setup['bookings_open']), true, false) . '> Members can book</label>',
+                'Members can book the sessions on sale. Untick to stop new bookings at once; anyone already booked stays booked.')
+            . self::field_row('Book page', self::page_select('booking_page', $setup['booking_page']),
+                'The page holding [program_booking program="' . $key . '"]. Members book there, and the product\'s own page forwards to it.')
+            . self::field_row('Portal page', self::page_select('portal_page', $setup['portal_page']),
+                'The page holding [session_attendance program="' . $key . '"], for this program\'s supervisors.')
+            . self::field_row('Who is coming', '<select name="player_name"><option value="required"' . selected($setup['player_name'], 'required', false) . '>Ask for the player\'s name</option><option value="off"' . selected($setup['player_name'], 'off', false) . '>Not asked</option></select>',
+                'Asking for the player\'s name on every booking suits juniors. Not asked suits adults booking for themselves.')
+            . self::field_row('Places per booking', '<input type="number" name="max_places" min="1" max="' . self::MAX_MAX_PLACES . '" value="' . intval($setup['max_places']) . '" style="width: 64px;">',
+                '1 means one person per booking. Up to ' . self::MAX_MAX_PLACES . ' lets an adult bring guests on one booking.')
+            . self::field_row('Booking cut-off', $cutoff,
+                'When a session stops taking bookings. At the end of the day lets a late arrival pay on the spot or that evening.')
             . '</tbody></table><p><button type="submit" class="button button-primary">Save booking</button></p></form></div>';
         return $out;
     }
 
-    private static function box_slots($key, array $setup, $rev) {
-        $names = array(1 => 'Mon', 2 => 'Tue', 3 => 'Wed', 4 => 'Thu', 5 => 'Fri', 6 => 'Sat', 7 => 'Sun');
-        $out = '<div class="murvc-setup-box" id="slots"><h2>Days and slots</h2>' . self::form_open($key, 'box', 'slots', $rev)
-            . '<p><strong>Days a series may use</strong><br>';
-        foreach ($names as $n => $name) {
-            $out .= '<label style="margin-right: 10px;"><input type="checkbox" name="days[]" value="' . $n . '"' . (in_array($n, $setup['days'], true) ? ' checked' : '') . '> ' . $name . '</label>';
-        }
-        $out .= '</p><table class="murvc-setup-rows"><thead><tr><th>Start</th><th>End</th><th>Places</th><th>Hidden from new series</th></tr></thead><tbody>';
-        $rows = array_values($setup['slots']);
-        for ($i = 0; $i < self::MAX_SLOTS; $i++) {
-            $slot = isset($rows[$i]) ? $rows[$i] : null;
-            $name = 'slots[' . $i . ']';
-            $hidden = '<input type="hidden" name="' . $name . '[hidden]" value="0"><input type="checkbox" name="' . $name . '[hidden]" value="1"' . (($slot !== null && !empty($slot['hidden'])) ? ' checked' : '') . '>';
-            if ($slot !== null && self::slot_in_use($key, $slot['start'])) {
-                // A used slot keeps its times and places: they are posted as they are, and only Hidden can change.
-                $out .= '<tr><td>' . esc_html($slot['start']) . '<input type="hidden" name="' . $name . '[start]" value="' . esc_attr($slot['start']) . '"></td>'
-                    . '<td>' . esc_html($slot['end']) . '<input type="hidden" name="' . $name . '[end]" value="' . esc_attr($slot['end']) . '"></td>'
-                    . '<td>' . intval($slot['places']) . '<input type="hidden" name="' . $name . '[places]" value="' . intval($slot['places']) . '"></td>'
-                    . '<td><label>' . $hidden . ' Hidden</label> <span class="murvc-setup-note">Bookings carry this time. It can\'t be changed; add a new slot instead.</span></td></tr>';
-                continue;
-            }
-            $out .= '<tr><td><input type="time" name="' . $name . '[start]" value="' . esc_attr($slot !== null ? $slot['start'] : '') . '"></td>'
-                . '<td><input type="time" name="' . $name . '[end]" value="' . esc_attr($slot !== null ? $slot['end'] : '') . '"></td>'
-                . '<td><input type="number" name="' . $name . '[places]" min="1" max="' . self::MAX_SLOT_PLACES . '" value="' . esc_attr($slot !== null ? (string) intval($slot['places']) : '') . '" style="width: 80px;"></td>'
-                . '<td><label>' . $hidden . ' Hidden</label></td></tr>';
-        }
-        $out .= '</tbody></table><p class="murvc-setup-note">Up to ' . self::MAX_SLOTS . ' slots. Places are the default for each new session (1 to ' . self::MAX_SLOT_PLACES . ').</p>'
-            . '<p><button type="submit" class="button button-primary">Save days and slots</button></p></form></div>';
-        return $out;
-    }
-
-    private static function box_prices($key, array $setup, $rev) {
-        $out = '<div class="murvc-setup-box" id="prices"><h2>Prices</h2>' . self::form_open($key, 'box', 'prices', $rev)
-            . '<p class="murvc-setup-note">The prices a series may use, including GST. The first is the standard price.</p><p>';
-        for ($i = 0; $i < self::MAX_PRICES; $i++) {
-            $value = isset($setup['prices'][$i]) ? $setup['prices'][$i] : '';
-            $out .= '<label style="margin-right: 10px;">$<input type="text" inputmode="decimal" name="prices[]" id="murvc-price-' . $i . '" value="' . esc_attr($value) . '" size="8"' . ($i === 0 ? ' aria-label="Standard price"' : ' aria-label="Price ' . ($i + 1) . '"') . '></label>';
-        }
-        return $out . '</p><p><button type="submit" class="button button-primary">Save prices</button></p></form></div>';
+    /** The Standard price box (1.86.0, club 4): prices[0], the price every new session starts at. */
+    private static function box_price($key, array $setup, $rev) {
+        $value = !empty($setup['prices']) ? (string) $setup['prices'][0] : '';
+        return '<div class="murvc-setup-box" id="price"><h2>Standard price</h2>' . self::form_open($key, 'box', 'price', $rev)
+            . '<table class="murvc-setup-rows"><tbody>'
+            . self::field_row('<label for="murvc-standard-price">Standard price (incl. GST)</label>', '$<input type="text" inputmode="decimal" name="standard_price" id="murvc-standard-price" value="' . esc_attr($value) . '" size="8">',
+                'Every new session starts at this price. Only the committee can give a session a different price, on the Sessions tab.')
+            . '</tbody></table><p><button type="submit" class="button button-primary">Save standard price</button></p></form></div>';
     }
 
     private static function box_tiers($key, array $setup, $rev) {
-        $out = '<div class="murvc-setup-box" id="tiers"><h2>Discount tiers</h2>' . self::form_open($key, 'box', 'tiers', $rev, ' id="murvc-tiers-form"')
-            . '<p class="murvc-setup-note">The percent off every session of this program in one cart, by how many are booked. Both columns rise from row to row. A set where booking more costs less in total is refused at every approved price.</p>'
+        $out = '<div class="murvc-setup-box" id="tiers"><h2>Discounts</h2>' . self::form_open($key, 'box', 'tiers', $rev, ' id="murvc-tiers-form"')
+            . '<p class="description">Every session of this program in one cart gets the percent of the highest row it reaches; brothers and sisters count together. Both columns rise from row to row.</p>'
             . '<table class="murvc-setup-rows"><tbody>';
         for ($i = 0; $i < self::MAX_TIERS; $i++) {
             $tier = isset($setup['tiers'][$i]) ? $setup['tiers'][$i] : null;
             $out .= '<tr><td>from <input type="number" name="tiers[' . $i . '][from]" min="' . self::TIER_FROM_MIN . '" max="' . self::TIER_FROM_MAX . '" value="' . esc_attr($tier !== null ? (string) intval($tier['from']) : '') . '" style="width: 70px;"> sessions,</td>'
                 . '<td><input type="number" name="tiers[' . $i . '][pct]" min="' . self::TIER_PCT_MIN . '" max="' . self::TIER_PCT_MAX . '" value="' . esc_attr($tier !== null ? (string) intval($tier['pct']) : '') . '" style="width: 70px;">% off</td></tr>';
         }
-        $out .= '</tbody></table><p><button type="submit" class="button button-primary">Save discount tiers</button></p></form>';
+        $out .= '</tbody></table><p><button type="submit" class="button button-primary">Save discounts</button></p></form>';
         $price = !empty($setup['prices']) ? $setup['prices'][0] : '';
-        $out .= '<h3>Price check</h3><p class="murvc-setup-note">At the standard price, as the rows are typed (the save checks every approved price).</p>'
+        $out .= '<h3>Price check</h3><p class="description">At the standard price, as the rows are typed. A dip (more sessions costing less in total) is allowed: the Book page and the cart then tell families just below it that one more costs less.</p>'
             . '<div class="murvc-price-check"><table class="widefat striped" id="murvc-price-check"><thead><tr><th>Sessions</th><th>% off</th><th>Each</th><th>Total</th><th></th></tr></thead><tbody>';
         foreach (self::price_check_rows($setup['tiers'], $price) as $row) {
             $class = $row['dip'] ? 'is-dip' : ($row['boundary'] ? 'is-boundary' : '');
             $out .= '<tr class="' . $class . '"><td>' . intval($row['n']) . '</td><td>' . intval($row['pct']) . '%</td><td>$' . esc_html(self::cents_text($row['each_cents'])) . '</td><td>$' . esc_html(self::cents_text($row['total_cents'])) . '</td><td>'
-                . ($row['dip'] ? 'costs less than ' . (intval($row['n']) - 1) : ($row['boundary'] ? 'a tier starts' : '')) . '</td></tr>';
+                . ($row['dip'] ? 'costs less than ' . (intval($row['n']) - 1) . ': families will add one' : ($row['boundary'] ? 'a tier starts' : '')) . '</td></tr>';
         }
         if ($price === '') {
-            $out .= '<tr><td colspan="5">Save a price first.</td></tr>';
+            $out .= '<tr><td colspan="5">Save the standard price first.</td></tr>';
         }
         $out .= '</tbody></table></div></div>';
         // The same formula as discounted_cents(), redrawn as the rows are typed; cells written with textContent.
@@ -1765,7 +1925,7 @@ class TeamOversight_Program_Setup {
             }
             function money(c) { return "$" + Math.floor(c / 100) + "." + ("0" + (c % 100)).slice(-2); }
             function redraw() {
-                var priceInput = document.getElementById("murvc-price-0");
+                var priceInput = document.getElementById("murvc-standard-price");
                 var c = cents(priceInput ? priceInput.value : "");
                 var tiers = [];
                 for (var i = 0; i < ' . self::MAX_TIERS . '; i++) {
@@ -1788,7 +1948,7 @@ class TeamOversight_Program_Setup {
                     var dip = previous !== null && total < previous;
                     var tr = document.createElement("tr");
                     tr.className = dip ? "is-dip" : (boundary ? "is-boundary" : "");
-                    [String(n), pct + "%", money(each), money(total), dip ? "costs less than " + (n - 1) : (boundary ? "a tier starts" : "")].forEach(function (text) {
+                    [String(n), pct + "%", money(each), money(total), dip ? "costs less than " + (n - 1) + ": families will add one" : (boundary ? "a tier starts" : "")].forEach(function (text) {
                         var td = document.createElement("td");
                         td.textContent = text;
                         tr.appendChild(td);
@@ -1798,7 +1958,7 @@ class TeamOversight_Program_Setup {
                 }
             }
             form.addEventListener("input", redraw);
-            var priceInput = document.getElementById("murvc-price-0");
+            var priceInput = document.getElementById("murvc-standard-price");
             if (priceInput) { priceInput.addEventListener("input", redraw); }
         })();</script>';
         return $out;
@@ -1806,7 +1966,7 @@ class TeamOversight_Program_Setup {
 
     private static function box_blocks($key, array $setup, $rev) {
         $out = '<div class="murvc-setup-box" id="blocks"><h2>Blocks</h2>' . self::form_open($key, 'box', 'blocks', $rev)
-            . '<p class="murvc-setup-note">Named periods the Book page offers as shortcuts (the club\'s own periods, for example Term 1). Name 1 to ' . self::BLOCK_NAME_MAX . ' characters, at most ' . self::BLOCK_MAX_DAYS . ' days long.</p>'
+            . '<p class="description">Named periods the Book page offers as one-tap choices (the club\'s own periods, for example Term 1). Name 1 to ' . self::BLOCK_NAME_MAX . ' characters, at most ' . self::BLOCK_MAX_DAYS . ' days long.</p>'
             . '<table class="murvc-setup-rows"><thead><tr><th>Name</th><th>From</th><th>To</th></tr></thead><tbody>';
         $rows = array_values($setup['blocks']);
         $count = min(self::MAX_BLOCKS, count($rows) + 3);
@@ -1856,17 +2016,19 @@ class TeamOversight_Program_Setup {
             if ($has_lines) {
                 $out .= '<p class="murvc-setup-note">It has order lines, so it can\'t be discarded.</p>';
             } else {
-                $out .= self::form_open($key, 'do', 'discard', $rev) . '<p><button type="submit" class="button">Discard prepared product</button> <span class="murvc-setup-note">Moves it and its sessions to the Bin.</span></p></form>';
+                $out .= self::form_open($key, 'do', 'discard', $rev) . '<p><button type="submit" class="button">Discard prepared product</button> <span class="murvc-setup-note">'
+                    . esc_html('Moves it and its ' . $sessions . ' session' . ($sessions === 1 ? '' : 's') . ' to the Bin; nothing has been sold from it.') . '</span></p></form>';
             }
         } else {
             $this_year = intval(wp_date('Y'));
-            $ready = !empty($setup['days']) && !empty($setup['slots']) && !empty($setup['prices']);
+            // C13: Prepare needs only the standard price (step 1); days and times come with the sessions.
+            $ready = !empty($setup['prices']);
             $out .= '<h3>Prepare the next product</h3>';
             if (!$ready) {
-                $out .= '<p class="murvc-setup-note">Set the days, time slots and prices first.</p>';
+                $out .= '<p class="murvc-setup-note">Set the standard price first.</p>';
             } else {
                 $out .= self::form_open($key, 'do', 'prepare', $rev)
-                    . '<p class="murvc-setup-note">Makes a hidden draft session product for next season (one variation per session, loaded by the supervisors on the Sessions tab), with the current product\'s category, description and membership fields.</p>'
+                    . '<p class="description">Makes next season\'s product as a hidden draft; nothing goes on sale. Supervisors then add its sessions on the Sessions tab. It takes the current product\'s category, description and membership fields.</p>'
                     . '<p><label>Title <input type="text" name="title" maxlength="' . self::TITLE_MAX . '" size="40" value="' . esc_attr(self::program_name($key, $program) . ' ' . ($this_year + 1)) . '"></label> '
                     . '<label>Season <select name="year"><option value="' . $this_year . '">' . $this_year . '</option><option value="' . ($this_year + 1) . '" selected>' . ($this_year + 1) . '</option></select></label> '
                     . '<button type="submit" class="button button-primary">Prepare</button></p></form>';
@@ -1937,8 +2099,8 @@ class TeamOversight_Program_Setup {
             if (intval($setup['prepared_product']) > 0) {
                 $errors[] = 'There\'s already a prepared product.';
             }
-            if (empty($setup['days']) || empty($setup['slots']) || empty($setup['prices'])) {
-                $errors[] = 'Set the days, time slots and prices first.';
+            if (empty($setup['prices'])) {
+                $errors[] = 'Set the standard price first.';
             }
             $length = function_exists('mb_strlen') ? mb_strlen($title, 'UTF-8') : strlen($title);
             if ($length < 1 || $length > self::TITLE_MAX) {
@@ -1987,17 +2149,11 @@ class TeamOversight_Program_Setup {
             $date_attr->set_position(0);
             $date_attr->set_visible(true);
             $date_attr->set_variation(true);
-            $times = array();
-            foreach ($setup['slots'] as $slot) {
-                $label = TeamOversight_Program_Sessions::slot_label($slot);
-                if ($label !== '') {
-                    $times[] = $label;
-                }
-            }
+            // C12: like Date, Time starts with no options; the first series fills both from its sessions.
             $time_attr = new WC_Product_Attribute();
             $time_attr->set_id(0);
             $time_attr->set_name('Time');
-            $time_attr->set_options($times);
+            $time_attr->set_options(array());
             $time_attr->set_position(1);
             $time_attr->set_visible(false);
             $time_attr->set_variation(true);
@@ -2810,7 +2966,8 @@ class TeamOversight_Program_Setup {
         $old = $facts['old'];
         $new = $facts['new'];
         $weekday = $facts['weekday'] > 0 ? TeamOversight_Program_Sessions::day_name($facts['weekday']) : 'no weekday';
-        $out .= '<ol>'
+        $out .= '<p class="murvc-setup-confirm-lead"><strong>' . esc_html('This puts ' . $new['title'] . ' on sale at /product/' . $old['slug'] . '/ and retires ' . $old['title'] . '; bookings stay closed until you tick Bookings open.') . '</strong></p>'
+            . '<ol>'
             . '<li>' . esc_html($old['title']) . ' (#' . intval($old['id']) . ') gets the address /product/' . esc_html($old['retired_slug']) . '/, becomes private and hidden from the shop. Nothing else on it changes: no attribute, label, price, stock, variation or membership field; its orders, refunds and reports are untouched.</li>'
             . '<li>' . esc_html($new['title']) . ' (#' . intval($new['id']) . ', ' . intval($new['sessions']) . ' session' . ($new['sessions'] === 1 ? '' : 's') . ') takes /product/' . esc_html($old['slug']) . '/, is published and stays hidden from the shop.</li>'
             . '<li>The program\'s product becomes #' . intval($new['id']) . ', and #' . intval($old['id']) . ' joins its earlier products as ' . esc_html(self::kind_words($old['kind'])) . ', ' . esc_html($weekday) . ', ' . esc_html(implode(', ', $facts['years'])) . '.</li>'
@@ -2832,7 +2989,8 @@ class TeamOversight_Program_Setup {
         }
         $from = intval($last['from']);
         $to = intval($last['to']);
-        $out .= '<ol>'
+        $out .= '<p class="murvc-setup-confirm-lead"><strong>' . esc_html('This puts ' . self::product_title($from) . ' back on sale at /product/' . $last['old_slug'] . '/ and makes ' . self::product_title($to) . ' the prepared product again.') . '</strong></p>'
+            . '<ol>'
             . '<li>' . esc_html(self::product_title($to)) . ' (#' . $to . ') goes back to being the prepared product, a draft.</li>'
             . '<li>' . esc_html(self::product_title($from)) . ' (#' . $from . ') gets /product/' . esc_html($last['old_slug']) . '/ back, ' . esc_html(isset($last['old_status']) ? $last['old_status'] : 'publish') . ' and ' . esc_html(isset($last['old_visibility']) ? $last['old_visibility'] : 'visible') . ' in the shop, as before the switch, and is the program\'s product again.</li>'
             . '<li>It leaves the earlier products. Bookings stay closed.</li>'
@@ -2849,7 +3007,8 @@ class TeamOversight_Program_Setup {
         if (!$facts['exists']) {
             return $out . '<p>' . esc_html($facts['problem']) . '</p><p>' . $back . '</p></div>';
         }
-        $out .= '<p><strong>#' . intval($facts['id']) . ' ' . esc_html($facts['title']) . '</strong>, read as ' . esc_html(self::kind_words($kind)) . '. '
+        $out .= '<p class="murvc-setup-confirm-lead"><strong>' . esc_html('This adds ' . $facts['title'] . '\'s paid bookings to the program\'s history (New here and the stats); nothing about the product changes.') . '</strong></p>'
+            . '<p><strong>#' . intval($facts['id']) . ' ' . esc_html($facts['title']) . '</strong>, read as ' . esc_html(self::kind_words($kind)) . '. '
             . intval($facts['paid_lines']) . ' paid order line' . ($facts['paid_lines'] === 1 ? '' : 's') . '.</p>';
         if ($facts['owner'] !== '') {
             $other = TeamOversight_Programs::get_program($facts['owner']);
