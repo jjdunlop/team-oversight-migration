@@ -335,11 +335,11 @@ class TeamOversight_Fee_Cover {
         if ($mark) {
             $by = $mark['by'] > 0 ? get_userdata($mark['by']) : false;
             $html .= '<strong style="color:#1e6b34;">Covered: ' . esc_html($mark['reason']) . '</strong><br><small style="color:#996800;">Set by ' . esc_html($by ? $by->display_name : 'an admin') . ($mark['at'] !== '' ? ', ' . esc_html(mysql2date('j M Y', $mark['at'])) : '') . '</small>';
-            $html .= '<span title="' . esc_attr($hint) . '">' . $form('set_fee_cover', $mark['reason'], 'Save reason') . '</span>';
+            $html .= '<div title="' . esc_attr($hint) . '">' . $form('set_fee_cover', $mark['reason'], 'Save reason') . '</div>';
             $html .= $form('clear_fee_cover', null, 'Clear', 'Clear the fee cover? Their open offers are re-quoted at the playing fee and their ' . $season . ' fee is worked out again.');
             return $html;
         }
-        return '<span title="' . esc_attr($hint) . '">' . $form('set_fee_cover', self::default_reason($season), 'Cover playing fee') . '</span>';
+        return '<div title="' . esc_attr($hint) . '">' . $form('set_fee_cover', self::default_reason($season), 'Cover playing fee') . '</div>';
     }
 
     // ------------------------------------------------------------------
