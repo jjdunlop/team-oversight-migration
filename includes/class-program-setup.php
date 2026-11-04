@@ -1902,7 +1902,7 @@ class TeamOversight_Program_Setup {
 
     private static function box_tiers($key, array $setup, $rev) {
         $out = '<div class="murvc-setup-box" id="tiers"><h2>Discounts</h2>' . self::form_open($key, 'box', 'tiers', $rev, ' id="murvc-tiers-form"')
-            . '<p class="description">Every session of this program in one cart gets the percent of the highest row it reaches; brothers and sisters count together. Both columns rise from row to row.</p>'
+            . '<p class="description">Every session of this program in one cart gets the percent of the highest row it reaches. Both columns rise from row to row.</p>'
             . '<table class="murvc-setup-rows"><tbody>';
         for ($i = 0; $i < self::MAX_TIERS; $i++) {
             $tier = isset($setup['tiers'][$i]) ? $setup['tiers'][$i] : null;

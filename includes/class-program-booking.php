@@ -387,11 +387,12 @@ class TeamOversight_Program_Booking {
 
     /**
      * 1.86.1: where a member changes the name on their account: Ultimate
-     * Member's Account page when it has one, else WooCommerce's Account
-     * details ('' when neither is there).
+     * Member's Account page only when members can edit their first and last
+     * name there (um_names_editable()), else WooCommerce's Account details,
+     * which always has both name fields ('' when neither is there).
      */
     public static function account_details_url() {
-        if (function_exists('um_get_core_page')) {
+        if (function_exists('um_get_core_page') && self::um_names_editable()) {
             $url = um_get_core_page('account');
             if (is_string($url) && $url !== '') {
                 return $url;
@@ -402,6 +403,28 @@ class TeamOversight_Program_Booking {
             return is_string($url) ? $url : '';
         }
         return '';
+    }
+
+    /**
+     * 1.86.1: whether Ultimate Member's Account page lets a member change
+     * their first and last name: its Display First & Last name fields
+     * setting (account_name) on and its Disable First & Last name field
+     * editing setting (account_name_disable) off. With editing disabled UM
+     * posts no name fields, so the page can't change a name.
+     */
+    private static function um_names_editable() {
+        if (!function_exists('UM')) {
+            return false;
+        }
+        $um = UM();
+        if (!is_object($um) || !method_exists($um, 'options')) {
+            return false;
+        }
+        $options = $um->options();
+        if (!is_object($options) || !method_exists($options, 'get')) {
+            return false;
+        }
+        return !empty($options->get('account_name')) && empty($options->get('account_name_disable'));
     }
 
     /** The ids of a program's dated products (current, prepared and earlier). */
