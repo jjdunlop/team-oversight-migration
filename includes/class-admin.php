@@ -326,7 +326,7 @@ class TeamOversight_Admin {
             $this->finalise_selections();
         }
 
-        if (isset($_POST['action']) && in_array($_POST['action'], array('accept_trial', 'reject_trial', 'undo_trial', 'mark_trial_paid', 'waive_trial_fee', 'delete_trial', 'set_trial_registration'), true)) {
+        if (isset($_POST['action']) && in_array($_POST['action'], array('accept_trial', 'reject_trial', 'undo_trial', 'mark_trial_paid', 'waive_trial_fee', 'delete_trial', 'set_trial_registration', 'set_fee_cover', 'clear_fee_cover'), true)) {
             $this->process_trial_action();
         }
 
@@ -1819,6 +1819,8 @@ class TeamOversight_Admin {
         // chip wording below is unchanged.
         $chip_offers_on = TeamOversight_Coach_Portal::offers_on($season);
         $chip_offer_index = ($chip_offers_on && $selections_by_app) ? TeamOversight_Offers::index_for_applications(array_map('intval', array_keys($selections_by_app))) : array();
+        // 1.88.0: the club's fee cover, per application (2027 on; one season_index() for the whole page).
+        $fee_cover_on = class_exists('TeamOversight_Fee_Cover') && TeamOversight_Fee_Cover::applies($season);
 
         // Selected / Training Only verdicts awaiting Finalise: any on a
         // pending application, plus those on accepted applications not yet
@@ -2051,6 +2053,9 @@ class TeamOversight_Admin {
                             <th>Interested Teams</th>
                             <th>Positions</th>
                             <th title="VV registration type: worked out from the application (Youth State League at another club counts as a free agent), or set here by an admin">Registration</th>
+                            <?php if ($fee_cover_on): ?>
+                                <th title="The club covers this player's playing fee for the season (a Premier League MVP, say): they pay the supporter fee for their category, their offer quotes it and the deposit is all of it. Life members are covered automatically.">Fee cover</th>
+                            <?php endif; ?>
                             <th>Status</th>
                             <th>Payment</th>
                             <th>Actions</th>
@@ -2115,6 +2120,9 @@ class TeamOversight_Admin {
                                         <br><small style="color: #996800;">Set by <?php echo esc_html($override_by ? $override_by->display_name : 'an admin'); ?><?php echo !empty($trial->registration_override_at) ? ', ' . esc_html(mysql2date('j M Y', $trial->registration_override_at)) : ''; ?></small>
                                     <?php endif; ?>
                                 </td>
+                                <?php if ($fee_cover_on): ?>
+                                    <td><?php echo TeamOversight_Fee_Cover::render_application_cell($trial); ?></td>
+                                <?php endif; ?>
                                 <td>
                                     <span class="status-<?php echo esc_attr($trial->application_status); ?>">
                                         <?php echo esc_html(ucwords(str_replace('_', ' ', $trial->application_status))); ?>
@@ -2219,7 +2227,7 @@ class TeamOversight_Admin {
                             </tr>
                             <?php if (!empty($form_data)): ?>
                                 <tr class="trial-details-row" id="trial-details-<?php echo $trial->id; ?>" style="display: none;">
-                                    <td colspan="10" style="background: #f8f9fa; padding: 15px 25px;">
+                                    <td colspan="<?php echo $fee_cover_on ? 11 : 10; ?>" style="background: #f8f9fa; padding: 15px 25px;">
                                         <table class="trial-details-table">
                                             <?php foreach ($form_data as $question => $answer): ?>
                                                 <?php if ($answer !== '' && $answer !== null): ?>
@@ -2896,6 +2904,10 @@ class TeamOversight_Admin {
                             $fee_manual = intval($invoice->fee_overridden) === 1;
                             $breakdown = $breakdown_fees->fee_breakdown($invoice->email, $invoice->season);
                             $breakdown_html = $breakdown_fees->render_fee_breakdown($breakdown, $invoice->invoice_amount, $invoice->season, $fee_manual);
+                            // 1.88.0: the club covers this person's playing fee (index lookups only: no query per row).
+                            if (!empty($breakdown['fee_cover']['reason'])) {
+                                $fee_info .= ' · fee covered (' . $breakdown['fee_cover']['reason'] . ')';
+                            }
                             $manual_title = '';
                             if ($fee_manual) {
                                 $setter = intval($invoice->fee_overridden_by) > 0 ? get_userdata(intval($invoice->fee_overridden_by)) : false;
@@ -2943,7 +2955,7 @@ class TeamOversight_Admin {
                                 }
                                 ?>
                                 <?php if ($timeline_uid > 0): ?>
-                                    <td><a class="fee-timeline-link" href="<?php echo esc_url(TeamOversight_Member_Lookup::profile_url($timeline_uid, '', $invoice->season)); ?>" title="Open their <?php echo esc_attr($invoice->season); ?> fee timeline"><?php echo esc_html($invoice->name !== null && $invoice->name !== '' ? $invoice->name : 'user #' . $timeline_uid); ?></a><?php echo $offer_tag_html($invoice); ?></td>
+                                    <td><a class="fee-timeline-link" href="<?php echo esc_url(TeamOversight_Member_Lookup::profile_url($timeline_uid, '', $invoice->season)); ?>" title="Open their <?php echo esc_attr($invoice->season); ?> fee timeline"><?php echo esc_html($invoice->name !== null && $invoice->name !== '' ? $invoice->name : 'user #' . $timeline_uid); ?></a><?php echo $offer_tag_html($invoice); ?><?php echo class_exists('TeamOversight_Fee_Cover') ? TeamOversight_Fee_Cover::tag_html($timeline_uid, $invoice->season) : ''; ?></td>
                                 <?php else: ?>
                                     <td><?php echo esc_html($invoice->name); ?><?php echo $offer_tag_html($invoice); ?></td>
                                 <?php endif; ?>
@@ -3838,6 +3850,33 @@ class TeamOversight_Admin {
         return esc_html($label);
     }
 
+    /**
+     * 1.88.0: the notice after Cover playing fee, Save reason or Clear on
+     * Trial Applications: what was set or refused, then each consequence
+     * (re-quoted offers with old and new figures and that nothing was
+     * emailed, a locked-in offer left as it is, the fee worked out again or
+     * waiting for the release, an Edit Fee kept). Escaped HTML.
+     */
+    public static function fee_cover_notice($result) {
+        if (!is_array($result)) {
+            return '';
+        }
+        $kind = empty($result['ok']) ? 'error' : (!empty($result['changed']) ? 'success' : 'info');
+        $html = '<div class="notice notice-' . $kind . '"><p>' . esc_html($result['message']) . '</p>';
+        $sync = isset($result['sync']) && is_array($result['sync']) ? $result['sync'] : array();
+        if (!empty($sync['details'])) {
+            $html .= '<ul style="list-style: disc; margin-left: 20px;">';
+            foreach ($sync['details'] as $line) {
+                $html .= '<li>' . esc_html($line) . '</li>';
+            }
+            $html .= '</ul>';
+        }
+        if (!empty($sync['requoted'])) {
+            $html .= '<p>' . esc_html('Nobody was emailed. Use Email the new offer on Offers, Waiting on players, to send the player their changed offer.') . '</p>';
+        }
+        return $html . '</div>';
+    }
+
     private function process_trial_action() {
         if (!isset($_POST['trial_nonce']) || !wp_verify_nonce($_POST['trial_nonce'], 'process_trial')) {
             echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
@@ -3852,6 +3891,20 @@ class TeamOversight_Admin {
         global $wpdb;
         $trial_id = intval($_POST['trial_id']);
         $action = sanitize_text_field($_POST['action']);
+
+        if ($action === 'set_fee_cover' || $action === 'clear_fee_cover') {
+            // 1.88.0: the club covers (or stops covering) this player's playing fee for the season. The rules, the
+            // dry run of their open offers, the log, the note and what follows (re-quotes, the fee worked out again)
+            // are TeamOversight_Fee_Cover's; this only reports what changed.
+            if (!class_exists('TeamOversight_Fee_Cover')) {
+                return;
+            }
+            $result = $action === 'set_fee_cover'
+                ? TeamOversight_Fee_Cover::set_mark($trial_id, isset($_POST['fee_cover_reason']) ? wp_unslash($_POST['fee_cover_reason']) : '', get_current_user_id())
+                : TeamOversight_Fee_Cover::clear_mark($trial_id, get_current_user_id());
+            echo self::fee_cover_notice($result);
+            return;
+        }
 
         if ($action === 'set_trial_registration') {
             // The club's call on one application's registration type (blank
@@ -4218,6 +4271,13 @@ class TeamOversight_Admin {
             // the assignment first so those are cleaned up properly.
             if ($trial->application_status === 'accepted') {
                 echo '<div class="notice notice-error"><p>This application has been accepted — use <strong>Undo Assignment</strong> first, then delete.</p></div>';
+                return;
+            }
+
+            // 1.88.0: the mark of the club's fee cover lives on the application; deleting it would silently end the
+            // cover without re-pricing anything, so it is cleared first (which re-quotes and re-prices).
+            if (isset($trial->fee_cover_reason) && $trial->fee_cover_reason !== null && trim((string) $trial->fee_cover_reason) !== '') {
+                echo '<div class="notice notice-error"><p><strong>Not deleted.</strong> This application carries the club\'s fee cover (' . esc_html($trial->fee_cover_reason) . '). Clear it first, so the player\'s fee is worked out again.</p></div>';
                 return;
             }
 

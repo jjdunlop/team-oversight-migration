@@ -368,6 +368,44 @@ class TeamOversight_Offers_Setup {
             }
         }
 
+        // 3b2. 1.88.0: the playing fee covered by the club (TeamOversight_Fee_Cover). Shown only when somebody is
+        // covered this season: a covered player's offer and fee need the supporter fee (or its upper limit) of
+        // their category, and an open offer must carry the cover the player has now.
+        if (class_exists('TeamOversight_Fee_Cover') && TeamOversight_Fee_Cover::applies($season)) {
+            $summary = TeamOversight_Fee_Cover::season_summary($season);
+            $stale = 0;
+            foreach (TeamOversight_Offers::open_offers($season) as $open) {
+                if (!TeamOversight_Fee_Cover::same(TeamOversight_Fee_Cover::stored_cover($open), TeamOversight_Fee_Cover::for_person($open->user_id, $season))) {
+                    $stale++;
+                }
+            }
+            if ($summary['people'] > 0 || $stale > 0) {
+                $fees_engine = TeamOversight_Fees::shared();
+                $missing_classes = array();
+                foreach ($summary['user_ids'] as $uid) {
+                    $person = get_userdata($uid);
+                    if (!$person) {
+                        continue;
+                    }
+                    $class = $fees_engine->determine_person_fee_class($person->user_email, $season);
+                    if ($fees_engine->get_fee($class, 'supporter', $season) === null && TeamOversight_Fees::get_limit($class, 'supporter', $season) === null) {
+                        $missing_classes[$class] = true;
+                    }
+                }
+                $who = $summary['people'] . ' player' . ($summary['people'] === 1 ? ' is' : 's are') . ' covered for ' . $season . ': ' . $summary['marked'] . ' marked, ' . $summary['life'] . ' life member' . ($summary['life'] === 1 ? '' : 's') . '.';
+                if (!empty($missing_classes)) {
+                    $names = array_keys($missing_classes);
+                    $last = array_pop($names);
+                    $list = empty($names) ? $last : implode(', ', $names) . ' and ' . $last;
+                    $rows[] = self::row('fee_cover', 'bad', 'Fee covered by the club', $who . ' Covered players in ' . $list . ' have no supporter fee or supporter upper limit for ' . $season . ', so their offers can\'t be sent and their fee can\'t be worked out.', self::config_url($season, 'fee-matrix'), 'Fee matrix');
+                } elseif ($stale > 0) {
+                    $rows[] = self::row('fee_cover', 'warn', 'Fee covered by the club', $who . ' ' . $stale . ' open offer' . ($stale === 1 ? ' still carries' : 's still carry') . ' an old fee cover: the daily check re-quotes ' . ($stale === 1 ? 'it' : 'them') . ' (Logs, Offer alert, says why when it can\'t).', TeamOversight_Offers_Admin::page_url(array('tab' => 'out', 'season' => $season)), 'Offers');
+                } else {
+                    $rows[] = self::row('fee_cover', 'ok', 'Fee covered by the club', $who . ' Each pays the supporter fee for their category.', admin_url('admin.php?page=team-oversight-trials'), 'Trial Applications');
+                }
+            }
+        }
+
         // 3c. JPL and YSL (1.87.0): a season the one-off data step kept on the one JPL/YSL row, said where the committee looks.
         $jpl_ysl_kept = TeamOversight_Fees::jpl_ysl_kept_note($season);
         if ($jpl_ysl_kept !== '') {
@@ -747,6 +785,7 @@ class TeamOversight_Offers_Setup {
         }
         echo '<dt style="font-weight: 600; margin-top: 6px;">Credit and forfeit</dt><dd style="margin: 0 0 0 16px;">When an offer ends with a deposit paid, the site settles it straight away. A withdrawal by the club makes it credit: the club broke its side and the money stays on the player\'s account (Held deposits) until the treasurer refunds it by hand. A decline, or a move to Declined after a missed date, makes it a forfeit: the player broke theirs and the deposit is kept (the Forfeited list on Held deposits; Reverse forfeit gives it back). Only a place removed outside the Offers page, a reversed forfeit or money the site could not settle waits on Held deposits for the treasurer to choose "Refund owed" (credit) or "Club keeps it" (forfeit). Separately, money above the final fee also stays on the account as credit.</dd>';
         echo '<dt style="font-weight: 600; margin-top: 6px;">Placed, Locked in, Confirmed</dt><dd style="margin: 0 0 0 16px;">Three words for related things. Locked in is the offer\'s state (the deposit is complete). Placed is the admin word for the team place existing. Confirmed is the coach portal\'s list of players placed on a team.</dd>';
+        echo '<dt style="font-weight: 600; margin-top: 6px;">Fee covered</dt><dd style="margin: 0 0 0 16px;">' . self::h('The club covers the player\'s playing fee for the season: a Premier League MVP marked on their trial application (Trial Applications, Fee cover), or a life member, automatically. They pay the supporter fee for their category instead, their offer quotes it (its upper limit while the fee isn\'t entered) and the deposit is all of it. Marking or clearing someone with an offer out changes the offer at once without emailing them: Email the new offer on Waiting on players tells them. A locked-in player stays locked in, and anything they paid above their new fee is credit to refund by hand.') . '</dd>';
         echo '</dl></details>';
         return ob_get_clean();
     }

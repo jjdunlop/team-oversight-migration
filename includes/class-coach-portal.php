@@ -939,6 +939,20 @@ class TeamOversight_Coach_Portal {
             if (in_array($phase, array('sent', 'sent_overdue', 'accepted', 'accepted_overdue'), true) && intval($offer->reminder_count) > 0 && self::short_date($offer->last_reminded_at) !== '') {
                 $subs[] = 'Last reminder ' . self::short_date($offer->last_reminded_at);
             }
+            // 1.88.0: the club re-quoted the offer because the player's fee cover changed; say when, why and whether the player was emailed (no figure).
+            if (in_array($phase, array('sent', 'sent_overdue', 'accepted', 'accepted_overdue'), true) && $offer && isset($offer->requote_count) && intval($offer->requote_count) > 0) {
+                $row = array_key_exists('_requote', (array) $mail) ? $mail['_requote']
+                    : (class_exists('TeamOversight_Offer_Emails') ? TeamOversight_Offer_Emails::status_for_key(TeamOversight_Offers::requote_email_key($offer)) : null);
+                $why = (isset($offer->quote_cover) && (string) $offer->quote_cover !== '')
+                    ? TeamOversight_Offers::wording('requote_why_set', array('{reason}' => (string) $offer->quote_cover))
+                    : TeamOversight_Offers::wording('requote_why_cleared');
+                $vars = array('{date}' => self::short_date($offer->requoted_at), '{why}' => $why);
+                if (is_array($row) && $row['status'] === 'sent' && self::short_date($row['sent_at']) !== '') {
+                    $subs[] = TeamOversight_Offers::wording('requote_card_emailed', array_merge($vars, array('{emailed}' => self::short_date($row['sent_at']))));
+                } else {
+                    $subs[] = TeamOversight_Offers::wording('requote_card_waiting', $vars);
+                }
+            }
         }
         $html = '<div class="cac-offer-status is-' . esc_attr(str_replace('_', '-', $phase)) . '"><span class="cos-label">' . esc_html($label) . '</span>';
         foreach ($subs as $sub) {
@@ -1173,6 +1187,20 @@ class TeamOversight_Coach_Portal {
                 }
             }
         }
+        $mail = ($sent_ids && class_exists('TeamOversight_Offer_Emails')) ? TeamOversight_Offer_Emails::status_for_offers($sent_ids) : array();
+        // 1.88.0: offers the club re-quoted (the player's fee cover changed): whether the change was emailed, one read for the board.
+        $requote_keys = array();
+        foreach ($offers as $offer) {
+            if ($offer && $offer->requote_count > 0 && in_array($offer->state, array(TeamOversight_Offers::SENT, TeamOversight_Offers::ACCEPTED), true)) {
+                $requote_keys[intval($offer->id)] = TeamOversight_Offers::requote_email_key($offer);
+            }
+        }
+        if ($requote_keys && class_exists('TeamOversight_Offer_Emails')) {
+            $requote_rows = TeamOversight_Offer_Emails::status_for_keys(array_values($requote_keys));
+            foreach ($requote_keys as $offer_id => $key) {
+                $mail[$offer_id]['_requote'] = isset($requote_rows[$key]) ? $requote_rows[$key] : null;
+            }
+        }
         return array(
             'index' => $index,
             'counts' => $counts,
@@ -1181,7 +1209,7 @@ class TeamOversight_Coach_Portal {
             'blocks' => $blocks,
             'declined' => $declined,
             'paid' => $accepted_offers ? TeamOversight_Offers::paid_toward_deposit_map($accepted_offers) : array(),
-            'mail' => ($sent_ids && class_exists('TeamOversight_Offer_Emails')) ? TeamOversight_Offer_Emails::status_for_offers($sent_ids) : array(),
+            'mail' => $mail,
             'locked_by_app' => $locked_by_app,
             'locked_by_user' => $locked_by_user,
             'rejections' => $rejections,
@@ -2258,6 +2286,7 @@ class TeamOversight_Coach_Portal {
                                     <?php if ($app_ctx): ?>
                                         <?php echo $this->render_reg_chip($app_ctx['reg_type'], $app_ctx['transfer_club']); ?>
                                     <?php endif; ?>
+                                    <?php echo $this->render_cover_chip(isset($member->user_id) ? $member->user_id : 0, $season); ?>
                                     <?php if ($this->was_on_team_last_season($last_season_members, isset($member->user_id) ? $member->user_id : 0, $member->email)): ?>
                                         <?php echo $this->render_same_team_chip($active_team, $season); ?>
                                     <?php endif; ?>
@@ -2322,6 +2351,7 @@ class TeamOversight_Coach_Portal {
                                 <span class="cac-name"><?php echo esc_html($member->name); ?></span>
                                 <span class="cac-chips">
                                     <?php echo $this->render_reg_chip($member->reg_type, $member->transfer_club); ?>
+                                    <?php echo $this->render_cover_chip(isset($member->user_id) ? $member->user_id : 0, $season); ?>
                                     <?php if (isset($member->application_status) && $member->application_status === 'awaiting_payment'): ?>
                                         <?php echo self::render_payment_pending_chip(); ?>
                                     <?php endif; ?>
@@ -2493,6 +2523,7 @@ class TeamOversight_Coach_Portal {
                                     <span class="cac-name"><?php echo esc_html($a['name']); ?></span>
                                     <span class="cac-chips">
                                         <?php echo $this->render_reg_chip($a['reg_type'], $a['transfer_club']); ?>
+                                        <?php echo $this->render_cover_chip(isset($a['user_id']) ? $a['user_id'] : 0, $season); ?>
                                         <?php if (!empty($a['payment_pending'])): ?>
                                             <?php echo self::render_payment_pending_chip(); ?>
                                         <?php endif; ?>
@@ -3141,6 +3172,14 @@ class TeamOversight_Coach_Portal {
             background: #fdeee0;
             color: #8a4b00;
             border: 1px solid #e0a86b;
+        }
+
+        /* 1.88.0: the club covers the playing fee. Read only; a dashed
+           outline so it never reads as a verdict chip. */
+        .chip-fee-cover {
+            background: #ffffff;
+            color: #1e5b8c;
+            border: 1px dashed #7aa7cf;
         }
 
         /* Free agent: no paperwork needed. Soft pink — the one hue no
@@ -5637,6 +5676,24 @@ class TeamOversight_Coach_Portal {
     private function render_same_team_chip($team_code, $season) {
         $last = intval($season) - 1;
         return '<span class="verdict-chip chip-sameteam" title="Played for ' . esc_attr($team_code) . ' in ' . $last . ' — back on the same team, not just returning to the club.">↩ Same team</span>';
+    }
+
+    /**
+     * 1.88.0: the read-only badge of a player whose playing fee the club
+     * covers ("Fee covered: Premier League MVP 2026", or "Fee covered: Life
+     * member"), for a season that has offers. Nothing to press, no figure
+     * (the reason can't hold one). '' for everyone else. An index lookup:
+     * no query per card.
+     */
+    private function render_cover_chip($user_id, $season) {
+        if (!self::offers_on($season) || !class_exists('TeamOversight_Fee_Cover') || intval($user_id) <= 0) {
+            return '';
+        }
+        $text = TeamOversight_Fee_Cover::coach_badge(intval($user_id), $season);
+        if ($text === '') {
+            return '';
+        }
+        return '<span class="verdict-chip chip-fee-cover" title="' . esc_attr('The club covers this player\'s ' . $season . ' playing fee: they pay the supporter fee only.') . '">' . esc_html($text) . '</span>';
     }
 
     /**

@@ -62,7 +62,7 @@ class TeamOversight_Offers_Admin {
     );
 
     /** The single-row buttons (offer_action). */
-    const ACTIONS = array('approve', 'reject', 'remind', 'extend', 'move_declined', 'withdraw', 'retry', 'pull_out', 'mark_credit', 'forfeit', 'apply', 'reverse', 'resend', 'ns_send', 'ns_stop');
+    const ACTIONS = array('approve', 'reject', 'remind', 'extend', 'move_declined', 'withdraw', 'retry', 'pull_out', 'mark_credit', 'forfeit', 'apply', 'reverse', 'resend', 'ns_send', 'ns_stop', 'email_requote');
     /**
      * The buttons above the To approve list, and (1.80.0) Send all above the
      * Not selected tab's "not told yet" list. (1.79.x's cancel_ns,
@@ -310,6 +310,14 @@ class TeamOversight_Offers_Admin {
 
     private static function chip($text, $class = '') {
         return '<span class="mo-chip' . ($class !== '' ? ' mo-chip-' . esc_attr($class) : '') . '">' . esc_html((string) $text) . '</span>';
+    }
+
+    /** 1.88.0: the green "Fee covered" chip of a covered player (a cover array, or null for ''). */
+    private static function cover_chip($cover) {
+        if (!is_array($cover) || empty($cover['reason'])) {
+            return '';
+        }
+        return '<br>' . self::chip(($cover['source'] === 'life' ? 'Fee covered automatically: ' : 'Fee covered: ') . $cover['reason'], 'green');
     }
 
     /** "Name (TST1 playing)" as plain text, for the flash summary. */
@@ -761,6 +769,7 @@ class TeamOversight_Offers_Admin {
             'coach_overdue' => 'Coaches: deadline not met',
             'not_selected' => 'Not selected',
             'locked_in' => 'You\'re locked in',
+            'offer_changed' => 'Offer changed',
         );
         return isset($labels[$event]) ? $labels[$event] : (string) $event;
     }
@@ -803,6 +812,34 @@ class TeamOversight_Offers_Admin {
             }
             if (!$offer->user_id || !get_userdata($offer->user_id)) {
                 $out[] = array('text' => $label . ' belongs to an account that no longer exists.', 'tab' => $offer->state === TeamOversight_Offers::AWAITING ? 'approve' : ($offer->state === TeamOversight_Offers::LOCKED_IN ? 'locked' : 'out'));
+            }
+        }
+        // 1.88.0: offers the club re-quoted (the player's fee cover changed) that nobody has emailed yet, and open offers
+        // whose stored cover no longer matches the player's (a re-quote that failed: the daily check tries again). Index
+        // lookups and one outbox read: no pricing.
+        if (class_exists('TeamOversight_Fee_Cover')) {
+            $changed_keys = array();
+            $stale_cover = 0;
+            foreach ($live as $offer) {
+                if (!in_array($offer->state, array(TeamOversight_Offers::SENT, TeamOversight_Offers::ACCEPTED), true)) {
+                    continue;
+                }
+                if ($offer->requote_count > 0) {
+                    $changed_keys[] = TeamOversight_Offers::requote_email_key($offer);
+                }
+                if (!TeamOversight_Fee_Cover::same(TeamOversight_Fee_Cover::stored_cover($offer), TeamOversight_Fee_Cover::for_person($offer->user_id, $offer->season))) {
+                    $stale_cover++;
+                }
+            }
+            if ($changed_keys && class_exists('TeamOversight_Offer_Emails')) {
+                $emailed = TeamOversight_Offer_Emails::status_for_keys($changed_keys);
+                $not_emailed = count(array_diff($changed_keys, array_keys($emailed)));
+                if ($not_emailed > 0) {
+                    $out[] = array('text' => $not_emailed . ' changed offer' . ($not_emailed === 1 ? '' : 's') . ' (the club\'s fee cover changed) ' . ($not_emailed === 1 ? 'hasn\'t' : 'haven\'t') . ' been emailed to the player yet: Email the new offer on Waiting on players.', 'tab' => 'out');
+                }
+            }
+            if ($stale_cover > 0) {
+                $out[] = array('text' => $stale_cover . ' open offer' . ($stale_cover === 1 ? ' still carries' : 's still carry') . ' an old fee cover (re-quoting failed: see Logs, Offer alert). The daily check tries again.', 'tab' => 'out');
             }
         }
         $waiting = 0;
@@ -1055,7 +1092,9 @@ class TeamOversight_Offers_Admin {
             $user = $offer->user_id ? get_userdata($offer->user_id) : false;
             $app = isset($apps[$offer->application_id]) ? $apps[$offer->application_id] : null;
             $quote = TeamOversight_Offers::compute_quote($offer->user_id, $season, $offer->team, $offer->role, array('offer' => $offer, 'mode' => 'send', 'fees' => $fees));
-            $limit = $quote['fee_class'] !== '' ? TeamOversight_Fees::get_limit($quote['fee_class'], TeamOversight_Fees::charged_as($offer->role), $season) : null;
+            // 1.88.0: the limit of the column the quote is on (a covered player's is the supporter column).
+            $column = isset($quote['column']) && $quote['column'] !== '' ? $quote['column'] : TeamOversight_Fees::charged_as($offer->role);
+            $limit = $quote['fee_class'] !== '' ? TeamOversight_Fees::get_limit($quote['fee_class'], $column, $season) : null;
             $block = '';
             $warn = array();
             $verdict_key = intval($offer->application_id) . '|' . $offer->team;
@@ -1114,6 +1153,7 @@ class TeamOversight_Offers_Admin {
             $ctx[$offer->id] = array(
                 'quote' => $quote,
                 'limit' => $limit,
+                'cover' => isset($quote['fee_cover']) ? $quote['fee_cover'] : null,
                 'block' => $block,
                 'warn' => $warn,
                 'app' => $app,
@@ -1286,12 +1326,18 @@ class TeamOversight_Offers_Admin {
         if (TeamOversight_Offers::is_early($offer)) {
             echo self::chip('Early Offer', 'amber') . '<br>';
         }
+        // 1.88.0: the club covers this player's playing fee: the quote is the supporter cell and the deposit all of it.
+        $cover = isset($c['cover']) && is_array($c['cover']) ? $c['cover'] : null;
+        if ($cover) {
+            echo substr(self::cover_chip($cover), strlen('<br>')) . '<br>';
+        }
         if ($q['fee_class'] !== '') {
-            echo self::h($q['fee_class']) . '<br><span class="mo-small">' . ($c['limit'] !== null ? 'Limit ' . self::h(TeamOversight_Offers::money($c['limit'])) : 'No limit set') . '</span><br>';
+            echo self::h($q['fee_class']) . '<br><span class="mo-small">' . ($c['limit'] !== null ? ($cover ? 'Supporter limit ' : 'Limit ') . self::h(TeamOversight_Offers::money($c['limit'])) : 'No limit set') . '</span><br>';
         }
         if ($q['ok']) {
-            echo '<strong>' . self::h(TeamOversight_Offers::money($q['amount'])) . '</strong> <span class="mo-small">' . ($q['basis'] === 'upper' ? 'upper limit' : 'real fee') . '</span><br>'
-                . 'Deposit <strong>' . self::h(TeamOversight_Offers::money($q['target'])) . '</strong>';
+            $basis_words = $cover ? ($q['basis'] === 'upper' ? 'supporter upper limit' : 'supporter fee') : ($q['basis'] === 'upper' ? 'upper limit' : 'real fee');
+            echo '<strong>' . self::h(TeamOversight_Offers::money($q['amount'])) . '</strong> <span class="mo-small">' . $basis_words . '</span><br>'
+                . 'Deposit <strong>' . self::h(TeamOversight_Offers::money($q['target'])) . '</strong>' . ($cover ? ' <span class="mo-small">(' . self::h(rtrim(rtrim(number_format((float) $q['percent'], 2), '0'), '.')) . '%)</span>' : '');
             if (!empty($q['places'])) {
                 echo '<br><span class="mo-small">Counts ' . self::h(implode(', ', $q['places'])) . '</span>';
             }
@@ -1400,13 +1446,21 @@ class TeamOversight_Offers_Admin {
         $paid = !empty($accepted) ? TeamOversight_Offers::paid_toward_deposit_map($accepted) : array();
         $mail = class_exists('TeamOversight_Offer_Emails') ? TeamOversight_Offer_Emails::status_for_offers($offer_ids) : array();
         $now = strtotime(current_time('mysql'));
+        // 1.88.0: offers the club re-quoted because the player's fee cover changed, and whether each change was emailed (one read).
+        $requote_keys = array();
+        foreach ($page_rows as $offer) {
+            if ($offer->requote_count > 0) {
+                $requote_keys[$offer->id] = TeamOversight_Offers::requote_email_key($offer);
+            }
+        }
+        $requote_rows = ($requote_keys && class_exists('TeamOversight_Offer_Emails')) ? TeamOversight_Offer_Emails::status_for_keys(array_values($requote_keys)) : array();
 
         echo '<div class="mo-scroll"><table class="widefat striped"><thead><tr><th>Player</th><th>Team</th><th>Where it is</th><th>Fee and deposit</th><th>Emails and nudges</th><th style="min-width: 220px;">Actions</th></tr></thead><tbody>';
         foreach ($page_rows as $offer) {
             $st = $status[$offer->id];
             $is_sent = $offer->state === TeamOversight_Offers::SENT;
             $date = $is_sent ? $offer->reply_by : $offer->deposit_due;
-            echo '<tr><td>' . self::player_link($offer, $season) . '</td>';
+            echo '<tr><td>' . self::player_link($offer, $season) . self::cover_chip(TeamOversight_Offers::cover_of($offer)) . '</td>';
             echo '<td>' . self::team_html($offer->team, $season) . '<br>' . self::chip(TeamOversight_Offers::role_name($offer->role)) . '</td>';
             echo '<td>' . self::chip(self::state_label($offer->state), $is_sent ? '' : 'green') . '<br>'
                 . ($is_sent ? 'Reply by ' : 'Deposit due ') . '<strong>' . self::h(self::d($date)) . '</strong>';
@@ -1433,6 +1487,18 @@ class TeamOversight_Offers_Admin {
             $reminded = $offer->last_reminded_at ? self::dt($offer->last_reminded_at) : '';
             echo '<span class="mo-small">' . ($offer->reminder_count ? intval($offer->reminder_count) . ' reminder' . ($offer->reminder_count === 1 ? '' : 's') . ', last ' . self::h($reminded) : 'No reminders')
                 . ($offer->extended_count ? '<br>' . intval($offer->extended_count) . ' extension' . ($offer->extended_count === 1 ? '' : 's') : '') . '</span>';
+            $requote_row = null;
+            if ($offer->requote_count > 0) {
+                // 1.88.0: re-quoted when the player's fee cover changed; nobody is emailed until an administrator presses Email the new offer.
+                $requote_row = isset($requote_rows[$requote_keys[$offer->id]]) ? $requote_rows[$requote_keys[$offer->id]] : null;
+                $why = (string) $offer->quote_cover !== '' ? 'fee covered: ' . $offer->quote_cover : 'fee cover ended';
+                echo '<br>' . self::chip('Changed on ' . self::d(substr((string) $offer->requoted_at, 0, 10)) . ' (' . $why . ')', 'amber');
+                if ($requote_row) {
+                    echo '<br><span class="mo-small">New offer email: ' . self::h($requote_row['status']) . ($requote_row['status'] === 'sent' && $requote_row['sent_at'] !== '' ? ' ' . self::h(self::dt($requote_row['sent_at'])) : '') . '</span>';
+                } else {
+                    echo '<br><span class="mo-small">The player hasn\'t been emailed about the change.</span>';
+                }
+            }
             echo '</td>';
 
             // Actions.
@@ -1451,6 +1517,15 @@ class TeamOversight_Offers_Admin {
             }
             $holds = !$is_sent && isset($paid[$offer->id]) && intval($paid[$offer->id]) > 0;
             echo self::button('Withdraw', self::row_form('withdraw', $offer->id, $shown, 'Withdraw this offer? The player is emailed.' . ($holds ? ' Their deposit stays on their account as credit to refund.' : '')), 'button', false, 'Emails the player a short note.');
+            if ($offer->requote_count > 0) {
+                if ($requote_row && $requote_row['status'] === 'sent') {
+                    echo self::disabled_button('Emailed ' . self::d(substr((string) $requote_row['sent_at'], 0, 10)), 'The changed offer was emailed to the player.');
+                } elseif ($requote_row) {
+                    echo self::disabled_button('Email the new offer', 'Already queued (' . $requote_row['status'] . ').');
+                } else {
+                    echo self::button('Email the new offer', self::row_form('email_requote', $offer->id, array_merge($shown, array('shown_requote' => (string) $offer->requote_count)), 'Email this player their changed offer? It goes to the player with the coaches copied, like the offer email.'), 'button button-primary', false, 'Emails the player their changed offer.');
+                }
+            }
             echo '</td></tr>';
         }
         echo '</tbody></table></div>';
@@ -1523,7 +1598,19 @@ class TeamOversight_Offers_Admin {
                 echo '<br><span class="mo-red mo-small">Pricing: ' . self::h($offer->pricing_error) . '</span>';
             }
             echo '</td>';
-            echo '<td>' . self::h(TeamOversight_Offers::fee_words($offer)) . '<br><span class="mo-small">Deposit ' . self::h(TeamOversight_Offers::money($offer->deposit_target !== null ? $offer->deposit_target : 0)) . '</span></td>';
+            echo '<td>' . self::h(TeamOversight_Offers::fee_words($offer)) . '<br><span class="mo-small">Deposit ' . self::h(TeamOversight_Offers::money($offer->deposit_target !== null ? $offer->deposit_target : 0)) . '</span>';
+            // 1.88.0: the club's fee cover now, and a cover that changed after lock-in (the fee follows it; credit is refunded by hand).
+            if (class_exists('TeamOversight_Fee_Cover')) {
+                $live_cover = TeamOversight_Fee_Cover::normalise(TeamOversight_Fee_Cover::for_person($offer->user_id, $offer->season));
+                echo self::cover_chip($live_cover);
+                if (!TeamOversight_Fee_Cover::same(TeamOversight_Fee_Cover::stored_cover($offer), $live_cover)) {
+                    $invoice = TeamOversight_Offers::invoice_for($offer);
+                    $credit = $invoice ? max(0.0, -floatval($invoice->outstanding_amount)) : 0.0;
+                    echo '<br><span class="mo-amber mo-small">Cover changed after lock-in (' . self::h($live_cover ? 'fee covered: ' . $live_cover['reason'] : 'fee cover ended') . '): their fee follows it. Anything paid above the fee shows as credit on Payment Management.'
+                        . ($credit >= 0.01 ? ' In credit now: ' . self::h(TeamOversight_Offers::money($credit)) . '.' : '') . '</span>';
+                }
+            }
+            echo '</td>';
 
             echo '<td>';
             if (!$placed) {
@@ -2035,6 +2122,10 @@ class TeamOversight_Offers_Admin {
                 break;
             case 'remind':
                 $r = TeamOversight_Offers::admin_remind($id, $actor_id, $shown);
+                break;
+            case 'email_requote':
+                // 1.88.0: Email the new offer (the club's fee cover changed while the offer was open). The re-quote number the row showed must still be the latest.
+                $r = TeamOversight_Offers::admin_email_requote($id, $actor_id, array('state' => $shown_state, 'requote' => isset($data['shown_requote']) && is_scalar($data['shown_requote']) ? (string) intval($data['shown_requote']) : ''));
                 break;
             case 'extend':
                 $r = TeamOversight_Offers::admin_extend($id, $actor_id, array('state' => $shown_state, 'date' => isset($data['shown_date']) && is_string($data['shown_date']) ? $data['shown_date'] : ''));
