@@ -37,7 +37,7 @@ if (!defined('ABSPATH')) {
  * is made for them.
  *
  * Readers are pure and cheap: season_index() loads a season once per request
- * with two queries; for_person() / for_email() are array lookups. Every
+ * with one query (the marks); for_person() / for_email() are array lookups. Every
  * writer calls flush_cache().
  */
 class TeamOversight_Fee_Cover {
