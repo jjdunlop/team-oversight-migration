@@ -1351,18 +1351,29 @@ class TeamOversight_Not_Selected {
      *                   suggests no lower division and no pathway, and its
      *                   more-than-one-team sentence doesn't promise news
      *                   about the other applications; it never names the team,
-     *   suggestions     list of array(label, level, codes): the divisions
-     *                   below THIS team they are eligible for (gender, age
-     *                   rule, date of birth), leaving out every team they
-     *                   applied for (they are already being considered there)
-     *                   and every team that has them Rejected, highest
-     *                   division first, colour variants grouped ("State
-     *                   League 2 Men (Blue or White)"). EMPTY unless can_edit
-     *                   is true and they hold no place, so "suggestions, else
-     *                   pathway" is the whole rule,
-     *   eligible        the same list whatever can_edit says (for previews),
+     *   suggestions     list of array(label, level, codes, applied): what the
+     *                   email lists, from eligible below. While can_edit is
+     *                   true, all of it; while it is false, only the groups
+     *                   already on their application (applied true: they
+     *                   can't add the others). EMPTY when they hold a place,
+     *                   so "suggestions, else pathway" is the whole rule,
+     *   eligible        every division below THIS team they are eligible
+     *                   for (gender, age rule, date of birth), whatever
+     *                   can_edit says (for previews). 1.88.2 (club decision,
+     *                   5 Nov 2026): a team they applied for is listed too,
+     *                   with applied true when every team of the group is on
+     *                   their application; a level that has them Rejected on
+     *                   a team they applied for is out, with every level
+     *                   above it (eligible_lower_divisions()), and a team that
+     *                   has them Rejected is never listed. Highest division
+     *                   first, colour variants grouped ("State League 2 Men
+     *                   (Blue or White)"),
      *   can_edit        bool: applications are open for the season and this
-     *                   application is still pending (editable),
+     *                   application is still pending (editable). The email
+     *                   has the Edit my application button only while this
+     *                   is true and some suggestion is not on their
+     *                   application yet (TeamOversight_Offer_Emails::
+     *                   build_next_steps()),
      *   edit_url        the trial form (TeamOversight_Trial_Emails::get_form_url()),
      *   pathway_kind    'adult' | 'junior' (a date of birth on or after the
      *                   season's U19 cutoff = junior; unknown = adult),
@@ -1396,6 +1407,16 @@ class TeamOversight_Not_Selected {
         $can_edit = (string) $app->application_status === 'pending'
             && class_exists('TeamOversight_Trials') && TeamOversight_Trials::applications_open($season);
 
+        // 1.88.2: an application that can't be edited lists only the divisions already on it (nothing can be added).
+        $suggestions = array();
+        if (!$placed) {
+            foreach ($eligible as $group) {
+                if ($can_edit || !empty($group['applied'])) {
+                    $suggestions[] = $group;
+                }
+            }
+        }
+
         $junior = false;
         if ($dob !== '') {
             $cutoff = TeamOversight_Database::get_dob_cutoff('u19', $season);
@@ -1411,7 +1432,7 @@ class TeamOversight_Not_Selected {
             'applied' => $applied_here,
             'multi' => $applied_here && count($applied) > 1,
             'placed' => $placed,
-            'suggestions' => ($can_edit && !$placed) ? $eligible : array(),
+            'suggestions' => $suggestions,
             'eligible' => $eligible,
             'can_edit' => $can_edit,
             'edit_url' => class_exists('TeamOversight_Trial_Emails') ? TeamOversight_Trial_Emails::get_form_url() : home_url('/'),
@@ -1443,22 +1464,37 @@ class TeamOversight_Not_Selected {
 
     /**
      * The lower divisions an applicant could still try after THIS team
-     * said no, grouped. The baseline is this team's level; candidates are
-     * the season's teams with a higher level number (level 0 = not set is
-     * never a candidate, and a team with no level suggests nothing), that
-     * the player did not apply for (they are already considered there) and
-     * that do not have them Rejected, with a gender that is Mixed or their
-     * competition and an age rule their date of birth meets (an age-ruled
-     * team is not suggested when the date of birth is unknown). A team's
-     * Tentative, Selected or Training Only verdict on a team they did not
-     * apply for changes nothing, so the list never hints at another team's
+     * said no, grouped. 1.88.2 (club decision, 5 Nov 2026): the baseline is
+     * the largest level among THIS team and every team they APPLIED FOR
+     * that has them Rejected, so once a level has turned them down only
+     * the divisions below it are suggested (its other teams, colour
+     * variants included, are out too). A Rejected verdict on a team they
+     * did not apply for never moves the baseline (it answers no
+     * application), though that team itself is never suggested. Candidates
+     * are the season's teams with a level number above the baseline (level
+     * 0 = not set is never a candidate, and a team with no level suggests
+     * nothing), that do not have them Rejected, with a gender that is Mixed
+     * or their competition and an age rule their date of birth meets (an
+     * age-ruled team is not suggested when the date of birth is unknown).
+     * A team they applied for is a candidate too (before 1.88.2 it was left
+     * out, which sent someone turned down by Premier League 1 to State
+     * League when they had also applied for Premier League 2); its group
+     * carries applied true when every team of the group is on their
+     * application. A Tentative, Selected or Training Only verdict changes
+     * nothing, so beyond that rule the list never hints at another team's
      * verdict. Without a competition (no stored answer, no binary profile
      * gender) only Mixed teams qualify.
      */
     private static function eligible_lower_divisions($app, array $config, array $verdicts, array $applied, $dob, $team) {
-        $baseline = isset($config[$team]) ? intval($config[$team]['level']) : 0;
-        if ($baseline <= 0) {
+        $own = isset($config[$team]) ? intval($config[$team]['level']) : 0;
+        if ($own <= 0) {
             return array();
+        }
+        $baseline = $own;
+        foreach ($applied as $code) {
+            if (isset($config[$code], $verdicts[$code]) && $verdicts[$code] === 'rejected') {
+                $baseline = max($baseline, intval($config[$code]['level']));
+            }
         }
         $competition = class_exists('TeamOversight_Trials') ? TeamOversight_Trials::application_competition($app) : null;
         $season = (string) $app->season;
@@ -1466,7 +1502,7 @@ class TeamOversight_Not_Selected {
         $groups = array();
         foreach ($config as $code => $info) {
             $level = intval($info['level']);
-            if ($level <= $baseline || in_array($code, $applied, true) || (isset($verdicts[$code]) && $verdicts[$code] === 'rejected')) {
+            if ($level <= $baseline || (isset($verdicts[$code]) && $verdicts[$code] === 'rejected')) {
                 continue;
             }
             if ($info['gender'] !== 'mixed' && ($competition === null || $info['gender'] !== $competition)) {
@@ -1483,7 +1519,7 @@ class TeamOversight_Not_Selected {
             if (!isset($groups[$key])) {
                 $groups[$key] = array('level' => $level, 'gender' => $info['gender'], 'base' => $base, 'members' => array());
             }
-            $groups[$key]['members'][] = array('code' => $code, 'name' => $info['name'], 'colour' => $colour);
+            $groups[$key]['members'][] = array('code' => $code, 'name' => $info['name'], 'colour' => $colour, 'applied' => in_array($code, $applied, true));
         }
 
         $gender_order = array('mens' => 0, 'womens' => 1, 'mixed' => 2);
@@ -1502,10 +1538,14 @@ class TeamOversight_Not_Selected {
             $members = $group['members'];
             $codes = array();
             $colours = array();
+            $all_applied = true;
             foreach ($members as $m) {
                 $codes[] = $m['code'];
                 if ($m['colour'] !== '') {
                     $colours[] = $m['colour'];
+                }
+                if (!$m['applied']) {
+                    $all_applied = false;
                 }
             }
             if (count($members) === 1 || count($colours) !== count($members)) {
@@ -1514,7 +1554,8 @@ class TeamOversight_Not_Selected {
                 sort($colours);
                 $label = $group['base'] . ' (' . self::join_or($colours) . ')';
             }
-            $out[] = array('label' => $label, 'level' => $group['level'], 'codes' => $codes);
+            // applied: every team of the group is on their application (a group only partly applied for is not).
+            $out[] = array('label' => $label, 'level' => $group['level'], 'codes' => $codes, 'applied' => $all_applied);
         }
         return $out;
     }

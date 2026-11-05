@@ -1226,11 +1226,18 @@ class TeamOversight_Offer_Emails {
     /**
      * The {next_steps} block of "not selected", from
      * TeamOversight_Not_Selected::notice_content() (one team): the divisions
-     * below that team they can still trial for (with a button to edit the
-     * application), else the pathway (adults: the Mixed Training Program and
-     * the Reds Social League; juniors: the Junior Academy, as extra
-     * training). Every sentence is the wording registry's (ns_lower_intro,
-     * ns_lower_outro, ns_pathway_*). Empty when there is nothing to suggest.
+     * below that team they can trial for, else the pathway (adults: the
+     * Mixed Training Program and the Reds Social League; juniors: the Junior
+     * Academy, as extra training). 1.88.2 (club decision, 5 Nov 2026): a
+     * suggestion already on their application (applied) carries the
+     * ns_lower_applied mark. While the application can be edited (can_edit)
+     * every suggestion is listed with ns_lower_outro and the Edit my
+     * application button; when every one listed is already on their
+     * application, or the application can't be edited (then only those are
+     * listed: they can't add the others), the outro is
+     * ns_lower_outro_applied and there is no button. Every sentence is the
+     * wording registry's (ns_lower_*, ns_pathway_*). Empty when there is
+     * nothing to suggest.
      */
     public static function build_next_steps(array $notice) {
         $font = TeamOversight_Email::FONT;
@@ -1238,14 +1245,29 @@ class TeamOversight_Offer_Emails {
         $pathway = (isset($notice['pathway']) && is_array($notice['pathway'])) ? $notice['pathway'] : array();
         $team_name = isset($notice['team_name']) ? (string) $notice['team_name'] : (isset($notice['rejected_teams'][0]) ? (string) $notice['rejected_teams'][0] : '');
         $team_vars = array('{team}' => $team_name !== '' ? $team_name : 'this team');
-        if (!empty($suggestions) && !empty($notice['can_edit'])) {
+        $can_edit = !empty($notice['can_edit']);
+        // What is listed: everything while the application can be edited, else only what is already on it.
+        $listed = array();
+        foreach ($suggestions as $s) {
+            $applied = is_array($s) && !empty($s['applied']);
+            if ($can_edit || $applied) {
+                $listed[] = array('label' => is_array($s) ? (string) $s['label'] : (string) $s, 'applied' => $applied);
+            }
+        }
+        if (!empty($listed)) {
+            $mark = trim(TeamOversight_Offers::wording('ns_lower_applied', $team_vars));
             $labels = array();
-            foreach ($suggestions as $s) {
-                $labels[] = is_array($s) ? (string) $s['label'] : (string) $s;
+            $all_applied = true;
+            foreach ($listed as $s) {
+                $labels[] = $s['label'] . ($s['applied'] && $mark !== '' ? ' ' . $mark : '');
+                if (!$s['applied']) {
+                    $all_applied = false;
+                }
             }
             $intro = TeamOversight_Offers::wording('ns_lower_intro', $team_vars);
-            $outro = TeamOversight_Offers::wording('ns_lower_outro', $team_vars);
-            $url = isset($notice['edit_url']) ? (string) $notice['edit_url'] : '';
+            $outro = TeamOversight_Offers::wording($all_applied ? 'ns_lower_outro_applied' : 'ns_lower_outro', $team_vars);
+            // The button only when there is something to add and they can still add it.
+            $url = ($can_edit && !$all_applied && isset($notice['edit_url'])) ? (string) $notice['edit_url'] : '';
             $html = TeamOversight_Email::paragraph(esc_html($intro), 16, null, '0 0 8px') . self::spaced_html(self::bullets_html($labels))
                 . TeamOversight_Email::paragraph(esc_html($outro), 16, null, '0 0 8px')
                 . ($url !== '' ? TeamOversight_Email::button('Edit my application', $url) : '');
@@ -1323,15 +1345,17 @@ class TeamOversight_Offer_Emails {
             // 1.80.0: one team per email, so it reads differently for a player who applied for one team and one who applied for several.
             return array(
                 'lower' => array('Preview: applied for one team, lower divisions to try', ' (one team, lower divisions to try)'),
-                'multi' => array('Preview: applied for more than one team, lower divisions to try', ' (more than one team, lower divisions to try)'),
+                // 1.88.2: a lower division already on their application is still suggested, with a mark.
+                'multi' => array('Preview: applied for more than one team, lower divisions to try, one already on the application', ' (more than one team, lower divisions to try, one already applied for)'),
                 'adult' => array('Preview: applied for one team, adult, nothing lower to try', ' (one team, adult, nothing lower)'),
                 'multi_adult' => array('Preview: applied for more than one team, adult, nothing lower to try', ' (more than one team, adult, nothing lower)'),
                 'junior' => array('Preview: applied for one team, junior, nothing lower to try', ' (one team, junior, nothing lower)'),
                 'multi_junior' => array('Preview: applied for more than one team, junior, nothing lower to try', ' (more than one team, junior, nothing lower)'),
                 // 1.80.0 review: a player who already holds a place this season (an offer they accepted) gets no other way in.
                 'multi_placed' => array('Preview: applied for more than one team, already has a place this season', ' (more than one team, already has a place)'),
-                // Signed by the coach (Sam Coach) in every shape above; this one shows a team with no coach on file.
-                'no_coach' => array('Preview: applied for one team, no coach on file (signed by the coaching team)', ' (no coach on file)'),
+                // Signed by the coach (Sam Coach) in every shape above; this one shows a team with no coach on file,
+                // and (1.88.2) a player whose lower divisions are all already on their application: no button.
+                'no_coach' => array('Preview: applied for more than one team, every lower division already on the application, no coach on file (signed by the coaching team)', ' (no coach on file, lower divisions already applied for)'),
             );
         }
         if (in_array($key, self::early_variants(), true)) {
@@ -1390,10 +1414,11 @@ class TeamOversight_Offer_Emails {
             $facts['link'] = self::coach_portal_url();
         }
         if ($key === 'not_selected') {
-            // The sample was turned down by one team; the multi variants applied for another team too (never named, never judged).
+            // The sample was turned down by one team; the multi variants (and no_coach) applied for another team too (never judged; 1.88.2: a lower one is listed with the applied mark).
             $facts['team'] = 'State League 2 Men';
             $facts['rejected_teams'] = 'State League 2 Men';
-            $facts['multi'] = strpos((string) $variant, 'multi') === 0;
+            // 1.88.2: the no-coach shape applied for the lower divisions too, so it is more than one team as well.
+            $facts['multi'] = strpos((string) $variant, 'multi') === 0 || $variant === 'no_coach';
             $facts['placed'] = $variant === 'multi_placed';
             $facts['link'] = TeamOversight_Trial_Emails::get_form_url();
             // Signed by the sample coach, except the shape for a team with no coach on file.
@@ -1483,13 +1508,17 @@ class TeamOversight_Offer_Emails {
      * junior pathway, each for a player who applied for one team and for one
      * who applied for more than one ('multi...'), 'multi_placed' (a player
      * who already holds a place this season: no next steps at all), and
-     * 'no_coach' (lower divisions; only its sign-off differs).
+     * 'no_coach' (signed by the coaching team). 1.88.2: in 'multi' one of
+     * the lower divisions is already on the application (the
+     * ns_lower_applied mark, still with the button), and in 'no_coach' all
+     * of them are (ns_lower_outro_applied, no button).
      */
     private static function sample_notice($variant) {
         $variant = (string) $variant;
-        $multi = strpos($variant, 'multi') === 0;
-        $shape = $multi ? (string) substr($variant, 6) : $variant;
-        // The no-coach shape differs only in its sign-off: lower divisions to try, like the first.
+        $applied = $variant === 'multi' ? 'one' : ($variant === 'no_coach' ? 'all' : '');
+        $multi = strpos($variant, 'multi') === 0 || $variant === 'no_coach';
+        $shape = strpos($variant, 'multi') === 0 ? (string) substr($variant, 6) : $variant;
+        // The no-coach shape has lower divisions to try, like the first.
         $shape = ($shape === '' || $shape === 'no_coach') ? 'lower' : $shape;
         $notice = array(
             'application_id' => 0,
@@ -1508,9 +1537,10 @@ class TeamOversight_Offer_Emails {
         );
         if ($shape === 'lower') {
             $notice['suggestions'] = array(
-                array('label' => 'State League 3 Men (Red or White)', 'level' => 6, 'codes' => array()),
-                array('label' => 'State League 3 Mixed', 'level' => 6, 'codes' => array()),
+                array('label' => 'State League 3 Men (Red or White)', 'level' => 6, 'codes' => array(), 'applied' => $applied === 'all'),
+                array('label' => 'State League 3 Mixed', 'level' => 6, 'codes' => array(), 'applied' => $applied !== ''),
             );
+            $notice['eligible'] = $notice['suggestions'];
             return $notice;
         }
         if ($shape === 'placed') {
@@ -2675,7 +2705,8 @@ class TeamOversight_Offer_Emails {
      * "Not selected" is sent in its eight shapes (one team or more than one
      * applied for; lower divisions, adult pathway, junior; a player who
      * already has a place this season; and a team with no coach on file,
-     * signed by the coaching team). Returns a list of
+     * signed by the coaching team, whose player already applied for every
+     * lower division suggested). Returns a list of
      * array(key, label, ok).
      */
     public static function send_test_emails($admin_user_id) {

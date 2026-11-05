@@ -185,12 +185,19 @@ class TeamOversight_Offer_Wording {
             'You applied for more than one team, and this message is only about {team}. It doesn\'t change anything about your other applications.',
             $ns_team, 3);
         $c['ns_lower_intro'] = self::item('email', '"Not selected" email: lower divisions to try (above the list)',
-            'The {next_steps} of the "not selected" email, above the list of lower divisions they can still trial for (below that team, by age and gender, in division order, leaving out teams they already applied for or were turned down by).',
+            'The {next_steps} of the "not selected" email, above the list of lower divisions they can trial for (below that team, by age and gender, in division order). A division already on their application stays in the list with the "already on your application" mark; a level that turned them down on a team they applied for is left out, with every level above it, and so is any team that turned them down. Once their application can\'t be edited, only the divisions already on it are listed.',
             'You can still try for a lower division than {team}. Based on your age and gender you\'re eligible to trial for:',
             $ns_team, 2);
         $c['ns_lower_outro'] = self::item('email', '"Not selected" email: lower divisions to try (under the list)',
-            'Under that list, above the Edit my application button.',
+            'Under that list, above the Edit my application button, when at least one division in it is not on their application yet and they can still edit it.',
             'If you\'d like to be considered, edit your application to add one.', array(), 2);
+        // 1.88.2 (club decision, 5 Nov 2026): a lower division they already applied for is still suggested, with a mark.
+        $c['ns_lower_applied'] = self::item('email', '"Not selected" email: a division already on their application',
+            'After a division in that list when every team of it is already on their application.',
+            '(already on your application)', array(), 1);
+        $c['ns_lower_outro_applied'] = self::item('email', '"Not selected" email: lower divisions to try, all already applied for',
+            'Under that list instead of the line above when every division in it is already on their application, or when their application can no longer be edited (then only those divisions are listed). There is no Edit my application button.',
+            'You don\'t need to change anything on your application.', array(), 1);
         $c['ns_pathway_two'] = self::item('email', '"Not selected" email: other ways in (adults, two pages)',
             'The {next_steps} of the "not selected" email when there is no lower division to suggest, above the Mixed Training Program and Reds Social League links.',
             'If you\'d still like to play with us this season, there are two other ways in:', array(), 2);
