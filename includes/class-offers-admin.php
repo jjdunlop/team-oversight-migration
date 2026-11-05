@@ -317,7 +317,7 @@ class TeamOversight_Offers_Admin {
         if (!is_array($cover) || empty($cover['reason'])) {
             return '';
         }
-        return '<br>' . self::chip(($cover['source'] === 'life' ? 'Fee covered automatically: ' : 'Fee covered: ') . $cover['reason'], 'green');
+        return '<br>' . self::chip('Fee covered: ' . $cover['reason'], 'green');
     }
 
     /** "Name (TST1 playing)" as plain text, for the flash summary. */

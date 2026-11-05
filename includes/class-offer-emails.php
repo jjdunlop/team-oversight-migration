@@ -475,7 +475,7 @@ class TeamOversight_Offer_Emails {
                 'label' => 'Offer (playing fee covered by the club)',
                 'type' => 'offer',
                 'switch' => false,
-                'when' => 'The committee approves an offer for a player whose playing fee the club covers (marked on their trial application, or a life member).',
+                'when' => 'The committee approves an offer for a player whose playing fee the club covers (marked on their trial application).',
                 'who' => 'The same as the offer.',
                 'program' => 'Offers · {season}',
                 'subject' => 'Your offer to join {team} for {season}',
@@ -670,7 +670,7 @@ class TeamOversight_Offer_Emails {
                 'label' => 'Offer changed (fee cover ended)',
                 'type' => 'offer_changed',
                 'switch' => false,
-                'when' => 'An administrator presses Email the new offer after the club\'s cover of a player\'s playing fee ended while their offer was open (the mark cleared, or their life membership revoked).',
+                'when' => 'An administrator presses Email the new offer after the club\'s cover of a player\'s playing fee ended while their offer was open (the mark cleared).',
                 'who' => 'The same as the offer.',
                 'program' => 'Offers · {season}',
                 'subject' => 'Your offer to join {team} for {season} has changed',
@@ -953,10 +953,10 @@ class TeamOversight_Offer_Emails {
             'held_cents' => 0, 'kind' => '', 'overdue_date' => '', 'rejected_teams' => '', 'multi' => false, 'placed' => false,
             'early' => false, 'early_note' => '', 'fee_limit' => '',
             'extras' => array(),
-            // 1.88.0: the club covers the player's playing fee (cover), why (cover_reason; source mark or life), the
+            // 1.88.0: the club covers the player's playing fee (cover), why (cover_reason; source always mark), the
             // supporter fee quoted (supporter_fee), whether that is the supporter upper limit still to be set
             // (cover_limit), whether the season's supporter fee is already paid (cover_paid: an offer for a second team),
-            // and for "offer changed" why the cover ended (change_kind: cleared or life_ended).
+            // and for "offer changed" why the cover ended (change_kind: cleared).
             'cover' => false, 'cover_reason' => '', 'cover_source' => '', 'cover_limit' => false, 'supporter_fee' => '',
             'cover_paid' => false, 'change_kind' => '', 'fee_month' => 'January',
             // 1.88.0 review: the season's fees are released (the covered limit note then says nothing about when).
@@ -1010,12 +1010,8 @@ class TeamOversight_Offer_Emails {
             $amount = (string) $f['supporter_fee'];
             $cover['{cover_reason}'] = (string) $f['cover_reason'];
             $cover['{supporter_fee}'] = $amount;
-            $cover['{cover_lead}'] = $f['cover_source'] === 'life'
-                ? TeamOversight_Offers::wording('cover_lead_life', array('{season}' => $f['season'], '{amount}' => $amount))
-                : TeamOversight_Offers::wording('cover_lead_mark', array('{reason}' => (string) $f['cover_reason'], '{season}' => $f['season'], '{amount}' => $amount));
-            $cover['{cover_why}'] = $f['cover_source'] === 'life'
-                ? TeamOversight_Offers::wording('email_cover_why_life', array('{season}' => $f['season']))
-                : TeamOversight_Offers::wording('email_cover_why_mark', array('{reason}' => (string) $f['cover_reason'], '{season}' => $f['season']));
+            $cover['{cover_lead}'] = TeamOversight_Offers::wording('cover_lead_mark', array('{reason}' => (string) $f['cover_reason'], '{season}' => $f['season'], '{amount}' => $amount));
+            $cover['{cover_why}'] = TeamOversight_Offers::wording('email_cover_why_mark', array('{reason}' => (string) $f['cover_reason'], '{season}' => $f['season']));
             $cover['{cover_preheader}'] = !empty($f['cover_paid']) ? $w('email_cover_preheader_paid', array('{season}' => $f['season'])) : $w('email_cover_preheader');
             if ($f['state'] === 'sent') {
                 if (!empty($f['cover_paid'])) {
@@ -1039,7 +1035,7 @@ class TeamOversight_Offer_Emails {
                 $cover['{cover_settled}'] = TeamOversight_Offers::wording('email_cover_whole_fee', array('{season}' => $f['season']));
             }
         } elseif ($f['change_kind'] !== '') {
-            $cover['{change_line}'] = TeamOversight_Offers::wording($f['change_kind'] === 'life_ended' ? 'email_changed_life_ended' : 'email_changed_cleared', array('{season}' => $f['season'], '{team}' => $f['team']));
+            $cover['{change_line}'] = TeamOversight_Offers::wording('email_changed_cleared', array('{season}' => $f['season'], '{team}' => $f['team']));
         }
 
         return array(
@@ -1296,12 +1292,10 @@ class TeamOversight_Offer_Emails {
             'offer_covered' => array(
                 'lower' => array('Preview: Premier League MVP, the supporter fee is set', ' (MVP)'),
                 'limit' => array('Preview: Premier League MVP, quoted on the supporter upper limit', ' (MVP, upper limit)'),
-                'life' => array('Preview: life member', ' (life member)'),
                 'paid' => array('Preview: a second team, the supporter fee already paid', ' (second team, already paid)'),
             ),
             'reminder_covered' => array(
                 'lower' => array('Preview: Premier League MVP', ' (MVP)'),
-                'life' => array('Preview: life member', ' (life member)'),
             ),
             'reminder_accepted_covered' => array(
                 'lower' => array('Preview: Premier League MVP', ' (MVP)'),
@@ -1312,11 +1306,9 @@ class TeamOversight_Offer_Emails {
             ),
             'offer_changed' => array(
                 'lower' => array('Preview: the committee cleared the cover', ' (cover cleared)'),
-                'life_ended' => array('Preview: the life membership ended', ' (life membership ended)'),
             ),
             'offer_changed_covered' => array(
                 'lower' => array('Preview: marked Premier League MVP after the offer was sent', ' (MVP)'),
-                'life' => array('Preview: became a life member after the offer was sent', ' (life member)'),
             ),
         );
     }
@@ -1437,16 +1429,15 @@ class TeamOversight_Offer_Emails {
             $facts['fee_limit'] = '';
             if ($key === 'offer_changed') {
                 // An ordinary offer again (the cover ended), quoted on the real fee.
-                $facts['change_kind'] = $variant === 'life_ended' ? 'life_ended' : 'cleared';
+                $facts['change_kind'] = 'cleared';
                 $facts['fee'] = '$480.00';
                 $facts['deposit'] = '$48.00';
             } else {
-                $life = $variant === 'life';
                 $limit = $variant === 'limit';
                 $amount = $limit ? '$40.00' : '$35.00';
                 $facts['cover'] = true;
-                $facts['cover_source'] = $life ? 'life' : 'mark';
-                $facts['cover_reason'] = $life ? 'Life member' : 'Premier League MVP ' . (intval($facts['season']) - 1);
+                $facts['cover_source'] = 'mark';
+                $facts['cover_reason'] = 'Premier League MVP ' . (intval($facts['season']) - 1);
                 $facts['cover_limit'] = $limit;
                 $facts['cover_paid'] = $variant === 'paid';
                 $facts['supporter_fee'] = $amount;
@@ -1681,7 +1672,7 @@ class TeamOversight_Offer_Emails {
             $facts['fees_released'] = TeamOversight_Fees::fees_released($offer->season);
             $facts['cover_paid'] = $offer->state === 'sent' && TeamOversight_Offers::remaining_cents($offer) <= 0;
         } elseif ($type === 'offer_changed') {
-            $facts['change_kind'] = class_exists('TeamOversight_Fee_Cover') && TeamOversight_Fee_Cover::life_ended($offer->user_id, $offer->season) ? 'life_ended' : 'cleared';
+            $facts['change_kind'] = 'cleared';
         }
         return $facts;
     }

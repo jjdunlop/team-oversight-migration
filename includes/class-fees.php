@@ -530,8 +530,8 @@ class TeamOversight_Fees {
     //     handles that elsewhere — so someone who only coaches pays the
     //     supporter fee); team manager as a PLAYING MEMBER.
     //  1b. 1.88.0, 2027 on: a person whose playing fee the club covers (a
-    //     Premier League MVP marked on their trial application, a life
-    //     member: TeamOversight_Fee_Cover) has their playing member and
+    //     Premier League MVP marked on their trial application:
+    //     TeamOversight_Fee_Cover) has their playing member and
     //     training only buckets charged at the SUPPORTER rate too, for the
     //     whole season; their team manager places are still playing members.
     //  2. The fee is the HIGHEST bucket. Buckets never add up.
@@ -1563,7 +1563,7 @@ class TeamOversight_Fees {
      * $fee_cover (1.88.0, timeline seasons only): null (default, every
      * existing caller) looks the person's cover up
      * (TeamOversight_Fee_Cover::for_email(): the committee's mark on their
-     * trial application, or a life membership); false prices them as not
+     * trial application); false prices them as not
      * covered; an array(reason, source) prices them as covered. A covered
      * person's playing and Training Only places are charged at the supporter
      * column, and the result then carries 'fee_cover' => array(reason,
@@ -2238,8 +2238,8 @@ class TeamOversight_Fees {
 
     /**
      * 1.88.0: work a person's season fee out again because something other
-     * than their teams changed (the club's fee cover was set or cleared, a
-     * life membership granted or revoked, an account merge). The same path as
+     * than their teams changed (the club's fee cover was set or cleared, an
+     * account merge). The same path as
      * a team change (recalculate_after_assignment_change(): no invoice is
      * created for someone who has none, nothing is re-priced before the fee
      * release, a fee set with Edit Fee is kept and its log line names the

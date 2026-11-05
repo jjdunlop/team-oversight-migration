@@ -1005,9 +1005,9 @@ class TeamOversight_Account_Merge {
             }
         }
 
-        // 1.88.0: a merged account that brings the club's fee cover (a marked 2027+ trial application, or a life
-        // membership) covers the kept account once merged. A warning, never a blocker: the merge itself changes no
-        // amount; straight after it the kept account's open offers are re-quoted and its fee worked out again.
+        // 1.88.0: a merged account that brings the club's fee cover (a marked 2027+ trial application) covers the
+        // kept account once merged. A warning, never a blocker: the merge itself changes no amount; straight after
+        // it the kept account's open offers are re-quoted and its fee worked out again.
         if (class_exists('TeamOversight_Fee_Cover')) {
             foreach (self::fee_cover_warnings($keep_id, array_keys($extras)) as $line) {
                 $warnings[] = $line;
@@ -1048,8 +1048,8 @@ class TeamOversight_Account_Merge {
     /**
      * 1.88.0: plan()'s warnings when a merged account brings the club's fee
      * cover (TeamOversight_Fee_Cover) that the kept account doesn't have: a
-     * marked trial application for a 2027+ season, or a life-member grant
-     * reaching 2027 or later. Reads only. Plain sentences, account ids only.
+     * marked trial application for a 2027+ season (1.88.1: life membership
+     * brings no cover). Reads only. Plain sentences, account ids only.
      */
     private static function fee_cover_warnings($keep_id, array $merge_ids) {
         global $wpdb;
@@ -1070,18 +1070,6 @@ class TeamOversight_Account_Merge {
                 continue;
             }
             $out[] = '#' . intval($m->user_id) . '\'s ' . $season . ' trial application carries the club\'s fee cover (' . $m->fee_cover_reason . '). After the merge it covers #' . intval($keep_id) . ': their open ' . $season . ' offers are re-quoted and their ' . $season . ' fee is worked out again straight after the merge.';
-        }
-        // A grant counts for a season when it is held on 31 December of it (TeamOversight_Fee_Cover::season_index()).
-        $life = $wpdb->get_col($wpdb->prepare(
-            "SELECT DISTINCT user_id FROM {$wpdb->prefix}team_memberships WHERE user_id IN ($in) AND tier = %s AND end_date >= %s AND end_date >= start_date",
-            TeamOversight_Memberships::TIER_LIFE, TeamOversight_Fee_Cover::year_end($from)
-        ));
-        $year = (string) max(intval($from), intval(current_time('Y')));
-        foreach ((array) $life as $uid) {
-            if (TeamOversight_Fee_Cover::life_in($keep_id, $year)) {
-                continue;
-            }
-            $out[] = '#' . intval($uid) . ' is a life member, so the club covers their playing fee from ' . $from . '. After the merge it covers #' . intval($keep_id) . ': their open offers are re-quoted and their fees worked out again straight after the merge.';
         }
         return $out;
     }

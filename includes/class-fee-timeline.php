@@ -2653,10 +2653,10 @@ class TeamOversight_Fee_Timeline {
             array_splice($lines, 1, 0, array(array('Cap', '<span class="murvc-muted">' . esc_html($cap_text) . '</span>')));
         }
 
-        // 1.88.0: the club covers this person's playing fee for the season (a mark on their trial application, or a life membership).
+        // 1.88.0: the club covers this person's playing fee for the season (a mark on their trial application).
         if (!empty($breakdown['fee_cover']['reason'])) {
             $cover_text = 'Fee covered by the club for ' . $season . ': ' . $breakdown['fee_cover']['reason']
-                . ($breakdown['fee_cover']['source'] === 'life' ? ', automatic' : '') . '. Playing and Training Only places are charged at the supporter fee.';
+                . '. Playing and Training Only places are charged at the supporter fee.';
             array_splice($lines, 1, 0, array(array('Fee cover', '<span class="murvc-muted">' . esc_html($cover_text) . '</span>')));
         }
 

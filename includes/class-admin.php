@@ -2054,7 +2054,7 @@ class TeamOversight_Admin {
                             <th>Positions</th>
                             <th title="VV registration type: worked out from the application (Youth State League at another club counts as a free agent), or set here by an admin">Registration</th>
                             <?php if ($fee_cover_on): ?>
-                                <th title="The club covers this player's playing fee for the season (a Premier League MVP, say): they pay the supporter fee for their category, their offer quotes it and the deposit is all of it. Life members are covered automatically.">Fee cover</th>
+                                <th title="The club covers this player's playing fee for the season (a Premier League MVP, say): they pay the supporter fee for their category, their offer quotes it and the deposit is all of it. Life members pay their playing fee as usual.">Fee cover</th>
                             <?php endif; ?>
                             <th>Status</th>
                             <th>Payment</th>

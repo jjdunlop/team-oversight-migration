@@ -5680,8 +5680,7 @@ class TeamOversight_Coach_Portal {
 
     /**
      * 1.88.0: the read-only badge of a player whose playing fee the club
-     * covers ("Fee covered: Premier League MVP 2026", or "Fee covered: Life
-     * member"), for a season that has offers. Nothing to press, no figure
+     * covers ("Fee covered: Premier League MVP 2026"), for a season that has offers. Nothing to press, no figure
      * (the reason can't hold one). '' for everyone else. An index lookup:
      * no query per card.
      */

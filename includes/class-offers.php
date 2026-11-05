@@ -825,7 +825,7 @@ class TeamOversight_Offers {
                     $place = strtolower(TeamOversight_Fees::role_label($s['top']['role'])) . ' place on ' . $s['top']['team'];
                     $out['code'] = 'cover_conflict';
                     $out['error_public'] = self::wording('cell_cover_conflict');
-                    $out['error_admin'] = 'This player\'s fee is covered (' . $cover['reason'] . '), but their ' . $place . ' is charged as a ' . strtolower(TeamOversight_Fees::role_label($s['top']['charged_as'])) . ', so this offer can\'t quote the supporter fee. Stop or change that place on the Fee timeline' . ($cover['source'] === TeamOversight_Fee_Cover::SOURCE_LIFE ? '' : ', or clear the cover') . '.';
+                    $out['error_admin'] = 'This player\'s fee is covered (' . $cover['reason'] . '), but their ' . $place . ' is charged as a ' . strtolower(TeamOversight_Fees::role_label($s['top']['charged_as'])) . ', so this offer can\'t quote the supporter fee. Stop or change that place on the Fee timeline, or clear the cover.';
                     return $out;
                 }
             }
@@ -2937,8 +2937,7 @@ class TeamOversight_Offers {
     // An offer's figures are fixed when it is approved, and a fee matrix,
     // limit or settings change never moves them. The ONE exception is a
     // change of the player's fee cover for the season (a mark set, its
-    // reason changed or cleared on Trial Applications; a life membership
-    // granted or revoked; an account merge or its undo; the daily check
+    // reason changed or cleared on Trial Applications; an account merge or its undo; the daily check
     // finding the stored cover differs from the live one): a sent or
     // accepted offer is re-quoted at once (TeamOversight_Fee_Cover::
     // sync_person() and reconcile() call requote()). Nobody is emailed: an

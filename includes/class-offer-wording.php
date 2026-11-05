@@ -45,7 +45,7 @@ class TeamOversight_Offer_Wording {
     public static function groups() {
         return array(
             'early' => array('Early Offer and the fee', 'What an Early Offer is, and how the fee is described before it is set.'),
-            'cover' => array('Fee covered by the club', 'What a player whose playing fee the club covers reads: a Premier League MVP the committee marks on their trial application, or a life member (automatic). Their offer quotes the supporter fee and the deposit is all of it.'),
+            'cover' => array('Fee covered by the club', 'What a player whose playing fee the club covers reads: a Premier League MVP the committee marks on their trial application. Their offer quotes the supporter fee and the deposit is all of it.'),
             'policy' => array('Money policy', 'What happens to a deposit. These sentences are quoted by the commitments list and by the notes on a withdrawal, a decline and a finished offer, so a change here reaches all of them.'),
             'email' => array('Sentences used inside the offer emails', 'The short sentences the email wording fills in with {reply_sentence}, {deposit_sentence}, {deposit_status}, {reason_line}, {deposit_line}, {deposit_note} and {overdue_what}, and the "not selected" email\'s {other_teams}, its suggestions for what to do next and its sign-off ({reply_line}, {coach_title}, and {coach_name} when no coach can be named).'),
             'page' => array('The offer page', 'What the player reads on their offer page, in the deposit box, in the offers banner at the top of the Player Checklist, and on the Player Checklist once they have accepted an offer.'),
@@ -500,10 +500,6 @@ class TeamOversight_Offer_Wording {
             'The covered offer email, its reminders, the "offer changed" email and the box at the top of the offer page, for a player the committee marked on their trial application.',
             'Congratulations again on being named {reason}. The club is covering your {season} playing fee, so you only pay the supporter fee of {amount}.',
             array_merge(array('{reason}' => 'the reason the committee typed, e.g. Premier League MVP 2026'), $season, $amount), 3);
-        $c['cover_lead_life'] = self::item('cover', 'Covered as a life member: the opening sentence',
-            'The same places, for a life member of the club (covered automatically).',
-            'As a life member of the club, you don\'t pay a playing fee for {season}. You only pay the supporter fee of {amount}.',
-            array_merge($season, $amount), 3);
         $c['cover_limit_note'] = self::item('cover', 'Covered, quoted on the supporter upper limit',
             'Under the opening sentence when the supporter fee wasn\'t entered yet, so the offer quotes the supporter upper limit (the covered wording has no Early Offer text).',
             'The {season} supporter fee is set in {fee_month}. You pay {amount} now, the most it can be. If it\'s set lower, the difference stays on your account as credit.',
@@ -572,19 +568,12 @@ class TeamOversight_Offer_Wording {
             '{cover_why} in the covered "you\'re locked in" email, for a player the committee marked.',
             'The club is covering your {season} playing fee because you were named {reason}.',
             array_merge($season, array('{reason}' => 'the reason, e.g. Premier League MVP 2026')), 2);
-        $c['email_cover_why_life'] = self::item('email', 'Covered and locked in: why (life member)',
-            'The same for a life member.',
-            'As a life member of the club, you don\'t pay a playing fee for {season}.', $season, 2);
         $c['email_cover_whole_fee'] = self::item('email', 'Covered offer: the payment is the whole fee',
             '{cover_settled} in the covered offer and locked-in emails, when the quote is the supporter fee itself.',
             'That payment is your whole {season} fee.', $season, 1);
         $c['email_changed_cleared'] = self::item('email', 'Offer changed: the club no longer covers the fee',
             '{change_line} of the "offer changed" email after the committee cleared the mark.',
             'The club is no longer covering your {season} playing fee, so your offer to join {team} now quotes the playing fee.',
-            array_merge($season, $team_vars), 2);
-        $c['email_changed_life_ended'] = self::item('email', 'Offer changed: the life membership ended',
-            '{change_line} of the "offer changed" email after a life membership was revoked.',
-            'Your life membership has ended, so your {season} offer to join {team} now quotes the playing fee.',
             array_merge($season, $team_vars), 2);
 
         $c['page_cover_consent'] = self::item('page', 'Covered offer: above the Accept button',
@@ -662,7 +651,7 @@ class TeamOversight_Offer_Wording {
             'Can\'t send yet: the committee needs to check this player\'s fee first.', array(), 1);
         $c['cover_badge'] = self::item('coach', 'The covered player\'s badge',
             'On the player\'s card in the coach portal (applicants, confirmed players and the team list), read only.',
-            'Fee covered: {reason}', array('{reason}' => 'the reason, e.g. Premier League MVP 2026, or Life member'), 1);
+            'Fee covered: {reason}', array('{reason}' => 'the reason, e.g. Premier League MVP 2026'), 1);
         $c['requote_why_set'] = self::item('coach', 'Offer changed: why (the fee is now covered)',
             'The {why} of the two lines below.', 'fee covered: {reason}', array('{reason}' => 'the reason, e.g. Premier League MVP 2026'), 1);
         $c['requote_why_cleared'] = self::item('coach', 'Offer changed: why (the cover ended)',

@@ -484,7 +484,7 @@ class TeamOversight_Offers_Player {
                     <?php
                     $cover_amount = TeamOversight_Offers::money($offer->quote_released !== null ? $offer->quote_released : $view->quote_amount);
                     $cover_vars = array('{reason}' => $cover['reason'], '{season}' => $offer->season, '{amount}' => $cover_amount, '{fee_month}' => TeamOversight_Offers::fee_month($offer->season));
-                    $cover_text = TeamOversight_Offers::wording($cover['source'] === 'life' ? 'cover_lead_life' : 'cover_lead_mark', $cover_vars);
+                    $cover_text = TeamOversight_Offers::wording('cover_lead_mark', $cover_vars);
                     if ($offer->quote_basis === 'upper' && $offer->quote_released === null) {
                         // 1.88.0 review: "You paid" once locked in, and no "set in January" once the fees are out (as in the emails).
                         $note_key = $state === TeamOversight_Offers::LOCKED_IN ? 'cover_limit_note_paid' : 'cover_limit_note';
