@@ -1352,11 +1352,16 @@ class TeamOversight_Not_Selected {
      *                   more-than-one-team sentence doesn't promise news
      *                   about the other applications; it never names the team,
      *   suggestions     list of array(label, level, codes, applied): what the
-     *                   email lists, from eligible below. While can_edit is
-     *                   true, all of it; while it is false, only the groups
-     *                   already on their application (applied true: they
-     *                   can't add the others). EMPTY when they hold a place,
-     *                   so "suggestions, else pathway" is the whole rule,
+     *                   email lists. While can_edit is true, all of eligible
+     *                   below; while it is false, only the teams already on
+     *                   their application (they can't add the others),
+     *                   grouped among themselves, so every group has applied
+     *                   true and a colour group they partly applied for is
+     *                   narrowed to the teams on it ("State League 3 Men
+     *                   Red"); a verdict on a team they did not apply for
+     *                   never changes it (1.88.2 review). EMPTY when they
+     *                   hold a place, so "suggestions, else pathway" is the
+     *                   whole rule,
      *   eligible        every division below THIS team they are eligible
      *                   for (gender, age rule, date of birth), whatever
      *                   can_edit says (for previews). 1.88.2 (club decision,
@@ -1407,14 +1412,12 @@ class TeamOversight_Not_Selected {
         $can_edit = (string) $app->application_status === 'pending'
             && class_exists('TeamOversight_Trials') && TeamOversight_Trials::applications_open($season);
 
-        // 1.88.2: an application that can't be edited lists only the divisions already on it (nothing can be added).
+        // 1.88.2: an application that can't be edited lists only the teams already on it (nothing can be added), grouped
+        // among themselves, so a colour group partly applied for is narrowed to the teams on it and a verdict on a team
+        // they did not apply for never changes what is listed (1.88.2 review).
         $suggestions = array();
         if (!$placed) {
-            foreach ($eligible as $group) {
-                if ($can_edit || !empty($group['applied'])) {
-                    $suggestions[] = $group;
-                }
-            }
+            $suggestions = $can_edit ? $eligible : self::eligible_lower_divisions($app, $config, $verdicts, $applied, $dob, $team, true);
         }
 
         $junior = false;
@@ -1483,9 +1486,13 @@ class TeamOversight_Not_Selected {
      * application. A Tentative, Selected or Training Only verdict changes
      * nothing, so beyond that rule the list never hints at another team's
      * verdict. Without a competition (no stored answer, no binary profile
-     * gender) only Mixed teams qualify.
+     * gender) only Mixed teams qualify. With $only_applied true (an
+     * application that can't be edited) only the candidates already on
+     * their application are kept, grouped among themselves, so every group
+     * returned has applied true and a colour variant they did not apply for
+     * (whatever its verdict) can neither widen nor drop the group.
      */
-    private static function eligible_lower_divisions($app, array $config, array $verdicts, array $applied, $dob, $team) {
+    private static function eligible_lower_divisions($app, array $config, array $verdicts, array $applied, $dob, $team, $only_applied = false) {
         $own = isset($config[$team]) ? intval($config[$team]['level']) : 0;
         if ($own <= 0) {
             return array();
@@ -1503,6 +1510,10 @@ class TeamOversight_Not_Selected {
         foreach ($config as $code => $info) {
             $level = intval($info['level']);
             if ($level <= $baseline || (isset($verdicts[$code]) && $verdicts[$code] === 'rejected')) {
+                continue;
+            }
+            // A closed application: only the teams already on it, grouped among themselves (1.88.2 review).
+            if ($only_applied && !in_array($code, $applied, true)) {
                 continue;
             }
             if ($info['gender'] !== 'mixed' && ($competition === null || $info['gender'] !== $competition)) {

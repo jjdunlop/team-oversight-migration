@@ -185,7 +185,7 @@ class TeamOversight_Offer_Wording {
             'You applied for more than one team, and this message is only about {team}. It doesn\'t change anything about your other applications.',
             $ns_team, 3);
         $c['ns_lower_intro'] = self::item('email', '"Not selected" email: lower divisions to try (above the list)',
-            'The {next_steps} of the "not selected" email, above the list of lower divisions they can trial for (below that team, by age and gender, in division order). A division already on their application stays in the list with the "already on your application" mark; a level that turned them down on a team they applied for is left out, with every level above it, and so is any team that turned them down. Once their application can\'t be edited, only the divisions already on it are listed.',
+            'The {next_steps} of the "not selected" email, above the list of lower divisions they can trial for (below that team, by age and gender, in division order). A division already on their application stays in the list with the "already on your application" mark; a level that turned them down on a team they applied for is left out, with every level above it, and so is any team that turned them down. Once their application can\'t be edited, only the teams already on it are listed.',
             'You can still try for a lower division than {team}. Based on your age and gender you\'re eligible to trial for:',
             $ns_team, 2);
         $c['ns_lower_outro'] = self::item('email', '"Not selected" email: lower divisions to try (under the list)',
@@ -196,7 +196,7 @@ class TeamOversight_Offer_Wording {
             'After a division in that list when every team of it is already on their application.',
             '(already on your application)', array(), 1);
         $c['ns_lower_outro_applied'] = self::item('email', '"Not selected" email: lower divisions to try, all already applied for',
-            'Under that list instead of the line above when every division in it is already on their application, or when their application can no longer be edited (then only those divisions are listed). There is no Edit my application button.',
+            'Under that list, in place of the "lower divisions to try (under the list)" line, when every division in it is already on their application, or when their application can no longer be edited (then only the teams already on it are listed). There is no Edit my application button.',
             'You don\'t need to change anything on your application.', array(), 1);
         $c['ns_pathway_two'] = self::item('email', '"Not selected" email: other ways in (adults, two pages)',
             'The {next_steps} of the "not selected" email when there is no lower division to suggest, above the Mixed Training Program and Reds Social League links.',
@@ -419,11 +419,14 @@ class TeamOversight_Offer_Wording {
             'Rejected for this team and not sent the "not selected" email yet. Nothing is sent until you press Send "not selected" email on their card (or send them all at once). Players who can\'t be emailed yet, or who already have a place this season, aren\'t counted.', array(), 2);
         $c['ns_button'] = self::item('coach', 'The Send "not selected" email button', 'On a Rejected player\'s card (the team\'s coaches and committee with edit access).',
             'Send "not selected" email', array(), 1);
+        // 1.88.2 (club decision, 5 Nov 2026): the email can now list a lower division already on the application, so
+        // ns_confirm, ns_hint_list, ns_done and ns_bulk_hint promise no other team's verdict or offer instead of
+        // promising nothing about any other team.
         $c['ns_confirm'] = self::item('coach', 'Confirm: Send "not selected" email', 'The box that asks before that button sends.',
-            'Email {player} that they weren\'t selected for {team}? The email is only about {team}: it says nothing about any other team they applied for. Replies go to you if you coach {team} (else its head coach), and all of {team}\'s coaches are copied in. It can only be sent once.',
+            'Email {player} that they weren\'t selected for {team}? The email is only about {team}. It can list lower divisions they could still try, including ones already on their application, but it never gives any other team\'s verdict or offer. Replies go to you if you coach {team} (else its head coach), and all of {team}\'s coaches are copied in. It can only be sent once.',
             array_merge($team, array('{player}' => 'the player\'s name')), 3);
         $c['ns_hint_list'] = self::item('coach', 'Trial applicants: the hint about Rejected players', 'In the hint above the trial applicants list.',
-            'A Rejected player is told nothing until someone presses Send "not selected" email on their card. That email is about your team only and says nothing about any other team they applied for. It is only for players who applied for your team.', array(), 3);
+            'A Rejected player is told nothing until someone presses Send "not selected" email on their card. That email is about your team only. It may suggest lower divisions, but it never says what another team decided or offered. It is only for players who applied for your team.', array(), 3);
         $c['ns_hint_rejected'] = self::item('coach', 'After marking a player Rejected', 'Added to the message a coach sees after choosing Rejected.',
             'Nothing is sent to them: press Send "not selected" email on their card when you want to tell them.', array(), 2);
         $c['ns_untold'] = self::item('coach', 'Card: Rejected, not told yet', 'The status line of a Rejected player\'s card before anyone has sent the email.',
@@ -471,7 +474,7 @@ class TeamOversight_Offer_Wording {
         $c['ns_reason_verdict'] = self::item('coach', 'Not sent: the verdict changed', 'The answer to Send when the player is no longer Rejected for the team (a page left open).',
             'Their verdict for {team} isn\'t Rejected any more, so nothing was sent. Reload the page.', $team, 2);
         $c['ns_done'] = self::item('coach', 'After Send: on its way', 'The answer to Send while this website may send offer emails.',
-            '"Not selected" email on its way: they are told they weren\'t selected for {team}, and nothing about any other team.', $team, 2);
+            '"Not selected" email on its way: they are told they weren\'t selected for {team}, and nothing about any other team\'s verdict or offer.', $team, 2);
         $c['ns_done_waiting'] = self::item('coach', 'After Send: waiting for the club', 'The answer to Send while this website may not send offer emails yet.',
             '"Not selected" email queued: it waits until the club allows offer emails, then tells them they weren\'t selected for {team}. If it waits more than a day, the club decides whether to send it.', $team, 2);
         $c['ns_already'] = self::item('coach', 'After Send: it had already gone', 'The answer to Send when someone else had already sent it (another tab, the committee).',
@@ -483,7 +486,7 @@ class TeamOversight_Offer_Wording {
         $c['ns_bulk_hint_none'] = self::item('coach', 'Send "not selected" emails: the hint, when nobody can be sent one at once', 'Inside that panel, instead of the usual hint.',
             'Nobody here can be emailed all at once right now: the reason is beside each player.', array(), 2);
         $c['ns_bulk_hint'] = self::item('coach', 'Send "not selected" emails: the hint', 'Inside that panel.',
-            'These players are Rejected for {team} and haven\'t been told yet. Each gets one email saying they weren\'t selected for {team}; it says nothing about any other team they applied for. Nothing is sent until you press the button, and each player can only be sent it once.', $team, 3);
+            'These players are Rejected for {team} and haven\'t been told yet. Each gets one email saying they weren\'t selected for {team}, with any lower divisions they could still try and nothing about another team\'s verdict or offer. Nothing is sent until you press the button, and each player can only be sent it once.', $team, 3);
         $c['ns_bulk_button'] = self::item('coach', 'Send "not selected" emails: the button', 'The button in that panel.',
             'Email these {n}', array('{n}' => 'how many'), 1);
         $c['ns_bulk_confirm'] = self::item('coach', 'Confirm: Send "not selected" emails', 'The box that asks before that button sends.',
