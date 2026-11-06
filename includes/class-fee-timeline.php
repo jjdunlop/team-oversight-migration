@@ -537,7 +537,7 @@ class TeamOversight_Fee_Timeline {
             'role' => '',
             'action' => 'class_recorded',
             'source' => substr((string) $source, 0, 20),
-            'new_class' => substr((string) $class, 0, 100),
+            'new_class' => TeamOversight_Log::cut_bytes($class, 100),
             'note' => $last === null ? 'fee class first recorded' : 'fee class changed',
             'recorded_at' => current_time('mysql'),
             // 1.76.0: the system (0) when a caller says so, as the offers' lock-in does; the person logged in otherwise.
@@ -549,7 +549,7 @@ class TeamOversight_Fee_Timeline {
             $formats[] = '%d';
         }
         if ($last !== null) {
-            $data['old_class'] = substr((string) $last, 0, 100);
+            $data['old_class'] = TeamOversight_Log::cut_bytes($last, 100);
             $formats[] = '%s';
         }
         return (bool) $wpdb->insert($wpdb->prefix . 'team_assignment_changes', $data, $formats);
@@ -1053,7 +1053,7 @@ class TeamOversight_Fee_Timeline {
                 continue;
             }
             if ($spec[0] === '%s') {
-                $value = substr((string) $value, 0, $spec[1]);
+                $value = TeamOversight_Log::cut_bytes($value, $spec[1]);
             } elseif ($spec[0] === '%d') {
                 $value = max(0, intval($value));
             } else {
@@ -1212,7 +1212,7 @@ class TeamOversight_Fee_Timeline {
         global $wpdb;
         $opts = is_array($opts) ? $opts : array();
         $recorded_by = array_key_exists('recorded_by', $opts) ? max(0, intval($opts['recorded_by'])) : null;
-        $row_note = (isset($opts['note']) && is_string($opts['note']) && trim($opts['note']) !== '') ? substr(trim($opts['note']), 0, 255) : null;
+        $row_note = (isset($opts['note']) && is_string($opts['note']) && trim($opts['note']) !== '') ? TeamOversight_Log::cut_bytes(trim($opts['note']), 255) : null;
         $season = (string) $season;
         $result = array(
             'ok' => false, 'error' => '', 'reload' => false, 'added' => 0, 'row_ids' => array(), 'already' => 0, 'skipped' => array(), 'conflicts' => array(),

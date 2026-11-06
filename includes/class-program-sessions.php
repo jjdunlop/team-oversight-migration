@@ -770,7 +770,7 @@ class TeamOversight_Program_Sessions {
         if (preg_match('/^(\d{2}:\d{2}):\d{2}$/D', $value, $m)) {
             return $m[1];
         }
-        return substr($value, 0, 5);
+        return TeamOversight_Log::cut_bytes($value, 5);
     }
 
     /**
@@ -781,7 +781,7 @@ class TeamOversight_Program_Sessions {
      */
     private static function clean_input(array $input) {
         $text = function ($value, $max = 40) {
-            return is_scalar($value) ? substr(trim((string) $value), 0, $max) : '';
+            return is_scalar($value) ? TeamOversight_Log::cut_bytes(trim((string) $value), $max) : '';
         };
         $out = array(
             'season' => $text(isset($input['season']) ? $input['season'] : ''),
@@ -789,7 +789,7 @@ class TeamOversight_Program_Sessions {
             'times' => array(),
             'first' => $text(isset($input['first']) ? $input['first'] : ''),
             'last' => $text(isset($input['last']) ? $input['last'] : ''),
-            'skips' => is_scalar(isset($input['skips']) ? $input['skips'] : '') ? substr((string) (isset($input['skips']) ? $input['skips'] : ''), 0, 2000) : '',
+            'skips' => is_scalar(isset($input['skips']) ? $input['skips'] : '') ? TeamOversight_Log::cut_bytes(isset($input['skips']) ? $input['skips'] : '', 2000) : '',
             'price' => $text(isset($input['price']) ? $input['price'] : ''),
         );
         if (isset($input['times']) && is_array($input['times'])) {
@@ -920,7 +920,7 @@ class TeamOversight_Program_Sessions {
             }
             $parsed = self::parse_input_date($line);
             if ($parsed === '') {
-                $errors[] = 'Dates to skip: ' . sanitize_text_field(substr($line, 0, 20)) . ' isn\'t a date.';
+                $errors[] = 'Dates to skip: ' . sanitize_text_field(TeamOversight_Log::cut_bytes($line, 20)) . ' isn\'t a date.';
                 continue;
             }
             $skips[$parsed] = true;

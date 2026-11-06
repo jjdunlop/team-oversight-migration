@@ -816,7 +816,7 @@ class TeamOversight_Fees {
             $wpdb->query($wpdb->prepare(
                 'UPDATE ' . TeamOversight_Log::table() . " SET actor_id = 0 WHERE id = %d AND event_type = 'fee_edit' AND message = %s",
                 $id,
-                substr($message, 0, 500)
+                TeamOversight_Log::cut_bytes($message, 500)
             ));
         }
     }

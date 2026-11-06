@@ -1023,7 +1023,7 @@ class TeamOversight_Duplicates {
             for ($j = $i + 1; $j < count($ids); $j++) {
                 $n += (int) $wpdb->query($wpdb->prepare(
                     'INSERT IGNORE INTO ' . self::decisions_table() . ' (user_lo, user_hi, decision, reason, note, decided_by, decided_at) VALUES (%d, %d, %s, %s, %s, %d, %s)',
-                    min($ids[$i], $ids[$j]), max($ids[$i], $ids[$j]), 'different', substr($reason, 0, 30), substr($note, 0, 255), get_current_user_id(), current_time('mysql')
+                    min($ids[$i], $ids[$j]), max($ids[$i], $ids[$j]), 'different', substr($reason, 0, 30), TeamOversight_Log::cut_bytes($note, 255), get_current_user_id(), current_time('mysql')
                 ));
             }
         }

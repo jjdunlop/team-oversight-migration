@@ -49,7 +49,7 @@ class TeamOversight_Duplicates_Page {
     }
 
     private static function find_from($raw) {
-        return substr(sanitize_text_field(wp_unslash((string) $raw)), 0, 100);
+        return TeamOversight_Log::cut_bytes(sanitize_text_field(wp_unslash((string) $raw)), 100);
     }
 
     /** The groups (each with 'ids') that have at least one account matching the search. */

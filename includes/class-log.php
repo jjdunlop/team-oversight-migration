@@ -104,7 +104,7 @@ class TeamOversight_Log {
                 'subject_user_id' => isset($args['user_id']) ? intval($args['user_id']) : null,
                 'actor_id' => get_current_user_id(),
                 'amount' => isset($args['amount']) ? round(floatval($args['amount']), 2) : null,
-                'message' => substr((string) $message, 0, 500),
+                'message' => self::cut_bytes($message, 500),
             ),
             array('%s', '%d', '%d', '%f', '%s')
         );
@@ -113,6 +113,40 @@ class TeamOversight_Log {
         if (mt_rand(1, 200) === 1) {
             self::prune();
         }
+    }
+
+    /**
+     * $text cut to at most $bytes bytes, never inside a multibyte UTF-8
+     * character (1.89.2). A plain substr() that splits one leaves invalid
+     * UTF-8, and $wpdb->insert() / update() then refuse the whole row (the
+     * log line was lost that way); a raw query keeps the text only up to
+     * the split. Use it for any text cut to fit a column.
+     */
+    public static function cut_bytes($text, $bytes) {
+        $text = (string) $text;
+        $bytes = max(0, intval($bytes));
+        if (strlen($text) <= $bytes) {
+            return $text;
+        }
+        if (function_exists('mb_strcut')) {
+            return mb_strcut($text, 0, $bytes, 'UTF-8');
+        }
+        return self::cut_bytes_plain($text, $bytes);
+    }
+
+    /**
+     * cut_bytes() without mbstring: when the first byte left out is a
+     * continuation byte (10xxxxxx), the cut split a character, so it backs
+     * off to that character's first byte (at most three steps; text that is
+     * not UTF-8 to begin with is cut where asked). $text is longer than
+     * $bytes.
+     */
+    private static function cut_bytes_plain($text, $bytes) {
+        $end = $bytes;
+        while ($end > 0 && $end > $bytes - 3 && (ord($text[$end]) & 0xC0) === 0x80) {
+            $end--;
+        }
+        return (ord($text[$end]) & 0xC0) === 0x80 ? substr($text, 0, $bytes) : substr($text, 0, $end);
     }
 
     public static function prune() {
