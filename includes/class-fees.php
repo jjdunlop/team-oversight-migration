@@ -3135,6 +3135,11 @@ class TeamOversight_Fees {
                 <?php TeamOversight_Offers::render_settings_box($selected_season); ?>
             <?php endif; ?>
 
+            <?php if (class_exists('TeamOversight_Fee_Breakdown')): ?>
+                <?php // 1.89.0: Where your fees go on the Player Checklist, the committee's percentages (class-fee-breakdown.php). ?>
+                <?php TeamOversight_Fee_Breakdown::render_admin_box($selected_season); ?>
+            <?php endif; ?>
+
             <!-- Fee matrix: full width (it's a grid), then teams -->
             <div style="display: flex; flex-wrap: wrap; gap: 30px; align-items: flex-start;">
 

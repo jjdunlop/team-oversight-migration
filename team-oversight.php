@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), and coach profiles (Coaches).
- * Version: 1.88.2
+ * Version: 1.89.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.88.2');
+define('TEAM_OVERSIGHT_VERSION', '1.89.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -296,6 +296,8 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-fee-timeline.php';
     // 1.88.0: the playing fee covered by the club (a Premier League MVP marked on their trial application; 1.88.1: not life members).
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-fee-cover.php';
+    // 1.89.0: Where your fees go, the committee's percentages shown on the Player Checklist.
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-fee-breakdown.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-trials.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-trial-emails.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-imports.php';
@@ -354,6 +356,8 @@ function team_oversight_init() {
     TeamOversight_Fee_Timeline::register_hooks();
     // 1.88.0: the fee cover's two account-merge hooks (the kept account's offers and fee follow a merged cover), added once.
     TeamOversight_Fee_Cover::register_hooks();
+    // 1.89.0: the Configuration box's admin-post handler (Where your fees go), added once.
+    TeamOversight_Fee_Breakdown::register_hooks();
     // VVL Oversight → How it works: the calculator's AJAX hook, added once.
     TeamOversight_Help_Page::register_hooks();
     // Club Membership → Duplicate accounts: the scan's cache resets, the

@@ -901,7 +901,11 @@ class TeamOversight_Readiness {
      * place of "You're in" for those teams), in_teams (the codes they really
      * hold, named in "You're in" when there are any) and coaching (the codes
      * they coach, named in "You're coaching"). With no options the markup is
-     * exactly what a player on a team has always seen.
+     * exactly what a player on a team has always seen. 1.89.0: when the
+     * committee shows Where your fees go for the panel's season
+     * (TeamOversight_Fee_Breakdown::for_checklist()), its block ends the fees
+     * step, or the deposit step when there is no fees step; once per panel,
+     * read-only panels included.
      */
     public static function render_panel($season, $checklist, $options = array()) {
         $read_only = !empty($options['read_only']);
@@ -956,6 +960,12 @@ class TeamOversight_Readiness {
                 <p class="rtp-all-done">✔ You're all set — see you on court!</p>
             <?php endif; ?>
 
+            <?php
+            // 1.89.0: Where your fees go (the committee's percentages for the panel's season), once per panel:
+            // at the end of the fees step, else of the accepted-offer deposit step when there is no fees step.
+            $breakdown_step = isset($checklist['steps']['fees']) ? 'fees' : (isset($checklist['steps']['deposit']) ? 'deposit' : '');
+            $breakdown_html = ($breakdown_step !== '' && class_exists('TeamOversight_Fee_Breakdown')) ? TeamOversight_Fee_Breakdown::checklist_block($season) : '';
+            ?>
             <?php $step_number = 0; ?>
             <?php foreach ($checklist['steps'] as $step_key => $step): $step_number++; $waiting = !empty($step['waiting']); ?>
                 <div class="rtp-step <?php echo $waiting ? 'rtp-waiting' : ($step['done'] ? 'rtp-done' : 'rtp-todo'); ?>">
@@ -1031,6 +1041,10 @@ class TeamOversight_Readiness {
                                 </form>
                             <?php endif; ?>
                         </p>
+                        <?php endif; ?>
+
+                        <?php if ($breakdown_html !== '' && $step_key === $breakdown_step): ?>
+                            <?php echo $breakdown_html; ?>
                         <?php endif; ?>
                     </div>
                 </div>
