@@ -53,10 +53,15 @@ class TeamOversight_Fee_Breakdown {
     const INSIDE_LABEL_MIN = 12;
 
     /** Fixed order, never cycled (a bar has at most as many rows as colours). */
-    const GO_COLOURS = array('#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#6250d6');
-    const FROM_COLOURS = array('#008300', '#8a5cf6', '#898781', '#3a3a38');
-    /** Text inside a segment is white, except on these colours. */
-    const DARK_TEXT = array('#eda100' => '#3a2e00');
+    const GO_COLOURS = array('#2874d0', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#6250d6');
+    const FROM_COLOURS = array('#008300', '#8256f0', '#898781', '#3a3a38');
+    /**
+     * Text inside a segment is white, except on these colours, where near-black reads better. Each colour carries
+     * whichever of the two gives the higher contrast, and every pair is at least 4.5:1 (WCAG AA for 12px text):
+     * white on #2874d0 4.67, #6250d6 5.77, #008300 4.95, #8256f0 4.63, #3a3a38 11.4; #1a1a1a on #eb6834 5.44,
+     * #1baf7a 6.18, #eda100 8.04, #e87ba4 6.46, #898781 4.85.
+     */
+    const DARK_TEXT = array('#eb6834' => '#1a1a1a', '#1baf7a' => '#1a1a1a', '#eda100' => '#1a1a1a', '#e87ba4' => '#1a1a1a', '#898781' => '#1a1a1a');
     /** Below NARROW_LABEL_MIN a segment's inside percentage is hidden on narrow screens (it would be clipped there). */
     const NARROW_LABEL_MIN = 15;
 
