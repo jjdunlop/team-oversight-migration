@@ -13,8 +13,10 @@ if (!defined('ABSPATH')) {
  *
  * The committee types PERCENTAGES per season on VVL Oversight ->
  * Configuration (the treasurer works them out from the budget offline).
- * No dollar figure is stored or shown anywhere: save() refuses one in any
- * text, and render() draws percentages only.
+ * No dollar figure is stored or shown anywhere: render() draws percentages
+ * only, and save() refuses a dollar sign or an amount with cents (12.50) in
+ * any text, as a guard against honest mistakes (it can't tell every number
+ * that means money, e.g. 40,000 typed without a dollar sign).
  *
  * One option, not autoloaded (OPTION), keyed by season (four digits). Each
  * entry: show (bool), source (plain text, at most SOURCE_MAX), note (plain
@@ -55,6 +57,8 @@ class TeamOversight_Fee_Breakdown {
     const FROM_COLOURS = array('#008300', '#8a5cf6', '#898781', '#3a3a38');
     /** Text inside a segment is white, except on these colours. */
     const DARK_TEXT = array('#eda100' => '#3a2e00');
+    /** Below NARROW_LABEL_MIN a segment's inside percentage is hidden on narrow screens (it would be clipped there). */
+    const NARROW_LABEL_MIN = 15;
 
     /** What players read. */
     const HEADING = 'Where your fees go';
@@ -157,8 +161,16 @@ class TeamOversight_Fee_Breakdown {
         return $entry;
     }
 
-    /** The block for the season's Player Checklist ('' when for_checklist() is null). Never throws. */
+    /**
+     * The block for the season's Player Checklist ('' when for_checklist() is
+     * null). Never throws. '' while wp_head runs (as the coach lists do): a
+     * render there is thrown away and would use up the once-per-request
+     * styles, leaving the visible block unstyled.
+     */
     public static function checklist_block($season) {
+        if (function_exists('doing_action') && doing_action('wp_head')) {
+            return '';
+        }
         try {
             $entry = self::for_checklist($season);
             return $entry === null ? '' : self::render($season, $entry);
@@ -201,10 +213,15 @@ class TeamOversight_Fee_Breakdown {
      * dropped. Refused, with nothing written: a row with a label and no
      * percentage or the other way round, a percentage that is not a whole
      * number from 1 to 100, a bar with rows that does not add up to 100, too
-     * many rows, text that is too long, not plain or holds a dollar figure,
-     * Show on with no Where the money goes rows, an actor who is not an
-     * administrator. Compare-before-write; one log line per save that
-     * changes something. Returns array(ok, changed, message, errors (plain
+     * many rows, text that is too long, not plain or holds a dollar sign or
+     * an amount with cents (has_money()), Show on with no Where the money
+     * goes rows, an actor who is not an administrator. Inside an option-wide
+     * named lock the stored row is read straight from the database
+     * (TeamOversight_Program_Setup::read_option_fresh(), never get_option(),
+     * whose stale notoptions flag would make the write drop every other
+     * season) and read back the same way after the write. Compare-before-
+     * write; one log line per save that changes something. Returns
+     * array(ok, changed, message, errors (plain
      * sentences), entry (the normalised entry as saved, or as stored when
      * refused)).
      */
@@ -240,9 +257,15 @@ class TeamOversight_Fee_Breakdown {
             return self::result(false, false, 'Another save of Where your fees go is running. Try again in a moment. Nothing was saved.', array(), self::get($season));
         }
         try {
+            // Straight from the database, never get_option(): with the
+            // persistent object cache a stale notoptions flag (read by a
+            // checklist view before the first save) would read every season
+            // as missing, and the write would keep only this one.
             wp_cache_delete(self::OPTION, 'options');
-            $all = get_option(self::OPTION, array());
-            $all = is_array($all) ? $all : array();
+            $all = self::read_stored();
+            if ($all === null) {
+                return self::result(false, false, 'Where your fees go couldn\'t be read, so nothing was saved. Reload and try again.', array(), self::get($season));
+            }
             $before = (isset($all[$season]) && is_array($all[$season])) ? self::normalise($all[$season]) : self::defaults();
             if ($before === $entry) {
                 return self::result(true, false, 'Nothing changed for ' . $season . '.', array(), $before);
@@ -250,7 +273,7 @@ class TeamOversight_Fee_Breakdown {
             $all[$season] = $entry;
             update_option(self::OPTION, $all, false);
             wp_cache_delete(self::OPTION, 'options');
-            $check = get_option(self::OPTION, array());
+            $check = self::read_stored();
             if (!is_array($check) || !isset($check[$season]) || self::normalise($check[$season]) !== $entry) {
                 return self::result(false, false, 'The database did not take the change. Nothing was saved: try again.', array(), $before);
             }
@@ -263,6 +286,20 @@ class TeamOversight_Fee_Breakdown {
             ? 'Saved for ' . $season . '. It shows in the fees step of the ' . $season . ' Player Checklist.'
             : 'Saved for ' . $season . '. It is not on the Player Checklist: tick Show on the Player Checklist to show it.';
         return self::result(true, true, $message, array(), $entry);
+    }
+
+    /**
+     * The option as stored, for save() inside its lock: an array (array()
+     * when there is none), or null when it couldn't be read, so nothing is
+     * written over what wasn't read. The plugin's one fresh reader, which
+     * keeps the pre_option filters and drops a stale notoptions flag.
+     */
+    private static function read_stored() {
+        if (!class_exists('TeamOversight_Program_Setup') || !method_exists('TeamOversight_Program_Setup', 'read_option_fresh')) {
+            return null;
+        }
+        $all = TeamOversight_Program_Setup::read_option_fresh(self::OPTION);
+        return is_array($all) ? $all : null;
     }
 
     private static function result($ok, $changed, $message, array $errors, array $entry) {
@@ -298,9 +335,14 @@ class TeamOversight_Fee_Breakdown {
         return $text;
     }
 
-    /** A dollar sign, or an amount with cents (12.50). */
+    /**
+     * A dollar sign, or an amount with cents (12.50, 1,234.56). Not a
+     * percentage (33.33%) and not a dotted date (6.11.26). Only these two
+     * are caught: a number typed without either (40,000, 120k) is not.
+     */
     private static function has_money($text) {
-        return strpos((string) $text, '$') !== false || preg_match('/\b\d[\d,]*\.\d{2}\b/', (string) $text) === 1;
+        $text = (string) $text;
+        return strpos($text, '$') !== false || preg_match('/(?<![\d.,])\d[\d,]*\.\d{2}(?!\d|\.\d|\s*%)/', $text) === 1;
     }
 
     /** One bar's rows: array(rows (blank ones dropped), ok). Refusals go in $errors, naming the row as typed. */
@@ -461,8 +503,9 @@ class TeamOversight_Fee_Breakdown {
             $dark = self::DARK_TEXT;
             $text_colour = isset($dark[$colour]) ? $dark[$colour] : '#ffffff';
             $spoken[] = $row['label'] . ' ' . $pct . '%';
-            $segments .= '<span class="murvc-feego-seg" style="flex-grow:' . $pct . ';background-color:' . $colour . ';color:' . $text_colour . ';">'
-                . ($pct >= self::INSIDE_LABEL_MIN ? $pct . '%' : '') . '</span>';
+            $inside = $pct >= self::INSIDE_LABEL_MIN;
+            $segments .= '<span class="murvc-feego-seg' . (($inside && $pct < self::NARROW_LABEL_MIN) ? ' murvc-feego-seg-tight' : '') . '" style="flex-grow:' . $pct . ';background-color:' . $colour . ';color:' . $text_colour . ';">'
+                . ($inside ? $pct . '%' : '') . '</span>';
             $legend .= '<li><span class="murvc-feego-key" style="background-color:' . $colour . ';" aria-hidden="true"></span>'
                 . '<span class="murvc-feego-label">' . esc_html($row['label']) . ' <span class="murvc-feego-pct">' . $pct . '%</span></span></li>';
         }
@@ -474,7 +517,9 @@ class TeamOversight_Fee_Breakdown {
      * The block's styles, once per request ('' after the first call). Mobile
      * first: nothing fixed-width, the legend wraps, no sideways scroll. The
      * 2px gaps are margins (older Safari has no flex gap), so the page
-     * shows through them.
+     * shows through them. Up to 400px wide a segment under NARROW_LABEL_MIN
+     * drops its inside percentage (the legend still has it), and the bar and
+     * the legend squares keep their colours in forced-colours mode.
      */
     public static function styles() {
         if (self::$styles_printed) {
@@ -486,15 +531,16 @@ class TeamOversight_Fee_Breakdown {
         .murvc-feego .murvc-feego-title{margin:0 0 4px;padding:0;font-size:15px;line-height:1.3;font-weight:600;text-transform:none;letter-spacing:normal;color:inherit}
         .murvc-feego .murvc-feego-note{margin:0 0 8px;padding:0}
         .murvc-feego .murvc-feego-sub{margin:14px 0 4px;padding:0;font-size:14px;line-height:1.3;font-weight:600;text-transform:none;letter-spacing:normal;color:inherit}
-        .murvc-feego .murvc-feego-bar{display:flex;width:100%;height:24px;margin:6px 0;padding:0;border-radius:4px;overflow:hidden;background:transparent}
+        .murvc-feego .murvc-feego-bar{display:flex;width:100%;height:24px;margin:6px 0;padding:0;border-radius:4px;overflow:hidden;background:transparent;forced-color-adjust:none}
         .murvc-feego .murvc-feego-seg{display:block;flex-shrink:1;flex-basis:0;min-width:0;height:24px;overflow:hidden;white-space:nowrap;text-align:center;font-size:12px;font-weight:700;line-height:24px}
         .murvc-feego .murvc-feego-seg+.murvc-feego-seg{margin-left:2px}
         .murvc-feego .murvc-feego-legend{display:flex;flex-wrap:wrap;margin:4px 0 0;padding:0;list-style:none;font-size:13px;line-height:1.4}
         .murvc-feego .murvc-feego-legend li{display:flex;align-items:center;min-width:0;margin:0 14px 4px 0;padding:0;list-style:none;overflow-wrap:anywhere;color:inherit}
         .murvc-feego .murvc-feego-legend li::before{content:none}
-        .murvc-feego .murvc-feego-key{flex:0 0 10px;width:10px;height:10px;margin:0 6px 0 0;border-radius:2px}
+        .murvc-feego .murvc-feego-key{flex:0 0 10px;width:10px;height:10px;margin:0 6px 0 0;border-radius:2px;forced-color-adjust:none}
         .murvc-feego .murvc-feego-pct{font-weight:600}
         .murvc-feego .murvc-feego-source{margin:10px 0 0;padding:0;font-size:12px;color:#666}
+        @media (max-width:400px){.murvc-feego .murvc-feego-seg-tight{font-size:0}}
         </style>';
     }
 
@@ -549,9 +595,12 @@ class TeamOversight_Fee_Breakdown {
         foreach (self::bars() as $bar => $def) {
             $labels = (isset($post[$bar . '_label']) && is_array($post[$bar . '_label'])) ? $post[$bar . '_label'] : array();
             $pcts = (isset($post[$bar . '_pct']) && is_array($post[$bar . '_pct'])) ? $post[$bar . '_pct'] : array();
-            $count = min(20, max(count($labels), count($pcts)));
+            // Every posted row, in key order (a hand-made post may skip
+            // numbers), so save()'s at-most-N-rows refusal sees them all.
+            $keys = array_keys($labels + $pcts);
+            sort($keys);
             $rows = array();
-            for ($i = 0; $i < $count; $i++) {
+            foreach (array_slice($keys, 0, 20) as $i) {
                 $rows[] = array(
                     'label' => isset($labels[$i]) ? $text($labels[$i]) : '',
                     'pct' => isset($pcts[$i]) ? trim($text($pcts[$i])) : '',
