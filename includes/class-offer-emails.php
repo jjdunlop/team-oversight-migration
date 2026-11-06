@@ -453,7 +453,7 @@ class TeamOversight_Offer_Emails {
                 'subject' => 'Your {offer_name} to join {team} for {season}',
                 'heading' => 'Your {offer_name} to join {team}',
                 'preheader' => 'Accept by {reply_by} and pay your deposit by {deposit_due} to lock in your place.',
-                'button' => 'See your offer',
+                'button' => 'Accept or decline your offer',
                 'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
                 'blocks' => array('offer', 'terms', 'extras', 'button'),
                 'required' => array('offer' => 'the box with your fee, deposit and dates would be missing.', 'terms' => 'the commitments and deposit policy would be missing.', 'button' => 'there would be no button to the offer page.'),
@@ -462,7 +462,7 @@ class TeamOversight_Offer_Emails {
                     . "The coaching panel would love you to join {team} for the {season} season.\n\n"
                     . "{offer}\n\n"
                     . "{early_note}\n\n"
-                    . "{button:See your offer}\n\n"
+                    . "{button:Accept or decline your offer}\n\n"
                     . "Your offer page shows your fee and what you'll need to do before the season, including the uniform. You can accept or decline the offer there. " . self::training_line() . "\n\n"
                     . "{extras}\n\n"
                     . "## Locking in your place\n"
@@ -481,7 +481,7 @@ class TeamOversight_Offer_Emails {
                 'subject' => 'Your offer to join {team} for {season}',
                 'heading' => 'Your offer to join {team}',
                 'preheader' => '{cover_preheader}',
-                'button' => 'See your offer',
+                'button' => 'Accept or decline your offer',
                 'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
                 'blocks' => array('offer', 'terms', 'extras', 'button'),
                 'required' => array('offer' => 'the box with the supporter fee and dates would be missing.', 'terms' => 'the commitments and deposit policy would be missing.', 'button' => 'there would be no button to the offer page.'),
@@ -491,7 +491,7 @@ class TeamOversight_Offer_Emails {
                     . "{cover_lead}\n\n"
                     . "{offer}\n\n"
                     . "{cover_limit_note}\n\n"
-                    . "{button:See your offer}\n\n"
+                    . "{button:Accept or decline your offer}\n\n"
                     . "Your offer page shows what you'll need to do before the season, including the uniform. You can accept or decline the offer there. " . self::training_line() . "\n\n"
                     . "{extras}\n\n"
                     . "## Locking in your place\n"
@@ -509,7 +509,7 @@ class TeamOversight_Offer_Emails {
                 'subject' => 'Reminder: Your {offer_name} to join {team} for {season}',
                 'heading' => 'A reminder about your {offer_name} to join {team}',
                 'preheader' => '{reply_sentence}',
-                'button' => 'See your offer',
+                'button' => 'Accept or decline your offer',
                 'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
                 'blocks' => $offer_blocks,
                 'required' => array('offer' => 'the box with your fee, deposit and dates would be missing.', 'button' => 'there would be no button to the offer page.'),
@@ -517,7 +517,7 @@ class TeamOversight_Offer_Emails {
                     . "This is a reminder about your {offer_name} to join {team} for the {season} season. We haven't heard from you yet, and we'd love to know either way.\n\n"
                     . "{offer}\n\n"
                     . "{early_note}\n\n"
-                    . "{button:See your offer}\n\n"
+                    . "{button:Accept or decline your offer}\n\n"
                     . "You can accept or decline on your offer page. " . self::training_line() . "\n\n"
                     . "## Locking in your place\n"
                     . "{reply_sentence} {deposit_sentence} It's paid in one payment and comes off your season fee. If it isn't paid in time, your place may be offered to someone else. Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
@@ -534,7 +534,7 @@ class TeamOversight_Offer_Emails {
                 'subject' => 'Reminder: Your offer to join {team} for {season}',
                 'heading' => 'A reminder about your offer to join {team}',
                 'preheader' => '{cover_due}',
-                'button' => 'See your offer',
+                'button' => 'Accept or decline your offer',
                 'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
                 'blocks' => $offer_blocks,
                 'required' => array('offer' => 'the box with the supporter fee and dates would be missing.', 'button' => 'there would be no button to the offer page.'),
@@ -543,7 +543,7 @@ class TeamOversight_Offer_Emails {
                     . "{cover_lead}\n\n"
                     . "{offer}\n\n"
                     . "{cover_limit_note}\n\n"
-                    . "{button:See your offer}\n\n"
+                    . "{button:Accept or decline your offer}\n\n"
                     . "You can accept or decline on your offer page. " . self::training_line() . "\n\n"
                     . "## Locking in your place\n"
                     . "{cover_due}\n\n"
@@ -2527,7 +2527,7 @@ class TeamOversight_Offer_Emails {
 
             <?php if ($offer_page === ''): ?>
                 <div class="notice notice-warning inline" style="margin: 0 0 12px;"><p>
-                    <strong>There is no offer page yet,</strong> so the &quot;See your offer&quot; button would point to <?php echo esc_html(TeamOversight_Offers::offer_page_url()); ?>, which may not exist.
+                    <strong>There is no offer page yet,</strong> so the offer emails' button would point to <?php echo esc_html(TeamOversight_Offers::offer_page_url()); ?>, which may not exist.
                 </p>
                     <form method="post" style="margin: 0 0 8px;">
                         <?php echo $hidden('create_offer_page'); ?>
