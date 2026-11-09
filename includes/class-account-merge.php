@@ -167,6 +167,13 @@ class TeamOversight_Account_Merge {
             array('team_coach_ticks', 'cleared_by'),
             array('team_coach_ticks', 'seen_by'),
             array('team_coach_changes', 'recorded_by'),
+            // 1.90.0: Club documents: who made and last changed a document, who uploaded a
+            // version and who deleted a wrong upload's file, and who made each history row.
+            array('team_club_documents', 'created_by'),
+            array('team_club_documents', 'updated_by'),
+            array('team_club_document_versions', 'uploaded_by'),
+            array('team_club_document_versions', 'file_deleted_by'),
+            array('team_club_document_changes', 'recorded_by'),
         );
     }
 

@@ -81,6 +81,10 @@ class TeamOversight_Log {
                 // Club Programs (1.85.0): session changes and refused deletions.
                 'program_sessions' => 'Club Programs sessions',
                 'program_guard' => 'Club Programs deletion refused',
+                // Club documents (1.90.0): every change to a document, its versions, the groups and the
+                // settings; and problems (the storage check failing, an address opened with its file missing).
+                'club_document' => 'Club document',
+                'club_document_problem' => 'Club documents problem',
             ),
         );
 

@@ -611,6 +611,18 @@ class TeamOversight_Database {
             TeamOversight_Coaches::add_details_column();
         }
 
+        // 1.90.0: Club documents (TeamOversight_Club_Documents::tables_sql()): the
+        // documents, their versions and their history. Each behind its own SHOW
+        // TABLES check, so a normal load issues no CREATE.
+        if (class_exists('TeamOversight_Club_Documents')) {
+            foreach (TeamOversight_Club_Documents::tables_sql() as $short => $sql) {
+                if (!$wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}{$short}'")) {
+                    require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+                    dbDelta($sql);
+                }
+            }
+        }
+
         // 1.84.0: one tick per order line for dated Club Programs sessions
         // (written from 1.85.0). Never pruned, never dropped; the old
         // team_program_attendance table is untouched.
@@ -1115,6 +1127,12 @@ class TeamOversight_Database {
             // 1.82.0: program_details goes in right after program_roles before dbDelta() runs (dbDelta's own
             // ADD COLUMN would put it at the end of a 1.81.x table).
             TeamOversight_Coaches::add_details_column();
+        }
+        // 1.90.0: Club documents.
+        if (class_exists('TeamOversight_Club_Documents')) {
+            foreach (TeamOversight_Club_Documents::tables_sql() as $short => $sql) {
+                $tables[$short] = $sql;
+            }
         }
 
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
