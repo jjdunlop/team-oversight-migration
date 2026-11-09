@@ -15,8 +15,8 @@ if (!defined('ABSPATH')) {
  * TeamOversight_Club_Documents (can_open(), is_listed(), is_public()):
  * this class never reads the audiences column itself. serve() does the
  * I/O. The plan, in order:
- *   1. unknown, a name that fails the pattern, or a draft: WordPress's own
- *      404;
+ *   1. unknown, a name that fails the pattern, a draft, or a draft set
+ *      aside (withdrawn without ever being published): WordPress's own 404;
  *   2. not listed (only boxes the page doesn't list are ticked, or none)
  *      and the viewer isn't let in: exactly step 1's answer, so the address
  *      never confirms that such a document exists;
@@ -29,9 +29,10 @@ if (!defined('ABSPATH')) {
  *   7. the current file missing from storage: 503 naming the contact email;
  *   8. the file.
  * A public file is cacheable (10 minutes) only at the exact canonical
- * address and only while something listens on PURGE_ACTION; every answer
- * sends its own Expires; a restricted answer is never cacheable. Nothing
- * records who opened what.
+ * address and only while something listens on PURGE_ACTION, both in this
+ * request and on the admin side, where the purge runs (purge_confirmed());
+ * every answer sends its own Expires; a restricted answer is never
+ * cacheable. Nothing records who opened what.
  */
 class TeamOversight_Club_Documents_Route {
 
@@ -139,8 +140,10 @@ class TeamOversight_Club_Documents_Route {
     public static function plan_for($doc, $version, $user_id, $method, $request_uri, $if_none_match, array $ctx = array()) {
         $user_id = intval($user_id);
         $method = strtoupper((string) $method);
-        // 1. Unknown, or a draft: WordPress's own 404, as for an address that doesn't exist.
+        // 1. Unknown, a draft, or a draft set aside (withdrawn, never published): WordPress's own 404, as for
+        //    an address that doesn't exist.
         if (!$doc || !in_array((string) $doc->status, array('published', 'retired'), true)
+            || ((string) $doc->status === 'retired' && property_exists($doc, 'published_at') && empty($doc->published_at))
             || preg_match(TeamOversight_Club_Documents::SLUG_PATTERN, (string) $doc->slug) !== 1) {
             return self::not_found();
         }
@@ -194,7 +197,9 @@ class TeamOversight_Club_Documents_Route {
         $headers = self::file_headers($doc->slug, $version, $size, false);
         if (TeamOversight_Club_Documents::is_public($doc)) {
             $etag = '"' . substr((string) $version->sha256, 0, 32) . '"';
-            $listener = array_key_exists('listener', $ctx) ? (bool) $ctx['listener'] : TeamOversight_Club_Documents::has_purge_listener();
+            // Cacheable only while this request has a listener AND the admin side, where the purge runs, saw one.
+            $listener = array_key_exists('listener', $ctx) ? (bool) $ctx['listener']
+                : (TeamOversight_Club_Documents::has_purge_listener() && TeamOversight_Club_Documents::purge_confirmed());
             // At this point the address is the canonical one whenever the rule exists (step 3).
             $cache = ($rule && $listener) ? self::cacheable_headers($now, TeamOversight_Club_Documents::PUBLIC_MAX_AGE) : self::uncached_headers();
             $headers = array_merge($headers, $cache, array('ETag' => $etag));
@@ -227,7 +232,13 @@ class TeamOversight_Club_Documents_Route {
         return array('action' => 'page', 'status' => intval($status), 'title' => (string) $title, 'html' => (string) $html, 'headers' => self::restricted_headers());
     }
 
-    /** The 403 page: who the document is for, the account's membership, Ways to join (only with no current membership), back. */
+    /**
+     * The 403 page: who the document is for, the account's membership, Ways
+     * to join (only with no current membership), back. An account that
+     * looks after club documents (CAP) gets no Ways to join, and a line
+     * sending it to the document in Club documents, where it can open any
+     * document.
+     */
     private static function refusal($doc, $user_id, array $ctx) {
         $keys = TeamOversight_Club_Documents::audiences_of($doc);
         list($heading, $sentence) = TeamOversight_Club_Documents::refusal_words($keys, $doc->title);
@@ -237,9 +248,15 @@ class TeamOversight_Club_Documents_Route {
             $facts = isset($ctx['membership']) && is_array($ctx['membership']) ? $ctx['membership'] : TeamOversight_Club_Documents::membership_facts($user_id);
         }
         $line = TeamOversight_Club_Documents::membership_sentence($facts, $tiers);
-        $html = '<h1>' . esc_html($heading) . '</h1><p>' . esc_html($sentence) . ($line !== '' ? ' ' . esc_html($line) : '') . '</p><p>';
+        $html = '<h1>' . esc_html($heading) . '</h1><p>' . esc_html($sentence) . ($line !== '' ? ' ' . esc_html($line) : '') . '</p>';
+        $manager = user_can(intval($user_id), TeamOversight_Club_Documents::CAP);
+        if ($manager) {
+            $edit = admin_url('admin.php?page=' . TeamOversight_Club_Documents::PAGE_EDIT . '&document=' . intval($doc->id));
+            $html .= '<p>You look after club documents: <a href="' . esc_url($edit) . '">open it from Club documents</a> in the dashboard.</p>';
+        }
+        $html .= '<p>';
         $join = array_key_exists('join_url', $ctx) ? (string) $ctx['join_url'] : TeamOversight_Club_Documents::join_url();
-        if (!empty($tiers) && empty($facts['tier']) && $join !== '') {
+        if (!$manager && !empty($tiers) && empty($facts['tier']) && $join !== '') {
             $html .= '<a href="' . esc_url($join) . '">Ways to join</a> &nbsp; ';
         }
         $html .= '<a href="' . esc_url(TeamOversight_Club_Documents::documents_page_url()) . '">Back to policies and documents</a></p>';

@@ -51,6 +51,18 @@ class TeamOversight_Club_Documents {
     const GROUPS_OPTION = 'team_oversight_document_groups';
     const SETTINGS_OPTION = 'team_oversight_documents_settings';
     const REWRITE_OPTION = 'team_oversight_documents_rewrite';
+    /**
+     * Whether the page refresh reaches the site cache from the admin side
+     * (autoloaded, read by the route for every public file): 'on' while an
+     * admin request (a Club documents screen, a writer's refresh) last saw a
+     * listener on PURGE_ACTION, else the time it was last seen ('0' never).
+     * Written only when that changes (note_purge_listener()).
+     */
+    const PURGE_OPTION = 'team_oversight_documents_purge';
+    /** The last failed web check (Check now): array(state, at); deleted when a later web check passes. Not autoloaded. */
+    const WEB_CHECK_OPTION = 'team_oversight_documents_web_check';
+    /** How long the site's page cache can keep an answer nobody refreshes, in days. */
+    const CACHE_DAYS = 30;
     /** Raise when the address rule changes; a different stored value flushes the rules once. */
     const RULE_VERSION = '1.90.0';
 
@@ -1130,7 +1142,7 @@ class TeamOversight_Club_Documents {
                 unlink($probe);
             }
             if ($back !== $content || is_file($probe)) {
-                return self::storage_result(false, 5, 'unwritable', 'The website can\'t write to the documents folder. An administrator runs Set up storage in the browser.');
+                return self::storage_result(false, 5, 'unwritable', 'The website can\'t write to the documents folder. An administrator runs Set up storage in the browser. If that doesn\'t fix it, the folder belongs to another server account: ask the host to give it to the website\'s account, or remove it so Set up storage can make it.');
             }
         }
         return self::storage_result(true, 5, 'ok', '');
@@ -1213,7 +1225,9 @@ class TeamOversight_Club_Documents {
     /**
      * Check now (administrators): the folder check (steps 1 to 5) and then
      * the web check. Returns array(storage => storage_status(), web =>
-     * web_check()). A failure is logged.
+     * web_check()). A failed web check is logged and kept in
+     * WEB_CHECK_OPTION until a later web check passes (one that couldn't
+     * run keeps it), so To do and File storage go on showing it.
      */
     public static function check_now($actor) {
         if (!user_can(intval($actor), 'manage_options')) {
@@ -1223,8 +1237,17 @@ class TeamOversight_Club_Documents {
         $web = $status['ok'] ? self::web_check() : array('state' => 'skipped', 'message' => 'The web check runs once the folder check passes.');
         if ($web['state'] === 'fail') {
             self::log(self::LOG_PROBLEM, 'Club documents web check failed: a test file in the documents folder could be fetched over the web.');
+            update_option(self::WEB_CHECK_OPTION, array('state' => 'fail', 'at' => current_time('mysql')), false);
+        } elseif ($web['state'] === 'pass') {
+            delete_option(self::WEB_CHECK_OPTION);
         }
         return array('storage' => $status, 'web' => $web);
+    }
+
+    /** When the last web check failed (site time), or '' when none has failed since one passed. */
+    public static function web_check_failed() {
+        $last = get_option(self::WEB_CHECK_OPTION, array());
+        return (is_array($last) && isset($last['state'], $last['at']) && $last['state'] === 'fail') ? (string) $last['at'] : '';
     }
 
     /**
@@ -1278,8 +1301,8 @@ class TeamOversight_Club_Documents {
         }
         $words = array(
             'pass' => 'The test file couldn\'t be fetched over the web, as it should be.',
-            'fail' => 'The test file could be fetched over the web, so the files are not private. Uploads should stop until the host has fixed this.',
-            'unknown' => 'Couldn\'t check over the web from here; the folder check passed.',
+            'fail' => 'The test file could be fetched over the web, so the files in the documents folder are not private. Ask the host to fix this, and don\'t upload members-only papers until Check now passes.',
+            'unknown' => 'Couldn\'t check over the web from here.',
         );
         return array('state' => $state, 'message' => $words[$state]);
     }
@@ -1291,15 +1314,16 @@ class TeamOversight_Club_Documents {
     /**
      * A POST whose body was bigger than post_max_size arrives with $_POST
      * and $_FILES empty. The handler calls this first: the message to show
-     * (with the server's limit), or '' when the request is not such a post.
-     * Nothing is written, so no nonce is needed for this one message.
+     * (with the limit the form gives, cap_bytes(), which is never more than
+     * post_max_size), or '' when the request is not such a post. Nothing is
+     * written, so no nonce is needed for this one message.
      */
     public static function post_too_big($method, array $post, $content_length, $post_max_size) {
         $limit = function_exists('wp_convert_hr_to_bytes') ? wp_convert_hr_to_bytes((string) $post_max_size) : intval($post_max_size);
         if (strtoupper((string) $method) !== 'POST' || !empty($post) || $limit < 1 || intval($content_length) <= $limit) {
             return '';
         }
-        return 'The file is bigger than the site accepts (' . self::mb_words($limit) . ').';
+        return 'The file is bigger than the site accepts, so nothing was saved. The limit is ' . self::mb_words(self::cap_bytes()) . '.';
     }
 
     /** A byte count as whole MB ("32 MB"), or KB below 1 MB. */
@@ -1347,7 +1371,7 @@ class TeamOversight_Club_Documents {
         $error = isset($file['error']) ? intval($file['error']) : UPLOAD_ERR_OK;
         if ($error !== UPLOAD_ERR_OK) {
             if ($error === UPLOAD_ERR_INI_SIZE || $error === UPLOAD_ERR_FORM_SIZE) {
-                return array(array('The file is bigger than the site accepts (' . self::mb_words(wp_max_upload_size()) . ').'), null);
+                return array(array('The file is bigger than the site accepts. The limit is ' . self::mb_words(self::cap_bytes()) . '.'), null);
             }
             if ($error === UPLOAD_ERR_NO_FILE) {
                 return array(array('Choose a PDF to upload.'), null);
@@ -1529,9 +1553,15 @@ class TeamOversight_Club_Documents {
         return is_array($rows) ? $rows : array();
     }
 
-    /** The accounts that can manage documents today (administrators and editors), id => display name decoded once. */
+    /**
+     * The accounts that can manage documents today, which is also who the
+     * Committee box means: id => display name decoded once. Read from the
+     * capability itself (any role holding CAP, CAP given to one account, and
+     * manage_options, which holds CAP through grant_admins()), then each
+     * account checked with user_can().
+     */
     public static function managers() {
-        $users = get_users(array('role__in' => array('administrator', 'editor'), 'orderby' => 'display_name', 'fields' => array('ID', 'display_name')));
+        $users = get_users(array('capability__in' => array(self::CAP, 'manage_options'), 'orderby' => 'display_name', 'fields' => array('ID', 'display_name')));
         $out = array();
         foreach (is_array($users) ? $users : array() as $u) {
             if (user_can(intval($u->ID), self::CAP)) {
@@ -1608,6 +1638,14 @@ class TeamOversight_Club_Documents {
         return $slug;
     }
 
+    /** The address suggest_slug() gives a saved document for its saved title, group, year and ticks. */
+    public static function suggest_for_row($doc) {
+        if (!is_object($doc)) {
+            return '';
+        }
+        return self::suggest_slug((string) $doc->title, (string) $doc->group_key, $doc->doc_year === null ? 0 : intval($doc->doc_year), implode(',', self::audiences_of($doc)), intval($doc->id));
+    }
+
     /**
      * Clean what an editor typed (unslashed by the handler) against the old
      * row (null for a new document): array($clean, $errors). title (1 to
@@ -1664,8 +1702,15 @@ class TeamOversight_Club_Documents {
                 $errors[] = 'The address is fixed once the document has been published.';
             }
             $slug = (string) $old->slug;
-        } elseif ($slug === '') {
-            $slug = $old ? (string) $old->slug : self::suggest_slug($clean['title'], $clean['group_key'], $clean['doc_year'], $clean['audiences']);
+        } else {
+            $suggested = self::suggest_slug($clean['title'], $clean['group_key'], $clean['doc_year'], $clean['audiences'], $old ? intval($old->id) : 0);
+            if (!$old) {
+                $slug = $slug === '' ? $suggested : $slug;
+            } elseif ($slug === '' || $slug === (string) $old->slug) {
+                // Until it is published, an address that is still the one suggested for the saved details
+                // follows the title, group, year and ticks; one somebody typed stays as typed.
+                $slug = (string) $old->slug === self::suggest_for_row($old) ? $suggested : (string) $old->slug;
+            }
         }
         if (preg_match(self::SLUG_PATTERN, $slug) !== 1) {
             $errors[] = 'The address can use small letters, numbers and hyphens only, 3 to 60 of them, starting and ending with a letter or number.';
@@ -1699,9 +1744,37 @@ class TeamOversight_Club_Documents {
             return 'Set the AGM year before publishing.';
         }
         if (empty(self::audiences_of($doc))) {
-            return 'Tick at least one box to publish. A draft can be saved without.';
+            return 'Tick at least one box to publish.';
         }
         return '';
+    }
+
+    /**
+     * Whether a document's address answers for it now: published, or
+     * withdrawn after being published (its address says so). A draft, and a
+     * draft set aside (withdrawn, never published), answer page not found.
+     */
+    public static function address_live($doc) {
+        if (!is_object($doc)) {
+            return false;
+        }
+        $status = (string) $doc->status;
+        return $status === 'published' || ($status === 'retired' && !empty($doc->published_at));
+    }
+
+    /**
+     * What a version's file now does at the address, after an upload or
+     * Make current: one plain sentence for the document's status.
+     */
+    public static function opens_words($doc, $now = true) {
+        $status = is_object($doc) ? (string) $doc->status : '';
+        if ($status === 'published') {
+            return $now ? 'The address now opens it.' : 'The address opens it.';
+        }
+        if ($status === 'retired' && !empty($doc->published_at)) {
+            return 'The address still says it was withdrawn until you publish it again.';
+        }
+        return 'It opens once the document is published.';
     }
 
     // ------------------------------------------------------------------
@@ -1781,8 +1854,13 @@ class TeamOversight_Club_Documents {
             set_transient(self::DRAFT_PREFIX . intval($actor) . '_' . intval($id), $clean, 1800);
         }
         $who = self::person_name($fresh->updated_by);
-        $when = mysql2date('j M Y, g:i a', $fresh->updated_at);
-        $out = self::result(false, 'error', 'This document was changed by ' . $who . ' at ' . $when . ' after you opened it. Reload it, check the History and try again.', array(), $id);
+        $when = mysql2date('j M Y \a\t g:i a', $fresh->updated_at);
+        // Only this class's own fallbacks are capitalised; a person's name is shown as they wrote it.
+        $who = $who === 'someone' ? 'Someone' : (strpos($who, 'user #') === 0 ? 'User #' . substr($who, 6) : $who);
+        $said = $who . ' changed this document on ' . $when . ' after you opened it.';
+        // A save keeps what was typed (the edit screen refills the form once); a button with nothing typed keeps nothing.
+        $said .= !empty($clean) && intval($actor) > 0 ? ' Your changes are in the form below: check the History, then save again.' : ' Reload it, check the History and try again.';
+        $out = self::result(false, 'error', $said, array(), $id);
         $out['stale'] = true;
         return $out;
     }
@@ -1813,7 +1891,7 @@ class TeamOversight_Club_Documents {
             return self::result(false, 'error', 'That document was not found. Reload the page.', array(), $id);
         }
         list($clean, $errors) = self::clean_fields($fields, $old);
-        if ((string) $old->status !== 'draft' && $clean['audiences'] === '') {
+        if (self::address_live($old) && $clean['audiences'] === '') {
             $errors[] = 'A document on the website needs at least one box ticked. To take it off the website, withdraw it.';
         }
         if ((string) $old->status === 'published' && empty($errors)) {
@@ -1863,7 +1941,10 @@ class TeamOversight_Club_Documents {
         if ((string) $old->status !== 'draft') {
             self::queue_purge(isset($diff['audiences']) ? 'audiences' : 'document', isset($diff['audiences']) ? (string) $old->slug : '');
         }
-        return self::result(true, 'success', (string) $old->status === 'published' ? 'Document updated.' : 'Saved.', array(), $id);
+        // Ticks moved off Everyone: the file that was public may still be in the site cache.
+        $lines = (string) $old->status === 'published' && self::is_public($old) && !self::is_public($clean['audiences'])
+            ? self::cache_warning($id, false) : array();
+        return self::result(true, empty($lines) ? 'success' : 'warning', (string) $old->status === 'published' ? 'Document updated.' : 'Saved.', $lines, $id);
     }
 
     /** The next version number for a document. */
@@ -1939,7 +2020,10 @@ class TeamOversight_Club_Documents {
             return self::result(false, 'error', 'Nothing was uploaded.', $errors, $id);
         }
         $current = self::current_version($doc);
-        if ($current && hash_equals((string) $current->sha256, $info['sha256'])) {
+        // The same file as the current version changes nothing, unless that version's file is missing from
+        // storage: then this upload brings it back (as a new version, made current like any other).
+        $restoring = $current && hash_equals((string) $current->sha256, $info['sha256']);
+        if ($restoring && self::version_file_ok($current)) {
             return self::result(false, 'warning', 'This is the same file as version ' . intval($current->number) . '. Nothing changed.', array(), $id);
         }
         $stored = self::store_file($info['path'], true);
@@ -1966,11 +2050,19 @@ class TeamOversight_Club_Documents {
             $out['version_id'] = $version_id;
             return $out;
         }
+        $lines = array();
         if ((string) $doc->status === 'published') {
             self::queue_purge('version', (string) $doc->slug);
+            $lines = self::is_public($doc) && !$restoring ? self::cache_warning($id, false) : array();
         }
-        $out = self::result(true, 'success', 'Version ' . $number . ' uploaded. The address now opens it.', array(), $id);
+        if ($restoring) {
+            $message = 'The missing file is back, as version ' . $number . '.' . ((string) $doc->status === 'published' ? ' The address opens it again.' : '');
+        } else {
+            $message = 'Version ' . $number . ' uploaded. ' . self::opens_words($doc);
+        }
+        $out = self::result(true, empty($lines) ? 'success' : 'warning', $message, $lines, $id);
         $out['version_id'] = $version_id;
+        $out['number'] = $number;
         return $out;
     }
 
@@ -2000,10 +2092,12 @@ class TeamOversight_Club_Documents {
         $was = self::get_version($doc->current_version_id);
         self::record_change($id, 'made_current', array('number' => array($was ? intval($was->number) : null, intval($version->number))), $actor, $now);
         self::log(self::LOG_DOCUMENT, 'Club document #' . $id . ': version ' . intval($version->number) . ' made current.');
+        $lines = array();
         if ((string) $doc->status === 'published') {
             self::queue_purge('version', (string) $doc->slug);
+            $lines = self::is_public($doc) ? self::cache_warning($id, false) : array();
         }
-        return self::result(true, 'success', 'Version ' . intval($version->number) . ' is now current. The address opens it.', array(), $id);
+        return self::result(true, empty($lines) ? 'success' : 'warning', 'Version ' . intval($version->number) . ' is now current. ' . self::opens_words($doc, false), $lines, $id);
     }
 
     /**
@@ -2057,9 +2151,11 @@ class TeamOversight_Club_Documents {
      * ('draft'). Publish needs publish_problem() to be '' (a current file
      * that exists, a group that exists, the year in a group shown by year,
      * at least one box the registry knows); the first publish fixes the
-     * address name. Withdraw is from published only. Compare-and-set on
+     * address name. Withdraw is from published, or from a draft, which
+     * sets the draft aside: it stays off the website and its address keeps
+     * answering page not found (address_live()). Compare-and-set on
      * $expect_row_version. Records, logs and refreshes the page and the
-     * address.
+     * address (not for setting a draft aside, which changes neither).
      */
     public static function set_status($id, $status, $expect_row_version, $actor) {
         global $wpdb;
@@ -2082,8 +2178,8 @@ class TeamOversight_Club_Documents {
                 return self::result(false, 'error', $problem, array(), $id);
             }
         }
-        if ($status === 'retired' && $from !== 'published') {
-            return self::result(false, 'error', 'Only a document on the website can be withdrawn.', array(), $id);
+        if ($status === 'retired' && $from !== 'published' && $from !== 'draft') {
+            return self::result(false, 'error', 'Only a document on the website, or a draft, can be withdrawn.', array(), $id);
         }
         $now = current_time('mysql');
         $set = 'status = %s, row_version = row_version + 1, updated_at = %s, updated_by = NULLIF(%d, 0)';
@@ -2099,24 +2195,68 @@ class TeamOversight_Club_Documents {
         if ($done !== 1) {
             return self::stale($id, array(), $actor);
         }
-        $event = $status === 'published' ? ($from === 'retired' ? 'republished' : 'published') : ($status === 'retired' ? 'retired' : 'unpublished');
+        if ($status === 'published') {
+            $event = ($from === 'retired' && !empty($doc->published_at)) ? 'republished' : 'published';
+        } elseif ($status === 'retired') {
+            // A draft that was never on the website is set aside; one that was is withdrawn like any other.
+            $event = ($from === 'draft' && empty($doc->published_at)) ? 'set_aside' : 'retired';
+        } else {
+            $event = 'unpublished';
+        }
         self::record_change($id, $event, array('from' => $from), $actor, $now);
-        $words = array('published' => 'published', 'republished' => 'published again', 'retired' => 'withdrawn from the website', 'unpublished' => 'taken back to a draft');
+        $words = array('published' => 'published', 'republished' => 'published again', 'retired' => 'withdrawn from the website', 'set_aside' => 'set aside (a draft, never on the website)', 'unpublished' => 'taken back to a draft');
         self::log(self::LOG_DOCUMENT, 'Club document #' . $id . ': ' . $words[$event] . '.');
         delete_transient(self::LINKS_TRANSIENT);
-        self::queue_purge($event, (string) $doc->slug);
-        $messages = array(
-            'published' => 'Published. The page shows it once the page refresh has run.',
-            'republished' => 'Published again at the same address.',
-            'retired' => 'Withdrawn. Its address now says the club withdrew it.',
-            'unpublished' => 'Taken back to a draft. Its address now shows page not found.',
-        );
-        return self::result(true, 'success', $messages[$event], array(), $id);
+        if ($event !== 'set_aside') {
+            self::queue_purge($event, (string) $doc->slug);
+        }
+        if ($status === 'published') {
+            if (self::is_listed($doc)) {
+                $message = ($event === 'republished' ? 'Published again at the same address.' : 'Published.')
+                    . (self::has_purge_listener() ? ' It\'s listed on the Policies and documents page within a few minutes.'
+                        : ' It\'s listed on the Policies and documents page, but logged-out visitors may see the old page until the site cache is emptied.');
+            } else {
+                $message = ($event === 'republished' ? 'Published again. ' : 'Published. ') . 'It isn\'t listed on the page. ' . self::who_sentence($doc);
+            }
+        } else {
+            $messages = array(
+                'retired' => 'Withdrawn. Its address now says the club withdrew it.',
+                'set_aside' => 'Set aside. It stays off the website and its address shows page not found. Publish puts it up.',
+                'unpublished' => 'Taken back to a draft. Its address now shows page not found.',
+            );
+            $message = $messages[$event];
+        }
+        // A public file taken off: it may still be in the site cache when nothing could refresh it.
+        $lines = ($from === 'published' && $status !== 'published' && self::is_public($doc)) ? self::cache_warning($id, false) : array();
+        return self::result(true, empty($lines) ? 'success' : 'warning', $message, $lines, $id);
+    }
+
+    /**
+     * Where a move goes in a group's list (pure): the index to swap with,
+     * or false. Only past a document of the same year; a published document
+     * swaps with the nearest published one that way, skipping drafts and
+     * withdrawn ones (which the page doesn't show), so every move of a
+     * published document changes the page. Any other document swaps with
+     * its neighbour. $years and $statuses are in the list's order.
+     */
+    public static function move_target(array $years, array $statuses, $at, $direction) {
+        $step = $direction === 'up' ? -1 : 1;
+        $published = isset($statuses[$at]) && $statuses[$at] === 'published';
+        for ($to = $at + $step; $to >= 0 && $to < count($years); $to += $step) {
+            if ($years[$to] !== $years[$at]) {
+                return false;
+            }
+            if (!$published || $statuses[$to] === 'published') {
+                return $to;
+            }
+        }
+        return false;
     }
 
     /**
      * Move a document up or down inside its group (in a group shown by
-     * year, only past a document of the same year). The group is
+     * year, only past a document of the same year; a published document
+     * past the next published one, move_target()). The group is
      * renumbered 10, 20, 30. Compare-and-set on the moved document; the
      * others' positions change without raising their row_version (no form
      * holds a position). Records, logs, refreshes the page when published.
@@ -2132,18 +2272,20 @@ class TeamOversight_Club_Documents {
             return self::result(false, 'error', 'Choose up or down.', array(), $id);
         }
         $rows = $wpdb->get_results($wpdb->prepare(
-            'SELECT id, doc_year FROM ' . self::table() . ' WHERE group_key = %s ORDER BY (doc_year IS NULL), doc_year DESC, position, id',
+            'SELECT id, doc_year, status FROM ' . self::table() . ' WHERE group_key = %s ORDER BY (doc_year IS NULL), doc_year DESC, position, id',
             (string) $doc->group_key
         ));
         $ids = array();
         $years = array();
+        $statuses = array();
         foreach (is_array($rows) ? $rows : array() as $r) {
             $ids[] = intval($r->id);
             $years[] = $r->doc_year === null ? null : intval($r->doc_year);
+            $statuses[] = (string) $r->status;
         }
         $at = array_search($id, $ids, true);
-        $to = $direction === 'up' ? $at - 1 : $at + 1;
-        if ($at === false || $to < 0 || $to >= count($ids) || $years[$to] !== $years[$at]) {
+        $to = $at === false ? false : self::move_target($years, $statuses, $at, $direction);
+        if ($to === false) {
             return self::result(true, 'success', $direction === 'up' ? 'It is already at the top.' : 'It is already at the bottom.', array(), $id);
         }
         $other = $ids[$to];
@@ -2598,7 +2740,7 @@ class TeamOversight_Club_Documents {
         foreach ($duplicates as $path_found) {
             $lines[] = 'The same file is also at ' . $path_found . '. Add it to this document, so its old links are checked and redirected too.';
         }
-        $out = self::result(true, empty($lines) ? 'success' : 'warning', 'Copied as a draft. The file in the Media Library is unchanged. Tick who can open it before publishing.', $lines, $id);
+        $out = self::result(true, empty($lines) ? 'success' : 'warning', 'Copied as a draft; the Media Library file is unchanged. Check the title, description and address (it can\'t change once published), tick who can open it, then publish.', $lines, $id);
         $out['duplicates'] = $duplicates;
         return $out;
     }
@@ -2646,6 +2788,48 @@ class TeamOversight_Club_Documents {
         return self::result(true, 'success', 'Added. Its old links are checked too, and it can be removed like the first copy.', array(), $id);
     }
 
+    /**
+     * Take an old copy's path off a document that has never been on the
+     * website (administrators): "Not this document's file", for a file
+     * copied into the wrong draft. Its old link then no longer belongs to
+     * this document, and the Media Library file (never touched) can be
+     * copied into the right one. The draft's versions stay as they are.
+     * Compare-and-set; records, logs.
+     */
+    public static function remove_legacy_path($document_id, $path, $expect_row_version, $actor) {
+        global $wpdb;
+        $actor = intval($actor);
+        if (!user_can($actor, 'manage_options')) {
+            return self::result(false, 'error', 'Only an administrator can take an old copy off a document.');
+        }
+        $doc = self::get_document($document_id);
+        if (!$doc) {
+            return self::result(false, 'error', 'That document was not found. Reload the page.');
+        }
+        $id = intval($doc->id);
+        if (!empty($doc->published_at)) {
+            return self::result(false, 'error', 'This document has been on the website, so its old copies stay with it.', array(), $id);
+        }
+        $paths = self::legacy_paths_of($doc);
+        $path = is_scalar($path) ? (string) $path : '';
+        if ($path === '' || !in_array($path, $paths, true)) {
+            return self::result(false, 'error', 'That file isn\'t an old copy of this document. Reload the page.', array(), $id);
+        }
+        $paths = array_values(array_diff($paths, array($path)));
+        $now = current_time('mysql');
+        $done = $wpdb->query($wpdb->prepare(
+            'UPDATE ' . self::table() . ' SET legacy_paths = NULLIF(%s, \'\'), row_version = row_version + 1, updated_at = %s, updated_by = NULLIF(%d, 0) WHERE id = %d AND row_version = %d',
+            empty($paths) ? '' : wp_json_encode($paths, JSON_UNESCAPED_SLASHES), $now, $actor, $id, intval($expect_row_version)
+        ));
+        if ($done !== 1) {
+            return self::stale($id, array(), $actor);
+        }
+        self::record_change($id, 'legacy_path_removed', array('path' => $path), $actor, $now);
+        self::log(self::LOG_DOCUMENT, 'Club document #' . $id . ': an old copy\'s path taken off (not this document\'s file).');
+        delete_transient(self::LINKS_TRANSIENT);
+        return self::result(true, 'success', 'Taken off. The Media Library file is unchanged and can be copied into the right document.', array(), $id);
+    }
+
     /** A document's version with that number, or null. */
     private static function version_number($document_id, $number) {
         global $wpdb;
@@ -2691,20 +2875,78 @@ class TeamOversight_Club_Documents {
     }
 
     /**
+     * Why an old public copy can't be removed now, or '' when it can. The
+     * document's address must answer (address_live(): not a draft, whose
+     * address is page not found, so the old link would break); the file must
+     * still be on the server, and its folder writable by the website (or the
+     * Media Library entry would go and the file stay); and the file must be
+     * exactly a version the club holds: a version of this document with the
+     * same sha256, not deleted, whose stored file is there and still has
+     * that sha256 (so a file replaced in the Media Library since the copy
+     * is never deleted). Reads only.
+     */
+    public static function copy_problem($doc, $path) {
+        list($problem) = self::copy_check($doc, $path);
+        return $problem;
+    }
+
+    /** copy_problem()'s checks: array(problem ('' when it can be removed), the number of the version the club holds of it, or 0). */
+    private static function copy_check($doc, $path) {
+        if (!is_object($doc) || !self::address_live($doc)) {
+            return array('Publish the document first: until then its address shows page not found, so the old link would break.', 0);
+        }
+        $file = self::uploads_file($path);
+        if ($file === '' || !is_file($file)) {
+            return array('That file is no longer on the server, so there is no public copy to remove.', 0);
+        }
+        $hash = (string) hash_file('sha256', $file);
+        $same = array();
+        foreach (self::versions(intval($doc->id)) as $v) {
+            if (hash_equals((string) $v->sha256, $hash)) {
+                $same[] = $v;
+            }
+        }
+        if (empty($same)) {
+            return array('The file in the Media Library has changed since it was copied, so it stays. Upload it as a new version first.', 0);
+        }
+        $held = 0;
+        foreach ($same as $v) {
+            $kept = empty($v->file_deleted_at) ? self::file_path($v->stored_name) : '';
+            if ($kept !== '' && is_file($kept) && hash_equals((string) $v->sha256, (string) hash_file('sha256', $kept))) {
+                $held = intval($v->number);
+                break;
+            }
+        }
+        if ($held < 1) {
+            return array('The club\'s copy (version ' . intval($same[0]->number) . ') is missing or doesn\'t match, so the public copy stays. Upload the Media Library file as a new version first.', 0);
+        }
+        if (!wp_is_writable(dirname($file))) {
+            return array('The website can\'t delete that file, because its folder belongs to another server account. Ask the host to give the uploads folder back to the website\'s account, then try again.', $held);
+        }
+        return array('', $held);
+    }
+
+    /**
      * What the Remove the public copy confirm screen shows (step 1, a GET):
      * array(ok, problem, document, attachment, path, url, links (the
-     * old-link check's hits for this path), nonce_action). Writes nothing.
+     * old-link check's hits for this path), nonce_action, version (the
+     * number of the version the club holds of that file)). Writes nothing.
+     * With a problem (copy_problem()) it offers no button.
      */
     public static function remove_copy_facts($attachment_id, $document_id) {
         $doc = self::get_document($document_id);
         $path = self::attachment_path($attachment_id);
-        $out = array('ok' => false, 'problem' => '', 'document' => $doc, 'attachment' => intval($attachment_id), 'path' => $path, 'url' => '', 'links' => array(), 'nonce_action' => '');
+        $out = array('ok' => false, 'problem' => '', 'document' => $doc, 'attachment' => intval($attachment_id), 'path' => $path, 'url' => '', 'links' => array(), 'nonce_action' => '', 'version' => 0);
         if (!$doc || $path === '' || !in_array($path, self::legacy_paths_of($doc), true)) {
             $out['problem'] = 'That file isn\'t an old copy of this document.';
             return $out;
         }
         $uploads = wp_get_upload_dir();
         $out['url'] = rtrim((string) $uploads['baseurl'], '/') . '/' . $path;
+        list($out['problem'], $out['version']) = self::copy_check($doc, $path);
+        if ($out['problem'] !== '') {
+            return $out;
+        }
         $out['links'] = self::links_to_path($path);
         $out['nonce_action'] = self::remove_copy_nonce_action($attachment_id, $doc->id, $doc->row_version);
         $out['ok'] = true;
@@ -2716,13 +2958,16 @@ class TeamOversight_Club_Documents {
      * step 2 of its confirm, never automatic). $confirm: method (must be
      * POST), document (id), row_version (as the confirm screen drew it) and
      * nonce (for remove_copy_nonce_action()). Checks again that the
-     * attachment's path is in that document's legacy paths and that
-     * version 1's file is in storage with the sha256 recorded at import,
+     * attachment's path is in that document's legacy paths, then
+     * copy_problem() (the document's address answers, the file is exactly a
+     * version the club holds in storage, and the website can delete it),
      * then deletes the attachment for good (with WordPress's preview images
-     * of it). The old address then redirects to the document's address.
-     * One history row, one log line, and the old address is refreshed in
-     * the page cache. This is the only code in Club Manager that deletes an
-     * attachment; on the live site it runs only with the club's go.
+     * of it) and checks the file really went (when it didn't, it says so and
+     * records public_copy_failed). The old address then redirects to the
+     * document's address. One history row, one log line, and the old
+     * address is refreshed in the page cache. This is the only code in Club
+     * Manager that deletes an attachment; on the live site it runs only with
+     * the club's go.
      */
     public static function remove_public_copy($attachment_id, $actor, array $confirm) {
         global $wpdb;
@@ -2748,11 +2993,11 @@ class TeamOversight_Club_Documents {
         if (get_post_type($attachment_id) !== 'attachment' || $path === '' || !in_array($path, self::legacy_paths_of($doc), true)) {
             return self::result(false, 'error', 'That file isn\'t an old copy of this document, so nothing was deleted.', array(), $document_id);
         }
-        $first = self::version_number($document_id, 1);
-        $kept = $first && empty($first->file_deleted_at) ? self::file_path($first->stored_name) : '';
-        if ($kept === '' || !is_file($kept) || !hash_equals((string) $first->sha256, (string) hash_file('sha256', $kept))) {
-            return self::result(false, 'error', 'The club\'s copy (version 1) is missing or doesn\'t match, so the public copy was kept.', array(), $document_id);
+        $problem = self::copy_problem($doc, $path);
+        if ($problem !== '') {
+            return self::result(false, 'error', $problem, array(), $document_id);
         }
+        $file = self::uploads_file($path);
         $now = current_time('mysql');
         $claimed = $wpdb->query($wpdb->prepare(
             'UPDATE ' . self::table() . ' SET row_version = row_version + 1, updated_at = %s, updated_by = %d WHERE id = %d AND row_version = %d',
@@ -2769,11 +3014,20 @@ class TeamOversight_Club_Documents {
             self::log(self::LOG_PROBLEM, 'Club document #' . $document_id . ': removing attachment #' . $attachment_id . ' failed.');
             return self::result(false, 'error', 'WordPress couldn\'t delete that file. Nothing else changed.', array(), $document_id);
         }
+        // WordPress deletes the Media Library entry first and ignores a file it couldn't delete: check the file is gone.
+        clearstatcache();
+        if ($file !== '' && is_file($file)) {
+            self::record_change($document_id, 'public_copy_failed', array('attachment' => $attachment_id, 'path' => $path, 'file_kept' => true), $actor, $now);
+            self::log(self::LOG_PROBLEM, 'Club document #' . $document_id . ': attachment #' . $attachment_id . ' deleted from the Media Library, but its file is still on the server.');
+            delete_transient(self::LINKS_TRANSIENT);
+            return self::result(false, 'error', 'The Media Library entry was deleted, but the file is still on the server, so its old address still opens it. Delete it on the server: ' . $path, array(), $document_id);
+        }
         self::record_change($document_id, 'public_copy_removed', array('attachment' => $attachment_id, 'path' => $path), $actor, $now);
         self::log(self::LOG_DOCUMENT, 'Club document #' . $document_id . ': old public copy, attachment #' . $attachment_id . ', deleted from the Media Library.');
         delete_transient(self::LINKS_TRANSIENT);
         self::queue_purge('public_copy_removed', '', $old_url);
-        return self::result(true, 'success', 'The public copy was deleted. Its old address now sends people to the document\'s address.', array(), $document_id);
+        $lines = self::cache_warning($document_id, true);
+        return self::result(true, empty($lines) ? 'success' : 'warning', 'The public copy was deleted. Its old address now sends people to the document\'s address.', $lines, $document_id);
     }
 
     // ------------------------------------------------------------------
@@ -2982,23 +3236,28 @@ class TeamOversight_Club_Documents {
         return $url . ($anchor !== '' ? '#' . $anchor : '');
     }
 
-    private static function todo_row($key, $state, $text, $url = '', $label = '', array $links = array()) {
-        return array('key' => $key, 'state' => $state, 'text' => $text, 'url' => $url, 'label' => $label, 'links' => $links);
+    private static function todo_row($key, $state, $text, $url = '', $label = '', array $links = array(), $copy = '') {
+        return array('key' => $key, 'state' => $state, 'text' => $text, 'url' => $url, 'label' => $label, 'links' => $links, 'copy' => $copy);
     }
 
     /**
      * The To do panel's rows: a list of array(key, state ('warn' | 'bad'),
-     * text, url, label, links (list of array(title, url))), 'bad' first.
-     * Only what needs doing; it never blocks anything. Text is plain (the
-     * caller escapes it). A few queries, plus one per document that has old
-     * copies; the storage check and the old-link check are each kept for an
-     * hour.
+     * text, url, label, links (list of array(title, url)), copy (an address
+     * to show with a Copy button, or '')), 'bad' first. Only what needs
+     * doing; it never blocks anything. Text is plain (the caller escapes
+     * it). A few queries, plus one per document that has old copies; the
+     * storage check and the old-link check are each kept for an hour.
      */
     public static function todo() {
         $rows = array();
         $storage = self::storage_summary();
+        $admin = current_user_can('manage_options');
         if (!$storage['ok']) {
-            $rows[] = self::todo_row('storage', 'bad', $storage['problem'], self::admin_url_for(self::PAGE_SETTINGS, array(), 'storage'), 'File storage');
+            $rows[] = self::todo_row('storage', 'bad', $storage['problem'] . ($admin ? '' : ' Ask the website maintainer.'), self::admin_url_for(self::PAGE_SETTINGS, array(), 'storage'), 'File storage');
+        }
+        $web_failed = self::web_check_failed();
+        if ($web_failed !== '') {
+            $rows[] = self::todo_row('web_check', 'bad', 'On ' . mysql2date('j M Y', $web_failed) . ' Check now could fetch a test file from the documents folder over the web, so the files are not private. ' . ($admin ? 'Ask the host to fix it, then run Check now again.' : 'Ask the website maintainer.'), self::admin_url_for(self::PAGE_SETTINGS, array(), 'storage'), 'File storage');
         }
         $docs = self::list_documents();
         $versions = array();
@@ -3023,32 +3282,59 @@ class TeamOversight_Club_Documents {
         foreach ($docs as $doc) {
             $by_id[intval($doc->id)] = $doc;
         }
+        $copies = array();
+        foreach ($docs as $doc) {
+            $copies[intval($doc->id)] = empty($doc->legacy_paths) ? array() : self::legacy_copies($doc);
+        }
         foreach (self::old_links() as $id => $entry) {
             if (!isset($by_id[$id])) {
                 continue;
             }
             $doc = $by_id[$id];
-            $links = array();
-            foreach ($entry['old'] as $hits) {
+            $name = self::title_with_year($doc);
+            // Links to an old file, split by whether that file is still there (it opens) or gone (a redirect).
+            $split = array('open' => array(), 'redirect' => array());
+            foreach ($entry['old'] as $path => $hits) {
+                $gone = isset($copies[$id][$path]) && !$copies[$id][$path]['exists'];
                 foreach ($hits as $hit) {
-                    $links[] = array('title' => $hit['where'] . ' ' . $hit['title'], 'url' => $hit['edit_url']);
+                    $split[$gone ? 'redirect' : 'open'][] = array('title' => $hit['where'] . ' ' . $hit['title'], 'url' => $hit['edit_url']);
                 }
             }
-            if (!empty($links)) {
+            $address = self::document_url((string) $doc->slug);
+            foreach ($split as $kind => $links) {
                 $n = count($links);
-                $rows[] = self::todo_row('old_' . $id, 'warn', ($n === 1 ? '1 link still opens' : $n . ' links still open') . ' the old ' . self::title_with_year($doc) . ' file:', '', '', $links);
+                if ($n === 0) {
+                    continue;
+                }
+                $them = $n === 1 ? 'it' : 'them';
+                $text = $kind === 'redirect'
+                    ? ($n === 1 ? '1 link to the old ' . $name . ' file goes' : $n . ' links to the old ' . $name . ' file go') . ' through a redirect to its address.'
+                    : ($n === 1 ? '1 link still opens' : $n . ' links still open') . ' the old ' . $name . ' file.';
+                if ((string) $doc->status === 'published') {
+                    $text .= ($kind === 'redirect' ? ' Point ' : ' Change ') . $them . ($kind === 'redirect' ? ' at' : ' to') . ' its address:';
+                } elseif (self::address_live($doc)) {
+                    $text .= ' It was withdrawn on ' . self::nice_date($doc->retired_at, 'j M Y') . ', so take ' . $them . ' out.';
+                } else {
+                    $text .= ' Publish ' . $name . ' first, then change ' . $them . ' to its address.';
+                }
+                $copy = (string) $doc->status === 'published' ? $address : '';
+                $rows[] = self::todo_row(($kind === 'redirect' ? 'redirect_' : 'old_') . $id, 'warn', $text, '', '', $links, $copy);
             }
             foreach ($entry['withdrawn'] as $hit) {
-                $rows[] = self::todo_row('withdrawn_' . $id . '_' . $hit['id'], 'warn', ucfirst($hit['where']) . ' ' . $hit['title'] . ' links ' . self::title_with_year($doc) . ', which was withdrawn on ' . self::nice_date($doc->retired_at, 'j M Y') . '.', $hit['edit_url'], 'Edit');
+                $rows[] = self::todo_row('withdrawn_' . $id . '_' . $hit['id'], 'warn', ucfirst($hit['where']) . ' ' . $hit['title'] . ' links ' . $name . ', which was withdrawn on ' . self::nice_date($doc->retired_at, 'j M Y') . '.', $hit['edit_url'], 'Edit');
             }
         }
         foreach ($docs as $doc) {
-            if (empty($doc->legacy_paths)) {
-                continue;
-            }
-            foreach (self::legacy_copies($doc) as $path => $copy) {
-                if ($copy['exists']) {
-                    $rows[] = self::todo_row('copy_' . $doc->id . '_' . md5($path), 'warn', 'The old public copy of ' . self::title_with_year($doc) . ' is still in the Media Library (' . $path . '), so anyone with its old link can open it. Removing it is an administrator\'s step, under Old copies.', self::admin_url_for(self::PAGE_EDIT, array('document' => intval($doc->id)), 'old-copies'), 'Old copies');
+            foreach ($copies[intval($doc->id)] as $path => $copy) {
+                if (!$copy['exists']) {
+                    continue;
+                }
+                $old_copies = self::admin_url_for(self::PAGE_EDIT, array('document' => intval($doc->id)), 'old-copies');
+                if ($copy['attachment'] < 1) {
+                    // The Media Library entry went but the file stayed (WordPress couldn't delete it): only the server can fix it.
+                    $rows[] = self::todo_row('kept_' . $doc->id . '_' . md5($path), 'bad', 'The Media Library entry for the old copy of ' . self::title_with_year($doc) . ' is gone, but the file is still on the server at ' . $path . ', so its old link still opens it. Delete it on the server.' . ($admin ? '' : ' Ask the website maintainer.'), $old_copies, 'Old copies');
+                } elseif (self::address_live($doc)) {
+                    $rows[] = self::todo_row('copy_' . $doc->id . '_' . md5($path), 'warn', 'The old public copy of ' . self::title_with_year($doc) . ' is still in the Media Library (' . $path . '), so anyone with its old link can open it. Removing it is an administrator\'s step, under Old copies, once the links to it are changed.', $old_copies, 'Old copies');
                 }
             }
         }
@@ -3059,7 +3345,11 @@ class TeamOversight_Club_Documents {
             $rows[] = self::todo_row('contact', 'warn', 'No contact email is set, so the missing-file page gives the site\'s admin email.', self::admin_url_for(self::PAGE_SETTINGS, array(), 'settings'), 'Settings');
         }
         if (!self::has_purge_listener()) {
-            $rows[] = self::todo_row('page_refresh', 'warn', 'The documents page can show old content to logged-out visitors for up to 30 days until the page-refresh snippet is added. Emptying the whole site cache clears it meanwhile.');
+            // Public files were sent cacheable while the admin side last saw a listener; until CACHE_DAYS after that, one can still be kept.
+            $seen = (string) get_option(self::PURGE_OPTION, '0');
+            $files = $seen === 'on' || intval($seen) > time() - self::CACHE_DAYS * DAY_IN_SECONDS;
+            $rows[] = self::todo_row('page_refresh', 'warn', 'Nothing refreshes the site cache when a document changes, so for up to ' . self::CACHE_DAYS . ' days logged-out visitors can see an old documents page'
+                . ($files ? ', and a file that was public can still open after its ticks change' : '') . '. Until the page-refresh snippet is added, empty the whole site cache after each change.');
         }
         usort($rows, function ($a, $b) {
             return ($a['state'] === 'bad' ? 0 : 1) - ($b['state'] === 'bad' ? 0 : 1);
@@ -3142,9 +3432,57 @@ class TeamOversight_Club_Documents {
         self::$pages = null;
     }
 
-    /** Whether something (the site's page-cache snippet) listens on PURGE_ACTION. */
+    /** Whether something (the site's page-cache snippet) listens on PURGE_ACTION in this request. */
     public static function has_purge_listener() {
         return (bool) has_action(self::PURGE_ACTION);
+    }
+
+    /**
+     * Note whether this admin-side request (a Club documents screen, or the
+     * end of a writer's request) has a listener, in PURGE_OPTION, written
+     * only when that changes: 'on', or when it was last seen. The purge runs
+     * in the writer's request, so a listener only the visitor's request has
+     * (a snippet set to run on the front end only) never empties the cache.
+     * Returns the value stored before.
+     */
+    public static function note_purge_listener() {
+        $stored = get_option(self::PURGE_OPTION, '0');
+        $stored = is_scalar($stored) ? (string) $stored : '0';
+        $now = self::has_purge_listener();
+        if ($now && $stored !== 'on') {
+            update_option(self::PURGE_OPTION, 'on', true);
+        } elseif (!$now && $stored === 'on') {
+            update_option(self::PURGE_OPTION, (string) time(), true);
+        }
+        return $stored;
+    }
+
+    /** Whether the admin side last saw a listener (read by the route before a public file is sent cacheable). */
+    public static function purge_confirmed() {
+        return (string) get_option(self::PURGE_OPTION, '0') === 'on';
+    }
+
+    /**
+     * A change to what a public document's address answers, made in a
+     * request that can't refresh the site cache: when public files may have
+     * been kept in the cache in the last CACHE_DAYS days (the admin side saw
+     * a listener then), the line telling the editor to empty it, and one
+     * problem log line. array() otherwise. $any: the change is to an old
+     * upload address, which the server's cache may hold whatever was seen.
+     */
+    private static function cache_warning($document_id, $any) {
+        if (self::has_purge_listener()) {
+            return array();
+        }
+        $stored = self::note_purge_listener();
+        $recent = $stored === 'on' || intval($stored) > time() - self::CACHE_DAYS * DAY_IN_SECONDS;
+        if (!$any && !$recent) {
+            return array();
+        }
+        self::log(self::LOG_PROBLEM, 'Club document #' . intval($document_id) . ': changed while nothing could refresh the site cache.');
+        return array($any
+            ? 'The old file may still be in the site cache at its old address for logged-out visitors: empty the whole site cache now.'
+            : 'The old public file may still be in the site cache for logged-out visitors: empty the whole site cache now.');
     }
 
     /**
@@ -3184,6 +3522,7 @@ class TeamOversight_Club_Documents {
         $urls = array_keys(self::$purge_urls);
         self::$purge_reasons = array();
         self::$purge_urls = array();
+        self::note_purge_listener();
         $ids = array_keys(self::pages(true));
         foreach ($ids as $id) {
             clean_post_cache($id);

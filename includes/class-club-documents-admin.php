@@ -49,9 +49,9 @@ class TeamOversight_Club_Documents_Admin {
     /** The screens a button may send someone back to. */
     const PAGES = array('club-documents', 'club-documents-edit', 'club-documents-settings');
     /** Every button (the posted do). */
-    const DO_ACTIONS = array('save', 'upload', 'make_current', 'set_date', 'delete_file', 'withdraw', 'move', 'groups', 'settings', 'setup_storage', 'check_now', 'refresh', 'check_links', 'import', 'add_copy', 'remove_copy');
+    const DO_ACTIONS = array('save', 'upload', 'make_current', 'set_date', 'delete_file', 'withdraw', 'move', 'groups', 'settings', 'setup_storage', 'check_now', 'refresh', 'check_links', 'import', 'add_copy', 'drop_copy', 'remove_copy');
     /** The buttons only an administrator may press (manage_options as well as CAP). */
-    const ADMIN_ACTIONS = array('delete_file', 'settings', 'setup_storage', 'check_now', 'import', 'add_copy', 'remove_copy');
+    const ADMIN_ACTIONS = array('delete_file', 'settings', 'setup_storage', 'check_now', 'import', 'add_copy', 'drop_copy', 'remove_copy');
     /** The buttons that act on one version (posted as version). */
     const VERSION_ACTIONS = array('make_current', 'set_date', 'delete_file');
     /** The sections a button may return to. */
@@ -133,6 +133,8 @@ class TeamOversight_Club_Documents_Admin {
      */
     public static function load_page() {
         self::take_flash();
+        // An admin request: note whether the page refresh reaches the site cache from here, where it runs.
+        TeamOversight_Club_Documents::note_purge_listener();
         TeamOversight_Club_Documents::pages();
         $page = self::current_page();
         if ($page === TeamOversight_Club_Documents::PAGE_LIST) {
@@ -143,7 +145,12 @@ class TeamOversight_Club_Documents_Admin {
         } elseif ($page === TeamOversight_Club_Documents::PAGE_EDIT) {
             self::take_draft(self::get_id('document'));
         } elseif ($page === TeamOversight_Club_Documents::PAGE_SETTINGS) {
-            TeamOversight_Club_Documents::storage_summary();
+            // An administrator gets the check fresh (a fix made since shows at once); others the last result.
+            if (current_user_can('manage_options')) {
+                TeamOversight_Club_Documents::storage_status(true);
+            } else {
+                TeamOversight_Club_Documents::storage_summary();
+            }
         }
     }
 
@@ -181,6 +188,9 @@ class TeamOversight_Club_Documents_Admin {
         $out = self::result($ok, $message, $lines, $type, isset($r['id']) && intval($r['id']) > 0 ? intval($r['id']) : $id);
         if (!empty($r['stale'])) {
             $out['stale'] = true;
+        }
+        if (!empty($r['number'])) {
+            $out['number'] = (int) $r['number'];
         }
         if (!empty($r['needs_confirm'])) {
             $out['takeover'] = array(
@@ -284,6 +294,10 @@ class TeamOversight_Club_Documents_Admin {
             case 'add_copy':
                 $att = self::posted_id($data, 'attachment');
                 return ($doc && $att) ? 'murvc_documents_add_copy_' . $doc . '_' . $att : '';
+            case 'drop_copy':
+                // Bound to the document and the old path itself (the Media Library entry may be gone).
+                $path = isset($data['path']) && is_string($data['path']) ? $data['path'] : '';
+                return ($doc && $path !== '') ? 'murvc_documents_drop_copy_' . $doc . '_' . md5($path) : '';
             case 'remove_copy':
                 $att = self::posted_id($data, 'attachment');
                 $rv = self::posted_id($data, 'row_version');
@@ -356,7 +370,7 @@ class TeamOversight_Club_Documents_Admin {
             if (!current_user_can(TeamOversight_Club_Documents::CAP)) {
                 wp_die(esc_html('You do not have permission to do that.'), '', array('response' => 403));
             }
-            $result = self::result(false, $too_big . ' Nothing was uploaded.', array(), 'error');
+            $result = self::result(false, $too_big, array(), 'error');
             set_transient(self::FLASH_PREFIX . get_current_user_id(), $result, 300);
             wp_safe_redirect(self::return_url(wp_unslash(is_array($_GET) ? $_GET : array()), $result));
             exit;
@@ -455,6 +469,9 @@ class TeamOversight_Club_Documents_Admin {
             case 'add_copy':
                 $id = (int) self::posted_id($data, 'document');
                 return self::normalise($D::add_legacy_path($id, (int) self::posted_id($data, 'attachment'), self::row_version($data), $actor), $id);
+            case 'drop_copy':
+                $id = (int) self::posted_id($data, 'document');
+                return self::normalise($D::remove_legacy_path($id, self::text($data, 'path'), self::row_version($data), $actor), $id);
             case 'remove_copy':
                 $id = (int) self::posted_id($data, 'document');
                 return self::normalise($D::remove_public_copy((int) self::posted_id($data, 'attachment'), $actor, array(
@@ -527,6 +544,8 @@ class TeamOversight_Club_Documents_Admin {
         $input = self::posted_fields($data);
         $draft = $input + array('dated' => self::text($data, 'dated'), 'note' => self::text($data, 'note'));
         $lines = array();
+        $type = 'success';
+        $number = 0;
 
         if ($id === 0) {
             $r = self::normalise($D::create_document($input, $actor));
@@ -548,6 +567,9 @@ class TeamOversight_Club_Documents_Admin {
                 return $r;
             }
             $message = $r['message'];
+            // A writer's warning (a public file that may still be in the site cache) is kept.
+            $lines = $r['lines'];
+            $type = $r['type'] === 'warning' ? 'warning' : 'success';
         }
 
         if (self::has_file($file)) {
@@ -563,18 +585,25 @@ class TeamOversight_Club_Documents_Admin {
                 return self::result(true, ($before ? 'Saved' : 'Saved as a draft') . ', but the PDF wasn\'t uploaded.', $why, 'warning', $id);
             }
             $lines[] = $v['message'];
+            $lines = array_merge($lines, $v['lines']);
+            $number = isset($v['number']) ? (int) $v['number'] : 0;
+            $type = $v['type'] === 'warning' ? 'warning' : $type;
         }
 
         $doc = $D::get_document($id);
         if ($intent === 'publish' && $doc && (string) $doc->status !== 'published') {
             $p = self::normalise($D::set_status($id, 'published', (int) $doc->row_version, $actor), $id);
             if ($p['ok']) {
+                // Published in the same press: the upload's "opens once published" line would be out of date.
+                if ($number > 0) {
+                    $lines = array('Version ' . $number . ' uploaded.');
+                }
                 return self::result(true, $p['message'], $lines, 'success', $id);
             }
-            $was = (string) $doc->status === 'retired' ? 'Saved, still withdrawn: ' : 'Saved as a draft, not published: ';
+            $was = (string) $doc->status === 'retired' ? (empty($doc->published_at) ? 'Saved, still set aside: ' : 'Saved, still withdrawn: ') : 'Saved as a draft, not published: ';
             return self::result(true, $was . lcfirst($p['message']), $lines, 'warning', $id);
         }
-        return self::result(true, $message, $lines, 'success', $id);
+        return self::result(true, $message, $lines, $type, $id);
     }
 
     /**
@@ -649,8 +678,10 @@ class TeamOversight_Club_Documents_Admin {
             'dated' => self::text($data, 'dated'),
             'note' => self::text($data, 'note'),
             'title' => self::text($data, 'title'),
+            'description' => self::text($data, 'description'),
             'group_key' => self::text($data, 'group_key'),
             'doc_year' => self::text($data, 'doc_year'),
+            'slug' => self::text($data, 'slug'),
         );
         return self::normalise(TeamOversight_Club_Documents::import_attachment($att, $fields, $actor));
     }
@@ -679,7 +710,8 @@ class TeamOversight_Club_Documents_Admin {
         $url = self::page_url($page, $args);
         $anchor = isset($data['return_anchor']) && is_string($data['return_anchor']) && in_array($data['return_anchor'], self::ANCHORS, true) ? $data['return_anchor'] : '';
         if ($do === 'import' && !empty($result['id'])) {
-            $anchor = 'old-copies';
+            // A new copy opens at the top of its form, where the message says what to check before publishing.
+            $anchor = '';
         }
         return $anchor !== '' ? $url . '#' . $anchor : $url;
     }
@@ -740,7 +772,12 @@ class TeamOversight_Club_Documents_Admin {
             . '<th scope="col" class="manage-column column-primary">Title</th><th scope="col">Who can open it</th><th scope="col">Status</th>'
             . '<th scope="col">Updated</th><th scope="col">Address</th><th scope="col">Order</th>'
             . '</tr></thead><tbody>';
-        $n = count($docs);
+        $years = array();
+        $statuses = array();
+        foreach (array_values($docs) as $doc) {
+            $years[] = $doc->doc_year === null ? null : (int) $doc->doc_year;
+            $statuses[] = (string) $doc->status;
+        }
         foreach (array_values($docs) as $i => $doc) {
             $id = (int) $doc->id;
             $title = $D::title_with_year($doc);
@@ -751,13 +788,10 @@ class TeamOversight_Club_Documents_Admin {
             }
             $address = $D::document_url((string) $doc->slug);
             $field = 'md-addr-' . $id;
-            $same_year = function ($j) use ($docs, $doc) {
-                $other = array_values($docs)[$j];
-                return (string) $other->doc_year === (string) $doc->doc_year;
-            };
             $arrows = '';
             self::$view['anchor'] = '';
-            foreach (array('up' => array($i > 0 && $same_year($i - 1), '&uarr;', 'Move up'), 'down' => array($i < $n - 1 && $same_year($i + 1), '&darr;', 'Move down')) as $dir => $spec) {
+            // An arrow only where a move can happen: the same rule as move() (a published document past the next published one).
+            foreach (array('up' => array($D::move_target($years, $statuses, $i, 'up') !== false, '&uarr;', 'Move up'), 'down' => array($D::move_target($years, $statuses, $i, 'down') !== false, '&darr;', 'Move down')) as $dir => $spec) {
                 if ($spec[0]) {
                     $arrows .= self::form_open('move', array('document' => $id, 'direction' => $dir, 'row_version' => (int) $doc->row_version), 'mc-inline')
                         . '<button type="submit" class="button button-small"><span aria-hidden="true">' . $spec[1] . '</span><span class="screen-reader-text">' . self::h($spec[2] . ': ' . $title) . '</span></button></form>';
@@ -800,8 +834,15 @@ class TeamOversight_Club_Documents_Admin {
     }
 
     private static function status_word($doc) {
-        $words = array('draft' => 'Draft', 'published' => 'On the website', 'retired' => 'Withdrawn');
+        $D = 'TeamOversight_Club_Documents';
         $status = (string) $doc->status;
+        if ($status === 'published' && !$D::is_listed($doc)) {
+            return 'On the website, not listed';
+        }
+        if ($status === 'retired' && empty($doc->published_at)) {
+            return 'Set aside';
+        }
+        $words = array('draft' => 'Draft', 'published' => 'On the website', 'retired' => 'Withdrawn');
         return isset($words[$status]) ? $words[$status] : $status;
     }
 
@@ -820,7 +861,7 @@ class TeamOversight_Club_Documents_Admin {
             echo '<p>Nothing to do right now.</p>';
         } else {
             echo '<div class="mc-scroll"><table class="widefat striped"><tbody>';
-            foreach (array_slice($rows, 0, self::TODO_MAX) as $row) {
+            foreach (array_slice($rows, 0, self::TODO_MAX) as $n => $row) {
                 $state = isset($row['state'], $labels[$row['state']]) ? $row['state'] : 'warn';
                 $url = isset($row['url']) ? (string) $row['url'] : '';
                 $label = isset($row['label']) ? (string) $row['label'] : '';
@@ -830,9 +871,18 @@ class TeamOversight_Club_Documents_Admin {
                     $href = isset($link['url']) ? (string) $link['url'] : '';
                     $links .= '<li>' . self::h($title) . ($href !== '' ? ' <a href="' . esc_url($href) . '">Edit</a>' : '') . '</li>';
                 }
+                // An address to paste in place of the old link, with a Copy button.
+                $copy = isset($row['copy']) && is_string($row['copy']) ? $row['copy'] : '';
+                $copy_html = '';
+                if ($copy !== '') {
+                    $fid = 'md-todo-copy-' . (int) $n;
+                    $copy_html = '<div class="mc-copyrow"><label class="screen-reader-text" for="' . esc_attr($fid) . '">The address to use</label>'
+                        . '<input type="text" class="mc-copy" id="' . esc_attr($fid) . '" value="' . esc_attr($copy) . '" readonly> '
+                        . '<button type="button" class="button button-small" data-mc-copy="' . esc_attr($fid) . '">Copy</button></div>';
+                }
                 echo '<tr class="' . esc_attr('mc-todo-' . sanitize_html_class(isset($row['key']) ? (string) $row['key'] : '')) . '">'
                     . '<td class="mc-pill-cell"><span class="mc-pill mc-pill-' . esc_attr($state) . '">' . self::h($labels[$state]) . '</span></td>'
-                    . '<td>' . self::h(isset($row['text']) ? $row['text'] : '') . ($links !== '' ? '<ul class="mc-lines">' . $links . '</ul>' : '') . '</td>'
+                    . '<td>' . self::h(isset($row['text']) ? $row['text'] : '') . $copy_html . ($links !== '' ? '<ul class="mc-lines">' . $links . '</ul>' : '') . '</td>'
                     . '<td class="mc-nowrap">' . ($url !== '' ? '<a href="' . esc_url($url) . '">' . self::h($label !== '' ? $label : 'Open') . '</a>' : '') . '</td></tr>';
             }
             echo '</tbody></table></div>';
@@ -874,13 +924,13 @@ class TeamOversight_Club_Documents_Admin {
                     <li>Tick who can open it. A new document starts with nothing ticked, so the choice is always made on purpose. The sentence under the boxes says who can open it and whether the page lists it.</li>
                     <li>In AGM papers, set the AGM year: the year of the meeting, e.g. 2027 for the May 2027 AGM.</li>
                     <li>Choose the PDF and set the Updated date: today, or the date an older document was approved.</li>
-                    <li>Check the address. It can change until the document is published, then it is fixed for good.</li>
+                    <li>Check the address. It follows the title until you type your own, and is fixed for good once the document is published.</li>
                     <li>Click Publish. Save draft keeps it off the website.</li>
                 </ol>
                 <h3>Put up a new version</h3>
                 <p>Open the document and use Upload a new version. The address stays the same and opens the new file straight away; the old file stays under Versions. If the upload was a mistake, use Go back to version N on the one before it.</p>
                 <h3>Replacing a policy? Don't withdraw it</h3>
-                <p>Withdraw only a document that is gone for good. The checkout terms, sign-up forms and old emails link its address, so a withdrawn policy breaks them. A new version keeps them working.</p>
+                <p>Withdraw only a document that is gone for good. The checkout page links the refund policy's address, so withdrawing it breaks checkout. Upload a new version instead.</p>
                 <h3>AGM papers each year</h3>
                 <p>Add each paper as its own document in AGM papers with the year of the meeting, and tick Associate members and Full members. After the AGM, upload the signed minutes as a new version of the same document. Then an administrator updates who holds the Editor role on Users: that is who the Committee box means.</p>
                 <h3>Order</h3>
@@ -952,12 +1002,20 @@ class TeamOversight_Club_Documents_Admin {
                 . '<a class="button-link mc-danger" href="' . esc_url(self::page_url($D::PAGE_EDIT, array('document' => $id, 'confirm' => 'withdraw'))) . '">Withdraw from the website</a>';
         } elseif ($status === 'retired') {
             echo '<button type="submit" name="intent" value="update" class="button">Save</button> '
-                . '<button type="submit" name="intent" value="publish" class="button button-primary">Publish again</button>';
+                . '<button type="submit" name="intent" value="publish" class="button button-primary">' . self::h(empty($doc->published_at) ? 'Publish' : 'Publish again') . '</button>';
         } else {
             echo '<button type="submit" name="intent" value="draft" class="button">Save draft</button> '
                 . '<button type="submit" name="intent" value="publish" class="button button-primary">Publish</button>';
         }
         echo '</p></form>';
+        if ($doc && $status === 'draft' && empty($doc->published_at)) {
+            // A draft that isn't wanted (a file copied into the wrong document, say) can be set aside: it never goes up.
+            self::$view['anchor'] = '';
+            echo self::form_open('withdraw', array('document' => $id, 'row_version' => (int) $doc->row_version), 'mc-once',
+                'Set this draft aside? It stays off the website, marked Set aside, until someone publishes it.')
+                . '<p><button type="submit" class="button-link mc-danger">Set this draft aside</button>'
+                . ' <span class="description">For a draft that isn\'t wanted. Nothing is deleted.</span></p></form>';
+        }
 
         if ($doc) {
             if ($current) {
@@ -1014,14 +1072,19 @@ class TeamOversight_Club_Documents_Admin {
     private static function render_status($doc, $current) {
         $D = 'TeamOversight_Club_Documents';
         if (!$doc) {
-            echo '<p class="mc-status">Not saved yet. Save a draft at any time: nothing shows on the website until it is published.</p>';
+            echo '<p class="mc-status">Not saved yet.</p>';
             return;
         }
         $status = (string) $doc->status;
         if ($status === 'published') {
             $url = $D::document_url((string) $doc->slug);
-            echo '<p class="mc-status mc-good-text">' . self::h('On the website' . (!empty($doc->published_at) ? ', first published ' . $D::nice_date($doc->published_at, 'j M Y') : '') . '.') . '</p>'
+            $listed = $D::is_listed($doc);
+            echo '<p class="mc-status mc-good-text">' . self::h('On the website' . (!empty($doc->published_at) ? ', first published ' . $D::nice_date($doc->published_at, 'j M Y') : '') . '.'
+                . ($listed ? '' : ' Not listed on the page. ' . $D::who_sentence($doc))) . '</p>'
                 . '<p class="mc-text">Its address: <a href="' . esc_url($url) . '" target="_blank" rel="noopener">' . self::h($url) . '<span class="screen-reader-text"> (opens in a new tab)</span></a></p>';
+        } elseif ($status === 'retired' && empty($doc->published_at)) {
+            $problem = $D::publish_problem($doc, $current);
+            echo '<p class="mc-status">' . self::h('Set aside: never on the website, and its address shows page not found. ' . ($problem === '' ? 'Publish puts it up.' : 'Before it can be published: ' . lcfirst($problem))) . '</p>';
         } elseif ($status === 'retired') {
             echo '<p class="mc-status mc-bad-text">' . self::h('Withdrawn from the website on ' . $D::nice_date($doc->retired_at, 'j M Y') . '. Its address says so. Publish again brings it back at the same address.') . '</p>';
         } else {
@@ -1075,13 +1138,21 @@ class TeamOversight_Club_Documents_Admin {
             $url = $D::document_url((string) $doc->slug);
             self::field_row('Address', 'md-slug-fixed',
                 '<div class="mc-copyrow"><input type="text" class="mc-copy" id="md-slug-fixed" value="' . esc_attr($url) . '" readonly> <button type="button" class="button" data-mc-copy="md-slug-fixed">Copy</button></div>',
-                'Fixed for good: menus, emails and the checkout link it.');
+                'Fixed for good, so a link in an old email still works.');
         } else {
             $prefix = home_url('/documents/');
+            if (!$doc) {
+                $hint = 'Leave blank and it is made from the title, e.g. agm-2027-minutes-2026 in AGM papers. Small letters, numbers and hyphens. Fixed once the document is published.';
+            } else {
+                // While the saved address is the one suggested for the saved details, it follows them on each save.
+                $suggested = $D::suggest_for_row($doc);
+                $hint = (string) $doc->slug === $suggested
+                    ? 'Made from the title, and it follows the title, group, year and ticks when you save, until you type your own. Fixed once the document is published.'
+                    : 'Typed by hand, so it stays as it is. Suggested for these details: ' . $suggested . '. Fixed once the document is published.';
+            }
             self::field_row('Address', 'md-slug',
                 '<span class="mc-prefix">' . self::h($prefix) . '</span><input type="text" class="regular-text" id="md-slug" name="slug" value="' . esc_attr($v['slug']) . '" pattern="[a-z0-9][a-z0-9\-]{1,58}[a-z0-9]">/',
-                $doc ? 'Small letters, numbers and hyphens. It can change until the document is published, then it is fixed for good.'
-                    : 'Leave blank and it is made from the title, e.g. agm-2027-minutes-2026 in AGM papers. Small letters, numbers and hyphens. Fixed once the document is published.');
+                $hint);
         }
 
         if ($with_file) {
@@ -1127,17 +1198,25 @@ class TeamOversight_Club_Documents_Admin {
             . '<legend class="screen-reader-text">Who can open it</legend>'
             . '<p class="md-rule78">Under the constitution (rule 78) every member, associates included, can see the AGM minutes and accounts. For AGM papers, tick Associate members and Full members.</p>'
             . $boxes
-            . '<p class="md-greyed description" id="md-greyed" hidden>Greyed out while Everyone is ticked. Their ticks are kept, and count again once Everyone is unticked.</p>'
+            . '<p class="md-greyed description" id="md-greyed" hidden>The greyed boxes keep their ticks, which count again once Everyone is unticked.</p>'
             . '<div class="md-sentence" aria-live="polite"><p id="md-who">' . self::h($who) . '</p><p id="md-page"' . ($page === '' ? ' hidden' : '') . '>' . self::h($page) . '</p></div>'
             . '</fieldset>';
-        self::field_row('Who can open it', '', $control, 'A person can open it when they match any ticked box. A draft can be saved with none ticked; publishing needs at least one.');
+        self::field_row('Who can open it', '', $control, 'A person can open it when they match any ticked box.');
     }
 
-    /** Upload a new version (design 3.3): the address stays and opens the new file; the old one stays under Versions. */
+    /** Upload a new version (design 3.3): the address stays (and opens the new file once published); the old one stays under Versions. */
     private static function render_upload_box($doc) {
+        $status = (string) $doc->status;
+        if ($status === 'published') {
+            $what = 'The address stays the same and opens the new file straight away.';
+        } elseif ($status === 'retired' && !empty($doc->published_at)) {
+            $what = 'The address stays the same and still says the document was withdrawn until you publish it again.';
+        } else {
+            $what = 'The new file opens at the address once the document is published.';
+        }
         self::$view['anchor'] = 'upload';
         echo '<div class="mc-box" id="upload"><h2>Upload a new version</h2>'
-            . '<p class="description">The address stays the same and opens the new file straight away. The old file stays under Versions.</p>';
+            . '<p class="description">' . self::h($what . ' The old file stays under Versions.') . '</p>';
         echo self::form_open('upload', array('document' => (int) $doc->id, 'row_version' => (int) $doc->row_version), 'mc-form mc-once', '', true);
         echo '<table class="form-table" role="presentation"><tbody>';
         self::render_file_rows(current_time('Y-m-d'), '', 'md-up');
@@ -1179,6 +1258,13 @@ class TeamOversight_Club_Documents_Admin {
                 $current_number = (int) $r->number;
             }
         }
+        // Whether an old public copy is still in the Media Library: an imported version is then the club's copy of it.
+        $public_copy = false;
+        if ($admin) {
+            foreach ($D::legacy_copies($doc) as $copy) {
+                $public_copy = $public_copy || ($copy['exists'] && $copy['attachment'] > 0);
+            }
+        }
         echo '<div class="mc-scroll"><table class="widefat striped mc-versions"><thead><tr><th scope="col">Version</th><th scope="col">Updated</th><th scope="col">Uploaded</th><th scope="col">Size</th><th scope="col">Note</th><th scope="col">Actions</th></tr></thead><tbody>';
         foreach ($rows as $r) {
             $vid = (int) $r->id;
@@ -1208,7 +1294,8 @@ class TeamOversight_Club_Documents_Admin {
             if ($admin && !$is_current && empty($r->file_deleted_at)) {
                 $actions[] = '<details class="mc-more"><summary class="mc-danger">Delete file</summary>'
                     . self::form_open('delete_file', array('version' => $vid), 'mc-once', 'Delete this version\'s file for good? Its row stays in Versions.')
-                    . '<p class="description">Only for a wrong upload. The file is deleted for good; this row stays, with your reason.</p>'
+                    . '<p class="description">Only for a wrong upload. The file is deleted for good; this row stays, with your reason.'
+                    . ($public_copy && (string) $r->source === 'import' ? ' This is the club\'s copy of the Media Library file: without it, the public copy can\'t be removed.' : '') . '</p>'
                     . '<p><label for="' . esc_attr('md-vr-' . $vid) . '">Why</label> <input type="text" class="regular-text" id="' . esc_attr('md-vr-' . $vid) . '" name="reason" required></p>'
                     . '<p><button type="submit" class="button button-small mc-danger-button">Delete this file</button></p></form></details>';
             }
@@ -1239,14 +1326,32 @@ class TeamOversight_Club_Documents_Admin {
         echo '<h2 id="old-copies">Old copies</h2>';
         echo '<p class="mc-text mc-muted">The Media Library file this document was copied from, and any identical copy added since. While a public copy is there, anyone with its old link can open it. Once it is removed, its old address sends people to this document\'s address.</p>';
         echo '<div class="mc-scroll"><table class="widefat striped"><thead><tr><th scope="col">Old file</th><th scope="col">Public copy</th><th scope="col"></th></tr></thead><tbody>';
+        $live = $D::address_live($doc);
+        $never = empty($doc->published_at);
         foreach ($copies as $path => $copy) {
             $action = '';
-            if ($copy['exists'] && $copy['attachment'] > 0 && $admin) {
-                $action = '<a class="mc-danger" href="' . esc_url(self::page_url($D::PAGE_EDIT, array('document' => (int) $doc->id, 'confirm' => 'remove_copy', 'attachment' => (int) $copy['attachment']))) . '">Remove the public copy</a>';
+            if ($copy['exists'] && $copy['attachment'] > 0) {
+                $state = 'Still in the Media Library';
+                if ($admin && $live) {
+                    $action = '<a class="mc-danger" href="' . esc_url(self::page_url($D::PAGE_EDIT, array('document' => (int) $doc->id, 'confirm' => 'remove_copy', 'attachment' => (int) $copy['attachment']))) . '">Remove the public copy</a>';
+                } elseif ($admin) {
+                    $action = '<span class="mc-muted">Publish this document first. Until then its address shows page not found, so the old link would break.</span>';
+                }
+            } elseif ($copy['exists']) {
+                $state = 'The Media Library entry is gone, but the file is still on the server, so its old link still opens it. Delete it on the server.';
+            } else {
+                $state = $live ? 'Removed. Its old address sends people to this document.' : 'Not on the server.';
+            }
+            if ($admin && $never) {
+                // A file copied into the wrong draft: take it off, so the right document can copy it.
+                self::$view['anchor'] = 'old-copies';
+                $action .= ($action !== '' ? '<br>' : '') . self::form_open('drop_copy', array('document' => (int) $doc->id, 'path' => $path, 'row_version' => (int) $doc->row_version), 'mc-inline mc-once',
+                    'Take this old copy off the document? The Media Library file stays as it is.')
+                    . '<button type="submit" class="button button-small">Not this document\'s file</button></form>';
             }
             echo '<tr><td><a href="' . esc_url($copy['url']) . '" target="_blank" rel="noopener"><code>' . self::h($path) . '</code><span class="screen-reader-text"> (opens in a new tab)</span></a></td>'
-                . '<td>' . self::h($copy['exists'] ? 'Still in the Media Library' : 'Removed. Its old address sends people to this document.') . '</td>'
-                . '<td class="mc-nowrap">' . $action . '</td></tr>';
+                . '<td>' . self::h($state) . '</td>'
+                . '<td>' . $action . '</td></tr>';
         }
         echo '</tbody></table></div>';
         if (!$admin) {
@@ -1342,6 +1447,8 @@ class TeamOversight_Club_Documents_Admin {
                 return self::h('Published again.');
             case 'retired':
                 return self::h('Withdrawn from the website.');
+            case 'set_aside':
+                return self::h('Set aside (never on the website).');
             case 'unpublished':
                 return self::h('Taken back to a draft.');
             case 'moved':
@@ -1353,10 +1460,14 @@ class TeamOversight_Club_Documents_Admin {
                 return self::h('Copied from the Media Library (' . $path . ') as a draft, Updated ' . $dated . '.');
             case 'legacy_path_added':
                 return self::h('Identical old copy added: ' . $path . '.');
+            case 'legacy_path_removed':
+                return self::h('Old copy taken off (not this document\'s file): ' . $path . '.');
             case 'public_copy_removed':
                 return self::h('Old public copy deleted from the Media Library: ' . $path . '.');
             case 'public_copy_failed':
-                return self::h('Deleting the old public copy failed: ' . $path . '.');
+                return self::h(!empty($d['file_kept'])
+                    ? 'Old public copy deleted from the Media Library, but its file stayed on the server: ' . $path . '.'
+                    : 'Deleting the old public copy failed: ' . $path . '.');
         }
         return self::h(ucfirst(str_replace('_', ' ', $event)) . '.');
     }
@@ -1404,7 +1515,7 @@ class TeamOversight_Club_Documents_Admin {
         $title = $D::title_with_year($doc);
         $links = $D::links_to_address($doc);
         echo '<h1>Withdraw from the website</h1><hr class="wp-header-end">';
-        echo '<div class="mc-box mc-warn-box"><p><strong>Replacing a policy? Don\'t withdraw it.</strong> Use Upload a new version on the document instead: the address stays the same, so the checkout terms, sign-up forms and old emails that link it keep working.</p></div>';
+        echo '<div class="mc-box mc-warn-box"><p><strong>Replacing a policy? Don\'t withdraw it.</strong> Use Upload a new version on the document instead: the address stays the same, so links to it keep working. The checkout page links the refund policy\'s address, so withdrawing that policy breaks checkout.</p></div>';
         echo '<p class="mc-text">' . self::h('Withdrawing takes "' . $title . '" off the page. Its address then says the club withdrew it on ' . $D::nice_date(current_time('Y-m-d')) . ', with a link to the documents page. The committee can still open every version, and Publish again brings it back at the same address.') . '</p>';
         echo '<h2>Where its address is linked</h2>';
         self::render_link_list($links, 'Nothing we know of links its address.');
@@ -1427,7 +1538,7 @@ class TeamOversight_Club_Documents_Admin {
         echo '<p class="mc-text">' . self::h('Document: ' . $D::title_with_year($doc) . '.') . '</p>';
         echo '<p class="mc-text">File: <code>' . self::h($facts['path']) . '</code></p>'
             . '<p class="mc-text">Its old address: <a href="' . esc_url($facts['url']) . '" target="_blank" rel="noopener">' . self::h($facts['url']) . '<span class="screen-reader-text"> (opens in a new tab)</span></a></p>';
-        echo '<div class="mc-box mc-warn-box"><p>This deletes the file from the Media Library for good. The club\'s copy is version 1 of this document, and the old address will send people to the new one.</p></div>';
+        echo '<div class="mc-box mc-warn-box"><p>' . self::h('This deletes the file from the Media Library for good. The club\'s copy is version ' . (int) $facts['version'] . ' of this document, and the old address will send people to the new one.') . '</p></div>';
         echo '<h2>Still linking it</h2>';
         self::render_link_list($facts['links'], 'Nothing we know of links it.');
         if (!empty($facts['links'])) {
@@ -1492,11 +1603,14 @@ class TeamOversight_Club_Documents_Admin {
         self::field_row('PDF', 'md-imp-file', '<select id="md-imp-file" name="attachment" required>' . $options . '</select>', 'Each file shows the date it was uploaded to the website.');
         self::field_row('Date approved', 'md-imp-dated', '<input type="date" id="md-imp-dated" name="dated" value="" required>',
             'The date the committee approved this version, not the upload date. The page shows it as Updated.');
-        self::field_row('Title', 'md-imp-title', '<input type="text" class="regular-text" id="md-imp-title" name="title" value="">', 'Optional. Blank: the file\'s title in the Media Library. It can be changed after.');
+        self::field_row('Title', 'md-imp-title', '<input type="text" class="regular-text" id="md-imp-title" name="title" value="">', 'As the page shows it, e.g. Refund policy. Blank: the file\'s title in the Media Library. The address is made from the title.');
         self::field_row('Group', 'md-imp-group', '<select id="md-imp-group" name="group_key">' . $groups . '</select>', '');
         self::field_row('AGM year', 'md-imp-year', '<input type="text" class="small-text" id="md-imp-year" name="doc_year" value="" inputmode="numeric" pattern="[0-9]{4}">', 'Only in a group shown by year, such as AGM papers.');
+        self::field_row('Address', 'md-imp-slug',
+            '<span class="mc-prefix">' . self::h(home_url('/documents/')) . '</span><input type="text" class="regular-text" id="md-imp-slug" name="slug" value="" pattern="[a-z0-9][a-z0-9\-]{1,58}[a-z0-9]">/',
+            'Optional, e.g. refund-policy. Blank: made from the title. Fixed once the document is published.');
         self::field_row('Note', 'md-imp-note', '<input type="text" class="regular-text" id="md-imp-note" name="note" value="">', 'Optional, for the committee only.');
-        echo '</tbody></table><p><button type="submit" class="button">Copy as a draft</button> <span class="description">Then tick who can open it and publish.</span></p></form></div>';
+        echo '</tbody></table><p><button type="submit" class="button">Copy as a draft</button> <span class="description">It opens as a draft, to finish before publishing.</span></p></form></div>';
         self::$view['anchor'] = '';
     }
 
@@ -1533,7 +1647,7 @@ class TeamOversight_Club_Documents_Admin {
             $counts[(string) $doc->group_key] = (isset($counts[(string) $doc->group_key]) ? $counts[(string) $doc->group_key] : 0) + 1;
         }
         echo '<h2 id="groups">Groups</h2>';
-        echo '<p class="mc-text">Each group is a heading on the page, in this order (lowest first). Shown by year puts a year heading over its documents, newest first, as AGM papers does. The intro shows under the heading as plain text; links and bold are kept. A group that still holds documents can\'t be removed.</p>';
+        echo '<p class="mc-text">Each group is a heading on the page, in this order (lowest first). Shown by year puts a year heading over its documents, newest first, as AGM papers does. The intro shows under the heading. For a link, type <code>&lt;a href="/privacy-policy/"&gt;Privacy Policy&lt;/a&gt;</code>; for bold, <code>&lt;strong&gt;words&lt;/strong&gt;</code>. Other tags are taken out, apart from em, p and br. A group that still holds documents can\'t be removed.</p>';
         echo self::form_open('groups', array('groups_hash' => $D::groups_hash()), 'mc-once');
         echo '<div class="mc-scroll"><table class="widefat striped mc-groups"><thead><tr><th scope="col">Name</th><th scope="col">Order</th><th scope="col">Shown by year</th><th scope="col">Intro</th><th scope="col">Documents</th><th scope="col">Remove</th></tr></thead><tbody>';
         foreach ($D::groups() as $key => $group) {
@@ -1566,8 +1680,20 @@ class TeamOversight_Club_Documents_Admin {
             echo '<p class="mc-text">Nobody yet.</p>';
         } else {
             echo '<ul class="mc-lines">';
+            $role_names = function_exists('wp_roles') ? wp_roles()->get_names() : array();
             foreach ($people as $uid => $name) {
-                echo '<li>' . self::h($name) . ' <span class="mc-muted">' . self::h('(user #' . (int) $uid . (user_can((int) $uid, 'manage_options') ? ', administrator' : ', editor') . ')') . '</span></li>';
+                if (user_can((int) $uid, 'manage_options')) {
+                    $how = 'administrator';
+                } else {
+                    // Named by role, so an account given the capability another way shows how it holds it.
+                    $user = get_userdata((int) $uid);
+                    $roles = array();
+                    foreach ($user && isset($user->roles) ? (array) $user->roles : array() as $role) {
+                        $roles[] = isset($role_names[$role]) ? translate_user_role($role_names[$role]) : (string) $role;
+                    }
+                    $how = empty($roles) ? 'given the capability directly' : implode(', ', $roles);
+                }
+                echo '<li>' . self::h($name) . ' <span class="mc-muted">' . self::h('(user #' . (int) $uid . ', ' . $how . ')') . '</span></li>';
             }
             echo '</ul>';
         }
@@ -1586,13 +1712,19 @@ class TeamOversight_Club_Documents_Admin {
         self::$view['anchor'] = 'storage';
         echo '<h2 id="storage">File storage</h2>';
         echo '<p class="mc-text">Files are kept in a private folder outside the website, named in the site\'s wp-config.php. Uploads are refused until its check passes.</p>';
+        $checked = !empty($s['checked_at']) ? mysql2date('j M Y g:ia', (string) $s['checked_at']) : '';
         if (!empty($s['ok'])) {
-            echo '<p class="mc-text mc-good-text">' . self::h('The check passed (' . mysql2date('j M Y g:ia', (string) $s['checked_at']) . ').') . '</p>';
+            echo '<p class="mc-text mc-good-text">' . self::h('The folder check passed (' . $checked . ').') . '</p>';
         } else {
-            echo '<p class="mc-text mc-bad-text">' . self::h((string) $s['problem']) . '</p>';
+            echo '<p class="mc-text mc-bad-text">' . self::h((string) $s['problem'] . ($checked !== '' ? ' Last checked ' . $checked . '.' : '')) . '</p>';
+        }
+        $web_failed = $D::web_check_failed();
+        if ($web_failed !== '') {
+            echo '<p class="mc-text mc-bad-text">' . self::h('The web check failed on ' . mysql2date('j M Y g:ia', $web_failed) . ': a test file in the documents folder could be fetched over the web, so the files are not private. '
+                . ($admin ? 'Ask the host to fix this, and don\'t upload members-only papers until Check now passes.' : 'Ask the website maintainer.')) . '</p>';
         }
         if (!$admin) {
-            echo '<p class="mc-text mc-muted">An administrator sets up and checks the storage.</p>';
+            echo '<p class="mc-text mc-muted">An administrator sets up and checks the storage.' . (empty($s['ok']) ? ' Ask the website maintainer.' : '') . '</p>';
             self::$view['anchor'] = '';
             return;
         }
@@ -1672,7 +1804,7 @@ class TeamOversight_Club_Documents_Admin {
         }
         echo '</tbody></table></div>';
         if (!$D::has_purge_listener()) {
-            echo '<p class="mc-text mc-bad-text">Nothing connects the site\'s page cache to Club documents yet, so logged-out visitors can see an old documents page for up to 30 days. An administrator adds the page-refresh snippet, which listens for the murvc_documents_changed action.</p>';
+            echo '<p class="mc-text mc-bad-text">' . self::h('Nothing connects the site\'s page cache to Club documents in the dashboard, where changes are made, so logged-out visitors can see an old documents page for up to ' . $D::CACHE_DAYS . ' days and public files are sent uncached. An administrator adds the page-refresh snippet, which listens for the murvc_documents_changed action, set to run everywhere (the dashboard included).') . '</p>';
         }
         echo self::form_open('refresh', array(), 'mc-bar mc-once') . '<button type="submit" class="button">Refresh the documents page now</button>'
             . '<span class="description">Use this if the page still shows an old list a few minutes after a change.</span></form>';
