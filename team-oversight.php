@@ -346,9 +346,12 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coaches-admin.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coaches-public.php';
     // 1.90.0: Club documents (the rules, storage, access and writers; the
-    // permanent addresses /documents/<name>/ and the file streaming).
+    // permanent addresses /documents/<name>/ and the file streaming; the
+    // committee's screens; the [club_documents] shortcode).
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-club-documents.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-club-documents-route.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-club-documents-admin.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-club-documents-public.php';
     if (defined('WP_CLI') && WP_CLI) {
         require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-merge-cli.php';
     }
@@ -394,6 +397,8 @@ function team_oversight_init() {
     // 1.90.0: Club documents. Each is static and adds its hooks once per request.
     TeamOversight_Club_Documents::register_hooks();
     TeamOversight_Club_Documents_Route::register_hooks();
+    TeamOversight_Club_Documents_Admin::register_hooks();
+    TeamOversight_Club_Documents_Public::register_hooks();
     new TeamOversight_Trials();
     new TeamOversight_Imports();
     new TeamOversight_Exports();
