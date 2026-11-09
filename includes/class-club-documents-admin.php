@@ -986,7 +986,8 @@ class TeamOversight_Club_Documents_Admin {
         echo '<hr class="wp-header-end">';
         self::render_flash();
         echo '<p class="mc-text">' . ($doc ? '<strong>' . self::h('Document #' . $id . '.') . '</strong> ' : '')
-            . 'Nothing shows on the website until the document is published. ' . $back . '.</p>';
+            . ($doc && (string) $doc->status === 'published' ? '' : 'Nothing shows on the website until the document is published. ')
+            . $back . '.</p>';
         if (is_array($draft)) {
             echo '<div class="notice notice-warning inline"><p>The form below holds what you typed, not what is saved. Check it and save again.</p></div>';
         }
