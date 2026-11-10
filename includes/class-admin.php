@@ -1655,7 +1655,8 @@ class TeamOversight_Admin {
                     <strong>Club transfers selected:</strong>
                     <?php foreach (array('mens' => 'men\'s and boys\' teams', 'womens' => 'women\'s and girls\' teams') as $g => $words): ?>
                         <?php $n = count($transfers['genders'][$g]); ?>
-                        <span style="margin-right: 14px;<?php echo $n > $tl_limits[$g] ? ' color:#b32d2e; font-weight:600;' : ''; ?>"><?php echo intval($n); ?> of <?php echo intval($tl_limits[$g]); ?> across the <?php echo esc_html($words); ?></span>
+                        <?php $tn = TeamOversight_Transfer_Limits::tentative_people($transfers, $g, $season); ?>
+                        <span style="margin-right: 14px;<?php echo $n > $tl_limits[$g] ? ' color:#b32d2e; font-weight:600;' : ''; ?>"><?php echo intval($n); ?> of <?php echo intval($tl_limits[$g]); ?><?php echo $tn ? ' <span style="color:#666; font-weight:normal;">(+' . intval($tn) . ' Tentative)</span>' : ''; ?> across the <?php echo esc_html($words); ?></span>
                     <?php endforeach; ?>
                     <a href="<?php echo esc_url(admin_url('admin.php?page=team-oversight-fees&season=' . $season . '#transfer-limits')); ?>">Limits and exceptions</a>
                 </p>

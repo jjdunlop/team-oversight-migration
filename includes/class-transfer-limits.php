@@ -261,6 +261,28 @@ class TeamOversight_Transfer_Limits {
         return $out;
     }
 
+    /**
+     * How many PEOPLE in a gender are Tentative club transfers on any team and
+     * not Selected anywhere in that gender (the dashboard's and Configuration's
+     * "+N Tentative"). $counts: a counts() result.
+     */
+    public static function tentative_people(array $counts, $gender, $season) {
+        $selected = isset($counts['genders'][$gender]) ? $counts['genders'][$gender] : array();
+        $people = array();
+        foreach ($counts['tentative'] as $team => $list) {
+            $f = self::team_facts($team, $season);
+            if ($f['kind'] === '' || $f['gender'] !== $gender) {
+                continue;
+            }
+            foreach ($list as $r) {
+                if (!isset($selected[$r['person']])) {
+                    $people[$r['person']] = true;
+                }
+            }
+        }
+        return count($people);
+    }
+
     private static function by_words(array $by) {
         $parts = array();
         foreach ($by as $b) {
@@ -713,7 +735,8 @@ class TeamOversight_Transfer_Limits {
                         <?php $club = count($counts['genders'][$gender]); ?>
                         <tr>
                             <td><strong>All <?php echo esc_html(self::gender_words($gender)); ?></strong></td>
-                            <td><strong><?php echo intval($club); ?> of <?php echo intval($limits[$gender]); ?></strong><?php echo $club > $limits[$gender] ? ' <span style="color: #b32d2e; font-weight: 600;">Over the limit</span>' : ''; ?></td>
+                            <?php $club_tentative = self::tentative_people($counts, $gender, $season); ?>
+                            <td><strong><?php echo intval($club); ?> of <?php echo intval($limits[$gender]); ?></strong><?php echo $club_tentative ? ' <span class="description">(+' . intval($club_tentative) . ' Tentative)</span>' : ''; ?><?php echo $club > $limits[$gender] ? ' <span style="color: #b32d2e; font-weight: 600;">Over the limit</span>' : ''; ?></td>
                             <td>Each player counts once, even if selected in two teams.</td>
                         </tr>
                     <?php endforeach; ?>
