@@ -201,12 +201,14 @@ class TeamOversight_Transfer_Limits {
      * Club-wide places held for HIGHER teams' Tentative club transfers (club
      * decision, 10 Nov 2026): a higher team is assumed to fill its own limit
      * from its Tentative picks before a lower team uses a club-wide place.
-     * Higher = the same gender, a division level above 0 and smaller than
-     * $team's (TeamOversight_Offers' rule; teams exempt from the higher-team
-     * rule, U19 and U17, are left out on both sides, as there). Each higher
-     * team holds at most (its limit - its Selected club transfers); a person
-     * already Selected anywhere in the gender, $exclude_person, and anyone
-     * already held for another team are not counted again.
+     * Higher = the same gender and a division level above 0 and smaller than
+     * $team's. EVERY team takes part, JPL and YSL included (club decision,
+     * 10 Nov 2026: unlike the offers' higher-team rule, no age-rule team is
+     * left out); teams on the same level never hold places for each other,
+     * and a team with no level is never judged. Each higher team holds at
+     * most (its limit - its Selected club transfers); a person already
+     * Selected anywhere in the gender, $exclude_person, and anyone already
+     * held for another team are not counted again.
      * Returns array(count, by => list of array(name, count)).
      */
     public static function reserved_for($team, $season, array $counts, $exclude_person = '') {
@@ -215,7 +217,7 @@ class TeamOversight_Transfer_Limits {
         $mine = isset($config[$team]) && is_array($config[$team]) ? $config[$team] : null;
         $my_level = $mine && isset($mine['level']) ? intval($mine['level']) : 0;
         $facts = self::team_facts($team, $season);
-        if ($my_level <= 0 || $facts['gender'] === '' || TeamOversight_Offers::block_exempt($mine)) {
+        if ($my_level <= 0 || $facts['gender'] === '' || $facts['kind'] === '') {
             return $none;
         }
         $selected_people = $counts['genders'][$facts['gender']];
@@ -223,7 +225,7 @@ class TeamOversight_Transfer_Limits {
         foreach ($config as $code => $t) {
             $code = (string) $code;
             $level = (is_array($t) && isset($t['level'])) ? intval($t['level']) : 0;
-            if ($code === $team || $level <= 0 || $level >= $my_level || TeamOversight_Offers::block_exempt($t)) {
+            if ($code === $team || $level <= 0 || $level >= $my_level) {
                 continue;
             }
             $f = self::team_facts($code, $season);
