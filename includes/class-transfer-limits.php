@@ -457,6 +457,59 @@ class TeamOversight_Transfer_Limits {
     }
 
     // ------------------------------------------------------------------
+    // Transfer paperwork status (1.92.0, club decision 10 Nov 2026)
+    // ------------------------------------------------------------------
+
+    /** The statuses an administrator can set; NULL in the column reads as not_submitted. */
+    const TRANSFER_STATUSES = array('not_submitted' => 'Not Submitted', 'pending' => 'Pending', 'completed' => 'Completed');
+    /** Registration types whose paperwork is tracked: a club transfer and an ITC (overseas clearance). */
+    const PAPERWORK_TYPES = array('Club Transfer', 'ITC');
+
+    /** Does this application's player need transfer paperwork (Club Transfer or ITC, override included)? */
+    public static function needs_paperwork($application) {
+        return $application && class_exists('TeamOversight_Trials') && in_array(TeamOversight_Trials::registration_type($application), self::PAPERWORK_TYPES, true);
+    }
+
+    /** The stored status key of an application row (not_submitted when unset or unknown). */
+    public static function transfer_status($application) {
+        $value = ($application && isset($application->transfer_status)) ? (string) $application->transfer_status : '';
+        return isset(self::TRANSFER_STATUSES[$value]) ? $value : 'not_submitted';
+    }
+
+    /** Set an application's transfer status. Administrators only; logged. Returns array(ok, message). */
+    public static function set_transfer_status($application_id, $status, $actor) {
+        global $wpdb;
+        if (!user_can($actor, 'manage_options')) {
+            return array('ok' => false, 'message' => 'Only an administrator can change a transfer status.');
+        }
+        $status = (string) $status;
+        if (!isset(self::TRANSFER_STATUSES[$status])) {
+            return array('ok' => false, 'message' => 'Choose Not Submitted, Pending or Completed.');
+        }
+        $app = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$wpdb->prefix}trial_applications WHERE id = %d", intval($application_id)));
+        if (!$app) {
+            return array('ok' => false, 'message' => 'Application not found.');
+        }
+        if (!self::needs_paperwork($app)) {
+            return array('ok' => false, 'message' => $app->name . ' isn\'t a club transfer or ITC, so there is no transfer to track.');
+        }
+        $old = self::transfer_status($app);
+        if ($old === $status) {
+            return array('ok' => true, 'message' => 'No change.');
+        }
+        $wpdb->update($wpdb->prefix . 'trial_applications', array(
+            'transfer_status' => $status === 'not_submitted' ? null : $status,
+            'transfer_status_by' => intval($actor),
+            'transfer_status_at' => current_time('mysql'),
+        ), array('id' => intval($app->id)), array('%s', '%d', '%s'), array('%d'));
+        $who = $app->name . ($app->trial_number ? ' (#' . intval($app->trial_number) . ')' : '');
+        if (class_exists('TeamOversight_Log')) {
+            TeamOversight_Log::add(self::LOG_TYPE, 'Transfer status for ' . $who . ' (' . $app->season . '): ' . self::TRANSFER_STATUSES[$old] . ' to ' . self::TRANSFER_STATUSES[$status] . '.', array('user_id' => intval($app->user_id)));
+        }
+        return array('ok' => true, 'message' => 'Transfer status for ' . $who . ' set to ' . self::TRANSFER_STATUSES[$status] . '.');
+    }
+
+    // ------------------------------------------------------------------
     // Flags
     // ------------------------------------------------------------------
 

@@ -1246,7 +1246,16 @@ class TeamOversight_Readiness {
     // Admin: Player Readiness page (called from TeamOversight_Admin)
     // ------------------------------------------------------------------
 
-    public function render_admin_page($season) {
+    /**
+     * The admin Player Readiness page for one season ($seasons: the season
+     * selector's list). 1.92.0: one season at a time, chosen at the top.
+     * From 2027 (offers seasons) a player is listed only once they hold a
+     * place on a team or have ACCEPTED an offer (accepted or locked in; club
+     * decision, 10 Nov 2026), never for a coach's verdict alone; before 2027
+     * the verdicts still count, as they did. A Transfer column tracks a club
+     * transfer's or ITC's paperwork (Not Submitted, Pending, Completed).
+     */
+    public function render_admin_page($season, $seasons = array()) {
         if (isset($_POST['action']) && $_POST['action'] === 'save_readiness_settings') {
             $this->save_settings();
         }
@@ -1255,29 +1264,81 @@ class TeamOversight_Readiness {
             $this->save_shirt_credit();
         }
 
-        global $wpdb;
+        if (isset($_POST['action']) && $_POST['action'] === 'save_transfer_status') {
+            $this->save_transfer_status();
+        }
 
-        // Everyone selected/confirmed as a player, each shown for the
-        // LATEST season they're in (current year or later) — so end-of-year
-        // selections for next season appear here the moment they're made.
-        $year = wp_date('Y');
-        $player_rows = $wpdb->get_results($wpdb->prepare("
-            SELECT user_id, MAX(season) AS season FROM (
-                SELECT ta.user_id, ta.season FROM {$wpdb->prefix}team_assignments ta
-                WHERE ta.season >= %s AND ta.is_active = 1 AND ta.role IN ('playing_member', 'training_only', 'team_manager') AND ta.user_id > 0
-                UNION ALL
-                SELECT a.user_id, s.season FROM {$wpdb->prefix}team_trial_selections s
+        global $wpdb;
+        $season = (string) $season;
+        $offers_season = class_exists('TeamOversight_Offers') && TeamOversight_Offers::applies($season);
+
+        // Who is listed: an active place on a team this season, and (2027 on)
+        // an accepted or locked-in offer, else (before 2027) a Selected or
+        // Training Only verdict.
+        $user_ids = $wpdb->get_col($wpdb->prepare("
+            SELECT DISTINCT ta.user_id FROM {$wpdb->prefix}team_assignments ta
+            WHERE ta.season = %s AND ta.is_active = 1 AND ta.role IN ('playing_member', 'training_only', 'team_manager') AND ta.user_id > 0
+        ", $season));
+        $offer_teams = array(); // user id => team code => offer (accepted, or locked in and not yet placed)
+        if ($offers_season) {
+            $page = TeamOversight_Offers::list_offers(array('season' => $season, 'states' => array(TeamOversight_Offers::ACCEPTED, TeamOversight_Offers::LOCKED_IN), 'limit' => 500));
+            foreach ($page['rows'] as $offer) {
+                $uid = intval($offer->user_id);
+                if ($uid <= 0 || (string) $offer->team === '') {
+                    continue;
+                }
+                $user_ids[] = $uid;
+                if ($offer->state === TeamOversight_Offers::LOCKED_IN && !empty($offer->placed_at)) {
+                    continue; // placed: the team place itself is counted
+                }
+                if (!isset($offer_teams[$uid][(string) $offer->team])) {
+                    $offer_teams[$uid][(string) $offer->team] = $offer;
+                }
+            }
+        } else {
+            $user_ids = array_merge($user_ids, $wpdb->get_col($wpdb->prepare("
+                SELECT DISTINCT a.user_id FROM {$wpdb->prefix}team_trial_selections s
                 JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
-                WHERE s.season >= %s AND s.status IN ('selected', 'training_only') AND a.user_id > 0
-            ) players
-            GROUP BY user_id
-        ", $year, $year));
+                WHERE s.season = %s AND s.status IN ('selected', 'training_only') AND a.user_id > 0
+            ", $season)));
+        }
+        $user_ids = array_values(array_unique(array_map('intval', $user_ids)));
+        if (!empty($user_ids)) {
+            cache_users($user_ids);
+        }
+
+        // Each player's newest application for the season (the transfer column), one query.
+        $applications = array();
+        if (!empty($user_ids)) {
+            $rows = $wpdb->get_results($wpdb->prepare("
+                SELECT * FROM {$wpdb->prefix}trial_applications
+                WHERE season = %s AND user_id IN (" . implode(',', $user_ids) . ")
+                ORDER BY id DESC
+            ", $season));
+            foreach ((array) $rows as $row) {
+                if (!isset($applications[intval($row->user_id)])) {
+                    $applications[intval($row->user_id)] = $row;
+                }
+            }
+        }
+        $track_transfers = class_exists('TeamOversight_Transfer_Limits');
 
         $kit_products = self::get_kit_products();
 
         ?>
         <div class="wrap">
             <h1>Player Readiness</h1>
+
+            <?php if (!empty($seasons)): ?>
+                <div class="season-filter" style="margin: 10px 0;">
+                    <label for="readiness-season-select">Season:</label>
+                    <select id="readiness-season-select" onchange="location.href=this.value;">
+                        <?php foreach ($seasons as $s): ?>
+                            <option value="<?php echo esc_url(admin_url('admin.php?page=team-oversight-readiness&season=' . $s)); ?>" <?php selected($season, (string) $s); ?>><?php echo esc_html($s); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+            <?php endif; ?>
 
             <details class="import-export-section" style="margin: 15px 0; padding: 10px 15px; background: #fff; border: 1px solid #ccd0d4;" <?php echo (!get_option(self::VV_URL_OPTION) && empty($kit_products['shirt'])) ? 'open' : ''; ?>>
                 <summary style="cursor: pointer; font-weight: 600;">Readiness settings</summary>
@@ -1316,14 +1377,20 @@ class TeamOversight_Readiness {
                 </form>
             </details>
 
-            <p><strong><?php echo count($player_rows); ?></strong> players selected/confirmed for <?php echo esc_html($year); ?> or later — each shown for the latest season they're in. Shirt requirements come from each team's configuration (Premier 2, YSL 0, default 1).</p>
+            <p><strong><?php echo count($user_ids); ?></strong> players for <?php echo esc_html($season); ?>.
+                <?php if ($offers_season): ?>
+                    A player appears here once they have accepted their offer or hold a place on a team.
+                <?php else: ?>
+                    Everyone on a team, or Selected or Training Only by a coach.
+                <?php endif; ?>
+                Shirt requirements come from each team's configuration (Premier 2, YSL 0, default 1).</p>
 
-            <?php if (!empty($player_rows)): ?>
+            <?php if (!empty($user_ids)): ?>
                 <table class="wp-list-table widefat fixed striped">
                     <thead><tr>
                         <th>Player</th>
-                        <th style="width: 6%;">Season</th>
-                        <th style="width: 10%;">Teams</th>
+                        <th style="width: 12%;">Teams</th>
+                        <?php if ($track_transfers): ?><th style="width: 11%;" title="Club transfers and ITC players only">Transfer</th><?php endif; ?>
                         <th style="width: 12%;">VV Registration</th>
                         <th>Shirt Payment</th>
                         <th style="width: 14%;">Shorts &amp; Socks</th>
@@ -1331,18 +1398,34 @@ class TeamOversight_Readiness {
                         <th style="width: 55px;">Ready</th>
                     </tr></thead>
                     <tbody>
-                        <?php foreach ($player_rows as $player_row): ?>
+                        <?php foreach ($user_ids as $player_id): ?>
                             <?php
-                            $player_id = intval($player_row->user_id);
-                            $player_season = $player_row->season;
+                            $player_season = $season;
                             $player = get_userdata($player_id);
                             if (!$player) {
                                 continue;
                             }
-                            $checklist = self::compute($player, $player_season, true);
+                            $my_offers = isset($offer_teams[$player_id]) ? $offer_teams[$player_id] : array();
+                            // 2027 on: the accepted (or locked-in, not yet placed) offers' teams count, as on the player's own
+                            // checklist (season_panel()); never a bare verdict. Before 2027: the verdicts, as before.
+                            $checklist = $offers_season ? self::compute($player, $player_season, false, array_keys($my_offers)) : self::compute($player, $player_season, true);
                             if ($checklist === null) {
                                 continue;
                             }
+                            $deposit_unpaid = false;
+                            $offer_words = array();
+                            foreach ($my_offers as $code => $offer) {
+                                if ($offer->state === TeamOversight_Offers::ACCEPTED) {
+                                    $deposit_unpaid = true;
+                                    $offer_words[] = $code . ': accepted, deposit not paid yet';
+                                } else {
+                                    $offer_words[] = $code . ': locked in, not on the team list yet';
+                                }
+                            }
+                            if ($deposit_unpaid) {
+                                $checklist['ready'] = false;
+                            }
+                            $player_app = isset($applications[$player_id]) ? $applications[$player_id] : null;
                             $kit_step = $checklist['steps']['kit'];
                             $kit_summary = array();
                             foreach ($kit_step['items'] as $item) {
@@ -1352,8 +1435,27 @@ class TeamOversight_Readiness {
                             ?>
                             <tr>
                                 <td><a href="<?php echo esc_url(get_edit_user_link($player_id)); ?>"><?php echo esc_html($player->display_name); ?></a><br><small><?php echo esc_html($player->user_email); ?></small></td>
-                                <td><?php echo esc_html($player_season); ?></td>
-                                <td><?php echo esc_html(implode(', ', $checklist['teams'])); ?></td>
+                                <td><?php echo esc_html(implode(', ', $checklist['teams'])); ?><?php foreach ($offer_words as $w): ?><br><small style="color:#996800;"><?php echo esc_html($w); ?></small><?php endforeach; ?></td>
+                                <?php if ($track_transfers): ?>
+                                    <td style="font-size: 12px;">
+                                        <?php if ($player_app && TeamOversight_Transfer_Limits::needs_paperwork($player_app)): ?>
+                                            <?php $tstatus = TeamOversight_Transfer_Limits::transfer_status($player_app); ?>
+                                            <form method="post">
+                                                <input type="hidden" name="action" value="save_transfer_status">
+                                                <input type="hidden" name="transfer_application_id" value="<?php echo intval($player_app->id); ?>">
+                                                <?php wp_nonce_field('save_transfer_status', 'transfer_status_nonce'); ?>
+                                                <select name="transfer_status" onchange="this.form.submit()" aria-label="Transfer status for <?php echo esc_attr($player->display_name); ?>" style="font-size: 12px; max-width: 100%;<?php echo $tstatus === 'completed' ? ' color:#1a7a2e;' : ($tstatus === 'pending' ? ' color:#996800;' : ' color:#a00;'); ?>">
+                                                    <?php foreach (TeamOversight_Transfer_Limits::TRANSFER_STATUSES as $key => $label): ?>
+                                                        <option value="<?php echo esc_attr($key); ?>" <?php selected($tstatus, $key); ?>><?php echo esc_html($label); ?></option>
+                                                    <?php endforeach; ?>
+                                                </select>
+                                            </form>
+                                            <small><?php echo esc_html(TeamOversight_Trials::registration_type($player_app)); ?></small>
+                                        <?php else: ?>
+                                            <span style="color: #666;">—</span>
+                                        <?php endif; ?>
+                                    </td>
+                                <?php endif; ?>
                                 <td><?php echo $checklist['steps']['vv']['done'] ? '<span style="color:#1a7a2e;">✔ Confirmed by player</span>' : '<span style="color:#996800;">Not confirmed</span>'; ?></td>
                                 <td style="font-size: 12px;">
                                     <?php if ($shirt_step === null): ?>
@@ -1395,6 +1497,24 @@ class TeamOversight_Readiness {
             <?php endif; ?>
         </div>
         <?php
+    }
+
+    /** 1.92.0: a club transfer's or ITC's paperwork status, from the Transfer column (administrators only; TeamOversight_Transfer_Limits decides and logs). */
+    private function save_transfer_status() {
+        if (!isset($_POST['transfer_status_nonce']) || !wp_verify_nonce($_POST['transfer_status_nonce'], 'save_transfer_status')) {
+            echo '<div class="notice notice-error"><p>Security check failed. Reload the page and try again.</p></div>';
+            return;
+        }
+        if (!current_user_can('manage_options') || !class_exists('TeamOversight_Transfer_Limits')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+        $result = TeamOversight_Transfer_Limits::set_transfer_status(
+            isset($_POST['transfer_application_id']) ? intval($_POST['transfer_application_id']) : 0,
+            isset($_POST['transfer_status']) ? sanitize_key(wp_unslash($_POST['transfer_status'])) : '',
+            get_current_user_id()
+        );
+        echo '<div class="notice notice-' . ($result['ok'] ? 'success' : 'error') . ' is-dismissible"><p>' . esc_html($result['message']) . '</p></div>';
     }
 
     /**

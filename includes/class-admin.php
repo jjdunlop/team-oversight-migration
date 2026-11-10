@@ -292,6 +292,7 @@ class TeamOversight_Admin {
             </div>
             
             <?php $this->render_team_summary_table($current_season); ?>
+            <?php $this->render_coaches_table($current_season); ?>
             <?php $this->render_team_detail_table($current_season); ?>
         </div>
         <?php
@@ -1442,7 +1443,8 @@ class TeamOversight_Admin {
     
     public function readiness_page() {
         $readiness = new TeamOversight_Readiness();
-        $readiness->render_admin_page($this->get_current_season());
+        // 1.92.0: one season at a time, with the same season selector as the dashboard.
+        $readiness->render_admin_page($this->get_current_season(), $this->get_available_seasons('main'));
     }
 
     public function fees_page() {
@@ -1579,60 +1581,91 @@ class TeamOversight_Admin {
         
         $team_stats = array();
         
+        // 1.92.0 (club decision, 10 Nov 2026): players only (playing places). Coaches,
+        // assistant coaches and team managers are in their own table below, one row
+        // per person; a player-coach is counted here and listed there. Every team of
+        // the season is shown, with its club transfers for 2027 on.
+        $transfers = (class_exists('TeamOversight_Transfer_Limits') && TeamOversight_Transfer_Limits::applies($season))
+            ? TeamOversight_Transfer_Limits::counts($season, true) : null;
         foreach ($teams as $team_code => $team_name) {
-            // Get team members count (approved players)
-            $member_count = $wpdb->get_var($wpdb->prepare("
-                SELECT COUNT(DISTINCT ta.email) 
+            $member_count = intval($wpdb->get_var($wpdb->prepare("
+                SELECT COUNT(DISTINCT ta.email)
                 FROM {$wpdb->prefix}team_assignments ta
-                WHERE ta.team = %s AND ta.season = %s AND ta.is_active = 1 
-                AND ta.role IN ('playing_member', 'team_manager', 'coach', 'assistant_coach')
-            ", $team_code, $season));
-            
+                WHERE ta.team = %s AND ta.season = %s AND ta.is_active = 1
+                AND ta.role = 'playing_member'
+            ", $team_code, $season)));
+
+            $accredited_percentage = 0;
+            $outstanding_percentage = 0;
+            $total_outstanding = 0;
             if ($member_count > 0) {
-                // Get accreditation percentage
                 $accredited_count = $wpdb->get_var($wpdb->prepare("
-                    SELECT COUNT(DISTINCT ta.email) 
+                    SELECT COUNT(DISTINCT ta.email)
                     FROM {$wpdb->prefix}team_assignments ta
                     JOIN {$wpdb->prefix}team_accreditations acc ON ta.email = acc.email
                     WHERE ta.team = %s AND ta.season = %s AND ta.is_active = 1
-                    AND ta.role IN ('playing_member', 'team_manager', 'coach', 'assistant_coach')
+                    AND ta.role = 'playing_member'
                     AND acc.vvid IS NOT NULL AND acc.accreditation_list IS NOT NULL
                 ", $team_code, $season));
-                
-                $accredited_percentage = $member_count > 0 ? round(($accredited_count / $member_count) * 100, 1) : 0;
-                
-                // Get outstanding fees percentage and total
+
+                $accredited_percentage = round(($accredited_count / $member_count) * 100, 1);
+
                 $outstanding_data = $wpdb->get_row($wpdb->prepare("
-                    SELECT 
+                    SELECT
                         COUNT(DISTINCT CASE WHEN inv.outstanding_amount > 0 THEN inv.email END) as outstanding_count,
                         SUM(CASE WHEN inv.outstanding_amount > 0 THEN inv.outstanding_amount ELSE 0 END) as total_outstanding
                     FROM {$wpdb->prefix}team_assignments ta
                     LEFT JOIN {$wpdb->prefix}team_invoices inv ON ta.email = inv.email AND inv.season = ta.season
                     WHERE ta.team = %s AND ta.season = %s AND ta.is_active = 1
-                    AND ta.role IN ('playing_member', 'team_manager', 'coach', 'assistant_coach')
+                    AND ta.role = 'playing_member'
                 ", $team_code, $season));
-                
-                $outstanding_percentage = $member_count > 0 ? round(($outstanding_data->outstanding_count / $member_count) * 100, 1) : 0;
+
+                $outstanding_percentage = round(($outstanding_data->outstanding_count / $member_count) * 100, 1);
                 $total_outstanding = $outstanding_data->total_outstanding ?: 0;
-                
-                $team_stats[$team_code] = array(
-                    'name' => $team_name,
-                    'member_count' => $member_count,
-                    'accredited_percentage' => $accredited_percentage,
-                    'outstanding_percentage' => $outstanding_percentage,
-                    'total_outstanding' => $total_outstanding
-                );
             }
+
+            $transfer_cell = null;
+            if ($transfers !== null) {
+                $facts = TeamOversight_Transfer_Limits::team_facts($team_code, $season);
+                if ($facts['kind'] !== '') {
+                    $transfer_cell = array(
+                        'selected' => isset($transfers['teams'][$team_code]) ? count($transfers['teams'][$team_code]) : 0,
+                        'tentative' => isset($transfers['tentative'][$team_code]) ? count($transfers['tentative'][$team_code]) : 0,
+                        'limit' => intval($facts['limit']),
+                    );
+                }
+            }
+
+            $team_stats[$team_code] = array(
+                'name' => $team_name,
+                'member_count' => $member_count,
+                'accredited_percentage' => $accredited_percentage,
+                'outstanding_percentage' => $outstanding_percentage,
+                'total_outstanding' => $total_outstanding,
+                'transfers' => $transfer_cell,
+            );
         }
-        
+
         ?>
         <div style="margin-bottom: 30px;">
             <h2>Team Summary</h2>
+            <?php if ($transfers !== null): ?>
+                <?php $tl_limits = TeamOversight_Transfer_Limits::limits(); ?>
+                <p>
+                    <strong>Club transfers selected:</strong>
+                    <?php foreach (array('mens' => 'men\'s and boys\' teams', 'womens' => 'women\'s and girls\' teams') as $g => $words): ?>
+                        <?php $n = count($transfers['genders'][$g]); ?>
+                        <span style="margin-right: 14px;<?php echo $n > $tl_limits[$g] ? ' color:#b32d2e; font-weight:600;' : ''; ?>"><?php echo intval($n); ?> of <?php echo intval($tl_limits[$g]); ?> across the <?php echo esc_html($words); ?></span>
+                    <?php endforeach; ?>
+                    <a href="<?php echo esc_url(admin_url('admin.php?page=team-oversight-fees&season=' . $season . '#transfer-limits')); ?>">Limits and exceptions</a>
+                </p>
+            <?php endif; ?>
             <table class="wp-list-table widefat fixed striped">
                 <thead>
                     <tr>
                         <th>Team</th>
-                        <th>Total Approved Players</th>
+                        <th>Players</th>
+                        <?php if ($transfers !== null): ?><th title="Club transfers Selected by the coach, of the team's limit; Tentative in brackets">Club transfers</th><?php endif; ?>
                         <th>% Accredited</th>
                         <th>% Outstanding Fees</th>
                         <th>Total Outstanding Amount</th>
@@ -1642,7 +1675,17 @@ class TeamOversight_Admin {
                     <?php foreach ($team_stats as $team_code => $stats): ?>
                         <tr>
                             <td><strong><?php echo esc_html($stats['name']); ?></strong></td>
-                            <td><?php echo $stats['member_count']; ?></td>
+                            <td><?php echo intval($stats['member_count']); ?></td>
+                            <?php if ($transfers !== null): ?>
+                                <td>
+                                    <?php if ($stats['transfers'] === null): ?>
+                                        —
+                                    <?php else: ?>
+                                        <?php $t = $stats['transfers']; ?>
+                                        <span<?php echo $t['selected'] > $t['limit'] ? ' style="color:#b32d2e; font-weight:600;"' : ''; ?>><?php echo intval($t['selected']); ?> of <?php echo intval($t['limit']); ?></span><?php echo $t['tentative'] ? ' <span style="color:#666;">(+' . intval($t['tentative']) . ' Tentative)</span>' : ''; ?>
+                                    <?php endif; ?>
+                                </td>
+                            <?php endif; ?>
                             <td>
                                 <span style="color: <?php echo $stats['accredited_percentage'] >= 80 ? 'green' : ($stats['accredited_percentage'] >= 50 ? 'orange' : 'red'); ?>">
                                     <?php echo $stats['accredited_percentage']; ?>%
@@ -1662,6 +1705,113 @@ class TeamOversight_Admin {
         <?php
     }
     
+    /**
+     * 1.92.0 (club decision, 10 Nov 2026): coaches, assistant coaches and team
+     * managers, one row per person (account, else email), with every team they
+     * hold each role on. A player-coach is counted as a player in Team Summary
+     * and listed here too, with the teams they play for.
+     */
+    private function render_coaches_table($season) {
+        global $wpdb;
+        $staff_roles = array('coach' => 'Coach', 'assistant_coach' => 'Assistant coach', 'team_manager' => 'Team manager');
+        $rows = $wpdb->get_results($wpdb->prepare("
+            SELECT ta.user_id, ta.email, ta.team, ta.role
+            FROM {$wpdb->prefix}team_assignments ta
+            WHERE ta.season = %s AND ta.is_active = 1
+            ORDER BY ta.team
+        ", $season));
+        $people = array();
+        foreach ((array) $rows as $r) {
+            $uid = intval($r->user_id);
+            $key = $uid > 0 ? 'u' . $uid : 'e' . strtolower(trim((string) $r->email));
+            if (!isset($people[$key])) {
+                $people[$key] = array('user_id' => $uid, 'email' => (string) $r->email, 'roles' => array(), 'plays' => array());
+            }
+            if (isset($staff_roles[$r->role])) {
+                $people[$key]['roles'][$r->role][(string) $r->team] = true;
+            } elseif (in_array($r->role, array('playing_member', 'training_only'), true)) {
+                $people[$key]['plays'][(string) $r->team . ($r->role === 'training_only' ? ' (training only)' : '')] = true;
+            }
+        }
+        $people = array_filter($people, function ($p) {
+            return !empty($p['roles']);
+        });
+        $user_ids = array();
+        $emails = array();
+        foreach ($people as $p) {
+            if ($p['user_id'] > 0) {
+                $user_ids[] = $p['user_id'];
+            }
+            $emails[] = strtolower($p['email']);
+        }
+        if (!empty($user_ids)) {
+            cache_users($user_ids);
+        }
+        $accreditations = array();
+        if (!empty($emails)) {
+            $placeholders = implode(',', array_fill(0, count($emails), '%s'));
+            foreach ((array) $wpdb->get_results($wpdb->prepare("SELECT email, vvid, accreditation_list FROM {$wpdb->prefix}team_accreditations WHERE LOWER(email) IN ($placeholders)", $emails)) as $acc) {
+                $accreditations[strtolower((string) $acc->email)] = $acc;
+            }
+        }
+        foreach ($people as $key => $p) {
+            $user = $p['user_id'] > 0 ? get_userdata($p['user_id']) : false;
+            $people[$key]['name'] = $user ? (string) $user->display_name : $p['email'];
+            $people[$key]['email'] = $user ? (string) $user->user_email : $p['email'];
+        }
+        uasort($people, function ($a, $b) {
+            return strcasecmp($a['name'], $b['name']);
+        });
+        ?>
+        <div style="margin-bottom: 30px;">
+            <h2>Coaches and team managers (<?php echo count($people); ?>)</h2>
+            <?php if (empty($people)): ?>
+                <p>No coaches or team managers on a team for <?php echo esc_html($season); ?> yet.</p>
+            <?php else: ?>
+                <table class="wp-list-table widefat fixed striped">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Coaching</th>
+                            <th>Also plays for</th>
+                            <th>Accreditation</th>
+                            <th>Email</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($people as $p): ?>
+                            <?php
+                            $parts = array();
+                            foreach ($staff_roles as $role => $label) {
+                                if (!empty($p['roles'][$role])) {
+                                    $parts[] = $label . ': ' . implode(', ', array_keys($p['roles'][$role]));
+                                }
+                            }
+                            $acc = isset($accreditations[strtolower($p['email'])]) ? $accreditations[strtolower($p['email'])] : null;
+                            ?>
+                            <tr>
+                                <td><strong><?php echo esc_html($p['name']); ?></strong></td>
+                                <td><?php echo esc_html(implode('; ', $parts)); ?></td>
+                                <td><?php echo empty($p['plays']) ? '—' : esc_html(implode(', ', array_keys($p['plays']))); ?></td>
+                                <td><?php
+                                    if ($acc && (string) $acc->accreditation_list !== '') {
+                                        echo esc_html((string) $acc->accreditation_list);
+                                    } elseif ($acc && (string) $acc->vvid !== '') {
+                                        echo 'VVID ' . esc_html((string) $acc->vvid) . ', no accreditation recorded';
+                                    } else {
+                                        echo '<span style="color:#a00;">None recorded</span>';
+                                    }
+                                ?></td>
+                                <td><a href="mailto:<?php echo esc_attr($p['email']); ?>"><?php echo esc_html($p['email']); ?></a></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
     private function render_team_detail_table($season) {
         global $wpdb;
         

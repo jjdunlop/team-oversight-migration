@@ -148,6 +148,8 @@ class TeamOversight_Account_Merge {
             array('trial_applications', 'registration_override_by'),
             // 1.88.0: who set the club's fee cover on an application (the mark itself moves with the application).
             array('trial_applications', 'fee_cover_by'),
+            // 1.92.0: who last set a transfer's paperwork status on an application.
+            array('trial_applications', 'transfer_status_by'),
             array('team_positions', 'updated_by'),
             // 1.76.0: who requested, decided, closed and settled an offer,
             // and who last set a fee matrix upper limit.

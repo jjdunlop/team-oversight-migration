@@ -641,6 +641,14 @@ class TeamOversight_Database {
                 ADD COLUMN fee_cover_by bigint(20) unsigned DEFAULT NULL,
                 ADD COLUMN fee_cover_at datetime DEFAULT NULL");
         }
+        // 1.92.0: a club transfer's or ITC's paperwork status on its trial application (TeamOversight_Transfer_Limits::
+        // set_transfer_status(); NULL = Not Submitted; who and when, like registration_override). One guarded ALTER.
+        if (empty($wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}trial_applications LIKE 'transfer_status'"))) {
+            $wpdb->query("ALTER TABLE {$wpdb->prefix}trial_applications
+                ADD COLUMN transfer_status varchar(20) DEFAULT NULL,
+                ADD COLUMN transfer_status_by bigint(20) unsigned DEFAULT NULL,
+                ADD COLUMN transfer_status_at datetime DEFAULT NULL");
+        }
         if ($wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}team_offers'") && empty($wpdb->get_results("SHOW COLUMNS FROM {$wpdb->prefix}team_offers LIKE 'quote_cover'"))) {
             $wpdb->query("ALTER TABLE {$wpdb->prefix}team_offers
                 ADD COLUMN quote_cover varchar(100) DEFAULT NULL AFTER target_dropped_at,
