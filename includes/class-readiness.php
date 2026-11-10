@@ -1386,7 +1386,7 @@ class TeamOversight_Readiness {
                 Shirt requirements come from each team's configuration (Premier 2, YSL 0, default 1).</p>
 
             <?php if (!empty($user_ids)): ?>
-                <table class="wp-list-table widefat fixed striped">
+                <table class="wp-list-table widefat fixed striped murvc-sortable" id="murvc-readiness-table">
                     <thead><tr>
                         <th>Player</th>
                         <th style="width: 12%;">Teams</th>
@@ -1426,6 +1426,13 @@ class TeamOversight_Readiness {
                                 $checklist['ready'] = false;
                             }
                             $player_app = isset($applications[$player_id]) ? $applications[$player_id] : null;
+                            $needs_transfer = $track_transfers && $player_app && TeamOversight_Transfer_Limits::needs_paperwork($player_app);
+                            $tstatus = $needs_transfer ? TeamOversight_Transfer_Limits::transfer_status($player_app) : '';
+                            // 1.92.1 (club decision, 10 Nov 2026): a club transfer or ITC isn't Ready until their transfer is Completed.
+                            $transfer_blocks = $needs_transfer && $tstatus !== 'completed';
+                            if ($transfer_blocks) {
+                                $checklist['ready'] = false;
+                            }
                             $kit_step = $checklist['steps']['kit'];
                             $kit_summary = array();
                             foreach ($kit_step['items'] as $item) {
@@ -1434,12 +1441,11 @@ class TeamOversight_Readiness {
                             $shirt_step = isset($checklist['steps']['shirt']) ? $checklist['steps']['shirt'] : null;
                             ?>
                             <tr>
-                                <td><a href="<?php echo esc_url(get_edit_user_link($player_id)); ?>"><?php echo esc_html($player->display_name); ?></a><br><small><?php echo esc_html($player->user_email); ?></small></td>
-                                <td><?php echo esc_html(implode(', ', $checklist['teams'])); ?><?php foreach ($offer_words as $w): ?><br><small style="color:#996800;"><?php echo esc_html($w); ?></small><?php endforeach; ?></td>
+                                <td data-sort="<?php echo esc_attr(strtolower($player->display_name)); ?>"><a href="<?php echo esc_url(get_edit_user_link($player_id)); ?>"><?php echo esc_html($player->display_name); ?></a><br><small><?php echo esc_html($player->user_email); ?></small></td>
+                                <td data-sort="<?php echo esc_attr(strtolower(implode(', ', $checklist['teams']))); ?>"><?php echo esc_html(implode(', ', $checklist['teams'])); ?><?php foreach ($offer_words as $w): ?><br><small style="color:#996800;"><?php echo esc_html($w); ?></small><?php endforeach; ?></td>
                                 <?php if ($track_transfers): ?>
-                                    <td style="font-size: 12px;">
-                                        <?php if ($player_app && TeamOversight_Transfer_Limits::needs_paperwork($player_app)): ?>
-                                            <?php $tstatus = TeamOversight_Transfer_Limits::transfer_status($player_app); ?>
+                                    <td style="font-size: 12px;" data-sort="<?php echo $needs_transfer ? intval(array_search($tstatus, array_keys(TeamOversight_Transfer_Limits::TRANSFER_STATUSES), true)) : '-1'; ?>">
+                                        <?php if ($needs_transfer): ?>
                                             <form method="post">
                                                 <input type="hidden" name="action" value="save_transfer_status">
                                                 <input type="hidden" name="transfer_application_id" value="<?php echo intval($player_app->id); ?>">
@@ -1456,8 +1462,8 @@ class TeamOversight_Readiness {
                                         <?php endif; ?>
                                     </td>
                                 <?php endif; ?>
-                                <td><?php echo $checklist['steps']['vv']['done'] ? '<span style="color:#1a7a2e;">✔ Confirmed by player</span>' : '<span style="color:#996800;">Not confirmed</span>'; ?></td>
-                                <td style="font-size: 12px;">
+                                <td data-sort="<?php echo $checklist['steps']['vv']['done'] ? '1' : '0'; ?>"><?php echo $checklist['steps']['vv']['done'] ? '<span style="color:#1a7a2e;">✔ Confirmed by player</span>' : '<span style="color:#996800;">Not confirmed</span>'; ?></td>
+                                <td style="font-size: 12px;" data-sort="<?php echo $shirt_step === null ? '1' : esc_attr(number_format(min(1, intval($shirt_step['shirt_required']) > 0 ? intval($shirt_step['shirt_paid']) / intval($shirt_step['shirt_required']) : 1), 2, '.', '')); ?>">
                                     <?php if ($shirt_step === null): ?>
                                         <span style="color: #666;">Not required (supplied)</span>
                                     <?php else: ?>
@@ -1482,16 +1488,58 @@ class TeamOversight_Readiness {
                                         </details>
                                     <?php endif; ?>
                                 </td>
-                                <td style="font-size: 12px;">
+                                <td style="font-size: 12px;" data-sort="<?php echo $kit_step['done'] ? '1' : '0'; ?>">
                                     <?php echo $kit_step['done'] ? '<span style="color:#1a7a2e;">✔' . (empty($kit_step['auto_done']) ? ' (player ticked)' : ' (purchased)') . '</span><br>' : ''; ?>
                                     <?php echo esc_html(implode(' · ', $kit_summary)); ?>
                                 </td>
-                                <td><?php echo !empty($checklist['steps']['fees']['waiting']) ? '<span style="color:#996800;">' . esc_html(self::waiting_label($checklist['steps']['fees'])) . '</span>' : ($checklist['steps']['fees']['done'] ? '<span style="color:#1a7a2e;">✔</span>' : '<span style="color:#a00;">' . esc_html($checklist['steps']['fees']['detail']) . '</span>'); ?></td>
-                                <td><?php echo $checklist['ready'] ? '<strong style="color:#1a7a2e;">✔</strong>' : '—'; ?></td>
+                                <td data-sort="<?php echo !empty($checklist['steps']['fees']['waiting']) ? '0.5' : ($checklist['steps']['fees']['done'] ? '1' : '0'); ?>"><?php echo !empty($checklist['steps']['fees']['waiting']) ? '<span style="color:#996800;">' . esc_html(self::waiting_label($checklist['steps']['fees'])) . '</span>' : ($checklist['steps']['fees']['done'] ? '<span style="color:#1a7a2e;">✔</span>' : '<span style="color:#a00;">' . esc_html($checklist['steps']['fees']['detail']) . '</span>'); ?></td>
+                                <td data-sort="<?php echo $checklist['ready'] ? '1' : '0'; ?>"><?php echo $checklist['ready'] ? '<strong style="color:#1a7a2e;">✔</strong>' : '—'; ?><?php echo $transfer_blocks ? '<br><small style="color:#996800;">transfer not completed</small>' : ''; ?></td>
                             </tr>
                         <?php endforeach; ?>
                     </tbody>
                 </table>
+                <style>
+                    #murvc-readiness-table th .murvc-sort { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+                    #murvc-readiness-table th .murvc-sort::after { content: " \2195"; color: #a7aaad; }
+                    #murvc-readiness-table th[aria-sort="ascending"] .murvc-sort::after { content: " \2191"; color: inherit; }
+                    #murvc-readiness-table th[aria-sort="descending"] .murvc-sort::after { content: " \2193"; color: inherit; }
+                </style>
+                <script>
+                // 1.92.1: click a column heading to sort the players by it (again to reverse). A cell's data-sort
+                // value is the key when it has one (numbers sort as numbers), else its text. Rows keep their forms.
+                (function () {
+                    var table = document.getElementById('murvc-readiness-table');
+                    if (!table || !table.tHead || !table.tBodies.length) { return; }
+                    var heads = table.tHead.rows[0].cells;
+                    var isNum = function (v) { return /^-?\d+(\.\d+)?$/.test(v); };
+                    var key = function (row, col) {
+                        var cell = row.cells[col];
+                        if (!cell) { return ''; }
+                        var v = cell.getAttribute('data-sort');
+                        return v !== null ? v : cell.textContent.trim().toLowerCase();
+                    };
+                    Array.prototype.forEach.call(heads, function (th, col) {
+                        var btn = document.createElement('button');
+                        btn.type = 'button';
+                        btn.className = 'murvc-sort';
+                        while (th.firstChild) { btn.appendChild(th.firstChild); }
+                        th.appendChild(btn);
+                        btn.addEventListener('click', function () {
+                            var dir = th.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+                            Array.prototype.forEach.call(heads, function (h) { h.removeAttribute('aria-sort'); });
+                            th.setAttribute('aria-sort', dir);
+                            var body = table.tBodies[0];
+                            var rows = Array.prototype.slice.call(body.rows);
+                            rows.sort(function (a, b) {
+                                var x = key(a, col), y = key(b, col);
+                                var cmp = (isNum(x) && isNum(y)) ? parseFloat(x) - parseFloat(y) : x.localeCompare(y);
+                                return dir === 'ascending' ? cmp : -cmp;
+                            });
+                            rows.forEach(function (r) { body.appendChild(r); });
+                        });
+                    });
+                })();
+                </script>
             <?php else: ?>
                 <p>No players selected or confirmed for this season yet.</p>
             <?php endif; ?>
