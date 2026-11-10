@@ -3140,6 +3140,11 @@ class TeamOversight_Fees {
                 <?php TeamOversight_Fee_Breakdown::render_admin_box($selected_season); ?>
             <?php endif; ?>
 
+            <?php if (class_exists('TeamOversight_Transfer_Limits')): ?>
+                <?php // 1.91.0: club transfer limits, this season's counts and exceptions (class-transfer-limits.php; 2027 on). ?>
+                <?php TeamOversight_Transfer_Limits::render_admin_box($selected_season); ?>
+            <?php endif; ?>
+
             <!-- Fee matrix: full width (it's a grid), then teams -->
             <div style="display: flex; flex-wrap: wrap; gap: 30px; align-items: flex-start;">
 

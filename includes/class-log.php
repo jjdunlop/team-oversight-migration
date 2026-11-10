@@ -59,6 +59,8 @@ class TeamOversight_Log {
                 // set, changed or cleared on a trial application, and a
                 // locked-in offer whose cover changed afterwards).
                 'fee_cover' => 'Fee covered by the club',
+                // 1.91.0: club transfer limits changed, an exception allowed or removed.
+                'transfer_limits' => 'Club transfer limits',
             ),
             'membership' => array(
                 'membership_granted' => 'Granted',

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), coach profiles (Coaches), and the club's policies and AGM papers (Club documents).
- * Version: 1.90.0
+ * Version: 1.91.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.90.0');
+define('TEAM_OVERSIGHT_VERSION', '1.91.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -321,6 +321,8 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-program-booking.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-committee-access.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-coach-portal.php';
+    // 1.91.0: club transfer limits (per team and club-wide), the coach portal's check, exceptions, the Configuration box.
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-transfer-limits.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-payments.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-readiness.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-help-page.php';
@@ -370,6 +372,8 @@ function team_oversight_init() {
     TeamOversight_Fee_Cover::register_hooks();
     // 1.89.0: the Configuration box's admin-post handler (Where your fees go), added once.
     TeamOversight_Fee_Breakdown::register_hooks();
+    // 1.91.0: the Club transfer limits box's admin-post handler, added once.
+    TeamOversight_Transfer_Limits::register_hooks();
     // VVL Oversight → How it works: the calculator's AJAX hook, added once.
     TeamOversight_Help_Page::register_hooks();
     // Club Membership → Duplicate accounts: the scan's cache resets, the

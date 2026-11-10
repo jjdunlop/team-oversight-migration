@@ -1720,6 +1720,7 @@ class TeamOversight_Coach_Portal {
             'meta_position' => self::meta_position_html($status, $position, $this->format_positions($applied)),
             'counts_html' => self::players_heading_html($snap['counts']),
             'flow_html' => self::render_flow($snap['counts']),
+            'transfer_html' => class_exists('TeamOversight_Transfer_Limits') ? TeamOversight_Transfer_Limits::board_html($team, $season, true) : '',
             'bulk_html' => $this->render_bulk_panel($team, $season, $snap),
             'ns_bulk_html' => $this->render_ns_bulk_panel($team, $season, $snap),
         );
@@ -2157,6 +2158,10 @@ class TeamOversight_Coach_Portal {
 
                 <?php if ($offers_on): ?>
                     <div id="coach-offer-flow"><?php echo self::render_flow($snap['counts']); ?></div>
+                <?php endif; ?>
+                <?php if (class_exists('TeamOversight_Transfer_Limits')): ?>
+                    <?php // 1.91.0: club transfers on this team and club-wide (class-transfer-limits.php). ?>
+                    <div id="coach-transfer-limits"><?php echo TeamOversight_Transfer_Limits::board_html($active_team, $season); ?></div>
                 <?php endif; ?>
 
                 <?php $attendance_date = $this->get_attendance_date(); ?>
@@ -2693,6 +2698,8 @@ class TeamOversight_Coach_Portal {
                 if (heading && typeof d.counts_html === 'string') { heading.innerHTML = d.counts_html; }
                 var flowChart = document.getElementById('coach-offer-flow');
                 if (flowChart && typeof d.flow_html === 'string') { flowChart.innerHTML = d.flow_html; }
+                var transfers = document.getElementById('coach-transfer-limits');
+                if (transfers && typeof d.transfer_html === 'string') { transfers.innerHTML = d.transfer_html; }
                 var bulk = document.getElementById('coach-offer-bulk');
                 if (bulk && typeof d.bulk_html === 'string') { bulk.innerHTML = d.bulk_html; }
                 var nsBulk = document.getElementById('coach-ns-bulk');
@@ -3933,6 +3940,17 @@ class TeamOversight_Coach_Portal {
             margin: 6px 0 12px;
         }
 
+        /* 1.91.0: club transfer limits line under the flow chart. */
+        .coach-portal .coach-transfer-limits {
+            margin: 4px 0 8px;
+            font-size: 0.9em;
+            color: #3c434a;
+        }
+        .coach-portal .coach-tl-over {
+            color: #b32d2e;
+            font-weight: 600;
+        }
+
         .coach-portal #coach-ns-bulk:empty {
             display: none;
         }
@@ -4458,12 +4476,32 @@ class TeamOversight_Coach_Portal {
             return '<div class="coach-portal-notice"><p>' . esc_html($application->name) . ' (#' . intval($application->trial_number) . ') hasn\'t paid the trial fee yet. You can reject them now; other verdicts open once the fee is paid.</p></div>';
         }
 
+        // 1.91.0: club transfer limits, only when a club transfer moves INTO
+        // Selected. Checked under a named lock that is held until the verdict
+        // is written, so two quick moves can't both pass; before the offers
+        // gate below, which may cancel a waiting request.
+        $transfer_lock = null;
+        if ($status === 'selected' && (!$existing || $existing->status !== 'selected')
+            && class_exists('TeamOversight_Transfer_Limits') && TeamOversight_Transfer_Limits::applies($season)) {
+            $transfer_lock = TeamOversight_Transfer_Limits::lock();
+            $transfer_refusal = TeamOversight_Transfer_Limits::check($application, $team, $season);
+            if ($transfer_refusal !== '') {
+                TeamOversight_Transfer_Limits::unlock($transfer_lock);
+                // The card is sent back as it really is, so the menu doesn't stay on Selected.
+                $this->offer_refresh_ok = true;
+                return '<div class="coach-portal-notice"><p>' . $who . ': ' . esc_html($transfer_refusal) . '</p></div>';
+            }
+        }
+
         // Last, just before the write: a request waiting for the committee is
         // cancelled by a change; once an offer is sent, accepted or locked in
         // the change is refused (withdraw the offer first).
         $gate_note = '';
         $refusal = $this->offer_verdict_gate($application_id, $team, $season, $status, $who, $gate_note);
         if ($refusal !== '') {
+            if ($transfer_lock !== null) {
+                TeamOversight_Transfer_Limits::unlock($transfer_lock);
+            }
             return $refusal;
         }
 
@@ -4495,6 +4533,9 @@ class TeamOversight_Coach_Portal {
                 'status' => $status,
                 'created_by' => get_current_user_id(),
             ), array('%d', '%s', '%s', '%s', '%d'));
+        }
+        if ($transfer_lock !== null) {
+            TeamOversight_Transfer_Limits::unlock($transfer_lock);
         }
 
         $offer_hint = '';

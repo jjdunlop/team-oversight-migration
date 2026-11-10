@@ -1158,6 +1158,8 @@ class TeamOversight_Offers_Admin {
                 'warn' => $warn,
                 'app' => $app,
                 'reg' => $app ? TeamOversight_Trials::registration_type($app) : '',
+                // 1.91.0: a club transfer's team and club-wide counts, an exception, or over the limit.
+                'transfer' => ($app && class_exists('TeamOversight_Transfer_Limits')) ? TeamOversight_Transfer_Limits::offer_flag($app, $offer->team, $season, $offer->role) : null,
                 'note' => isset($notes[intval($offer->application_id)]) ? $notes[intval($offer->application_id)] : null,
                 'others' => $mine,
                 'held_cents' => $held_cents,
@@ -1301,6 +1303,9 @@ class TeamOversight_Offers_Admin {
         }
         if ($c['reg'] !== '') {
             echo self::chip($c['reg']);
+        }
+        if (!empty($c['transfer'])) {
+            echo '<br><span class="mo-small' . (!empty($c['transfer']['over']) && empty($c['transfer']['exception']) ? ' mo-red' : '') . '">' . self::h($c['transfer']['text']) . '</span>';
         }
         if ($c['overage'] !== '') {
             echo '<br><span class="mo-chip mo-chip-amber">Over age</span> <span class="mo-small">' . self::h($c['overage']) . '</span>';
