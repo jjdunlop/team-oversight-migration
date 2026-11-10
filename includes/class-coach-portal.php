@@ -1720,10 +1720,12 @@ class TeamOversight_Coach_Portal {
             'meta_position' => self::meta_position_html($status, $position, $this->format_positions($applied)),
             'counts_html' => self::players_heading_html($snap['counts']),
             'flow_html' => self::render_flow($snap['counts']),
-            'transfer_html' => class_exists('TeamOversight_Transfer_Limits') ? TeamOversight_Transfer_Limits::board_html($team, $season, true) : '',
             'bulk_html' => $this->render_bulk_panel($team, $season, $snap),
             'ns_bulk_html' => $this->render_ns_bulk_panel($team, $season, $snap),
-        );
+        ) + ((class_exists('TeamOversight_Transfer_Limits') && TeamOversight_Transfer_Limits::applies($season))
+            // 1.91.0: the club transfer line, read fresh after the save (2027 on only, so an older season's refresh is 1.75.3's).
+            ? array('transfer_html' => TeamOversight_Transfer_Limits::board_html($team, $season, true))
+            : array());
     }
 
     /**
@@ -2159,8 +2161,8 @@ class TeamOversight_Coach_Portal {
                 <?php if ($offers_on): ?>
                     <div id="coach-offer-flow"><?php echo self::render_flow($snap['counts']); ?></div>
                 <?php endif; ?>
-                <?php if (class_exists('TeamOversight_Transfer_Limits')): ?>
-                    <?php // 1.91.0: club transfers on this team and club-wide (class-transfer-limits.php). ?>
+                <?php if (class_exists('TeamOversight_Transfer_Limits') && TeamOversight_Transfer_Limits::applies($season)): ?>
+                    <?php // 1.91.0: club transfers on this team and club-wide (class-transfer-limits.php; 2027 on, so a season before is drawn exactly as 1.75.3). ?>
                     <div id="coach-transfer-limits"><?php echo TeamOversight_Transfer_Limits::board_html($active_team, $season); ?></div>
                 <?php endif; ?>
 
