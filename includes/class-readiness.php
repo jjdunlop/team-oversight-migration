@@ -68,7 +68,9 @@ class TeamOversight_Readiness {
         $season = isset($_POST['murvc_rtp_season']) ? sanitize_text_field($_POST['murvc_rtp_season']) : $seasons[0];
         $target_done = isset($_POST['murvc_rtp_value']) && $_POST['murvc_rtp_value'] === '1';
 
-        if (in_array($step, array('vv', 'kit'), true) && in_array($season, $seasons, true)) {
+        // 1.92.1 (club decision, 10 Nov 2026): VV registration is ticked by the club on Player Readiness, never by
+        // the player, so only the kit step can be ticked here (an old page's vv tick changes nothing).
+        if ($step === 'kit' && in_array($season, $seasons, true)) {
             $manual = get_user_meta($user->ID, 'murvc_rtp_' . $season, true);
             $manual = is_array($manual) ? $manual : array();
             if ($target_done && !in_array($step, $manual, true)) {
@@ -81,6 +83,78 @@ class TeamOversight_Readiness {
 
         wp_safe_redirect($_SERVER['REQUEST_URI']);
         exit;
+    }
+
+    // ------------------------------------------------------------------
+    // VV registration, ticked by the club (1.92.1, club decision 10 Nov 2026)
+    // ------------------------------------------------------------------
+
+    /** User meta: season => array(by, at), the club's tick that a person's VV registration is done. */
+    const VV_CONFIRM_META = 'murvc_vv_confirmed';
+    /** User meta: the person's Volleyball Victoria ID (VVID), kept on their account across seasons. */
+    const VVID_META = 'murvc_vvid';
+    const VVID_MAX = 20;
+
+    /** The club's VV tick for a season: array(by, at) or null. */
+    public static function vv_confirmed($user_id, $season) {
+        $all = get_user_meta(intval($user_id), self::VV_CONFIRM_META, true);
+        $season = (string) $season;
+        return (is_array($all) && isset($all[$season]) && is_array($all[$season])) ? $all[$season] : null;
+    }
+
+    public static function get_vvid($user_id) {
+        $v = get_user_meta(intval($user_id), self::VVID_META, true);
+        return is_string($v) ? $v : '';
+    }
+
+    /**
+     * Save the club's VV tick for a season and the person's VVID. Administrators
+     * only. $vvid: letters, digits and dashes, at most VVID_MAX; blank clears it.
+     * Returns array(ok, message).
+     */
+    public static function save_vv_registration($user_id, $season, $confirmed, $vvid, $actor) {
+        if (!user_can($actor, 'manage_options')) {
+            return array('ok' => false, 'message' => 'Only an administrator can confirm a VV registration.');
+        }
+        $user = get_userdata(intval($user_id));
+        if (!$user) {
+            return array('ok' => false, 'message' => 'That account no longer exists.');
+        }
+        $season = (string) $season;
+        if (preg_match('/^\d{4}$/D', $season) !== 1) {
+            return array('ok' => false, 'message' => 'Choose a season.');
+        }
+        $vvid = strtoupper(trim((string) $vvid));
+        if ($vvid !== '' && (strlen($vvid) > self::VVID_MAX || preg_match('/^[A-Z0-9-]+$/', $vvid) !== 1)) {
+            return array('ok' => false, 'message' => 'A VVID is letters, numbers and dashes only, up to ' . self::VVID_MAX . ' characters. Nothing was saved.');
+        }
+        $all = get_user_meta($user->ID, self::VV_CONFIRM_META, true);
+        $all = is_array($all) ? $all : array();
+        $was = isset($all[$season]);
+        if ($confirmed && !$was) {
+            $all[$season] = array('by' => intval($actor), 'at' => current_time('mysql'));
+        } elseif (!$confirmed && $was) {
+            unset($all[$season]);
+        }
+        if (empty($all)) {
+            delete_user_meta($user->ID, self::VV_CONFIRM_META);
+        } else {
+            update_user_meta($user->ID, self::VV_CONFIRM_META, $all);
+        }
+        $old_vvid = self::get_vvid($user->ID);
+        if ($vvid === '') {
+            delete_user_meta($user->ID, self::VVID_META);
+        } else {
+            update_user_meta($user->ID, self::VVID_META, $vvid);
+        }
+        $parts = array();
+        if ($confirmed !== $was) {
+            $parts[] = $confirmed ? 'VV registration confirmed for ' . $season : 'VV registration no longer confirmed for ' . $season;
+        }
+        if ($vvid !== $old_vvid) {
+            $parts[] = $vvid === '' ? 'VVID cleared' : 'VVID saved as ' . $vvid;
+        }
+        return array('ok' => true, 'message' => empty($parts) ? 'No change for ' . $user->display_name . '.' : $user->display_name . ': ' . implode('; ', $parts) . '.');
     }
 
     // ------------------------------------------------------------------
@@ -264,17 +338,19 @@ class TeamOversight_Readiness {
         $manual = get_user_meta($user->ID, 'murvc_rtp_' . $season, true);
         $manual = is_array($manual) ? $manual : array();
 
-        // 1. VV membership.
+        // 1. VV membership. 1.92.1 (club decision, 10 Nov 2026): done only once the club ticks it on Player
+        // Readiness (vv_confirmed()); the player can't tick it. An earlier self-tick is kept as a hint for the club.
         $steps = array();
         $steps['vv'] = array(
             'title' => 'Register your Volleyball Victoria membership',
-            'done' => in_array('vv', $manual, true),
-            'manual' => true,
+            'done' => self::vv_confirmed($user->ID, $season) !== null,
+            'manual' => false,
+            'self_ticked' => in_array('vv', $manual, true),
             'url' => get_option(self::VV_URL_OPTION),
             'url_label' => 'Register with VV',
             'detail' => $is_staff_only
-                ? 'Every coach needs a current VV membership before taking the bench. Register on the VV website, then tick this off.'
-                : 'Every player needs a current VV membership before taking the court. Register on the VV website, then tick this off.',
+                ? 'Every coach needs a current VV membership before taking the bench. Register on the VV website; the club ticks this off once your registration comes through.'
+                : 'Every player needs a current VV membership before taking the court. Register on the VV website; the club ticks this off once your registration comes through.',
         );
 
         $purchased = $is_staff_only ? array('shirt' => 0, 'shorts' => 0, 'socks' => 0) : self::get_kit_purchases($user->ID, $season);
@@ -1268,6 +1344,10 @@ class TeamOversight_Readiness {
             $this->save_transfer_status();
         }
 
+        if (isset($_POST['action']) && $_POST['action'] === 'save_vv_registration') {
+            $this->handle_vv_registration();
+        }
+
         global $wpdb;
         $season = (string) $season;
         $offers_season = class_exists('TeamOversight_Offers') && TeamOversight_Offers::applies($season);
@@ -1462,7 +1542,24 @@ class TeamOversight_Readiness {
                                         <?php endif; ?>
                                     </td>
                                 <?php endif; ?>
-                                <td data-sort="<?php echo $checklist['steps']['vv']['done'] ? '1' : '0'; ?>"><?php echo $checklist['steps']['vv']['done'] ? '<span style="color:#1a7a2e;">✔ Confirmed by player</span>' : '<span style="color:#996800;">Not confirmed</span>'; ?></td>
+                                <?php $vv_conf = self::vv_confirmed($player_id, $player_season); ?>
+                                <td style="font-size: 12px;" data-sort="<?php echo $vv_conf !== null ? '1' : '0'; ?>">
+                                    <form method="post">
+                                        <input type="hidden" name="action" value="save_vv_registration">
+                                        <input type="hidden" name="vv_user_id" value="<?php echo intval($player_id); ?>">
+                                        <input type="hidden" name="vv_season" value="<?php echo esc_attr($player_season); ?>">
+                                        <?php wp_nonce_field('save_vv_registration', 'vv_nonce'); ?>
+                                        <label style="<?php echo $vv_conf !== null ? 'color:#1a7a2e;' : 'color:#a00;'; ?>"><input type="checkbox" name="vv_confirmed" value="1" <?php checked($vv_conf !== null); ?> onchange="this.form.submit()"> Registered</label><br>
+                                        <input type="text" name="vv_vvid" value="<?php echo esc_attr(self::get_vvid($player_id)); ?>" placeholder="VVID" maxlength="<?php echo intval(self::VVID_MAX); ?>" style="width: 90px; font-size: 12px;" aria-label="VVID for <?php echo esc_attr($player->display_name); ?>">
+                                        <button type="submit" class="button button-small">Save</button>
+                                    </form>
+                                    <?php if ($vv_conf !== null): ?>
+                                        <?php $vv_by = get_userdata(isset($vv_conf['by']) ? intval($vv_conf['by']) : 0); ?>
+                                        <small>Ticked<?php echo $vv_by ? ' by ' . esc_html($vv_by->display_name) : ''; ?><?php echo !empty($vv_conf['at']) ? ', ' . esc_html(mysql2date('j M Y', (string) $vv_conf['at'])) : ''; ?></small>
+                                    <?php elseif (!empty($checklist['steps']['vv']['self_ticked'])): ?>
+                                        <small style="color:#996800;">The player ticked this themselves earlier. Check VV before confirming.</small>
+                                    <?php endif; ?>
+                                </td>
                                 <td style="font-size: 12px;" data-sort="<?php echo $shirt_step === null ? '1' : esc_attr(number_format(min(1, intval($shirt_step['shirt_required']) > 0 ? intval($shirt_step['shirt_paid']) / intval($shirt_step['shirt_required']) : 1), 2, '.', '')); ?>">
                                     <?php if ($shirt_step === null): ?>
                                         <span style="color: #666;">Not required (supplied)</span>
@@ -1545,6 +1642,26 @@ class TeamOversight_Readiness {
             <?php endif; ?>
         </div>
         <?php
+    }
+
+    /** 1.92.1: the club's VV registration tick and the VVID, from the VV Registration column (administrators only). */
+    private function handle_vv_registration() {
+        if (!isset($_POST['vv_nonce']) || !wp_verify_nonce($_POST['vv_nonce'], 'save_vv_registration')) {
+            echo '<div class="notice notice-error"><p>Security check failed. Reload the page and try again.</p></div>';
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            echo '<div class="notice notice-error"><p>Insufficient permissions.</p></div>';
+            return;
+        }
+        $result = self::save_vv_registration(
+            isset($_POST['vv_user_id']) ? intval($_POST['vv_user_id']) : 0,
+            isset($_POST['vv_season']) ? sanitize_text_field(wp_unslash($_POST['vv_season'])) : '',
+            !empty($_POST['vv_confirmed']),
+            isset($_POST['vv_vvid']) ? sanitize_text_field(wp_unslash($_POST['vv_vvid'])) : '',
+            get_current_user_id()
+        );
+        echo '<div class="notice notice-' . ($result['ok'] ? 'success' : 'error') . ' is-dismissible"><p>' . esc_html($result['message']) . '</p></div>';
     }
 
     /** 1.92.0: a club transfer's or ITC's paperwork status, from the Transfer column (administrators only; TeamOversight_Transfer_Limits decides and logs). */
