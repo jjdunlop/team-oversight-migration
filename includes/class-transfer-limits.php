@@ -497,11 +497,14 @@ class TeamOversight_Transfer_Limits {
         if ($old === $status) {
             return array('ok' => true, 'message' => 'No change.');
         }
-        $wpdb->update($wpdb->prefix . 'trial_applications', array(
+        $written = $wpdb->update($wpdb->prefix . 'trial_applications', array(
             'transfer_status' => $status === 'not_submitted' ? null : $status,
             'transfer_status_by' => intval($actor),
             'transfer_status_at' => current_time('mysql'),
         ), array('id' => intval($app->id)), array('%s', '%d', '%s'), array('%d'));
+        if ($written === false) {
+            return array('ok' => false, 'message' => 'The transfer status couldn\'t be saved. Reload the page and try again.');
+        }
         $who = $app->name . ($app->trial_number ? ' (#' . intval($app->trial_number) . ')' : '');
         if (class_exists('TeamOversight_Log')) {
             TeamOversight_Log::add(self::LOG_TYPE, 'Transfer status for ' . $who . ' (' . $app->season . '): ' . self::TRANSFER_STATUSES[$old] . ' to ' . self::TRANSFER_STATUSES[$status] . '.', array('user_id' => intval($app->user_id)));
