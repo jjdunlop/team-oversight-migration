@@ -303,6 +303,59 @@ class TeamOversight_Readiness {
         );
     }
 
+    /** Applications loaded for a whole page: season => account id => row, or null for none (1.93.1). */
+    private static $page_applications = array();
+
+    /**
+     * Each account's newest trial application of a season, in one query, kept
+     * for this request so compute() asks no query per player on a page that
+     * lists many. Returns account id => row (accounts with none are left out).
+     */
+    public static function preload_applications($season, array $user_ids) {
+        global $wpdb;
+        $season = (string) $season;
+        $user_ids = array_values(array_unique(array_filter(array_map('intval', $user_ids))));
+        $found = array();
+        if (!empty($user_ids)) {
+            $rows = $wpdb->get_results($wpdb->prepare("
+                SELECT * FROM {$wpdb->prefix}trial_applications
+                WHERE season = %s AND user_id IN (" . implode(',', $user_ids) . ")
+                ORDER BY id DESC
+            ", $season));
+            foreach ((array) $rows as $row) {
+                if (!isset($found[intval($row->user_id)])) {
+                    $found[intval($row->user_id)] = $row;
+                }
+            }
+        }
+        foreach ($user_ids as $uid) {
+            self::$page_applications[$season][$uid] = isset($found[$uid]) ? $found[$uid] : null;
+        }
+        return $found;
+    }
+
+    /** An account's newest trial application of a season, or null: the page's preloaded row, else one query. */
+    public static function season_application($user_id, $season) {
+        global $wpdb;
+        $user_id = intval($user_id);
+        $season = (string) $season;
+        if ($user_id <= 0) {
+            return null;
+        }
+        if (isset(self::$page_applications[$season]) && array_key_exists($user_id, self::$page_applications[$season])) {
+            return self::$page_applications[$season][$user_id];
+        }
+        $row = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM {$wpdb->prefix}trial_applications WHERE season = %s AND user_id = %d ORDER BY id DESC LIMIT 1
+        ", $season, $user_id));
+        return $row ? $row : null;
+    }
+
+    /** Drops the page's preloaded applications (a writer changed one; the tests). */
+    public static function flush_cache() {
+        self::$page_applications = array();
+    }
+
     /**
      * The full checklist for a player, or null if they aren't on any team
      * this season. $include_verdicts: also count coach Selected / Training
@@ -352,6 +405,26 @@ class TeamOversight_Readiness {
                 ? 'Every coach needs a current VV membership before taking the bench. Register on the VV website; the club ticks this off once your registration comes through.'
                 : 'Every player needs a current VV membership before taking the court. Register on the VV website; the club ticks this off once your registration comes through.',
         );
+
+        // 1b. Transfer paperwork (1.93.1, club decision 11 Nov 2026): a club
+        // transfer, free agent or ITC sees where theirs is up to. From 2027
+        // only, players only. The club sets the status on Player Readiness;
+        // the step is done once it is Completed, and orange while Pending.
+        if (!$is_staff_only && class_exists('TeamOversight_Transfer_Limits') && TeamOversight_Transfer_Limits::applies($season)) {
+            $paperwork = TeamOversight_Transfer_Limits::player_step(self::season_application($user->ID, $season));
+            if ($paperwork) {
+                $steps['transfer'] = array(
+                    'title' => $paperwork['title'],
+                    'done' => $paperwork['status'] === 'completed',
+                    'manual' => false,
+                    'waiting' => $paperwork['status'] === 'pending',
+                    'url' => '',
+                    'url_label' => '',
+                    'detail' => $paperwork['detail'],
+                    'status' => $paperwork['status'],
+                );
+            }
+        }
 
         $purchased = $is_staff_only ? array('shirt' => 0, 'shorts' => 0, 'socks' => 0) : self::get_kit_purchases($user->ID, $season);
         $kit_products = self::get_kit_products();
@@ -1354,27 +1427,34 @@ class TeamOversight_Readiness {
 
         // Who is listed: an active place on a team this season, and (2027 on)
         // an accepted or locked-in offer, else (before 2027) a Selected or
-        // Training Only verdict.
+        // Training Only verdict. 1.93.1: a coach or assistant coach with no
+        // playing place is listed too, because this is the only place the
+        // club can tick their VV registration.
         $user_ids = $wpdb->get_col($wpdb->prepare("
             SELECT DISTINCT ta.user_id FROM {$wpdb->prefix}team_assignments ta
-            WHERE ta.season = %s AND ta.is_active = 1 AND ta.role IN ('playing_member', 'training_only', 'team_manager') AND ta.user_id > 0
+            WHERE ta.season = %s AND ta.is_active = 1 AND ta.role IN ('playing_member', 'training_only', 'team_manager', 'coach', 'assistant_coach') AND ta.user_id > 0
         ", $season));
         $offer_teams = array(); // user id => team code => offer (accepted, or locked in and not yet placed)
         if ($offers_season) {
-            $page = TeamOversight_Offers::list_offers(array('season' => $season, 'states' => array(TeamOversight_Offers::ACCEPTED, TeamOversight_Offers::LOCKED_IN), 'limit' => 500));
-            foreach ($page['rows'] as $offer) {
-                $uid = intval($offer->user_id);
-                if ($uid <= 0 || (string) $offer->team === '') {
-                    continue;
+            // Every accepted or locked-in offer of the season, a page at a time (1.93.1: no cap at one page).
+            $offset = 0;
+            do {
+                $page = TeamOversight_Offers::list_offers(array('season' => $season, 'states' => array(TeamOversight_Offers::ACCEPTED, TeamOversight_Offers::LOCKED_IN), 'limit' => 500, 'offset' => $offset));
+                foreach ($page['rows'] as $offer) {
+                    $uid = intval($offer->user_id);
+                    if ($uid <= 0 || (string) $offer->team === '') {
+                        continue;
+                    }
+                    $user_ids[] = $uid;
+                    if ($offer->state === TeamOversight_Offers::LOCKED_IN && !empty($offer->placed_at)) {
+                        continue; // placed: the team place itself is counted
+                    }
+                    if (!isset($offer_teams[$uid][(string) $offer->team])) {
+                        $offer_teams[$uid][(string) $offer->team] = $offer;
+                    }
                 }
-                $user_ids[] = $uid;
-                if ($offer->state === TeamOversight_Offers::LOCKED_IN && !empty($offer->placed_at)) {
-                    continue; // placed: the team place itself is counted
-                }
-                if (!isset($offer_teams[$uid][(string) $offer->team])) {
-                    $offer_teams[$uid][(string) $offer->team] = $offer;
-                }
-            }
+                $offset += 500;
+            } while (count($page['rows']) === 500 && $offset < intval($page['total']));
         } else {
             $user_ids = array_merge($user_ids, $wpdb->get_col($wpdb->prepare("
                 SELECT DISTINCT a.user_id FROM {$wpdb->prefix}team_trial_selections s
@@ -1387,20 +1467,9 @@ class TeamOversight_Readiness {
             cache_users($user_ids);
         }
 
-        // Each player's newest application for the season (the transfer column), one query.
-        $applications = array();
-        if (!empty($user_ids)) {
-            $rows = $wpdb->get_results($wpdb->prepare("
-                SELECT * FROM {$wpdb->prefix}trial_applications
-                WHERE season = %s AND user_id IN (" . implode(',', $user_ids) . ")
-                ORDER BY id DESC
-            ", $season));
-            foreach ((array) $rows as $row) {
-                if (!isset($applications[intval($row->user_id)])) {
-                    $applications[intval($row->user_id)] = $row;
-                }
-            }
-        }
+        // Each player's newest application for the season (the transfer column
+        // and, from 2027, the checklist's transfer step), one query for the page.
+        $applications = self::preload_applications($season, $user_ids);
         $track_transfers = class_exists('TeamOversight_Transfer_Limits');
 
         $kit_products = self::get_kit_products();
@@ -1463,6 +1532,7 @@ class TeamOversight_Readiness {
                 <?php else: ?>
                     Everyone on a team, or Selected or Training Only by a coach.
                 <?php endif; ?>
+                Coaches and assistant coaches who don't play are listed too, for their VV registration.
                 Shirt requirements come from each team's configuration (Premier 2, YSL 0, default 1).</p>
 
             <?php if (!empty($user_ids)): ?>
@@ -1470,7 +1540,7 @@ class TeamOversight_Readiness {
                     <thead><tr>
                         <th>Player</th>
                         <th style="width: 12%;">Teams</th>
-                        <?php if ($track_transfers): ?><th style="width: 11%;" title="Club transfers and ITC players only">Transfer</th><?php endif; ?>
+                        <?php if ($track_transfers): ?><th style="width: 11%;" title="Club transfers, free agents and ITC players only">Transfer</th><?php endif; ?>
                         <th style="width: 12%;">VV Registration</th>
                         <th>Shirt Payment</th>
                         <th style="width: 14%;">Shorts &amp; Socks</th>
@@ -1506,23 +1576,25 @@ class TeamOversight_Readiness {
                                 $checklist['ready'] = false;
                             }
                             $player_app = isset($applications[$player_id]) ? $applications[$player_id] : null;
-                            $needs_transfer = $track_transfers && $player_app && TeamOversight_Transfer_Limits::needs_paperwork($player_app);
+                            $staff_only = !empty($checklist['staff_only']);
+                            // The Transfer column is for players (a coach who also applied has no transfer to track here).
+                            $needs_transfer = $track_transfers && !$staff_only && $player_app && TeamOversight_Transfer_Limits::needs_paperwork($player_app);
                             $tstatus = $needs_transfer ? TeamOversight_Transfer_Limits::transfer_status($player_app) : '';
-                            // 1.92.1 (club decision, 10 Nov 2026): a club transfer or ITC isn't Ready until their transfer is Completed.
-                            $transfer_blocks = $needs_transfer && $tstatus !== 'completed';
-                            if ($transfer_blocks) {
-                                $checklist['ready'] = false;
-                            }
-                            $kit_step = $checklist['steps']['kit'];
+                            // 1.92.1 (club decision, 10 Nov 2026): a player with paperwork isn't Ready until it is Completed.
+                            // 1.93.1: that is the checklist's own transfer step (2027 on), which the player sees too, so
+                            // Ready already says so; a season before 2027 has no such step and reads as it did.
+                            $transfer_blocks = isset($checklist['steps']['transfer']) && empty($checklist['steps']['transfer']['done']);
+                            // A coach who doesn't play has no kit steps.
+                            $kit_step = isset($checklist['steps']['kit']) ? $checklist['steps']['kit'] : null;
                             $kit_summary = array();
-                            foreach ($kit_step['items'] as $item) {
+                            foreach ($kit_step ? $kit_step['items'] : array() as $item) {
                                 $kit_summary[] = $item['label'] . ': ' . ($item['satisfied'] ? '✔' : ($item['purchased'] > 0 ? $item['purchased'] : '—'));
                             }
                             $shirt_step = isset($checklist['steps']['shirt']) ? $checklist['steps']['shirt'] : null;
                             ?>
                             <tr>
                                 <td data-sort="<?php echo esc_attr(strtolower($player->display_name)); ?>"><a href="<?php echo esc_url(get_edit_user_link($player_id)); ?>"><?php echo esc_html($player->display_name); ?></a><br><small><?php echo esc_html($player->user_email); ?></small></td>
-                                <td data-sort="<?php echo esc_attr(strtolower(implode(', ', $checklist['teams']))); ?>"><?php echo esc_html(implode(', ', $checklist['teams'])); ?><?php foreach ($offer_words as $w): ?><br><small style="color:#996800;"><?php echo esc_html($w); ?></small><?php endforeach; ?></td>
+                                <td data-sort="<?php echo esc_attr(strtolower(implode(', ', $checklist['teams']))); ?>"><?php echo esc_html(implode(', ', $checklist['teams'])); ?><?php echo $staff_only ? '<br><small style="color:#666;">Coach, not playing</small>' : ''; ?><?php foreach ($offer_words as $w): ?><br><small style="color:#996800;"><?php echo esc_html($w); ?></small><?php endforeach; ?></td>
                                 <?php if ($track_transfers): ?>
                                     <td style="font-size: 12px;" data-sort="<?php echo $needs_transfer ? intval(array_search($tstatus, array_keys(TeamOversight_Transfer_Limits::TRANSFER_STATUSES), true)) : '-1'; ?>">
                                         <?php if ($needs_transfer): ?>
@@ -1562,7 +1634,7 @@ class TeamOversight_Readiness {
                                 </td>
                                 <td style="font-size: 12px;" data-sort="<?php echo $shirt_step === null ? '1' : esc_attr(number_format(min(1, intval($shirt_step['shirt_required']) > 0 ? intval($shirt_step['shirt_paid']) / intval($shirt_step['shirt_required']) : 1), 2, '.', '')); ?>">
                                     <?php if ($shirt_step === null): ?>
-                                        <span style="color: #666;">Not required (supplied)</span>
+                                        <span style="color: #666;"><?php echo $staff_only ? 'Not required (coach)' : 'Not required (supplied)'; ?></span>
                                     <?php else: ?>
                                         <?php if ($shirt_step['done']): ?>
                                             <span style="color:#1a7a2e;">✔ Paid <?php echo intval($shirt_step['shirt_paid']); ?>/<?php echo intval($shirt_step['shirt_required']); ?></span>
@@ -1585,9 +1657,13 @@ class TeamOversight_Readiness {
                                         </details>
                                     <?php endif; ?>
                                 </td>
-                                <td style="font-size: 12px;" data-sort="<?php echo $kit_step['done'] ? '1' : '0'; ?>">
-                                    <?php echo $kit_step['done'] ? '<span style="color:#1a7a2e;">✔' . (empty($kit_step['auto_done']) ? ' (player ticked)' : ' (purchased)') . '</span><br>' : ''; ?>
-                                    <?php echo esc_html(implode(' · ', $kit_summary)); ?>
+                                <td style="font-size: 12px;" data-sort="<?php echo (!$kit_step || $kit_step['done']) ? '1' : '0'; ?>">
+                                    <?php if (!$kit_step): ?>
+                                        <span style="color: #666;">Not required (coach)</span>
+                                    <?php else: ?>
+                                        <?php echo $kit_step['done'] ? '<span style="color:#1a7a2e;">✔' . (empty($kit_step['auto_done']) ? ' (player ticked)' : ' (purchased)') . '</span><br>' : ''; ?>
+                                        <?php echo esc_html(implode(' · ', $kit_summary)); ?>
+                                    <?php endif; ?>
                                 </td>
                                 <td data-sort="<?php echo !empty($checklist['steps']['fees']['waiting']) ? '0.5' : ($checklist['steps']['fees']['done'] ? '1' : '0'); ?>"><?php echo !empty($checklist['steps']['fees']['waiting']) ? '<span style="color:#996800;">' . esc_html(self::waiting_label($checklist['steps']['fees'])) . '</span>' : ($checklist['steps']['fees']['done'] ? '<span style="color:#1a7a2e;">✔</span>' : '<span style="color:#a00;">' . esc_html($checklist['steps']['fees']['detail']) . '</span>'); ?></td>
                                 <td data-sort="<?php echo $checklist['ready'] ? '1' : '0'; ?>"><?php echo $checklist['ready'] ? '<strong style="color:#1a7a2e;">✔</strong>' : '—'; ?><?php echo $transfer_blocks ? '<br><small style="color:#996800;">transfer not completed</small>' : ''; ?></td>

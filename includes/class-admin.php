@@ -1795,6 +1795,16 @@ class TeamOversight_Admin {
         if (!empty($user_ids)) {
             cache_users($user_ids);
         }
+        // 1.93.1: accreditations are keyed by email, and a place's email can
+        // differ from the account's, so both are looked up.
+        foreach ($people as $key => $p) {
+            $people[$key]['place_email'] = strtolower($p['email']);
+            $account = $p['user_id'] > 0 ? get_userdata($p['user_id']) : false;
+            if ($account && (string) $account->user_email !== '') {
+                $emails[] = strtolower((string) $account->user_email);
+            }
+        }
+        $emails = array_values(array_unique(array_filter($emails, 'strlen')));
         $accreditations = array();
         if (!empty($emails)) {
             $placeholders = implode(',', array_fill(0, count($emails), '%s'));
@@ -1835,7 +1845,8 @@ class TeamOversight_Admin {
                                     $parts[] = $label . ': ' . implode(', ', array_keys($p['roles'][$role]));
                                 }
                             }
-                            $acc = isset($accreditations[strtolower($p['email'])]) ? $accreditations[strtolower($p['email'])] : null;
+                            $acc = isset($accreditations[strtolower($p['email'])]) ? $accreditations[strtolower($p['email'])]
+                                : (isset($accreditations[$p['place_email']]) ? $accreditations[$p['place_email']] : null);
                             ?>
                             <tr>
                                 <td><strong><?php echo esc_html($p['name']); ?></strong></td>

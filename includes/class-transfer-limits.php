@@ -486,12 +486,41 @@ class TeamOversight_Transfer_Limits {
 
     /** The statuses an administrator can set; NULL in the column reads as not_submitted. */
     const TRANSFER_STATUSES = array('not_submitted' => 'Not Submitted', 'pending' => 'Pending', 'completed' => 'Completed');
-    /** Registration types whose paperwork is tracked: a club transfer and an ITC (overseas clearance). */
-    const PAPERWORK_TYPES = array('Club Transfer', 'ITC');
+    /**
+     * Registration types whose paperwork is tracked: a club transfer, a free
+     * agent (1.93.1, club decision 11 Nov 2026) and an ITC (overseas clearance).
+     */
+    const PAPERWORK_TYPES = array('Club Transfer', 'Free Agent', 'ITC');
 
-    /** Does this application's player need transfer paperwork (Club Transfer or ITC, override included)? */
+    /** Does this application's player need transfer paperwork (Club Transfer, Free Agent or ITC, override included)? */
     public static function needs_paperwork($application) {
         return $application && class_exists('TeamOversight_Trials') && in_array(TeamOversight_Trials::registration_type($application), self::PAPERWORK_TYPES, true);
+    }
+
+    /**
+     * The player's own checklist step for their paperwork (1.93.1): the title
+     * and one plain sentence for the status, or null when the application has
+     * none to track. Read-only: only an administrator changes the status.
+     */
+    public static function player_step($application) {
+        if (!self::needs_paperwork($application)) {
+            return null;
+        }
+        $type = TeamOversight_Trials::registration_type($application);
+        $names = array('Club Transfer' => 'club transfer', 'Free Agent' => 'free agent registration', 'ITC' => 'international transfer (ITC)');
+        $name = isset($names[$type]) ? $names[$type] : 'transfer';
+        $status = self::transfer_status($application);
+        $details = array(
+            'not_submitted' => 'Not submitted yet. The club updates this as your ' . $name . ' moves along.',
+            'pending' => 'Pending: submitted, and not completed yet. The club updates this as your ' . $name . ' moves along.',
+            'completed' => 'Completed.',
+        );
+        return array(
+            'title' => 'Your ' . $name,
+            'status' => $status,
+            'status_label' => self::TRANSFER_STATUSES[$status],
+            'detail' => $details[$status],
+        );
     }
 
     /** The stored status key of an application row (not_submitted when unset or unknown). */
@@ -515,7 +544,7 @@ class TeamOversight_Transfer_Limits {
             return array('ok' => false, 'message' => 'Application not found.');
         }
         if (!self::needs_paperwork($app)) {
-            return array('ok' => false, 'message' => $app->name . ' isn\'t a club transfer or ITC, so there is no transfer to track.');
+            return array('ok' => false, 'message' => $app->name . ' isn\'t a club transfer, free agent or ITC, so there is no transfer to track.');
         }
         $old = self::transfer_status($app);
         if ($old === $status) {
@@ -528,6 +557,10 @@ class TeamOversight_Transfer_Limits {
         ), array('id' => intval($app->id)), array('%s', '%d', '%s'), array('%d'));
         if ($written === false) {
             return array('ok' => false, 'message' => 'The transfer status couldn\'t be saved. Reload the page and try again.');
+        }
+        // The player's checklist reads the status too (1.93.1): drop any page copy of the application.
+        if (class_exists('TeamOversight_Readiness') && method_exists('TeamOversight_Readiness', 'flush_cache')) {
+            TeamOversight_Readiness::flush_cache();
         }
         $who = $app->name . ($app->trial_number ? ' (#' . intval($app->trial_number) . ')' : '');
         if (class_exists('TeamOversight_Log')) {

@@ -1728,6 +1728,10 @@ class TeamOversight_Trials {
         }
 
         if (!$charge_fee) {
+            // 1.93.1: nothing is owed now, so a fee line left in the cart by
+            // an earlier save (a top-up they no longer owe) is taken out.
+            $this->drop_fee_from_cart($application_id);
+
             // Back to the rego page itself, where the green panel shows the
             // trial number and status and the form is ready for more edits.
             // A one-off notice above it confirms what just happened.
@@ -1931,6 +1935,18 @@ class TeamOversight_Trials {
         return $added ? wc_get_checkout_url() : false;
     }
 
+    /** Takes an application's trial fee line out of the cart, when there is a cart (1.93.1). */
+    private function drop_fee_from_cart($application_id) {
+        if (!function_exists('WC') || !WC() || WC()->cart === null) {
+            return;
+        }
+        foreach (WC()->cart->get_cart() as $cart_item_key => $cart_item) {
+            if (!empty($cart_item['murvc_trial_application_id']) && intval($cart_item['murvc_trial_application_id']) === intval($application_id)) {
+                WC()->cart->remove_cart_item($cart_item_key);
+            }
+        }
+    }
+
     /**
      * woocommerce_before_calculate_totals: a top-up line costs the top-up,
      * whatever the product's own price. The amount was put on the cart line
@@ -2002,6 +2018,27 @@ class TeamOversight_Trials {
                 continue;
             }
 
+            // 1.93.1: an application can go back to awaiting payment after it
+            // was paid (the top-up: the YSL fee is paid, then a JPL or senior
+            // team is added). The order that paid the YSL fee must not pay the
+            // top-up too when its status changes again (processing, then
+            // completed): only a top-up line pays a top-up, and an order never
+            // pays the same application twice.
+            $application = $wpdb->get_row($wpdb->prepare("
+                SELECT id, order_id, form_data FROM {$wpdb->prefix}trial_applications WHERE id = %d
+            ", $application_id));
+            if (!$application) {
+                continue;
+            }
+            $form = json_decode((string) $application->form_data, true);
+            $owes_topup = is_array($form) && isset($form[self::FEE_TYPE_KEY]) && $form[self::FEE_TYPE_KEY] === self::FEE_TYPE_TOPUP;
+            if ($owes_topup && intval($item->get_meta(self::TOPUP_META)) <= 0) {
+                continue;
+            }
+            if (intval($application->order_id) === intval($order_id)) {
+                continue;
+            }
+
             $paid = $wpdb->query($wpdb->prepare("
                 UPDATE {$wpdb->prefix}trial_applications
                 SET application_status = 'pending', order_id = %d
@@ -2023,6 +2060,10 @@ class TeamOversight_Trials {
     private function paid_trial_items($order) {
         global $wpdb;
 
+        // 1.93.1: an application can have two paying orders (the YSL fee,
+        // then the top-up, which becomes its order_id). An order counts when
+        // it is the application's order, or when it was paid (a paid date).
+        $was_paid = is_callable(array($order, 'get_date_paid')) && $order->get_date_paid();
         $items = array();
         foreach ($order->get_items() as $item_id => $item) {
             $application_id = intval($item->get_meta('_murvc_trial_application_id'));
@@ -2030,10 +2071,10 @@ class TeamOversight_Trials {
                 continue;
             }
             $application = $wpdb->get_row($wpdb->prepare("
-                SELECT id, user_id, season, trial_number FROM {$wpdb->prefix}trial_applications
-                WHERE id = %d AND order_id = %d
-            ", $application_id, $order->get_id()));
-            if ($application) {
+                SELECT id, user_id, season, trial_number, order_id FROM {$wpdb->prefix}trial_applications
+                WHERE id = %d
+            ", $application_id));
+            if ($application && (intval($application->order_id) === intval($order->get_id()) || $was_paid)) {
                 $items[$item_id] = $application;
             }
         }

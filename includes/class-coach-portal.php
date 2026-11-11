@@ -4486,6 +4486,13 @@ class TeamOversight_Coach_Portal {
         if ($status === 'selected' && (!$existing || $existing->status !== 'selected')
             && class_exists('TeamOversight_Transfer_Limits') && TeamOversight_Transfer_Limits::applies($season)) {
             $transfer_lock = TeamOversight_Transfer_Limits::lock();
+            // 1.93.1: without the lock the count could change between the check
+            // and the write, so a club transfer's move waits for another try.
+            // Anyone else has nothing to count and goes through as before.
+            if ($transfer_lock === null && TeamOversight_Transfer_Limits::is_club_transfer($application)) {
+                $this->offer_refresh_ok = true;
+                return '<div class="coach-portal-notice"><p>' . $who . ': another selection is being saved right now. Try again in a moment.</p></div>';
+            }
             $transfer_refusal = TeamOversight_Transfer_Limits::check($application, $team, $season);
             if ($transfer_refusal !== '') {
                 TeamOversight_Transfer_Limits::unlock($transfer_lock);

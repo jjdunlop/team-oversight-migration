@@ -281,7 +281,7 @@ class TeamOversight_Account_Merge {
                 'use_gdpr_agreement', 'use_terms_conditions_agreement', 'mu_sport_health_check',
                 'mu_sport_covidsafe_campus', 'rtp_agreement', 'rtp_agreement_new', 'sex', 'Gender1',
                 'team_2025', '_team_2025', 'fee_type_2025', '_fee_type_2025', 'discount_check_2025',
-                '_discount_check_2025', 'top_number', '_top_number', '_team_history', 'murvc_shirt_credit',
+                '_discount_check_2025', 'top_number', '_top_number', '_team_history', 'murvc_shirt_credit', 'murvc_vvid',
                 'profile_privacy', 'profile_noindex', 'hide_in_members', 'um_show_last_login',
             ));
         }
@@ -512,7 +512,7 @@ class TeamOversight_Account_Merge {
         $kept_profile_year = isset($km['profile_confirmed_year'][0]) ? $km['profile_confirmed_year'][0] : null;
         $special = array('team_history', 'profile_confirmed_year', 'murvc_overdue_last_reminded', '_um_last_login',
             'wc_last_active', 'paying_customer', 'billing_email', 'wc_square_customer_id', 'profile_photo', 'cover_photo',
-            self::MERGED_META);
+            'murvc_vv_confirmed', self::MERGED_META);
 
         foreach ($extra_meta as $eid => $em) {
             foreach ($em as $key => $values) {
@@ -599,6 +599,30 @@ class TeamOversight_Account_Merge {
                     $set[$key] = array(maybe_serialize($union));
                     $merged[$key] = implode(', ', $union);
                 }
+            }
+        }
+
+        // 1.93.1: the club's VV registration ticks (season => who and when):
+        // every season ticked on any of the accounts, the kept account's own
+        // tick winning for a season both have ($sources lists it first).
+        $vv_ticks = array();
+        foreach ($sources as $m) {
+            if (empty($m['murvc_vv_confirmed'])) {
+                continue;
+            }
+            $v = maybe_unserialize($m['murvc_vv_confirmed'][0]);
+            foreach (is_array($v) ? $v : array() as $vv_season => $tick) {
+                if (!isset($vv_ticks[(string) $vv_season]) && is_array($tick)) {
+                    $vv_ticks[(string) $vv_season] = $tick;
+                }
+            }
+        }
+        if (!empty($vv_ticks)) {
+            $old = isset($km['murvc_vv_confirmed'][0]) ? maybe_unserialize($km['murvc_vv_confirmed'][0]) : array();
+            if (!is_array($old) || count($old) !== count($vv_ticks)) {
+                ksort($vv_ticks);
+                $set['murvc_vv_confirmed'] = array(maybe_serialize($vv_ticks));
+                $merged['murvc_vv_confirmed'] = 'VV registration ticked for ' . implode(', ', array_keys($vv_ticks));
             }
         }
 
