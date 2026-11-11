@@ -342,9 +342,21 @@ class TeamOversight_Trial_Emails {
             '{trial_number}' => (string) intval($application->trial_number),
             '{teams}' => $team_names ? implode(', ', $team_names) : '—',
             '{positions}' => $positions ? implode(', ', $positions) : '—',
-            '{fee}' => self::get_fee_text(),
+            '{fee}' => self::fee_text_for($application),
             '{link}' => self::get_form_url(),
         );
+    }
+
+    /**
+     * The fee this application owes as display text (1.93.0: the full fee,
+     * the Youth State League fee or a top-up), else the full fee, else ''.
+     */
+    private static function fee_text_for($application) {
+        $due = class_exists('TeamOversight_Trials') && method_exists('TeamOversight_Trials', 'fee_due') ? TeamOversight_Trials::fee_due($application) : null;
+        if ($due && $due['cents'] !== null) {
+            return TeamOversight_Trials::money_text($due['cents']);
+        }
+        return self::get_fee_text();
     }
 
     /** Illustrative values for previews and test sends. */
@@ -453,7 +465,7 @@ class TeamOversight_Trial_Emails {
 
     /** The trial fee as display text, or '' when no fee product is set. */
     private static function get_fee_text() {
-        $product = (new TeamOversight_Trials())->get_trial_fee_product();
+        $product = TeamOversight_Trials::fee_product('full');
         if (!$product || $product->get_price() === '') {
             return '';
         }

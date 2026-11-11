@@ -717,7 +717,11 @@ class TeamOversight_Admin {
         }
 
         $product_id = intval($_POST['trial_fee_product']);
-        update_option('team_oversight_trial_fee_product', $product_id);
+        update_option(TeamOversight_Trials::FEE_PRODUCT_OPTION, $product_id);
+        // 1.93.0: the Youth State League trial fee. A page drawn before 1.93.0 posts no such field: leave it as it is.
+        if (isset($_POST['trial_fee_product_ysl'])) {
+            update_option(TeamOversight_Trials::YSL_FEE_PRODUCT_OPTION, intval($_POST['trial_fee_product_ysl']));
+        }
 
         $training_url = isset($_POST['training_info_url']) ? esc_url_raw(trim($_POST['training_info_url'])) : '';
         update_option('team_oversight_training_info_url', $training_url);
@@ -744,6 +748,49 @@ class TeamOversight_Admin {
      * data knows about plus explicitly created future seasons, current
      * year onward.
      */
+    /**
+     * The products a trial fee can be (1.93.0): published simple products and
+     * the published variations of published variable products, id => label,
+     * by name. A variable, grouped or external product itself is left out: it
+     * can't go in the cart as a fee.
+     */
+    private function trial_fee_product_choices() {
+        $choices = array();
+        $products = get_posts(array(
+            'post_type' => 'product',
+            'post_status' => 'publish',
+            'numberposts' => 500,
+            'orderby' => 'title',
+            'order' => 'ASC',
+            'tax_query' => array(array('taxonomy' => 'product_type', 'field' => 'slug', 'terms' => array('variable', 'grouped', 'external'), 'operator' => 'NOT IN')),
+        ));
+        foreach ($products as $post) {
+            $choices[$post->ID] = $post->post_title . ' (#' . $post->ID . ')';
+        }
+        $variable_ids = get_posts(array(
+            'post_type' => 'product',
+            'post_status' => 'publish',
+            'numberposts' => 500,
+            'fields' => 'ids',
+            'tax_query' => array(array('taxonomy' => 'product_type', 'field' => 'slug', 'terms' => array('variable'))),
+        ));
+        if ($variable_ids) {
+            $variations = get_posts(array(
+                'post_type' => 'product_variation',
+                'post_status' => 'publish',
+                'post_parent__in' => $variable_ids,
+                'numberposts' => 1000,
+                'orderby' => 'title',
+                'order' => 'ASC',
+            ));
+            foreach ($variations as $post) {
+                $choices[$post->ID] = $post->post_title . ' (#' . $post->ID . ')';
+            }
+        }
+        asort($choices, SORT_NATURAL | SORT_FLAG_CASE);
+        return $choices;
+    }
+
     private function get_trial_setting_seasons() {
         $seasons = array_map('strval', $this->get_available_seasons('main'));
         $created = get_option('team_oversight_created_seasons', array());
@@ -2061,20 +2108,36 @@ class TeamOversight_Admin {
                         <?php endforeach; ?>
                     </p>
                     <p class="description" style="margin: 0 0 12px 0;">Only ticked seasons appear in the trial form's season selector. Untick a season once its trials are done — the form rejects it server-side too, and existing applicants keep seeing their trial number and status. Untick everything to close applications entirely. Need a further-out season? Create it on the <a href="<?php echo admin_url('admin.php?page=team-oversight-fees'); ?>">Configuration page</a>.</p>
-                    <select name="trial_fee_product" style="max-width: 400px;">
+                    <?php
+                    // Simple products and the variations of variable products
+                    // (1.93.0): a variable product itself can't be a fee.
+                    $fee_choices = $this->trial_fee_product_choices();
+                    $trial_ysl_product_id = intval(get_option(TeamOversight_Trials::YSL_FEE_PRODUCT_OPTION));
+                    // A saved choice the list leaves out (private, a variable product) stays listed, so saving never clears it.
+                    foreach (array($trial_fee_product_id, $trial_ysl_product_id) as $saved_id) {
+                        if ($saved_id && !isset($fee_choices[$saved_id])) {
+                            $fee_choices[$saved_id] = get_the_title($saved_id) . ' (#' . $saved_id . ', can\'t be bought as it is)';
+                        }
+                    }
+                    ?>
+                    <p style="margin: 0 0 4px 0;"><label for="trial_fee_product"><strong>Trial fee</strong></label></p>
+                    <select name="trial_fee_product" id="trial_fee_product" style="max-width: 400px;">
                         <option value="0">No fee — applications submit directly</option>
-                        <?php
-                        $products = get_posts(array(
-                            'post_type' => 'product',
-                            'post_status' => 'publish',
-                            'numberposts' => 500,
-                            'orderby' => 'title',
-                            'order' => 'ASC',
-                        ));
-                        foreach ($products as $product_post): ?>
-                            <option value="<?php echo $product_post->ID; ?>" <?php selected($trial_fee_product_id, $product_post->ID); ?>><?php echo esc_html($product_post->post_title); ?> (#<?php echo $product_post->ID; ?>)</option>
+                        <?php foreach ($fee_choices as $choice_id => $choice_label): ?>
+                            <option value="<?php echo intval($choice_id); ?>" <?php selected($trial_fee_product_id, $choice_id); ?>><?php echo esc_html($choice_label); ?></option>
                         <?php endforeach; ?>
                     </select>
+                    <p style="margin: 12px 0 4px 0;"><label for="trial_fee_product_ysl"><strong>Youth State League trial fee</strong></label></p>
+                    <select name="trial_fee_product_ysl" id="trial_fee_product_ysl" style="max-width: 400px;" aria-describedby="trial_fee_product_ysl_note">
+                        <option value="0">None — juniors trialling only for YSL trial free</option>
+                        <?php foreach ($fee_choices as $choice_id => $choice_label): ?>
+                            <option value="<?php echo intval($choice_id); ?>" <?php selected($trial_ysl_product_id, $choice_id); ?>><?php echo esc_html($choice_label); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <p class="description" id="trial_fee_product_ysl_note" style="margin: 4px 0 0 0;">What a junior pays when every team they pick is Youth State League (the age is in the Trial application rules on the Configuration page). Anyone the rules let in free stays free. A junior who paid it and then adds a JPL or senior team pays the difference to the trial fee. Applies only while a trial fee is set.<?php if ($trial_ysl_product_id && !TeamOversight_Trials::fee_product('ysl') && $trial_fee_product_id): ?> <strong style="color: #b32d2e;">The product chosen here can't be bought (unpublished, no price, or a variable product with no variation chosen), so YSL-only juniors trial free.</strong><?php endif; ?></p>
+                    <?php if ($trial_fee_product_id && !TeamOversight_Trials::fee_product('full')): ?>
+                        <p style="margin: 6px 0 0 0;"><strong style="color: #b32d2e;">The trial fee product can't be bought (unpublished, no price, or a variable product with no variation chosen), so applications submit with no fee.</strong></p>
+                    <?php endif; ?>
                     <p style="margin: 12px 0 0 0;">
                         <label for="training_info_url"><strong>Training info page URL</strong></label><br>
                         <input type="url" name="training_info_url" id="training_info_url" value="<?php echo esc_attr(get_option('team_oversight_training_info_url')); ?>" style="width: 420px;" placeholder="https://example.com/training-times/">

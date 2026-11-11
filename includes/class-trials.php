@@ -17,6 +17,31 @@ class TeamOversight_Trials {
      */
     const CLUB_WAIVER_PREFIX = 'Waived by club — ';
 
+    /**
+     * The trial fee products (1.93.0, club decision 11 Nov 2026). Each option
+     * holds a product id: a simple product or one variation of a variable
+     * product (Trial Fee → Full, Trial Fee → Youth State League). The full fee
+     * is FEE_PRODUCT_OPTION; the YSL fee is what a junior trialling only for
+     * Youth State League teams pays instead (unset: they trial free, as before
+     * 1.93.0). Set on Trial Applications → Trial settings.
+     */
+    const FEE_PRODUCT_OPTION = 'team_oversight_trial_fee_product';
+    const YSL_FEE_PRODUCT_OPTION = 'team_oversight_trial_fee_product_ysl';
+
+    /**
+     * form_data key saying which fee an application owes or paid when it is
+     * not the full fee: FEE_TYPE_YSL (the YSL fee) or FEE_TYPE_TOPUP (paid the
+     * YSL fee, then picked a JPL or senior team, so the difference is due).
+     * No key = the full fee. 'Trial Fee' keeps its values (Payable, Waived — ...).
+     */
+    const FEE_TYPE_KEY = 'Trial Fee Type';
+    const FEE_TYPE_YSL = 'Youth State League';
+    const FEE_TYPE_TOPUP = 'Top-up to the full fee';
+
+    /** Cart item key and order line meta carrying a top-up's price. */
+    const TOPUP_CART_KEY = 'murvc_trial_topup';
+    const TOPUP_META = '_murvc_trial_topup';
+
     private static $refund_hooks_registered = false;
 
     /**
@@ -119,6 +144,8 @@ class TeamOversight_Trials {
             add_action('woocommerce_order_status_refunded', array($this, 'handle_trial_refund'));
             add_action('woocommerce_order_status_cancelled', array($this, 'handle_trial_cancelled'));
             add_action('admin_notices', array($this, 'render_refund_notice'));
+            // 1.93.0: a top-up line is the full fee product at the difference.
+            add_action('woocommerce_before_calculate_totals', array(__CLASS__, 'apply_topup_prices'), 20);
         }
     }
     
@@ -479,9 +506,10 @@ class TeamOversight_Trials {
                     <div class="trial-status-text">
                         <?php if ($unpaid): ?>
                             <p><strong>Your <?php echo esc_html($my_application->season); ?> application has not been paid for yet.</strong> Coaches can see it, but can't select you for a team until the trial fee is paid.</p>
-                            <?php if ($fee_product): ?>
+                            <?php $due = self::fee_due($my_application); ?>
+                            <?php if ($due): ?>
                                 <p class="trial-pay-actions">
-                                    <a class="button button-primary" href="<?php echo esc_url(self::resume_payment_url($my_application->id)); ?>">Pay the trial fee<?php echo $fee_product->get_price() !== '' ? ' — ' . esc_html(wp_strip_all_tags(wc_price($fee_product->get_price()))) : ''; ?></a>
+                                    <a class="button button-primary" href="<?php echo esc_url(self::resume_payment_url($my_application->id)); ?>"><?php echo $due['kind'] === 'topup' ? 'Pay the rest of the trial fee' : 'Pay the trial fee'; ?><?php echo $due['cents'] !== null ? ' — ' . esc_html(self::money_text($due['cents'])) : ''; ?></a>
                                     <span class="trial-pay-note">Already paid? Contact the club and we'll sort it out.</span>
                                 </p>
                             <?php else: ?>
@@ -569,7 +597,12 @@ class TeamOversight_Trials {
                     <p><strong>Trial registration fee: <?php echo wp_kses_post($fee_product->get_price_html()); ?></strong><br>
                     <?php if ($who_text !== ''): ?>The fee applies to players <strong><?php echo esc_html($who_text); ?></strong> — after<?php else: ?>After<?php endif; ?> submitting you'll be taken to the checkout to pay. Coaches can't select you for a team until the fee is paid.<?php if (empty($fee_rules['charge_returning'])): ?> If you played for Renegades last season you can ignore this message, as your yearly membership covers your cost.<?php endif; ?></p>
                     <?php if ($viewer_free_by_age): ?>
-                        <p><strong>You're under <?php echo intval($fee_rules['free_under']); ?>, so trials are free if you only pick Youth State League teams</strong> (U/17 and U/15). Trialling for Junior Premier League or a senior team means the fee applies as above.</p>
+                        <?php $ysl_product = self::fee_product('ysl'); ?>
+                        <?php if ($ysl_product): ?>
+                            <p><strong>You're under <?php echo intval($fee_rules['free_under']); ?>, so if you only pick Youth State League teams (U/17 and U/15) the trial fee is <?php echo esc_html(self::money_text(self::price_cents($ysl_product))); ?>.</strong> Trialling for Junior Premier League or a senior team means the fee above applies.<?php if (empty($fee_rules['charge_returning'])): ?> If you played for Renegades last season, your trial is free either way.<?php endif; ?></p>
+                        <?php else: ?>
+                            <p><strong>You're under <?php echo intval($fee_rules['free_under']); ?>, so trials are free if you only pick Youth State League teams</strong> (U/17 and U/15). Trialling for Junior Premier League or a senior team means the fee applies as above.</p>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             <?php endif; ?>
@@ -1544,11 +1577,15 @@ class TeamOversight_Trials {
             wp_send_json_error(array('message' => 'You have already been assigned to a team for ' . $season . ', so your application can no longer be changed here. Please contact the club if something needs updating.'));
         }
 
-        // Fee rules: returning Renegades players and juniors trial free by
-        // default; new/transferring players pay when a product is set.
-        $fee_product = $this->get_trial_fee_product();
+        // Fee rules: returning Renegades players trial free by default;
+        // new/transferring players pay when a product is set, juniors trialling
+        // only for YSL pay the YSL fee (1.93.0; free when no YSL fee is set).
         $fee_decision = self::trial_fee_decision($history, $prefill['birth_date'], $interested_teams, $season);
+        $fee_kind = ($fee_decision['payable'] && isset($fee_decision['fee'])) ? $fee_decision['fee'] : '';
+        $fee_product = $fee_kind !== '' ? self::fee_product($fee_kind) : null;
         $charge_fee = $fee_product && $fee_decision['payable'];
+        $fee_type = ($charge_fee && $fee_kind === 'ysl') ? self::FEE_TYPE_YSL : '';
+        $topup_cents = 0;
 
         // Editing a live (pending) application: it was either paid for or
         // waived. Paid stays paid — an edit never charges twice. Waived is
@@ -1558,26 +1595,57 @@ class TeamOversight_Trials {
         // marked Payable can only have got there by being paid (online or
         // Mark as Paid), so that's the test.
         $is_edit = ($existing && $existing->application_status === 'pending');
+        $previous = $existing ? json_decode((string) $existing->form_data, true) : null;
+        $previous_fee = (is_array($previous) && isset($previous['Trial Fee'])) ? (string) $previous['Trial Fee'] : '';
+        $previous_type = (is_array($previous) && isset($previous[self::FEE_TYPE_KEY])) ? (string) $previous[self::FEE_TYPE_KEY] : '';
         $already_paid = false;
         $club_waived = false;
-        $previous_fee = '';
+        $paid_kind = ''; // what has been paid: 'full', 'ysl' (the YSL fee only) or '' (nothing)
         if ($is_edit) {
-            $previous = json_decode((string) $existing->form_data, true);
-            $previous_fee = (is_array($previous) && isset($previous['Trial Fee'])) ? (string) $previous['Trial Fee'] : '';
             $already_paid = intval($existing->order_id) > 0 || $previous_fee === 'Payable';
             // An admin's "Waive fee" is a club decision: it stands whatever
             // the player changes afterwards.
             $club_waived = strpos($previous_fee, self::CLUB_WAIVER_PREFIX) === 0;
+            if ($already_paid) {
+                $paid_kind = $previous_type === self::FEE_TYPE_YSL ? 'ysl' : 'full';
+            }
+        } elseif ($existing && $previous_type === self::FEE_TYPE_TOPUP) {
+            // Waiting on a top-up: the YSL fee is paid already.
+            $already_paid = true;
+            $paid_kind = 'ysl';
         }
+        // Saved free under the junior YSL rule before the YSL fee existed: an
+        // edit keeps it free unless they now owe the full fee (club decision,
+        // 11 Nov 2026).
+        $ysl_waived = $is_edit && !$already_paid && !$club_waived && self::is_ysl_waiver($previous_fee) && $fee_kind === 'ysl';
 
-        if ($already_paid) {
+        if ($paid_kind === 'ysl' && $fee_kind === 'full' && self::topup_cents() > 0) {
+            // Paid the YSL fee, now trialling for JPL or a senior team: the
+            // difference is due (club decision, 11 Nov 2026).
+            $charge_fee = true;
+            $fee_product = self::fee_product('full');
+            $topup_cents = self::topup_cents();
+            $fee_type = self::FEE_TYPE_TOPUP;
+            $form_data['Trial Fee'] = 'Payable';
+        } elseif ($already_paid) {
             $charge_fee = false;
+            $fee_type = $paid_kind === 'ysl' ? self::FEE_TYPE_YSL : '';
             $form_data['Trial Fee'] = 'Payable';
         } elseif ($club_waived) {
             $charge_fee = false;
+            $fee_type = '';
+            $form_data['Trial Fee'] = $previous_fee;
+        } elseif ($ysl_waived) {
+            $charge_fee = false;
+            $fee_type = '';
             $form_data['Trial Fee'] = $previous_fee;
         } else {
             $form_data['Trial Fee'] = $charge_fee ? 'Payable' : 'Waived — ' . ($fee_decision['reason'] ?: 'no fee product configured');
+        }
+        if ($fee_type !== '') {
+            $form_data[self::FEE_TYPE_KEY] = $fee_type;
+        } else {
+            unset($form_data[self::FEE_TYPE_KEY]);
         }
         if ($is_edit) {
             // Coaches may already have looked, so say when it last changed.
@@ -1670,16 +1738,21 @@ class TeamOversight_Trials {
             wp_send_json_success(array('message' => $flash, 'reload' => true));
         }
 
-        $checkout_url = $this->add_fee_to_cart($fee_product, $application_id);
+        $checkout_url = $this->add_fee_to_cart($fee_product, $application_id, $topup_cents);
 
         if (!$checkout_url) {
             wp_send_json_error(array('message' => 'Your application was saved, but the trial fee could not be added to your cart. Please contact the club to arrange payment.'));
         }
 
+        if ($topup_cents > 0) {
+            $message = 'Your changes have been saved. Junior Premier League and senior trials cost the full trial fee, so the rest of it (' . esc_html(self::money_text($topup_cents)) . ') is now due. Your trial number is still <strong>#' . $trial_number . '</strong>. Taking you to the checkout&hellip;';
+        } elseif ($is_edit) {
+            $message = 'Your changes have been saved, but they mean the trial fee now applies. Your trial number is still <strong>#' . $trial_number . '</strong>. Taking you to the checkout&hellip;';
+        } else {
+            $message = 'Application saved — your trial number is <strong>#' . $trial_number . '</strong>. Taking you to the checkout to pay the trial fee&hellip;';
+        }
         wp_send_json_success(array(
-            'message' => $is_edit
-                ? 'Your changes have been saved, but they mean the trial fee now applies. Your trial number is still <strong>#' . $trial_number . '</strong>. Taking you to the checkout&hellip;'
-                : 'Application saved — your trial number is <strong>#' . $trial_number . '</strong>. Taking you to the checkout to pay the trial fee&hellip;',
+            'message' => $message,
             'redirect' => $checkout_url
         ));
     }
@@ -1689,17 +1762,84 @@ class TeamOversight_Trials {
      * if none is configured (in which case applications submit directly).
      */
     public function get_trial_fee_product() {
+        return self::fee_product('full');
+    }
+
+    /** The YSL trial fee product (1.93.0), or null when none is set (or no full fee). */
+    public function get_trial_ysl_fee_product() {
+        return self::fee_product('ysl');
+    }
+
+    /**
+     * The product for a fee kind, 'full' or 'ysl', or null. A simple product
+     * or a variation; a variable product itself is never returned (it can't
+     * go in the cart without a variation). The YSL fee applies only while a
+     * full fee is set: with no trial fee at all, nobody pays.
+     */
+    public static function fee_product($kind) {
         if (!function_exists('wc_get_product')) {
             return null;
         }
-
-        $product_id = intval(get_option('team_oversight_trial_fee_product'));
+        if ($kind === 'ysl' && !self::fee_product('full')) {
+            return null;
+        }
+        $product_id = intval(get_option($kind === 'ysl' ? self::YSL_FEE_PRODUCT_OPTION : self::FEE_PRODUCT_OPTION));
         if (!$product_id) {
             return null;
         }
-
         $product = wc_get_product($product_id);
-        return ($product && $product->is_purchasable()) ? $product : null;
+        if (!$product || $product->is_type('variable') || $product->is_type('grouped') || !$product->is_purchasable()) {
+            return null;
+        }
+        return $product;
+    }
+
+    /** A product's price as entered (incl. GST on this site), in cents; null with no price. */
+    public static function price_cents($product) {
+        if (!$product || $product->get_price() === '') {
+            return null;
+        }
+        return (int) round(floatval($product->get_price()) * 100);
+    }
+
+    /**
+     * The top-up after the YSL fee: the full fee less the YSL fee, in cents,
+     * or 0 when there is nothing to top up (no YSL fee, or it isn't cheaper).
+     */
+    public static function topup_cents() {
+        $full = self::price_cents(self::fee_product('full'));
+        $ysl = self::price_cents(self::fee_product('ysl'));
+        if ($full === null || $ysl === null) {
+            return 0;
+        }
+        return max(0, $full - $ysl);
+    }
+
+    /**
+     * What an application owes right now, read from its form_data:
+     * array(kind 'full' | 'ysl' | 'topup', product, cents), or null when the
+     * fee's product is gone. Only meaningful for an unpaid application; the
+     * Pay button, the resume link and the Payment needed email use it.
+     */
+    public static function fee_due($application) {
+        $form = json_decode((string) (is_object($application) ? $application->form_data : ''), true);
+        $type = is_array($form) && isset($form[self::FEE_TYPE_KEY]) ? (string) $form[self::FEE_TYPE_KEY] : '';
+        if ($type === self::FEE_TYPE_TOPUP) {
+            $product = self::fee_product('full');
+            $cents = self::topup_cents();
+            return ($product && $cents > 0) ? array('kind' => 'topup', 'product' => $product, 'cents' => $cents) : null;
+        }
+        $kind = $type === self::FEE_TYPE_YSL ? 'ysl' : 'full';
+        $product = self::fee_product($kind);
+        return $product ? array('kind' => $kind, 'product' => $product, 'cents' => self::price_cents($product)) : null;
+    }
+
+    /** Cents as the shop shows money ("$40.00"), plain text. */
+    public static function money_text($cents) {
+        if ($cents === null) {
+            return '';
+        }
+        return html_entity_decode(wp_strip_all_tags(wc_price($cents / 100)), ENT_QUOTES, 'UTF-8');
     }
 
     /**
@@ -1733,8 +1873,8 @@ class TeamOversight_Trials {
 
         global $wpdb;
         $user_id = get_current_user_id();
-        $owned = $wpdb->get_var($wpdb->prepare("
-            SELECT id FROM {$wpdb->prefix}trial_applications
+        $owned = $wpdb->get_row($wpdb->prepare("
+            SELECT id, form_data FROM {$wpdb->prefix}trial_applications
             WHERE id = %d AND user_id = %d AND application_status = 'awaiting_payment'
         ", $application_id, $user_id));
 
@@ -1746,14 +1886,20 @@ class TeamOversight_Trials {
             exit;
         }
 
-        $product = $this->get_trial_fee_product();
-        $checkout_url = $product ? $this->add_fee_to_cart($product, $application_id) : false;
+        // The fee this application owes: the full fee, the YSL fee or the top-up (1.93.0).
+        $due = self::fee_due($owned);
+        $checkout_url = $due ? $this->add_fee_to_cart($due['product'], $application_id, $due['kind'] === 'topup' ? $due['cents'] : 0) : false;
 
         wp_safe_redirect($checkout_url ? $checkout_url : $target);
         exit;
     }
 
-    private function add_fee_to_cart($product, $application_id) {
+    /**
+     * Puts one trial fee line in the cart: a simple product, or a variation
+     * with its parent and attributes. $topup_cents > 0 makes it a top-up line,
+     * charged at that amount (apply_topup_prices()).
+     */
+    private function add_fee_to_cart($product, $application_id, $topup_cents = 0) {
         if (!function_exists('WC')) {
             return false;
         }
@@ -1772,18 +1918,42 @@ class TeamOversight_Trials {
             }
         }
 
-        $added = WC()->cart->add_to_cart(
-            $product->get_id(),
-            1,
-            0,
-            array(),
-            array('murvc_trial_application_id' => $application_id)
-        );
+        $data = array('murvc_trial_application_id' => $application_id);
+        if (intval($topup_cents) > 0) {
+            $data[self::TOPUP_CART_KEY] = intval($topup_cents);
+        }
+        if ($product->is_type('variation')) {
+            $added = WC()->cart->add_to_cart($product->get_parent_id(), 1, $product->get_id(), $product->get_variation_attributes(), $data);
+        } else {
+            $added = WC()->cart->add_to_cart($product->get_id(), 1, 0, array(), $data);
+        }
 
         return $added ? wc_get_checkout_url() : false;
     }
 
+    /**
+     * woocommerce_before_calculate_totals: a top-up line costs the top-up,
+     * whatever the product's own price. The amount was put on the cart line
+     * by add_fee_to_cart() on the server; nothing the browser sends sets it.
+     */
+    public static function apply_topup_prices($cart) {
+        if (!is_object($cart) || !is_callable(array($cart, 'get_cart'))) {
+            return;
+        }
+        foreach ($cart->get_cart() as $cart_item) {
+            if (!empty($cart_item['murvc_trial_application_id']) && !empty($cart_item[self::TOPUP_CART_KEY]) && isset($cart_item['data']) && is_object($cart_item['data'])) {
+                $cart_item['data']->set_price(intval($cart_item[self::TOPUP_CART_KEY]) / 100);
+            }
+        }
+    }
+
     public function display_application_in_cart($item_data, $cart_item) {
+        if (!empty($cart_item['murvc_trial_application_id']) && !empty($cart_item[self::TOPUP_CART_KEY])) {
+            $item_data[] = array(
+                'key' => 'Top-up',
+                'value' => 'the rest of the full trial fee, after the Youth State League fee you paid',
+            );
+        }
         if (!empty($cart_item['murvc_trial_application_id'])) {
             // Show the trial number the player was given (status panel,
             // emails), not the row id the cart line carries.
@@ -1805,6 +1975,9 @@ class TeamOversight_Trials {
     public function attach_application_to_order_item($item, $cart_item_key, $values) {
         if (!empty($values['murvc_trial_application_id'])) {
             $item->add_meta_data('_murvc_trial_application_id', intval($values['murvc_trial_application_id']), true);
+            if (!empty($values[self::TOPUP_CART_KEY])) {
+                $item->add_meta_data(self::TOPUP_META, intval($values[self::TOPUP_CART_KEY]), true);
+            }
         }
     }
 
@@ -2123,13 +2296,23 @@ class TeamOversight_Trials {
     }
 
     /**
-     * Should this applicant pay the trial fee? The junior exemption comes
-     * first but only covers a YSL-only selection; otherwise the
-     * per-history-category rule decides. Returns array(payable, reason) —
+     * Should this applicant pay the trial fee, and which one? Returns
+     * array(payable, reason, fee): fee is 'full', 'ysl' or '' (nothing due);
      * reason explains a waiver for the admin trail.
+     *
+     * 1.93.0 (club decision, 11 Nov 2026): the history rule decides first, so
+     * whoever it lets in free (by default last season's Renegades players)
+     * stays free. Someone it charges who is under the age in the rules and
+     * picks only Youth State League teams owes the YSL fee instead of the full
+     * one; with no YSL fee product set they trial free, as before 1.93.0. A
+     * junior reaching up to JPL or a senior team owes the full fee.
      */
     public static function trial_fee_decision($history, $birth_date, $interested_teams = array(), $season = null) {
         $rules = self::get_trial_fee_rules();
+        $by_history = self::history_fee_rule($history, $rules);
+        if (!$by_history['payable']) {
+            return $by_history + array('fee' => '');
+        }
 
         $free_under = intval($rules['free_under']);
         if ($free_under > 0 && $birth_date && self::is_youth_only($interested_teams, $season)) {
@@ -2137,15 +2320,36 @@ class TeamOversight_Trials {
             if ($ts) {
                 $age = (new DateTime('@' . $ts))->diff(new DateTime())->y;
                 if ($age < $free_under) {
-                    return array('payable' => false, 'reason' => 'under ' . $free_under . ', Youth State League only');
+                    return self::fee_product('ysl')
+                        ? array('payable' => true, 'reason' => '', 'fee' => 'ysl')
+                        : array('payable' => false, 'reason' => self::ysl_waiver_reason($free_under), 'fee' => '');
                 }
             }
         }
+        return array('payable' => true, 'reason' => '', 'fee' => 'full');
+    }
 
-        // Renegades history splits in two: last season's players are covered
-        // by the yearly membership they already paid, whereas someone back
-        // after a season away holds no current membership and pays like
-        // anyone else.
+    /**
+     * The waiver reason a junior trialling only for YSL got before 1.93.0
+     * (and still gets with no YSL fee product set). An application saved with
+     * it stays free when it is edited (club decision, 11 Nov 2026).
+     */
+    public static function ysl_waiver_reason($free_under) {
+        return 'under ' . intval($free_under) . ', Youth State League only';
+    }
+
+    /** Was this 'Trial Fee' value the junior YSL waiver, for any age? */
+    public static function is_ysl_waiver($trial_fee) {
+        return (bool) preg_match('/^Waived — under \d+, Youth State League only$/u', (string) $trial_fee);
+    }
+
+    /**
+     * The history half of the rule. Renegades history splits in two: last
+     * season's players are covered by the yearly membership they already
+     * paid, whereas someone back after a season away holds no current
+     * membership and pays like anyone else.
+     */
+    private static function history_fee_rule($history, $rules) {
         if ($history === 'renegades_last_season') {
             return !empty($rules['charge_returning'])
                 ? array('payable' => true, 'reason' => '')

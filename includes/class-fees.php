@@ -3034,10 +3034,10 @@ class TeamOversight_Fees {
                     </p>
                     <p class="description" style="margin: 0 0 12px 0;">The two Renegades categories are separate because the waiver exists for players whose yearly membership already covers the trial — someone returning after a season away holds no current membership, so by default they pay.</p>
                     <p style="margin: 0 0 12px 0;">
-                        <label>Free for Youth State League trials under age
+                        <label>Youth State League trials under age
                             <input type="number" name="free_under" value="<?php echo intval($trial_fee_rules['free_under']); ?>" min="0" max="30" style="width: 60px;">
                         </label>
-                        <span class="description">(applies regardless of history, but <strong>only when every team they pick is YSL</strong> — U/17 or U/15. A junior reaching up to JPL or a senior team pays. 0 disables the age exemption.)</span>
+                        <span class="description">(<strong>only when every team they pick is YSL</strong> — U/17 or U/15: someone the boxes above charge pays the Youth State League trial fee instead, or trials free when no YSL fee is set on the Trial Applications page. Anyone the boxes let in free stays free. A junior reaching up to JPL or a senior team pays the full fee. 0 turns this off, so juniors pay the full fee.)</span>
                     </p>
                     <p style="margin: 0 0 4px 0;"><strong>Transfer club list</strong> <span class="description">— the dropdown on the trial form, one club per line. Empty the box and save to reset to the built-in VVL list.</span></p>
                     <textarea name="transfer_clubs" rows="10" style="width: 100%; max-width: 480px; font-family: monospace;"><?php echo esc_textarea(implode("\n", TeamOversight_Trials::get_transfer_clubs())); ?></textarea>
