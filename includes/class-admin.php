@@ -2461,7 +2461,7 @@ class TeamOversight_Admin {
                                 </td>
                             </tr>
                             <?php if (!empty($form_data)): ?>
-                                <tr class="trial-details-row" id="trial-details-<?php echo $trial->id; ?>" style="display: none;">
+                                <tr class="trial-details-row" id="trial-details-<?php echo $trial->id; ?>" data-sort-child style="display: none;">
                                     <td colspan="<?php echo $fee_cover_on ? 11 : 10; ?>" style="background: #f8f9fa; padding: 15px 25px;">
                                         <table class="trial-details-table">
                                             <?php foreach ($form_data as $question => $answer): ?>

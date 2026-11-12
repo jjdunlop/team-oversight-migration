@@ -1671,48 +1671,7 @@ class TeamOversight_Readiness {
                         <?php endforeach; ?>
                     </tbody>
                 </table>
-                <style>
-                    #murvc-readiness-table th .murvc-sort { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; }
-                    #murvc-readiness-table th .murvc-sort::after { content: " \2195"; color: #a7aaad; }
-                    #murvc-readiness-table th[aria-sort="ascending"] .murvc-sort::after { content: " \2191"; color: inherit; }
-                    #murvc-readiness-table th[aria-sort="descending"] .murvc-sort::after { content: " \2193"; color: inherit; }
-                </style>
-                <script>
-                // 1.92.1: click a column heading to sort the players by it (again to reverse). A cell's data-sort
-                // value is the key when it has one (numbers sort as numbers), else its text. Rows keep their forms.
-                (function () {
-                    var table = document.getElementById('murvc-readiness-table');
-                    if (!table || !table.tHead || !table.tBodies.length) { return; }
-                    var heads = table.tHead.rows[0].cells;
-                    var isNum = function (v) { return /^-?\d+(\.\d+)?$/.test(v); };
-                    var key = function (row, col) {
-                        var cell = row.cells[col];
-                        if (!cell) { return ''; }
-                        var v = cell.getAttribute('data-sort');
-                        return v !== null ? v : cell.textContent.trim().toLowerCase();
-                    };
-                    Array.prototype.forEach.call(heads, function (th, col) {
-                        var btn = document.createElement('button');
-                        btn.type = 'button';
-                        btn.className = 'murvc-sort';
-                        while (th.firstChild) { btn.appendChild(th.firstChild); }
-                        th.appendChild(btn);
-                        btn.addEventListener('click', function () {
-                            var dir = th.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
-                            Array.prototype.forEach.call(heads, function (h) { h.removeAttribute('aria-sort'); });
-                            th.setAttribute('aria-sort', dir);
-                            var body = table.tBodies[0];
-                            var rows = Array.prototype.slice.call(body.rows);
-                            rows.sort(function (a, b) {
-                                var x = key(a, col), y = key(b, col);
-                                var cmp = (isNum(x) && isNum(y)) ? parseFloat(x) - parseFloat(y) : x.localeCompare(y);
-                                return dir === 'ascending' ? cmp : -cmp;
-                            });
-                            rows.forEach(function (r) { body.appendChild(r); });
-                        });
-                    });
-                })();
-                </script>
+                <?php // 1.94.0: the headings sort through the shared assets/table-sort.js (TeamOversight_Table_Sort), which reads the cells' data-sort keys. ?>
             <?php else: ?>
                 <p>No players selected or confirmed for this season yet.</p>
             <?php endif; ?>

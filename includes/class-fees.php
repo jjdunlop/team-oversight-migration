@@ -3267,7 +3267,7 @@ class TeamOversight_Fees {
                             <p class="description">JPL is the row for a junior on a team with the U19 age rule (Junior Premier League), YSL for a team with the U17 or U15 rule (Youth State League); a team with no age rule goes by its code. Before <?php echo intval(self::JUNIOR_LEAGUE_SPLIT_FROM); ?> both were one JPL/YSL row.</p>
                         <?php endif; ?>
                         <div style="overflow-x: auto;">
-                            <table class="wp-list-table widefat striped fee-grid">
+                            <table class="wp-list-table widefat striped fee-grid" data-nosort>
                                 <thead>
                                     <tr>
                                         <th>Fee class</th>

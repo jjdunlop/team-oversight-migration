@@ -1,0 +1,28 @@
+/* Sortable tables (1.94.0): the heading button table-sort.js puts in each column heading. */
+.murvc-sort {
+    background: none;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    text-align: inherit;
+    cursor: pointer;
+}
+.murvc-sort::after {
+    content: " \2195";
+    color: #a7aaad;
+}
+th[aria-sort="ascending"] .murvc-sort::after {
+    content: " \2191";
+    color: inherit;
+}
+th[aria-sort="descending"] .murvc-sort::after {
+    content: " \2193";
+    color: inherit;
+}
+.murvc-sort:focus-visible {
+    outline: 2px solid #2271b1;
+    outline-offset: 2px;
+    border-radius: 2px;
+}

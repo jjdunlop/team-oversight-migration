@@ -713,7 +713,7 @@ class TeamOversight_Fee_Breakdown {
                 </p>
                 <div style="display: flex; flex-wrap: wrap; gap: 16px 30px; align-items: flex-start; margin: 12px 0 4px;">
                     <?php foreach ($bars as $bar => $def): ?>
-                        <table class="widefat striped" style="width: auto; min-width: 0; max-width: 100%;">
+                        <table class="widefat striped" data-nosort style="width: auto; min-width: 0; max-width: 100%;">
                             <caption style="text-align: left; font-weight: 600; padding: 0 0 6px;"><?php echo esc_html($def['name']); ?></caption>
                             <thead>
                                 <tr><th scope="col" style="width: 3em;">Row</th><th scope="col">Label</th><th scope="col">%</th></tr>

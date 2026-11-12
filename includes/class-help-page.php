@@ -794,7 +794,7 @@ class TeamOversight_Help_Page {
         }
         self::fees();
         $season = self::requested_season();
-        echo '<div class="wrap murvc-help">';
+        echo '<div class="wrap murvc-help" data-nosort>';
         echo '<style>' . self::styles() . '</style>';
         echo '<h1>How it works</h1>';
         echo '<p class="mh-lead">A plain-English guide to the MURVC Club Manager plugin: what it runs, how fees are worked out and fall due, and what to know before changing it. It is written for the committee checking that it behaves as agreed, and for whoever maintains it next. Sections 2, 6, 7 and 9 read the live settings and work their figures out with the same code that bills members, so they are never out of date. Section 9 is the committee\'s guide to running offers and deposits through the selection period. Nothing on this page changes anything.</p>';

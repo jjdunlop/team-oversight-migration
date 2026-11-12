@@ -296,36 +296,7 @@ class TeamOversight_Members_Page {
                 el.addEventListener(el.tagName === 'INPUT' ? 'input' : 'change', filterMembers);
             });
 
-            // Column sorting
-            document.querySelectorAll('#members-table th.sortable-col').forEach((th) => {
-                th.style.cursor = 'pointer';
-                th.title = 'Click to sort';
-                th.addEventListener('click', () => {
-                    const table = th.closest('table');
-                    const tbody = table.querySelector('tbody');
-                    const index = Array.from(th.parentNode.children).indexOf(th);
-                    const asc = th.dataset.sorted !== 'asc';
-                    table.querySelectorAll('th').forEach(h => delete h.dataset.sorted);
-                    th.dataset.sorted = asc ? 'asc' : 'desc';
-
-                    const rows = Array.from(tbody.querySelectorAll('tr'));
-                    rows.sort((a, b) => {
-                        const cellA = a.children[index], cellB = b.children[index];
-                        const rawA = cellA.dataset.sort !== undefined ? cellA.dataset.sort : cellA.textContent.trim();
-                        const rawB = cellB.dataset.sort !== undefined ? cellB.dataset.sort : cellB.textContent.trim();
-                        const numA = parseFloat(rawA), numB = parseFloat(rawB);
-                        let cmp;
-                        if (!isNaN(numA) && !isNaN(numB)) {
-                            cmp = numA - numB;
-                        } else {
-                            cmp = String(rawA).localeCompare(String(rawB));
-                        }
-                        return asc ? cmp : -cmp;
-                    });
-                    rows.forEach(r => tbody.appendChild(r));
-                });
-            });
-
+            // 1.94.0: the headings sort through the shared assets/table-sort.js (TeamOversight_Table_Sort); the cells keep their data-sort keys.
             // Email autocomplete for the grant form (reuses the search_users AJAX handler)
             document.getElementById('grant_user_email').addEventListener('input', function() {
                 const query = this.value;
@@ -998,7 +969,7 @@ class TeamOversight_Members_Page {
                 </thead>
                 <tbody>
                     <?php foreach ($rows as $label => $counts): ?>
-                        <tr<?php echo $label === 'TOTAL' ? ' style="font-weight: 600; border-top: 2px solid #333;"' : ''; ?>>
+                        <tr<?php echo $label === 'TOTAL' ? ' data-sort-pin style="font-weight: 600; border-top: 2px solid #333;"' : ''; ?>>
                             <td><?php echo esc_html($label); ?></td>
                             <?php foreach ($genders as $g): ?>
                                 <td style="text-align: right;"><?php echo intval($counts[$g]); ?></td>
@@ -1210,7 +1181,7 @@ class TeamOversight_Members_Page {
                 </thead>
                 <tbody>
                     <?php foreach ($rows as $label => $counts): ?>
-                        <tr<?php echo $label === 'Total' ? ' style="font-weight: 600; border-top: 2px solid #333;"' : ''; ?>>
+                        <tr<?php echo $label === 'Total' ? ' data-sort-pin style="font-weight: 600; border-top: 2px solid #333;"' : ''; ?>>
                             <td><?php echo esc_html($label); ?></td>
                             <?php foreach ($genders as $g): ?>
                                 <td style="text-align: right;"><?php echo intval($counts[$g]); ?></td>

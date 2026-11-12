@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), coach profiles (Coaches), and the club's policies and AGM papers (Club documents).
- * Version: 1.93.2
+ * Version: 1.94.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.93.2');
+define('TEAM_OVERSIGHT_VERSION', '1.94.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -326,6 +326,7 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-payments.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-readiness.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-help-page.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-table-sort.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-duplicates.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-merge.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-duplicates-page.php';
@@ -376,6 +377,8 @@ function team_oversight_init() {
     TeamOversight_Transfer_Limits::register_hooks();
     // VVL Oversight → How it works: the calculator's AJAX hook, added once.
     TeamOversight_Help_Page::register_hooks();
+    // 1.94.0: every list table on a Club Manager admin screen sorts by its headings (assets/table-sort.js).
+    TeamOversight_Table_Sort::register_hooks();
     // Club Membership → Duplicate accounts: the scan's cache resets, the
     // login block during a merge, and the page's admin-post handlers.
     TeamOversight_Duplicates::register_hooks();
