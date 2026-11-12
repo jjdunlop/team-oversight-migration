@@ -572,6 +572,18 @@ The club's policies and AGM papers. The committee adds each PDF with a title, a 
 
 ---
 
+## Sortable tables (1.94.0)
+
+Every list table on a Club Manager admin screen sorts when you click a column heading: once for A to Z (or low to high, or oldest first), again for the other way, and a third time to put the rows back as the page drew them. It works on Payment Management, Trial Applications, the Members list, Membership History, Team Assignments, Player Readiness, the dashboard, the Offers tabs, the logs, Coach bios and Club documents, and on any list table added later.
+
+- Amounts sort as numbers, dates as dates, and a dropdown or tick box by what it is set to now. An empty cell (or a dash) always goes last.
+- A trial application's details row moves with its application. The totals row of the MUS Matrix and the VV Report stays at the bottom.
+- The Fee Matrix, the *Where your fees go* rows and the How it works guide are left alone, as is any table with merged cells or under two rows.
+- Sorting happens in the browser only. Nothing is saved and nothing is asked of the server, so reloading the page shows its own order again. On a list split over pages it orders the rows on the page shown (the heading's hint says so).
+- The Members list and Player Readiness had sorters of their own; they now use this one.
+
+For maintainers: `TeamOversight_Table_Sort` loads `assets/table-sort.js` and `assets/table-sort.css` on this plugin's admin screens only. A table is taken when it has the class `widefat`, `wp-list-table` or `murvc-sortable`, one heading row and plain body rows. Mark the exceptions: `data-nosort` on a table, a wrapper or a heading; `data-sort="..."` on a cell to give its sort value; `data-sort-child` on a row that belongs to the row above; `data-sort-pin` on a totals row. Front-end pages (the coach portal, members' own pages) are not touched.
+
 ## Shortcodes
 
 | Shortcode | Audience | Purpose |
