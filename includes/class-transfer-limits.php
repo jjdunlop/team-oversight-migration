@@ -766,7 +766,7 @@ class TeamOversight_Transfer_Limits {
                 <tbody>
                     <?php foreach (array('mens', 'womens') as $gender): ?>
                         <?php $club = count($counts['genders'][$gender]); ?>
-                        <tr>
+                        <tr data-sort-pin>
                             <td><strong>All <?php echo esc_html(self::gender_words($gender)); ?></strong></td>
                             <?php $club_tentative = self::tentative_people($counts, $gender, $season); ?>
                             <td><strong><?php echo intval($club); ?> of <?php echo intval($limits[$gender]); ?></strong><?php echo $club_tentative ? ' <span class="description">(+' . intval($club_tentative) . ' Tentative)</span>' : ''; ?><?php echo $club > $limits[$gender] ? ' <span style="color: #b32d2e; font-weight: 600;">Over the limit</span>' : ''; ?></td>

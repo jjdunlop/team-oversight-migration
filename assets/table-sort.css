@@ -9,16 +9,21 @@
     text-align: inherit;
     cursor: pointer;
 }
+/* The arrow is decoration: aria-sort on the heading says the order, so the second content line gives it
+   an empty text alternative (a browser that doesn't know that form keeps the first line). */
 .murvc-sort::after {
     content: " \2195";
+    content: " \2195" / "";
     color: #a7aaad;
 }
 th[aria-sort="ascending"] .murvc-sort::after {
     content: " \2191";
+    content: " \2191" / "";
     color: inherit;
 }
 th[aria-sort="descending"] .murvc-sort::after {
     content: " \2193";
+    content: " \2193" / "";
     color: inherit;
 }
 .murvc-sort:focus-visible {

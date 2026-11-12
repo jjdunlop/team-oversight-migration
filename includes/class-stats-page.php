@@ -453,7 +453,7 @@ class TeamOversight_Stats_Page {
                                 </tr>
                             <?php endforeach; ?>
                             <?php if ($unknown > 0): ?>
-                                <tr style="color: #888;">
+                                <tr data-sort-pin style="color: #888;">
                                     <td>No postcode</td>
                                     <td style="text-align: right;"><?php echo intval($unknown); ?></td>
                                     <td style="text-align: right;"><?php echo $total > 0 ? round($unknown / $total * 100, 1) : 0; ?>%</td>

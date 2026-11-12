@@ -768,7 +768,7 @@ class TeamOversight_Club_Documents_Admin {
     private static function render_group_table($label, array $docs, array $versions) {
         $D = 'TeamOversight_Club_Documents';
         echo '<h2 class="mc-heading">' . self::h($label) . '</h2>';
-        echo '<div class="mc-scroll"><table class="wp-list-table widefat striped mc-list"><thead><tr>'
+        echo '<div class="mc-scroll"><table class="wp-list-table widefat striped mc-list" data-nosort><thead><tr>'
             . '<th scope="col" class="manage-column column-primary">Title</th><th scope="col">Who can open it</th><th scope="col">Status</th>'
             . '<th scope="col">Updated</th><th scope="col">Address</th><th scope="col">Order</th>'
             . '</tr></thead><tbody>';

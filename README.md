@@ -576,9 +576,9 @@ The club's policies and AGM papers. The committee adds each PDF with a title, a 
 
 Every list table on a Club Manager admin screen sorts when you click a column heading: once for A to Z (or low to high, or oldest first), again for the other way, and a third time to put the rows back as the page drew them. It works on Payment Management, Trial Applications, the Members list, Membership History, Team Assignments, Player Readiness, the dashboard, the Offers tabs, the logs, Coach bios and Club documents, and on any list table added later.
 
-- Amounts sort as numbers, dates as dates, and a dropdown or tick box by what it is set to now. An empty cell (or a dash) always goes last.
-- A trial application's details row moves with its application. The totals row of the MUS Matrix and the VV Report stays at the bottom.
-- The Fee Matrix, the *Where your fees go* rows and the How it works guide are left alone, as is any table with merged cells or under two rows.
+- Amounts sort as numbers, dates as dates, and a dropdown, tick box or text box by what it holds now. A date column with a word in some cells (*Never*, *No file yet*) still sorts as dates, with those cells after the dated ones. An empty cell (or a dash) always goes last. A date printed without a year is read as the one nearest today.
+- A trial application's details row moves with its application. Summary rows stay where they are: the totals of the MUS Matrix and the VV Report, the club-wide rows of the club transfer limits table, and *No postcode*.
+- The Fee Matrix, the *Where your fees go* rows, the Club documents list (its order is the one set with Move up and Move down) and the How it works guide are left alone, as is any table with merged cells or under two rows. A column that holds only buttons gets no sort button.
 - Sorting happens in the browser only. Nothing is saved and nothing is asked of the server, so reloading the page shows its own order again. On a list split over pages it orders the rows on the page shown (the heading's hint says so).
 - The Members list and Player Readiness had sorters of their own; they now use this one.
 

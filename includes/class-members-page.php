@@ -231,7 +231,7 @@ class TeamOversight_Members_Page {
                                 <td data-sort="<?php echo esc_attr($m['name']); ?>"><?php echo esc_html($m['name']); ?></td>
                                 <td data-sort="<?php echo esc_attr($m['email']); ?>"><?php echo esc_html($m['email']); ?></td>
                                 <td><?php echo esc_html($m['mobile']); ?></td>
-                                <td data-sort="<?php echo esc_attr($m['age'] !== '' ? $m['age'] : -1); ?>"><?php echo esc_html($m['age']); ?></td>
+                                <td data-sort="<?php echo esc_attr($m['age']); ?>"><?php echo esc_html($m['age']); ?></td>
                                 <td style="font-size: 11px;" title="<?php echo esc_attr($m['mus_category']); ?>"><?php echo esc_html($m['mus_short']); ?></td>
                                 <td data-sort="<?php echo esc_attr($m['status_sort']); ?>" title="<?php echo esc_attr($m['status_detail']); ?>">
                                     <?php echo esc_html($m['status_label']); ?>

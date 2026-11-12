@@ -9,12 +9,14 @@
  * marks the exceptions:
  *
  *  - data-nosort on a table, or on anything around it: never sorted (a grid of
- *    settings such as the Fee Matrix, the How it works guide);
+ *    settings such as the Fee Matrix, the Club documents list whose order is
+ *    set with Move up and Move down, the How it works guide);
  *  - data-nosort on a heading: that column gets no button;
  *  - data-sort="..." on a cell: the value to sort by, in place of its text;
  *  - data-sort-child on a row: it belongs to the row above and moves with it
  *    (the details row under a trial application);
- *  - data-sort-pin on a row: it stays at the bottom (a totals row);
+ *  - data-sort-pin on a row: it keeps its end of the table (a totals row at
+ *    the bottom, the club-wide rows at the top of the transfer limits table);
  *  - data-sort-paged on a table: the heading's hint says only the rows on
  *    this page are sorted (the script also sees WordPress's own page links).
  *
