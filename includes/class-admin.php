@@ -2787,7 +2787,7 @@ class TeamOversight_Admin {
         $database = new TeamOversight_Database();
         $teams = $database->get_teams($season);
 
-        // 1.77.0: Deposit / Held / Forfeited tags from the offers, one query
+        // 1.77.0: Deposit pending / Held / Forfeited tags from the offers, one query
         // (empty before 2027 and on a site that never made an offer).
         $offer_tags = class_exists('TeamOversight_Offers') ? TeamOversight_Offers::invoice_tags($season) : array('by_user' => array(), 'by_email' => array());
         $offer_tag_html = function ($invoice) use ($offer_tags) {
@@ -2798,7 +2798,8 @@ class TeamOversight_Admin {
                 $tags = $offer_tags['by_email'][strtolower((string) $invoice->email)];
             }
             $words = array(
-                'deposit' => array('Deposit', 'An accepted offer: this invoice holds the player\'s deposit until they lock in.'),
+                // 1.93.2: named as the coach portal's flow step is (Deposit pending); plain Deposit read as a deposit already paid.
+                'deposit' => array('Deposit pending', 'The player has accepted an offer and isn\'t locked in yet. This invoice holds what they pay toward the deposit until they are.'),
                 'held' => array('Held', 'An offer that ended with a deposit held for the player or still to be settled. See Held deposits on the Offers page.'),
                 'forfeited' => array('Forfeited', 'An offer that ended with the deposit kept by the club (a negative forfeit line in the ledger).'),
             );
