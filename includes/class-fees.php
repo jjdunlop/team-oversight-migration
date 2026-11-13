@@ -3398,7 +3398,8 @@ class TeamOversight_Fees {
             <!-- Fee matrix: full width (it's a grid), then teams -->
             <div style="display: flex; flex-wrap: wrap; gap: 30px; align-items: flex-start;">
 
-                <div id="fee-matrix" style="flex: 1 1 100%;">
+                <?php // 1.96.0: min-width 0 lets this flex item be narrower than a wide grid, so the grid's own wrapper scrolls sideways instead of the whole page. ?>
+                <div id="fee-matrix" style="flex: 1 1 100%; min-width: 0;">
                     <h2>Fee Matrix</h2>
                     <?php $grid = $this->get_fee_grid($selected_season); ?>
                     <?php

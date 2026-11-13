@@ -794,7 +794,13 @@ class TeamOversight_Fee_Columns {
         foreach (array('fee_matrix', 'fee_matrix_limits') as $short) {
             $roles = $wpdb->get_col($wpdb->prepare("SELECT DISTINCT team_role FROM {$wpdb->prefix}{$short} WHERE season = %s AND team_role LIKE %s", (string) $season, $like));
             foreach ((array) $roles as $role) {
-                $taken[strtolower((string) $role)] = true;
+                $role = strtolower((string) $role);
+                $taken[$role] = true;
+                // 1.96.0: a leftover Training only row (col_5_to) takes its column's key (col_5) too, or a new column would pick that amount up.
+                $base = self::base_key($role);
+                if ($base !== '') {
+                    $taken[$base] = true;
+                }
             }
         }
         return $taken;
