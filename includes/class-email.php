@@ -120,15 +120,64 @@ class TeamOversight_Email {
     }
 
     /**
-     * What to call someone: their profile's first name, else the first
-     * word of their name. One rule for every email.
+     * What to call someone: their preferred name when their account has one
+     * (1.94.1, club decision 13 Nov 2026), else their profile's first name,
+     * else the first word of their name. One rule for every email.
      */
     public static function first_name($user_id, $name) {
+        $preferred = self::preferred_given($user_id);
+        if ($preferred !== '') {
+            return $preferred;
+        }
         $first = $user_id ? trim((string) get_user_meta(intval($user_id), 'first_name', true)) : '';
         if ($first === '') {
             $first = trim((string) strtok((string) $name, ' '));
         }
         return $first !== '' ? $first : (string) $name;
+    }
+
+    private static function lower($text) {
+        return function_exists('mb_strtolower') ? mb_strtolower((string) $text, 'UTF-8') : strtolower((string) $text);
+    }
+
+    /**
+     * The account's preferred name (the profile's preferred_name) when it is
+     * a plain name: letters, spaces, apostrophes, hyphens and dots, at most
+     * 40 characters. '' with none, with no account, or with anything else in
+     * the field (an address, a number, brackets), so that is never printed.
+     */
+    public static function preferred_name($user_id) {
+        $user_id = intval($user_id);
+        if ($user_id <= 0) {
+            return '';
+        }
+        $preferred = trim((string) preg_replace('/\s+/u', ' ', self::decode((string) get_user_meta($user_id, 'preferred_name', true))));
+        return ($preferred !== '' && preg_match('/^\p{L}[\p{L}\p{M}\x{2019}\' .\-]{0,39}\z/u', $preferred) === 1) ? $preferred : '';
+    }
+
+    /**
+     * The preferred name as a given name, for a greeting: as typed, without
+     * their last name when they typed that too (Aggie Cirillo greets as
+     * Aggie; Mary Jane stays Mary Jane). '' with no usable preferred name.
+     */
+    public static function preferred_given($user_id) {
+        $preferred = self::preferred_name($user_id);
+        if ($preferred === '') {
+            return '';
+        }
+        $last = trim((string) get_user_meta(intval($user_id), 'last_name', true));
+        $tail = ' ' . self::lower($last);
+        if ($last !== '' && substr(' ' . self::lower($preferred), -strlen($tail)) === $tail) {
+            // Take the last name's words off the end (one for each word of it).
+            $given = $preferred;
+            for ($i = substr_count($last, ' ') + 1; $i > 0 && $given !== ''; $i--) {
+                $given = trim((string) preg_replace('/(?:^|\s+)\S+\z/u', '', $given));
+            }
+            if ($given !== '') {
+                return $given;
+            }
+        }
+        return $preferred;
     }
 
     /**
@@ -139,31 +188,26 @@ class TeamOversight_Email {
      * name that already ends with their last name is used as typed, and one
      * that is their first name changes nothing. A preferred name that isn't a
      * plain name (an address, a number, brackets, over 40 characters) is
-     * ignored. One rule for every sign-off; greetings stay first_name().
+     * ignored (preferred_name()). One rule for every sign-off; greetings are
+     * first_name(), which uses the same preferred name.
      */
     public static function sign_off_name($user_id, $name) {
         $user_id = intval($user_id);
-        if ($user_id <= 0) {
+        $preferred = self::preferred_name($user_id);
+        if ($preferred === '') {
             return (string) $name;
         }
-        $preferred = trim((string) preg_replace('/\s+/u', ' ', self::decode((string) get_user_meta($user_id, 'preferred_name', true))));
-        if ($preferred === '' || preg_match('/^\p{L}[\p{L}\p{M}\x{2019}\' .\-]{0,39}\z/u', $preferred) !== 1) {
-            return (string) $name;
-        }
-        $lower = function ($text) {
-            return function_exists('mb_strtolower') ? mb_strtolower($text, 'UTF-8') : strtolower($text);
-        };
         $first = trim((string) get_user_meta($user_id, 'first_name', true));
         $last = trim((string) get_user_meta($user_id, 'last_name', true));
-        if ($first !== '' && $lower($preferred) === $lower($first)) {
+        if ($first !== '' && self::lower($preferred) === self::lower($first)) {
             return (string) $name;
         }
         if ($last === '') {
             return $preferred;
         }
         // Already their whole name (Aggie Cirillo): as typed.
-        $tail = ' ' . $lower($last);
-        if (substr(' ' . $lower($preferred), -strlen($tail)) === $tail) {
+        $tail = ' ' . self::lower($last);
+        if (substr(' ' . self::lower($preferred), -strlen($tail)) === $tail) {
             return $preferred;
         }
         return $preferred . ' ' . $last;
