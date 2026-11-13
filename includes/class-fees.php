@@ -3332,17 +3332,18 @@ class TeamOversight_Fees {
             <?php if (class_exists('TeamOversight_Fee_Breakdown')): ?>
                 <?php // 1.89.0: Where your fees go on the Player Checklist, the committee's percentages (class-fee-breakdown.php). ?>
                 <?php TeamOversight_Fee_Breakdown::render_admin_box($selected_season); ?>
-            <?php endif;
-            // 1.95.0, club decision 13 Nov 2026: team fee columns (class-fee-columns.php). The box prints
-            // nothing before 2027, and this block itself prints nothing, so earlier seasons' page is unchanged.
-            if (class_exists('TeamOversight_Fee_Columns')) {
-                TeamOversight_Fee_Columns::render_admin_box($selected_season);
-            } ?>
+            <?php endif; ?>
 
             <?php if (class_exists('TeamOversight_Transfer_Limits')): ?>
                 <?php // 1.91.0: club transfer limits, this season's counts and exceptions (class-transfer-limits.php; 2027 on). ?>
                 <?php TeamOversight_Transfer_Limits::render_admin_box($selected_season); ?>
-            <?php endif; ?>
+            <?php endif;
+            // 1.95.0, club decision 13 Nov 2026: team fee columns (class-fee-columns.php), straight above the
+            // Fee Matrix they add a column to (1.95.1). The box prints nothing before 2027, and this block
+            // itself prints nothing, so earlier seasons' page is unchanged.
+            if (class_exists('TeamOversight_Fee_Columns')) {
+                TeamOversight_Fee_Columns::render_admin_box($selected_season);
+            } ?>
 
             <!-- Fee matrix: full width (it's a grid), then teams -->
             <div style="display: flex; flex-wrap: wrap; gap: 30px; align-items: flex-start;">
