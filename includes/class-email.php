@@ -131,6 +131,44 @@ class TeamOversight_Email {
         return $first !== '' ? $first : (string) $name;
     }
 
+    /**
+     * The name someone signs an email with (1.94.1, club request 13 Nov 2026):
+     * their preferred name in place of their first name, followed by their
+     * last name, when their account has a preferred name (the profile's
+     * preferred_name); else $name as given (the display name). A preferred
+     * name that already ends with their last name is used as typed, and one
+     * that is their first name changes nothing. A preferred name that isn't a
+     * plain name (an address, a number, brackets, over 40 characters) is
+     * ignored. One rule for every sign-off; greetings stay first_name().
+     */
+    public static function sign_off_name($user_id, $name) {
+        $user_id = intval($user_id);
+        if ($user_id <= 0) {
+            return (string) $name;
+        }
+        $preferred = trim((string) preg_replace('/\s+/u', ' ', self::decode((string) get_user_meta($user_id, 'preferred_name', true))));
+        if ($preferred === '' || preg_match('/^\p{L}[\p{L}\p{M}\x{2019}\' .\-]{0,39}\z/u', $preferred) !== 1) {
+            return (string) $name;
+        }
+        $lower = function ($text) {
+            return function_exists('mb_strtolower') ? mb_strtolower($text, 'UTF-8') : strtolower($text);
+        };
+        $first = trim((string) get_user_meta($user_id, 'first_name', true));
+        $last = trim((string) get_user_meta($user_id, 'last_name', true));
+        if ($first !== '' && $lower($preferred) === $lower($first)) {
+            return (string) $name;
+        }
+        if ($last === '') {
+            return $preferred;
+        }
+        // Already their whole name (Aggie Cirillo): as typed.
+        $tail = ' ' . $lower($last);
+        if (substr(' ' . $lower($preferred), -strlen($tail)) === $tail) {
+            return $preferred;
+        }
+        return $preferred . ' ' . $last;
+    }
+
     /** Fill placeholders in plain text (a subject, a heading): no HTML, one line. */
     public static function fill($text, $vars) {
         $filled = strtr(self::decode($text), self::plain_vars($vars));

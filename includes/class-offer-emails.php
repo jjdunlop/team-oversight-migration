@@ -1674,7 +1674,8 @@ class TeamOversight_Offer_Emails {
             'deposit_due' => $offer->deposit_due ? (string) $offer->deposit_due : '',
             'paid_cents' => $paid,
             'left_cents' => $left,
-            'coach_name' => (string) $contacts['coach_name'],
+            // 1.94.1: the coach signs with their preferred name when their account has one.
+            'coach_name' => $contacts['primary'] ? TeamOversight_Email::sign_off_name($contacts['primary']['user_id'], (string) $contacts['coach_name']) : (string) $contacts['coach_name'],
             'coach_email' => $contacts['primary'] ? (string) $contacts['primary']['email'] : '',
             'link' => $coach_side ? self::coach_portal_url() : TeamOversight_Offers::offer_url($offer),
             'training_url' => TeamOversight_Offers::training_url($offer->season),
@@ -1922,7 +1923,7 @@ class TeamOversight_Offer_Emails {
             'placed' => !empty($notice['placed']),
             'link' => isset($notice['edit_url']) ? (string) $notice['edit_url'] : TeamOversight_Trial_Emails::get_form_url(),
             // The sign-off: the Reply-To coach by name; '' (signed by the team's coaching team) when no coach is on file.
-            'coach_name' => $contacts['primary'] ? (string) $contacts['primary']['name'] : '',
+            'coach_name' => $contacts['primary'] ? TeamOversight_Email::sign_off_name($contacts['primary']['user_id'], (string) $contacts['primary']['name']) : '',
         ));
         list($subject, $email) = self::render_wording('not_selected', self::not_selected_vars($facts), array('next_steps' => self::build_next_steps($notice)));
         $events = self::get_events();
