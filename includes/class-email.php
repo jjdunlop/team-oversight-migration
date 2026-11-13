@@ -157,7 +157,7 @@ class TeamOversight_Email {
 
     /**
      * The preferred name as a given name, for a greeting: as typed, without
-     * their last name when they typed that too (Aggie Cirillo greets as
+     * their last name when they typed that too (Aggie Brook greets as
      * Aggie; Mary Jane stays Mary Jane). '' with no usable preferred name.
      */
     public static function preferred_given($user_id) {
@@ -205,7 +205,7 @@ class TeamOversight_Email {
         if ($last === '') {
             return $preferred;
         }
-        // Already their whole name (Aggie Cirillo): as typed.
+        // Already their whole name (Aggie Brook): as typed.
         $tail = ' ' . self::lower($last);
         if (substr(' ' . self::lower($preferred), -strlen($tail)) === $tail) {
             return $preferred;
