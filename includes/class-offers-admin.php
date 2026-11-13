@@ -1094,6 +1094,7 @@ class TeamOversight_Offers_Admin {
             $quote = TeamOversight_Offers::compute_quote($offer->user_id, $season, $offer->team, $offer->role, array('offer' => $offer, 'mode' => 'send', 'fees' => $fees));
             // 1.88.0: the limit of the column the quote is on (a covered player's is the supporter column).
             // 1.95.0: a playing member on a team with a team fee column is on that column (the engine's one rule, also when the quote has none).
+            // 1.96.0, club decision 13 Nov 2026: a Training only place there is on the column's Training only role (the key plus TRAINING_SUFFIX).
             $column = isset($quote['column']) && $quote['column'] !== '' ? $quote['column'] : TeamOversight_Fees::column_for_place($offer->role, $offer->team, $season);
             $limit = $quote['fee_class'] !== '' ? TeamOversight_Fees::get_limit($quote['fee_class'], $column, $season) : null;
             $block = '';
@@ -1340,6 +1341,7 @@ class TeamOversight_Offers_Admin {
         if ($q['fee_class'] !== '') {
             // 1.95.0, club decision 13 Nov 2026: a quote on a team fee column names it, "Specialist coach limit $X" (this page
             // is for administrators only; the column's name never reaches a coach or a player). Every other row reads as before.
+            // 1.96.0: a quote on the column's Training only cell reads "Specialist coach training only limit $X" (column_label()).
             $limit_words = $cover ? 'Supporter limit ' : 'Limit ';
             $no_limit = 'No limit set';
             if (!$cover && isset($q['column']) && class_exists('TeamOversight_Fee_Columns') && TeamOversight_Fee_Columns::is_key((string) $q['column'])) {

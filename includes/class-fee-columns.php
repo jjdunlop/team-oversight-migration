@@ -6,42 +6,56 @@ if (!defined('ABSPATH')) {
 
 /**
  * Team fee columns (1.95.0, club decision 13 Nov 2026): a named set of
- * playing fees for a team whose playing members pay a different fee (a
- * team with a specialist coach, say). The committee names a column on VVL
- * Oversight -> Configuration, types its fee and upper limit per fee class
- * in the Fee Matrix, and ticks the teams whose playing members are charged
- * at it. Training only, supporter, coach, assistant coach and team manager
- * places on those teams are charged as on any other team, and a person
- * whose playing fee the club covers (TeamOversight_Fee_Cover) still pays
- * the supporter column.
+ * fees for a team whose players pay a different fee (a team with a
+ * specialist coach, say). The committee names a column on VVL Oversight ->
+ * Configuration, types its amounts per fee class in the Fee Matrix, and
+ * ticks the teams charged at it. Supporter, coach, assistant coach and
+ * team manager places on those teams are charged as on any other team, and
+ * a person whose playing fee the club covers (TeamOversight_Fee_Cover)
+ * still pays the supporter column.
+ *
+ * 1.96.0, club decision 13 Nov 2026: a column is a PAIR of amounts, one
+ * for the team's playing members and one for its Training only players,
+ * each with a fee and an upper limit per fee class (a double column in the
+ * Fee Matrix). A place whose raw role is playing_member is charged at the
+ * playing amount, one whose raw role is training_only at the Training only
+ * amount (COLUMN_ROLES, role_key()). Every column has both; there is no
+ * switch per column.
  *
  * Fee-timeline seasons only (2027 on: applies()). For an earlier season
  * every reader returns the empty answer and nothing is drawn.
  *
  * The amounts are ordinary matrix data: fee_matrix and fee_matrix_limits
- * rows of the season whose team_role is the column's key. A blank cell has
- * no amount: it never falls back to the Playing member amount. The name is
- * admin-only. Players and coaches see amounts, never the name.
+ * rows of the season. The playing amount's team_role is the column's key
+ * (as stored by 1.95.x, so nothing was migrated); the Training only
+ * amount's is the key plus TRAINING_SUFFIX (col_1_to). A blank cell has no
+ * amount: it never falls back to the Playing member or Training only
+ * amount. The name is admin-only. Players and coaches see amounts, never
+ * the name, and a key (either form) is never printed.
  *
  * One option, not autoloaded (OPTION), keyed by four-digit season: columns
  * (key => label and retired; insertion order is display order) and teams
  * (team code => key). A key is KEY_PREFIX plus a number (col_1, col_2 ...),
  * never the name: a key sits in a priced bucket's charged_as and in a
  * quote's column, and the name must not reach a player or a coach through
- * one. It never changes on a rename and is never reused (a retired column
- * keeps its entry and its matrix rows). Not team meta: update_team(),
- * reset_default_teams() and seed_season_teams() rewrite that wholesale. No
- * account id is stored, so there is nothing for the account merge. Nothing
- * here is copied into another season.
+ * one. A stored key never ends with TRAINING_SUFFIX (next_key() never makes
+ * one, and normalise() drops one). It never changes on a rename and is
+ * never reused (a retired column keeps its entry and its matrix rows). Not
+ * team meta: update_team(), reset_default_teams() and seed_season_teams()
+ * rewrite that wholesale. No account id is stored, so there is nothing for
+ * the account merge. Nothing here is copied into another season.
  *
  * Readers: applies(), get(), live(), is_key(), is_live(), label(), teams(),
  * team_column(), teams_of(), in_use(), with a request cache dropped by
- * flush_cache() (also on murvc_offers_cache_flushed). The one writer:
- * save() (a team's column can only change before its offers carry a quote;
- * after a team change in a released season the season is re-priced). The
- * admin box: render_admin_box() on Configuration, posting to admin-post
- * (handle_post(), process_post()) with Post/Redirect/Get. The engine's side
- * is TeamOversight_Fees::team_fee_column() and column_for_place().
+ * flush_cache() (also on murvc_offers_cache_flushed); is_live(), label()
+ * and teams_of() take either form of a key. The key helpers role_key(),
+ * base_key() and is_training_key() read nothing. The one writer: save() (a
+ * team's column can only change before its playing or Training only offers
+ * carry a quote; after a team change in a released season the season is
+ * re-priced). The admin box: render_admin_box() on Configuration, posting
+ * to admin-post (handle_post(), process_post()) with Post/Redirect/Get. The
+ * engine's side is TeamOversight_Fees::team_fee_column() and
+ * column_for_place().
  */
 class TeamOversight_Fee_Columns {
 
@@ -59,6 +73,14 @@ class TeamOversight_Fee_Columns {
 
     /** Every key starts with this; no team role does. */
     const KEY_PREFIX = 'col_';
+    /**
+     * 1.96.0, club decision 13 Nov 2026: the matrix team_role of a column's
+     * Training only amount is its key plus this (col_1_to); the key itself
+     * is the playing amount's. A stored key never ends with it.
+     */
+    const TRAINING_SUFFIX = '_to';
+    /** 1.96.0: the raw roles charged at a column, in the order the Fee Matrix shows them (playing, then Training only). */
+    const COLUMN_ROLES = array('playing_member', 'training_only');
     /** team_role is varchar(50) in fee_matrix and fee_matrix_limits. */
     const KEY_MAX = 50;
     /** The longest name a column can have, in characters. */
@@ -139,10 +161,64 @@ class TeamOversight_Fee_Columns {
         return is_string($value) && strpos($value, self::KEY_PREFIX) === 0;
     }
 
-    /** A key as stored: KEY_PREFIX and more, at most KEY_MAX characters, unchanged by sanitize_key(), no '|' and no ':'. */
+    /**
+     * A key as stored: KEY_PREFIX and more, at most KEY_MAX characters,
+     * unchanged by sanitize_key(), no '|' and no ':'. 1.96.0: and not ending
+     * with TRAINING_SUFFIX, which only the Training only amount's matrix role
+     * carries. (next_key() makes col_ and a number, so a key plus the suffix
+     * is far inside team_role's 50 characters.)
+     */
     public static function valid_key($key) {
         return self::is_key($key) && strlen($key) > strlen(self::KEY_PREFIX) && strlen($key) <= self::KEY_MAX
-            && sanitize_key($key) === $key && strpos($key, '|') === false && strpos($key, ':') === false;
+            && sanitize_key($key) === $key && strpos($key, '|') === false && strpos($key, ':') === false
+            && !self::ends_with_suffix($key);
+    }
+
+    /** Does a string end with TRAINING_SUFFIX (and hold more than it)? */
+    private static function ends_with_suffix($key) {
+        $length = strlen(self::TRAINING_SUFFIX);
+        return strlen($key) > $length && substr($key, -$length) === self::TRAINING_SUFFIX;
+    }
+
+    /**
+     * 1.96.0, club decision 13 Nov 2026: is this the matrix role of a
+     * column's Training only amount? A column key that ends with
+     * TRAINING_SUFFIX and holds a column key before it (col_1_to, never
+     * col_to). Says nothing about whether a season has the column.
+     */
+    public static function is_training_key($key) {
+        return self::is_key($key) && strlen($key) > strlen(self::KEY_PREFIX) + strlen(self::TRAINING_SUFFIX) && self::ends_with_suffix($key);
+    }
+
+    /**
+     * 1.96.0: the column key behind a matrix role: col_1_to gives col_1,
+     * col_1 gives col_1. Anything that isn't a column key gives ''.
+     */
+    public static function base_key($key) {
+        if (!self::is_key($key)) {
+            return '';
+        }
+        return self::is_training_key($key) ? substr($key, 0, -strlen(self::TRAINING_SUFFIX)) : $key;
+    }
+
+    /**
+     * 1.96.0: the matrix role a place of a raw role is charged at on a team
+     * charged at $column: the key itself for playing_member, the key plus
+     * TRAINING_SUFFIX for training_only, '' for any other role or an empty
+     * column. Reads nothing; never print what it returns.
+     */
+    public static function role_key($column, $role) {
+        $column = is_string($column) ? $column : '';
+        if ($column === '') {
+            return '';
+        }
+        if ($role === 'playing_member') {
+            return $column;
+        }
+        if ($role === 'training_only') {
+            return $column . self::TRAINING_SUFFIX;
+        }
+        return '';
     }
 
     // ------------------------------------------------------------------
@@ -164,8 +240,9 @@ class TeamOversight_Fee_Columns {
 
     /**
      * The structural reading of an entry: never refuses. A column needs a
-     * valid key and a name (trimmed); anything else is dropped. A teams
-     * entry naming a missing or retired column is dropped.
+     * valid key and a name (trimmed); anything else is dropped (1.96.0: so
+     * is a key ending with TRAINING_SUFFIX, valid_key()). A teams entry
+     * naming a missing or retired column is dropped.
      */
     public static function normalise($entry) {
         $out = self::empty_entry();
@@ -206,19 +283,31 @@ class TeamOversight_Fee_Columns {
         return $out;
     }
 
-    /** Is $key a live column of the season? */
+    /** Is $key a live column of the season? 1.96.0: true for its Training only form (col_1_to) too. */
     public static function is_live($key, $season) {
         if (!is_string($key)) {
             return false;
         }
+        $base = self::base_key($key);
+        if ($base === '') {
+            return false;
+        }
         $live = self::live($season);
-        return isset($live[$key]);
+        return isset($live[$base]);
     }
 
-    /** The committee's name for a column of the season (a retired one too), or ''. Admin-only text. */
+    /**
+     * The committee's name for a column of the season (a retired one too),
+     * or ''. Admin-only text. 1.96.0: the same name for the Training only
+     * form (the caller adds the role words).
+     */
     public static function label($key, $season) {
+        $base = is_string($key) ? self::base_key($key) : '';
+        if ($base === '') {
+            return '';
+        }
         $entry = self::get($season);
-        return (is_string($key) && isset($entry['columns'][$key])) ? $entry['columns'][$key]['label'] : '';
+        return isset($entry['columns'][$base]) ? $entry['columns'][$base]['label'] : '';
     }
 
     /**
@@ -243,7 +332,9 @@ class TeamOversight_Fee_Columns {
 
     /**
      * The column a team's playing members are charged at in the season (a
-     * key), or '' (the Playing member column). The stored tick decides, not
+     * key), or '' (the Playing member column). 1.96.0: its Training only
+     * players are charged at the same column's Training only amount
+     * (role_key()). The stored tick decides, not
      * teams(): pricing must not move because a team code was taken out of
      * Team Management (a stopped place still prices its stretch), so a team
      * with a column can't be deleted there either.
@@ -259,11 +350,12 @@ class TeamOversight_Fee_Columns {
         return md5((string) wp_json_encode($entry));
     }
 
-    /** The codes of the teams charged at a column in the season. */
+    /** The codes of the teams charged at a column in the season. 1.96.0: the same teams for its Training only form (col_1_to). */
     public static function teams_of($key, $season) {
+        $base = is_string($key) ? self::base_key($key) : '';
         $out = array();
         foreach (self::teams($season) as $code => $column) {
-            if ($column === $key) {
+            if ($base !== '' && $column === $base) {
                 $out[] = (string) $code;
             }
         }
@@ -316,14 +408,14 @@ class TeamOversight_Fee_Columns {
      * sanitize_text_field() after wp_unslash()); anything else is refused,
      * never cleaned or clipped. Everything is checked first and every
      * problem listed in errors, with nothing written. A team's column can
-     * only change while it has no live quoted playing offer
-     * (TeamOversight_Offers::quoted_playing_offers()). Inside an option-wide
-     * named lock the stored row is read straight from the database
-     * (TeamOversight_Program_Setup::read_option_fresh()) and must still be
-     * what was checked; then compare-before-write, write (autoload off),
-     * read back. One season_config log line per change. After a team change
-     * in a season whose fees are released, every invoice of the season is
-     * re-priced (TeamOversight_Fees::reprice_season()). Returns array(ok,
+     * only change while it has no live quoted playing or (1.96.0) Training
+     * only offer (TeamOversight_Offers::quoted_playing_offers()). Inside an
+     * option-wide named lock the stored row is read straight from the
+     * database (TeamOversight_Program_Setup::read_option_fresh()) and must
+     * still be what was checked; then compare-before-write, write (autoload
+     * off), read back. One season_config log line per change. After a team
+     * change in a season whose fees are released, every invoice of the
+     * season is re-priced (TeamOversight_Fees::reprice_season()). Returns array(ok,
      * errors (plain sentences), changed, notes (plain sentences for the
      * notice: what changed and what the re-price did)).
      */
@@ -588,7 +680,8 @@ class TeamOversight_Fee_Columns {
             }
         }
         foreach ($team_changes as $code => $pair) {
-            $changes[] = $season . ' ' . $code . ' playing members charged at ' . self::column_words($pair[1], $live_after) . ' (was ' . self::column_words($pair[0], $live_before) . ')';
+            // 1.96.0: the column holds a Training only amount too, so the line names both.
+            $changes[] = $season . ' ' . $code . ' playing members and training only players charged at ' . self::column_words($pair[1], $live_after) . ' (was ' . self::column_words($pair[0], $live_before) . ')';
         }
         foreach ($retire as $key => $yes) {
             $changes[] = $season . ' team fee column retired: ' . $live_before[$key];
@@ -599,15 +692,15 @@ class TeamOversight_Fee_Columns {
         return $out;
     }
 
-    /** The refusal for a team whose column would change while it has quoted playing offers. */
+    /** The refusal for a team whose column would change while it has quoted playing or (1.96.0) Training only offers. */
     private static function quoted_refusal($code, $quoted, array $config) {
         return self::team_words($code, $config) . ' has ' . intval($quoted) . ' offer' . (intval($quoted) === 1 ? '' : 's') . ' already sent with a quote. A team\'s fee column can only change before its offers are sent.';
     }
 
-    /** "Playing member" for '', else "the NAME column" (the name as it is after the save, or before it for the "was"). */
+    /** "the standard columns" for '', else "the NAME column" (the name as it is after the save, or before it for the "was"). */
     private static function column_words($key, array $names) {
         if ($key === '') {
-            return 'Playing member';
+            return 'the standard columns';
         }
         $name = isset($names[$key]) ? (string) $names[$key] : 'retired';
         // TeamOversight_Fees::column_phrase()'s rule, kept here so the class loads without it.
@@ -621,9 +714,11 @@ class TeamOversight_Fee_Columns {
     }
 
     /**
-     * How many of the season's offers for the team are live playing offers
-     * carrying a quote: TeamOversight_Offers::quoted_playing_offers(), the
-     * only reader of team_offers here. An offers class without it counts 0.
+     * How many of the season's offers for the team are live playing or
+     * Training only offers carrying a quote (1.96.0, club decision 13 Nov
+     * 2026: a Training only place is charged at the column too):
+     * TeamOversight_Offers::quoted_playing_offers(), the only reader of
+     * team_offers here. An offers class without it counts 0.
      */
     private static function quoted_offers($season, $team) {
         if (!class_exists('TeamOversight_Offers') || !method_exists('TeamOversight_Offers', 'quoted_playing_offers')) {
@@ -670,7 +765,9 @@ class TeamOversight_Fee_Columns {
     /**
      * A new key: KEY_PREFIX plus the lowest number from 1 that is none of
      * $taken (key => true). Never made from the name, so a key printed by
-     * mistake tells a player or a coach nothing.
+     * mistake tells a player or a coach nothing, and never ending with
+     * TRAINING_SUFFIX (1.96.0: a column's Training only role is its key
+     * plus the suffix; taken_keys() lists such roles too, harmlessly).
      */
     public static function next_key(array $taken) {
         $n = 1;
@@ -958,7 +1055,7 @@ class TeamOversight_Fee_Columns {
         ?>
         <div id="team-fee-columns" style="background: #fff; border: 1px solid #ccd0d4; padding: 15px 20px; margin-bottom: 20px;">
             <h2 style="margin-top: 0;">Team fee columns</h2>
-            <p class="description">A team fee column is an extra Playing member column in the <?php echo esc_html($season); ?> Fee Matrix: playing members of the teams ticked under it are charged at it, and their training only, coach, assistant coach and team manager places are charged as usual. Type its fees and upper limits in the Fee Matrix below; a blank cell has no amount and never falls back to the Playing member amount. Players and coaches never see a column's name, and a team's column can only change before its offers are sent.</p>
+            <p class="description">A team fee column adds two columns to the <?php echo esc_html($season); ?> Fee Matrix: one for playing members and one for Training only players. Playing members of the teams ticked under it are charged at its playing amount. Training only players of those teams are charged at its Training only amount. Coaches, assistant coaches and team managers on those teams are charged as usual. Type the fees and upper limits in the Fee Matrix below. A blank cell has no amount: it never falls back to the Playing member or Training only amount. Players and coaches never see a column's name. A team's column can only change before its offers are sent.</p>
             <?php if ($flash !== null): ?>
                 <?php $type = empty($flash['ok']) ? 'error' : (!empty($flash['changed']) ? 'success' : 'info'); ?>
                 <div class="notice notice-<?php echo esc_attr($type); ?> inline">
@@ -1000,7 +1097,7 @@ class TeamOversight_Fee_Columns {
                                             No <?php echo esc_html($season); ?> teams yet.
                                         <?php else: ?>
                                             <fieldset>
-                                                <legend class="screen-reader-text"><?php echo esc_html('Teams whose playing members are charged at ' . $label); ?></legend>
+                                                <legend class="screen-reader-text"><?php echo esc_html('Teams whose playing members and training only players are charged at ' . $label); ?></legend>
                                                 <?php foreach ($config as $code => $team): ?>
                                                     <?php $code = (string) $code; ?>
                                                     <?php $name = (is_array($team) && isset($team['name']) && is_scalar($team['name'])) ? (string) $team['name'] : $code; ?>

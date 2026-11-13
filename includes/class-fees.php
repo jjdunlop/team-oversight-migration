@@ -538,11 +538,15 @@ class TeamOversight_Fees {
     //     a team fee column (TeamOversight_Fee_Columns: a named column of
     //     the season's matrix, e.g. "Specialist coach"). A playing member
     //     place on that team is charged at that column of its class, for the
-    //     whole season (column_for_place() is the one rule). The fee cover
-    //     still wins (supporter). Training only, supporter, coach, assistant
-    //     coach and team manager places on that team are charged as on any
-    //     other team, and a blank column cell never falls back to the
-    //     playing member amount. Seasons before 2027 are untouched.
+    //     whole season (column_for_place() is the one rule). 1.96.0, club
+    //     decision 13 Nov 2026: the column is a pair of amounts, and a
+    //     Training only place on that team is charged at its Training only
+    //     amount (matrix role: the key plus TRAINING_SUFFIX). The raw role
+    //     decides, so a team manager is not caught. The fee cover still wins
+    //     (supporter). Supporter, coach, assistant coach and team manager
+    //     places on that team are charged as on any other team, and a blank
+    //     column cell never falls back to the playing member or training
+    //     only amount. Seasons before 2027 are untouched.
     //  2. The fee is the HIGHEST bucket. Buckets never add up.
     //  3. Pro-rata: the fee-segment history records the buckets for each
     //     stretch of the season; each stretch is charged for its share of
@@ -578,9 +582,14 @@ class TeamOversight_Fees {
     // (TeamOversight_Fee_Columns); the playing member places on those teams
     // are charged at it. Its amounts are fee_matrix / fee_matrix_limits
     // rows whose team_role is the column's key, so rate() and the limits
-    // read them unchanged. The name is admin-only: column_label() prints it
-    // on admin screens, never to a player or a coach. A season before 2027,
-    // and every team without a column, prices exactly as before.
+    // read them unchanged. 1.96.0, club decision 13 Nov 2026: a column is a
+    // pair, and the Training only places on those teams are charged at its
+    // Training only amount, whose team_role is the key plus
+    // TeamOversight_Fee_Columns::TRAINING_SUFFIX (role_key()). The name is
+    // admin-only: column_label() prints it on admin screens, never to a
+    // player or a coach, and a key (either form) is never printed. A season
+    // before 2027, and every team without a column, prices exactly as
+    // before.
     // ------------------------------------------------------------------
 
     /** The team fee column a team's playing members are charged at in a season (a key), or '' (the Playing member column). */
@@ -594,10 +603,13 @@ class TeamOversight_Fees {
     /**
      * The ONE rule for the matrix column a place is charged at: 'supporter'
      * for a covered person's playing or Training Only place
-     * (TeamOversight_Fee_Cover::COVERED_ROLES), else the team's fee column
-     * for a place whose RAW role is playing_member (a team manager, charged
-     * as a playing member, is not caught), else charged_as($role). The
-     * engine (timeline_stretches() and price_buckets()) and the offers
+     * (TeamOversight_Fee_Cover::COVERED_ROLES), else, on a team with a team
+     * fee column, the column's role for a place whose RAW role is one of
+     * TeamOversight_Fee_Columns::COLUMN_ROLES (1.96.0, club decision 13 Nov
+     * 2026: the key for playing_member, the key plus TRAINING_SUFFIX for
+     * training_only, role_key(); a team manager, charged as a playing
+     * member, is not caught), else charged_as($role). The engine
+     * (timeline_stretches() and price_buckets()) and the offers
      * (fee_cell(), compute_quote()) follow it.
      */
     public static function column_for_place($role, $team, $season, $covered = false) {
@@ -605,10 +617,10 @@ class TeamOversight_Fees {
         if ($covered && class_exists('TeamOversight_Fee_Cover') && in_array($role, TeamOversight_Fee_Cover::COVERED_ROLES, true)) {
             return 'supporter';
         }
-        if ($role === 'playing_member') {
+        if (class_exists('TeamOversight_Fee_Columns') && in_array($role, TeamOversight_Fee_Columns::COLUMN_ROLES, true)) {
             $column = self::team_fee_column($team, $season);
             if ($column !== '') {
-                return $column;
+                return TeamOversight_Fee_Columns::role_key($column, $role);
             }
         }
         return self::charged_as($role);
@@ -618,28 +630,52 @@ class TeamOversight_Fees {
      * A matrix column for an admin screen: a team fee column's name as the
      * committee typed it (never lowercased; 'Team fee column' when the
      * season is null or the name can't be found), anything else exactly
-     * role_label(). Admin-only: never print it to a player or a coach.
+     * role_label(). 1.96.0: the Training only form (col_1_to) is the name
+     * followed by " training only" ("Specialist coach training only", or
+     * "Team fee column training only"). Admin-only: never print it to a
+     * player or a coach.
      */
     public static function column_label($column, $season = null) {
         if (self::is_column_key($column)) {
             $name = $season === null ? '' : TeamOversight_Fee_Columns::label((string) $column, $season);
-            return $name !== '' ? $name : 'Team fee column';
+            return ($name !== '' ? $name : 'Team fee column') . (TeamOversight_Fee_Columns::is_training_key((string) $column) ? ' training only' : '');
         }
         return self::role_label($column);
     }
 
-    /** column_label() as a phrase: "Specialist coach column" (no second "column" when the name already ends with it). */
+    /**
+     * column_label() as a phrase: "Specialist coach column" (no second
+     * "column" when the name already ends with it). 1.96.0: the same phrase
+     * for the Training only form, because the line it sits in already says
+     * the role ("training only, Specialist coach column").
+     */
     public static function column_phrase($column, $season = null) {
-        $label = self::column_label($column, $season);
+        $label = self::column_label(self::is_column_key($column) ? TeamOversight_Fee_Columns::base_key((string) $column) : $column, $season);
         return preg_match('/\bcolumn$/i', $label) === 1 ? $label : $label . ' column';
     }
 
-    /** Is this matrix role a team fee column's key? */
+    /**
+     * 1.96.0, club decision 13 Nov 2026: the small grey line under a team
+     * fee column's heading (the Fee Matrix and How it works): "Playing
+     * members of: CODES" for the playing form, "Training only on: CODES"
+     * for the Training only form, or "No team uses this column yet". Team
+     * codes only; admin-only.
+     */
+    public static function column_teams_line($column, $season) {
+        $column = is_scalar($column) ? (string) $column : '';
+        $teams = class_exists('TeamOversight_Fee_Columns') ? TeamOversight_Fee_Columns::teams_of($column, $season) : array();
+        if (empty($teams)) {
+            return 'No team uses this column yet';
+        }
+        return (TeamOversight_Fee_Columns::is_training_key($column) ? 'Training only on: ' : 'Playing members of: ') . implode(', ', $teams);
+    }
+
+    /** Is this matrix role a team fee column's key? 1.96.0: either form (col_1, or col_1_to for its Training only amount). */
     private static function is_column_key($role) {
         return class_exists('TeamOversight_Fee_Columns') && TeamOversight_Fee_Columns::is_key(is_scalar($role) ? (string) $role : '');
     }
 
-    /** Is this matrix role a live team fee column of the season? */
+    /** Is this matrix role a live team fee column of the season? 1.96.0: either form (TeamOversight_Fee_Columns::is_live()). */
     private static function column_is_live($role, $season) {
         return class_exists('TeamOversight_Fee_Columns') && TeamOversight_Fee_Columns::is_live(is_scalar($role) ? (string) $role : '', $season);
     }
@@ -949,7 +985,7 @@ class TeamOversight_Fees {
         return implode(', ', array_slice($cells, 0, $max)) . ($more > 0 ? ' and ' . $more . ' more' : '');
     }
 
-    /** 'JPL / training only' (1.95.0: a team fee column's cell 'JPL / Specialist coach', named from $season). */
+    /** 'JPL / training only' (1.95.0: a team fee column's cell 'JPL / Specialist coach', named from $season; 1.96.0: its Training only cell 'JPL / Specialist coach training only'). */
     private static function cell_label($class, $role, $season = null) {
         return $class . ' / ' . self::cell_role_words($role, $season);
     }
@@ -1636,8 +1672,10 @@ class TeamOversight_Fees {
      * 'fee_cover' (1.88.0: a playing or Training Only place of a person the
      * club covers) is charged at the supporter column of its class. A
      * bucket it gave a 'fee_column' (1.95.0: a playing member place on a
-     * team with a team fee column) is charged at that column of its class;
-     * a blank cell there is blank (never the playing member amount).
+     * team with a team fee column; 1.96.0: a Training only place there too,
+     * with the column's Training only role) is charged at that column of
+     * its class; a blank cell there is blank (never the playing member or
+     * training only amount).
      */
     public function price_buckets($buckets, $season, $source = self::RATE_FEE) {
         $priced = array();
@@ -1833,12 +1871,16 @@ class TeamOversight_Fees {
      * is playing_member, on a team with a team fee column this season
      * (team_fee_column(), looked up once per team per call), gets
      * 'fee_column' => the column's key, which price_buckets() charges at
-     * (column_for_place()'s rule). No other bucket gets the key, so every
-     * other breakdown is byte for byte what it was; the column is
-     * season-wide, so the merge below still compares like with like.
+     * (column_for_place()'s rule). 1.96.0, club decision 13 Nov 2026: so
+     * does one whose RAW role is training_only, with the column's Training
+     * only role (TeamOversight_Fee_Columns::role_key(): the key plus
+     * TRAINING_SUFFIX). No other bucket gets the key, so every other
+     * breakdown is byte for byte what it was; the column is season-wide, so
+     * the merge below still compares like with like.
      */
     private function timeline_stretches($email, $season, $rows, $fixed_class = null, $fee_cover = null) {
         $covered_roles = (is_array($fee_cover) && class_exists('TeamOversight_Fee_Cover')) ? TeamOversight_Fee_Cover::COVERED_ROLES : array();
+        $column_roles = class_exists('TeamOversight_Fee_Columns') ? TeamOversight_Fee_Columns::COLUMN_ROLES : array();
         $team_columns = array();
         $places = array();
         $points = array();
@@ -1904,12 +1946,12 @@ class TeamOversight_Fees {
                     if ($covered_roles && in_array($place['role'], $covered_roles, true)) {
                         $bucket['fee_cover'] = true;
                     }
-                    if (empty($bucket['fee_cover']) && $place['role'] === 'playing_member') {
+                    if (empty($bucket['fee_cover']) && in_array($place['role'], $column_roles, true)) {
                         if (!array_key_exists($place['team'], $team_columns)) {
                             $team_columns[$place['team']] = self::team_fee_column($place['team'], $season);
                         }
                         if ($team_columns[$place['team']] !== '') {
-                            $bucket['fee_column'] = $team_columns[$place['team']];
+                            $bucket['fee_column'] = TeamOversight_Fee_Columns::role_key($team_columns[$place['team']], $place['role']);
                         }
                     }
                     $buckets[$place['team'] . '|' . $place['role']] = $bucket;
@@ -2036,7 +2078,9 @@ class TeamOversight_Fees {
      * from the invoiced amount ($manual: the fee was set with Edit Fee, so
      * re-pricing keeps it and only Use calculated fee applies this). A
      * bucket charged at a team fee column (1.95.0) reads "(charged as
-     * playing member, Specialist coach column)", the name from $season:
+     * playing member, Specialist coach column)", and (1.96.0) a Training
+     * only one "(charged as training only, Specialist coach column)"
+     * (column_phrase() is the same for both forms), the name from $season:
      * Payment Management is for administrators only.
      */
     public function render_fee_breakdown($breakdown, $invoice_amount = null, $season = null, $manual = false) {
@@ -2331,7 +2375,9 @@ class TeamOversight_Fees {
      * unpriced_cells() in words: "supporter fee for Other Student", two or
      * more joined with "and" (cells_words() is the JPL/YSL step's own).
      * 1.95.0: a team fee column's cell reads "Specialist coach fee for Full
-     * Adult", named from $season (null: "Team fee column fee for ...").
+     * Adult", named from $season (null: "Team fee column fee for ..."), and
+     * (1.96.0) its Training only cell "Specialist coach training only fee
+     * for Full Adult" (column_label()).
      */
     public static function unpriced_words(array $cells, $season = null) {
         $words = array();
@@ -2689,10 +2735,12 @@ class TeamOversight_Fees {
      * override does), a blank fee input also clears that fee (back to
      * "unknown"), so a fee filled in by a copy can be taken back. Nothing is
      * refused, so a save is never half applied. A team fee column's cell
-     * (1.95.0) is saved like any other while the column is live in the
-     * season; a column the season no longer has (or any column before 2027)
-     * is skipped, and the answer warns and reloads. Log lines and warnings
-     * name a column's cell by the column's name (column_label()).
+     * (1.95.0; 1.96.0: its playing or its Training only cell) is saved like
+     * any other while the column is live in the season; a column the season
+     * no longer has (or any column before 2027) is skipped, and the answer
+     * warns and reloads. Log lines and warnings name a column's cell by the
+     * column's name (column_label(): "Specialist coach training only" for
+     * the Training only cell).
      */
     public function save_fee_matrix() {
         if (!isset($_POST['fee_nonce']) || !wp_verify_nonce($_POST['fee_nonce'], 'save_fee_matrix')) {
@@ -2752,11 +2800,13 @@ class TeamOversight_Fees {
         // 1.95.0: a team fee column's cell is saved only while the column is
         // live in this season (never before 2027). A page drawn before it was
         // retired posts it anyway: skipped, never saved, and the page is
-        // reloaded. Every other role is saved exactly as before.
+        // reloaded. Every other role is saved exactly as before. 1.96.0, club
+        // decision 13 Nov 2026: the Training only form (col_1_to) is judged
+        // by its column (base_key()), so it is saved while the column is live.
         $stale_columns = 0;
         $live_columns = ($timeline && class_exists('TeamOversight_Fee_Columns')) ? TeamOversight_Fee_Columns::live($season) : array();
         $is_stale_column = function ($role) use ($live_columns) {
-            return self::is_column_key($role) && !isset($live_columns[(string) $role]);
+            return self::is_column_key($role) && !isset($live_columns[TeamOversight_Fee_Columns::base_key((string) $role)]);
         };
 
         // Update fees for the specific season only
@@ -3508,7 +3558,7 @@ class TeamOversight_Fees {
                     <style>
                         .fee-grid th, .fee-grid td { white-space: nowrap; vertical-align: middle; }
                         .fee-grid .fee-cell { display: inline-flex; align-items: center; gap: 2px; }
-                        .fee-grid input[type=number] { width: 84px; text-align: right; }
+                        .fee-grid input[type=number] { width: 104px; text-align: right; }
                         .fee-grid .fee-cell-name { display: inline-block; width: 74px; font-size: 11px; color: #646970; text-transform: uppercase; letter-spacing: .03em; }
                         .fee-grid .fee-cell-limit { margin-top: 4px; }
                     </style>
@@ -4344,10 +4394,14 @@ class TeamOversight_Fees {
      * amount yet). Every season shows the standard rows and columns, so a
      * class missing from the matrix can still be filled in.
      *
-     * 1.95.0: a season with live team fee columns (2027 on) shows them
-     * right after Playing member (roles holds their keys), and the result
-     * gains 'columns' (key => the committee's name, admin-only). A season
-     * without one returns exactly what it did, with no 'columns' key.
+     * 1.95.0: a season with live team fee columns (2027 on) shows them, and
+     * the result gains 'columns' (matrix role => column_label(), admin-only).
+     * A season without one returns exactly what it did, with no 'columns'
+     * key. 1.96.0, club decision 13 Nov 2026: the team fee columns go on the
+     * right. roles is playing_member, training_only, supporter, then for
+     * each live column in display order its key and its Training only role
+     * (the key plus TRAINING_SUFFIX), and 'columns' maps both forms
+     * ("Specialist coach", "Specialist coach training only").
      */
     public function get_fee_grid($season) {
         $cells = array();
@@ -4366,37 +4420,39 @@ class TeamOversight_Fees {
         // Always exactly the paying columns; old coach/manager amounts in the
         // table are no longer used and aren't shown.
         $roles = self::standard_fee_roles();
-        // 1.95.0: plus the season's live team fee columns after Playing
-        // member (a retired column's rows are kept but not shown).
+        // 1.95.0: plus the season's live team fee columns (a retired
+        // column's rows are kept but not shown). 1.96.0: on the right, each
+        // as a pair: the playing amount, then the Training only amount.
         $columns = class_exists('TeamOversight_Fee_Columns') ? TeamOversight_Fee_Columns::live($season) : array();
         if (empty($columns)) {
             return array('classes' => $classes, 'roles' => $roles, 'cells' => $cells);
         }
-        $with_columns = array();
-        foreach ($roles as $role) {
-            $with_columns[] = $role;
-            if ($role === 'playing_member') {
-                foreach (array_keys($columns) as $key) {
-                    $with_columns[] = (string) $key;
-                }
+        $with_columns = array_values($roles);
+        $labels = array();
+        foreach (array_keys($columns) as $key) {
+            foreach (TeamOversight_Fee_Columns::COLUMN_ROLES as $column_role) {
+                $role_key = TeamOversight_Fee_Columns::role_key((string) $key, $column_role);
+                $with_columns[] = $role_key;
+                $labels[$role_key] = self::column_label($role_key, $season);
             }
         }
-        return array('classes' => $classes, 'roles' => $with_columns, 'cells' => $cells, 'columns' => $columns);
+        return array('classes' => $classes, 'roles' => $with_columns, 'cells' => $cells, 'columns' => $labels);
     }
 
     /**
      * A Fee Matrix column heading (escaped HTML): the role as always, or
      * (1.95.0) a team fee column's name with a small grey line under it
-     * naming the teams whose playing members are charged at it.
+     * naming the teams charged at it. 1.96.0: both forms are headed by the
+     * column's name; the line says which amount it is (column_teams_line():
+     * "Playing members of: CODES" or "Training only on: CODES").
      */
     private static function grid_heading($role, array $grid, $season) {
         if (!isset($grid['columns'][$role])) {
             return esc_html(ucfirst(str_replace('_', ' ', $role)));
         }
-        $teams = class_exists('TeamOversight_Fee_Columns') ? TeamOversight_Fee_Columns::teams_of((string) $role, $season) : array();
-        return esc_html($grid['columns'][$role])
+        return esc_html(self::column_label(TeamOversight_Fee_Columns::base_key((string) $role), $season))
             . '<br><span style="font-size: 11px; font-weight: normal; color: #646970;">'
-            . esc_html(empty($teams) ? 'No team uses this column yet' : 'Playing members of: ' . implode(', ', $teams))
+            . esc_html(self::column_teams_line($role, $season))
             . '</span>';
     }
 
@@ -4428,10 +4484,11 @@ class TeamOversight_Fees {
      * last_copy['skipped']; every other copy is exactly as before.
      *
      * Team fee columns (1.95.0): a column belongs to one season, so a fee
-     * or limit row whose role is a column key is never copied, into any
-     * season. Each is listed in last_copy['skipped'] (where it would have
-     * been copied: its fee with copy_fees or limits_from_fees, its limit
-     * with copy_limits), after the JPL and YSL cells.
+     * or limit row whose role is a column key (1.96.0: either form, col_1 or
+     * col_1_to) is never copied, into any season. Each is listed in
+     * last_copy['skipped'] (where it would have been copied: its fee with
+     * copy_fees or limits_from_fees, its limit with copy_limits), after the
+     * JPL and YSL cells.
      */
     public function copy_fee_matrix($from, $to, $opts = array()) {
         global $wpdb;
@@ -4675,9 +4732,12 @@ class TeamOversight_Fees {
      * team of the season is charged at (TeamOversight_Fee_Columns::
      * in_use()), (class, key) for every person fee class when one of its
      * teams is not a junior-league team, and the junior-league row of each
-     * junior-league team charged at it (no repeats). Never a training only
-     * cell, never Unknown. With no column in use (and for a null season)
-     * the list is exactly what it was.
+     * junior-league team charged at it (no repeats). Never Unknown. With no
+     * column in use (and for a null season) the list is exactly what it
+     * was. 1.96.0, club decision 13 Nov 2026: the same cells for each of a
+     * column's two forms, column by column in display order: first those
+     * on its key (the playing amount), then those on its Training only role
+     * (the key plus TRAINING_SUFFIX).
      */
     public static function offerable_cells($season = null) {
         $cells = array();
@@ -4700,13 +4760,16 @@ class TeamOversight_Fees {
                     $junior_rows[] = $row;
                 }
             }
-            if ($senior) {
-                foreach (self::person_fee_classes() as $class) {
-                    $cells[] = array($class, (string) $key);
+            foreach (TeamOversight_Fee_Columns::COLUMN_ROLES as $column_role) {
+                $role_key = TeamOversight_Fee_Columns::role_key((string) $key, $column_role);
+                if ($senior) {
+                    foreach (self::person_fee_classes() as $class) {
+                        $cells[] = array($class, $role_key);
+                    }
                 }
-            }
-            foreach ($junior_rows as $row) {
-                $cells[] = array($row, (string) $key);
+                foreach ($junior_rows as $row) {
+                    $cells[] = array($row, $role_key);
+                }
             }
         }
         return $cells;
@@ -4717,9 +4780,9 @@ class TeamOversight_Fees {
      * page and tests: no_limit (offerable cells without an upper limit),
      * no_fee (offerable cells without a fee), above (cells whose fee is
      * above their limit), each a list of "Class / role" labels. 1.95.0: a
-     * team fee column's cell is labelled "Class / NAME" (the name as typed),
-     * and a fee row of a column the season no longer has is left out of
-     * above.
+     * team fee column's cell is labelled "Class / NAME" (the name as typed;
+     * 1.96.0: its Training only cell "Class / NAME training only"), and a
+     * fee row of a column the season no longer has is left out of above.
      */
     public function matrix_report($season) {
         $fees = array();
