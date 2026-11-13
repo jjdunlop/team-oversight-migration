@@ -89,6 +89,15 @@ class TeamOversight_Help_Page {
         return strtolower(TeamOversight_Fees::role_label($role));
     }
 
+    /**
+     * 1.95.0: is this matrix column a team fee column's key? Such a column is
+     * printed by its name (TeamOversight_Fees::column_label() /
+     * column_phrase()), never role_text() of the key.
+     */
+    private static function is_fee_column($column) {
+        return class_exists('TeamOversight_Fee_Columns') && TeamOversight_Fee_Columns::is_key(is_string($column) ? $column : '');
+    }
+
     /** A link to an admin page of the plugin. */
     private static function admin_link($page, $label, $args = array()) {
         $url = admin_url('admin.php?page=' . rawurlencode($page));
@@ -274,6 +283,12 @@ class TeamOversight_Help_Page {
                         continue;
                     }
                     $charged = isset($b['charged_as']) ? (string) $b['charged_as'] : (string) $b['role'];
+                    if (self::is_fee_column($charged)) {
+                        // 1.95.0: a team fee column's cell, by the column's name as typed (this page is for administrators only).
+                        $cells[] = $b['class'] . ' / ' . TeamOversight_Fees::column_label($charged, $season)
+                            . ' (' . self::role_text($b['role']) . ' on ' . $b['team'] . ' is charged at that amount)';
+                        continue;
+                    }
                     $cells[] = $b['class'] . ' / ' . self::role_text($charged)
                         . ($charged !== (string) $b['role'] ? ' (' . self::role_text($b['role']) . ' is charged at that amount)' : '');
                 }
@@ -343,7 +358,7 @@ class TeamOversight_Help_Page {
             'ok' => true, 'error' => '', 'season' => $season, 'class' => (string) $class, 'today' => $today,
             'places' => $places, 'rows' => $rows,
             'fee' => $fee, 'paid' => $paid, 'credit' => max(0.0, round($paid - $fee, 2)), 'outstanding' => $invoice->outstanding_amount,
-            'breakdown' => self::breakdown_rows($breakdown), 'missing' => (bool) $breakdown['missing'],
+            'breakdown' => self::breakdown_rows($breakdown, $season), 'missing' => (bool) $breakdown['missing'],
             'schedule' => $schedule, 'due' => $due,
             'standing' => $standing, 'status' => TeamOversight_Payments::describe_standing($standing),
             'pill' => TeamOversight_Payments::standing_pill_parts($standing, $season),
@@ -352,14 +367,25 @@ class TeamOversight_Help_Page {
         );
     }
 
-    /** fee_breakdown()'s stretches as plain rows (the Member Lookup card's columns), for the page and the calculator. */
-    private static function breakdown_rows($breakdown) {
+    /**
+     * fee_breakdown()'s stretches as plain rows (the Member Lookup card's
+     * columns), for the page and the calculator. 1.95.0: a place charged at
+     * a team fee column reads "charged at the Specialist coach column" (the
+     * name from $season), so only the name, never the key, reaches the
+     * calculator's script.
+     */
+    private static function breakdown_rows($breakdown, $season = null) {
         $rows = array();
         foreach ($breakdown['stretches'] as $s) {
             $places = array();
             foreach ($s['buckets'] as $b) {
+                if (self::is_fee_column($b['charged_as'])) {
+                    $charged = ', charged at the ' . TeamOversight_Fees::column_phrase($b['charged_as'], $season);
+                } else {
+                    $charged = $b['charged_as'] !== $b['role'] ? ', charged as ' . self::role_text($b['charged_as']) : '';
+                }
                 $text = trim($b['team'] . ' ' . self::role_text($b['role'])) . ' (' . $b['class'] . ')'
-                    . ($b['charged_as'] !== $b['role'] ? ', charged as ' . self::role_text($b['charged_as']) : '')
+                    . $charged
                     . ': ' . ($b['rate'] === null ? 'no amount in the fee matrix' : self::money($b['rate']));
                 $top = $s['top'] && count($s['buckets']) > 1 && $b['team'] === $s['top']['team'] && $b['role'] === $s['top']['role'];
                 $places[] = array('text' => $text, 'top' => $top);
@@ -521,12 +547,14 @@ class TeamOversight_Help_Page {
         }
 
         // Two senior teams of the season, the same gender where there are
-        // (a junior-league team would change a junior's class).
+        // (a junior-league team would change a junior's class). 1.95.0: nor
+        // a team with a team fee column, whose playing members are charged
+        // at that column, so the stories stay about the playing member amount.
         $database = new TeamOversight_Database();
         $config = $database->get_teams_config($season);
         $codes = array();
         foreach (array_keys(self::teams($season)) as $code) {
-            if (!TeamOversight_Fees::is_junior_league_team((string) $code, $season)) {
+            if (!TeamOversight_Fees::is_junior_league_team((string) $code, $season) && TeamOversight_Fees::team_fee_column((string) $code, $season) === '') {
                 $codes[] = (string) $code;
             }
         }
@@ -1026,6 +1054,13 @@ class TeamOversight_Help_Page {
         $limits = $timeline ? TeamOversight_Fees::get_limits_for_season($season) : array();
         echo '<div class="mh-scroll"><table class="widefat striped mh-table mh-matrix"><thead><tr><th scope="col">Fee class</th>';
         foreach ($grid['roles'] as $role) {
+            if (isset($grid['columns'][$role])) {
+                // 1.95.0: a team fee column (only a season that has one: get_fee_grid()), by its name and the teams charged at it.
+                $column_teams = TeamOversight_Fee_Columns::teams_of((string) $role, $season);
+                echo '<th scope="col">' . esc_html(TeamOversight_Fees::column_label($role, $season))
+                    . '<br><span class="description">' . esc_html(empty($column_teams) ? 'No team uses this column yet' : 'Playing members of: ' . implode(', ', $column_teams)) . '</span></th>';
+                continue;
+            }
             echo '<th scope="col">' . esc_html(TeamOversight_Fees::role_label($role)) . '</th>';
         }
         echo '</tr></thead><tbody>';
@@ -1052,7 +1087,11 @@ class TeamOversight_Help_Page {
         $league_rows = TeamOversight_Fees::junior_league_split_applies($season)
             ? 'JPL and YSL are the rows for a junior on a Junior Premier League team (age rule U19) and on a Youth State League team (age rule U17 or U15; a team with no age rule goes by its code)'
             : 'JPL/YSL is the row for a junior on a junior-league team';
-        echo '<p class="description">' . esc_html(implode('; ', $charged) . '. The matrix has only these three columns, so there is no separate coaching rate (and no coaching discount). ' . $league_rows . '; nobody is put in Unknown. A blank cell has no amount: someone who falls into it is charged the highest of their other places that has one; with none at all they get no new invoice, and an invoice they already have keeps its amount.') . '</p>';
+        // 1.95.0: a season with team fee columns has more than three columns (only playing members of their teams are charged at them).
+        $columns_words = empty($grid['columns'])
+            ? 'The matrix has only these three columns, so there is no separate coaching rate (and no coaching discount). '
+            : 'Apart from the team fee columns, which only the playing members of their teams are charged at, the matrix has only these three columns, so there is no separate coaching rate (and no coaching discount). ';
+        echo '<p class="description">' . esc_html(implode('; ', $charged) . '. ' . $columns_words . $league_rows . '; nobody is put in Unknown. A blank cell has no amount: someone who falls into it is charged the highest of their other places that has one; with none at all they get no new invoice, and an invoice they already have keeps its amount.') . '</p>';
         self::close_section();
     }
 
@@ -1080,6 +1119,11 @@ class TeamOversight_Help_Page {
 
         echo '<h3>Every place is priced on its own</h3>';
         echo '<p>Each team place is a bucket: team, role and the fee class for that team. Its rate comes from the matrix: playing member, training only and supporter at their own amounts, coach and assistant coach at the supporter amount, team manager at the playing member amount.</p>';
+        // 1.95.0, club decision 13 Nov 2026: team fee columns, said only for a season with one in use (no team, no amount).
+        if (class_exists('TeamOversight_Fee_Columns') && TeamOversight_Fee_Columns::in_use($season)) {
+            echo '<p>In ' . esc_html($season) . ' the committee has given at least one team a team fee column (Configuration, Team fee columns): a playing member place on that team is charged at that column of its fee class, not at the playing member amount. '
+                . 'The team\'s other places (training only, coach, assistant coach, team manager) are charged as on any other team, and a player whose fee the club covers still pays the supporter fee.</p>';
+        }
 
         echo '<h3>The highest place each day, never added up</h3>';
         echo '<p>For each day inside the season dates the person is charged the highest rate among the places they hold that day. Places never add up, so a coach who also plays pays the higher of the two, and a training-only player who joins a second team as a playing member pays the playing rate from that day only.</p>';

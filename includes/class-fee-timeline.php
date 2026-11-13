@@ -2112,7 +2112,7 @@ class TeamOversight_Fee_Timeline {
             self::render_places($user, $season, $rows, $today, $flags);
         }
         echo '<h4 class="murvc-tl-sub">How the fee is worked out</h4>';
-        self::render_stretches($breakdown);
+        self::render_stretches($breakdown, $season);
         echo '<h4 class="murvc-tl-sub">Money</h4>';
         self::render_money($user, $season, $invoice, $breakdown);
         echo '<h4 class="murvc-tl-sub">Change history</h4>';
@@ -2540,8 +2540,15 @@ class TeamOversight_Fee_Timeline {
         echo '</div>';
     }
 
-    /** The fee_breakdown() stretches: dates, places held with their rates, the rate charged and the amount. */
-    private static function render_stretches($breakdown) {
+    /**
+     * The fee_breakdown() stretches: dates, places held with their rates, the
+     * rate charged and the amount. 1.95.0, club decision 13 Nov 2026: a place
+     * charged at a team fee column reads "charged at the Specialist coach
+     * column" (the name as typed, from $season; this card is for
+     * administrators only), and one more sentence follows the table. Every
+     * other place reads exactly as before.
+     */
+    private static function render_stretches($breakdown, $season = null) {
         $stretches = $breakdown['stretches'];
         if (empty($stretches)) {
             echo '<p class="murvc-muted">Nothing to charge: no place falls inside the season dates.</p>';
@@ -2550,11 +2557,18 @@ class TeamOversight_Fee_Timeline {
         echo '<div class="murvc-tl-scroll"><table class="widefat striped murvc-tl-stretches"><thead><tr>'
             . '<th>From</th><th>Last day charged</th><th>Days</th><th>Places held</th><th>Rate</th><th>Amount</th>'
             . '</tr></thead><tbody>';
+        $any_column = false;
         foreach ($stretches as $s) {
             $places = array();
             foreach ($s['buckets'] as $b) {
+                if (class_exists('TeamOversight_Fee_Columns') && TeamOversight_Fee_Columns::is_key((string) $b['charged_as'])) {
+                    $any_column = true;
+                    $charged = ', charged at the ' . TeamOversight_Fees::column_phrase($b['charged_as'], $season);
+                } else {
+                    $charged = $b['charged_as'] !== $b['role'] ? ', charged as ' . strtolower(TeamOversight_Fees::role_label($b['charged_as'])) . (!empty($b['fee_cover']) ? ' (fee covered)' : '') : '';
+                }
                 $text = trim($b['team'] . ' ' . strtolower(TeamOversight_Fees::role_label($b['role']))) . ' (' . $b['class'] . ')'
-                    . ($b['charged_as'] !== $b['role'] ? ', charged as ' . strtolower(TeamOversight_Fees::role_label($b['charged_as'])) . (!empty($b['fee_cover']) ? ' (fee covered)' : '') : '')
+                    . $charged
                     . ': ' . ($b['rate'] === null ? 'no amount in the fee matrix' : self::money($b['rate']));
                 $top = $s['top'] && count($s['buckets']) > 1 && $b['team'] === $s['top']['team'] && $b['role'] === $s['top']['role'];
                 $places[] = $top ? '<strong>' . esc_html($text) . '</strong>' : esc_html($text);
@@ -2574,7 +2588,8 @@ class TeamOversight_Fee_Timeline {
                 ? 'Season fee: each stretch is its rate × its days ÷ ' . intval($breakdown['season_days']) . ' season days, added up and rounded once'
                 : 'Season fee: no season dates, so the latest place\'s full rate (no pro-rata)')
             . '</th><th>' . esc_html(self::money($breakdown['total'])) . '</th></tr></tfoot></table></div>';
-        echo '<p class="description">Where places overlap, each day is charged at the highest of them (in bold); fees never add up. Coaches and assistant coaches are charged at the supporter rate, team managers as playing members.</p>';
+        echo '<p class="description">Where places overlap, each day is charged at the highest of them (in bold); fees never add up. Coaches and assistant coaches are charged at the supporter rate, team managers as playing members.'
+            . ($any_column ? ' A playing member place on a team with a team fee column is charged at that column of its fee class (Configuration, Team fee columns).' : '') . '</p>';
         if (!empty($breakdown['missing'])) {
             echo '<p class="murvc-owing">Some roles have no amount in the fee matrix, so they were left out. Fill in the blank cells on Configuration.</p>';
         }

@@ -485,6 +485,12 @@ class TeamOversight_Offers {
      * (TeamOversight_Fee_Cover::for_person()), false = not covered, an array
      * = this cover. A covered player's playing or Training Only place is
      * priced on the SUPPORTER column of the same class.
+     *
+     * 1.95.0, club decision 13 Nov 2026: the column comes from the engine's
+     * one rule, TeamOversight_Fees::column_for_place(): the supporter column
+     * when covered, else the team's fee column for a playing member place on
+     * a team that has one (a key: admin-only, never print it), else
+     * charged_as(). A team with no column is priced exactly as before.
      */
     public static function fee_cell($user_id, $season, $team, $role, $fees = null, $fee_cover = null) {
         $user = intval($user_id) > 0 ? get_userdata(intval($user_id)) : false;
@@ -494,7 +500,7 @@ class TeamOversight_Offers {
         $fees = $fees instanceof TeamOversight_Fees ? $fees : self::fees();
         $person = $fees->determine_person_fee_class($user->user_email, $season);
         $cover = self::resolve_cover($fee_cover, $user->ID, $season);
-        $column = ($cover !== null && in_array((string) $role, TeamOversight_Fee_Cover::COVERED_ROLES, true)) ? 'supporter' : TeamOversight_Fees::charged_as($role);
+        $column = TeamOversight_Fees::column_for_place($role, $team, $season, $cover !== null);
         return array($fees->fee_class_for_team($person, $team, $season), $column);
     }
 
@@ -566,6 +572,13 @@ class TeamOversight_Offers {
      * (error_public is the registry's cell_missing_cover, error_admin says
      * which supporter fee to set). An uncovered player's basis is
      * basis_now(), exactly as before. 'fee_cover' is the cover used, or null.
+     *
+     * 1.95.0, club decision 13 Nov 2026: for a playing member on a team with
+     * a team fee column the cell is that column's (fee_cell()), and a blank
+     * one is refused like any blank cell (never the playing member amount).
+     * error_admin names it by the column's name as typed; error_public is the
+     * same registry line as for any cell, so a coach never sees the name.
+     * 'column' is then the column's key: never print it.
      */
     public static function cell_check($user_id, $season, $team, $role, $basis = null, $fees = null, $fee_cover = null) {
         $out = array('ok' => false, 'error_public' => '', 'error_admin' => '', 'basis' => '', 'fee_class' => '', 'column' => '', 'limit' => null, 'fee' => null, 'fee_cover' => null);
@@ -609,8 +622,9 @@ class TeamOversight_Offers {
             return $out;
         }
         // Coach-safe (no class, no figure), from the wording registry: before the release an Early Offer needs the upper limit, after it the fee.
+        // 1.95.0: also for a team fee column's cell, whose name only error_admin carries (column_words()).
         $out['error_public'] = self::wording($basis === 'upper' ? 'cell_missing_limit' : 'cell_missing_fee');
-        $where = $class . ' / ' . strtolower(TeamOversight_Fees::role_label($column));
+        $where = $class . ' / ' . self::column_words($column, $season);
         if ($basis === 'upper') {
             $out['error_admin'] = 'No upper limit is set for ' . $where . ' in the ' . $season . ' fee matrix.';
         } elseif (TeamOversight_Fees::get_fee_release_date($season) === '') {
@@ -619,6 +633,25 @@ class TeamOversight_Offers {
             $out['error_admin'] = 'No fee is set for ' . $where . ' in the ' . $season . ' fee matrix, and the fees are released, so offers are quoted on real fees.';
         }
         return $out;
+    }
+
+    /** 1.95.0: is this matrix column a team fee column's key (TeamOversight_Fee_Columns)? */
+    private static function is_fee_column($column) {
+        return class_exists('TeamOversight_Fee_Columns') && TeamOversight_Fee_Columns::is_key(is_string($column) ? $column : '');
+    }
+
+    /**
+     * A matrix column in an admin sentence ("Full Adult / playing member"):
+     * 1.95.0, a team fee column's name as the committee typed it
+     * (TeamOversight_Fees::column_label(), never lowercased); anything else
+     * lowercased exactly as before. Admin-only: never in a coach's or a
+     * player's text.
+     */
+    private static function column_words($column, $season) {
+        if (self::is_fee_column($column)) {
+            return TeamOversight_Fees::column_label($column, $season);
+        }
+        return strtolower(TeamOversight_Fees::role_label($column));
     }
 
     /**
@@ -705,10 +738,12 @@ class TeamOversight_Offers {
      * Returns array(ok, error_public, error_admin, basis, amount, fee_class,
      * start, percent, target, amount_cents, target_cents, places (labels
      * of the other places counted), mode, column (the matrix column of this
-     * place), fee_cover (the cover priced with, or null), code ('' when ok;
-     * 'cover_conflict', or 'no_price' for any other refusal)). error_public
-     * is safe for coaches (no class, no amount); error_admin names the class
-     * and role.
+     * place: TeamOversight_Fees::column_for_place(), so since 1.95.0 a team
+     * fee column's key for a playing member on a team with one; Offers to
+     * approve reads its limit; never print it), fee_cover (the cover priced
+     * with, or null), code ('' when ok; 'cover_conflict', or 'no_price' for
+     * any other refusal)). error_public is safe for coaches (no class, no
+     * amount); error_admin names the class and role.
      */
     public static function compute_quote($user_id, $season, $team, $role, $opts = array()) {
         $mode = (isset($opts['mode']) && in_array($opts['mode'], array('send', 'accept', 'real', 'requote'), true)) ? $opts['mode'] : 'send';
@@ -740,7 +775,11 @@ class TeamOversight_Offers {
             $cover = null;
         }
         $out['fee_cover'] = $cover;
-        $out['column'] = $cover !== null ? 'supporter' : TeamOversight_Fees::charged_as($role);
+        // 1.95.0, club decision 13 Nov 2026: the engine's one rule (TeamOversight_Fees::column_for_place()), in every mode,
+        // the accept shortcut below included: a playing member place on a team with a team fee column is on that column (a
+        // key: never print it). A team's column can't change while its offers carry a quote (TeamOversight_Fee_Columns::
+        // save()), so the column now is the one the quote was made on. A team with no column gets exactly what it did.
+        $out['column'] = TeamOversight_Fees::column_for_place($role, $team, $season, $cover !== null);
 
         if ($mode === 'real') {
             $basis = 'fee';
@@ -825,7 +864,7 @@ class TeamOversight_Offers {
                     $place = strtolower(TeamOversight_Fees::role_label($s['top']['role'])) . ' place on ' . $s['top']['team'];
                     $out['code'] = 'cover_conflict';
                     $out['error_public'] = self::wording('cell_cover_conflict');
-                    $out['error_admin'] = 'This player\'s fee is covered (' . $cover['reason'] . '), but their ' . $place . ' is charged as a ' . strtolower(TeamOversight_Fees::role_label($s['top']['charged_as'])) . ', so this offer can\'t quote the supporter fee. Stop or change that place on the Fee timeline, or clear the cover.';
+                    $out['error_admin'] = 'This player\'s fee is covered (' . $cover['reason'] . '), but their ' . $place . ' is charged as a ' . self::column_words($s['top']['charged_as'], $season) . ', so this offer can\'t quote the supporter fee. Stop or change that place on the Fee timeline, or clear the cover.';
                     return $out;
                 }
             }
@@ -1600,6 +1639,15 @@ class TeamOversight_Offers {
      * 1.88.0: an offer quoted with the club's fee cover was quoted on the
      * SUPPORTER column, so it counts only for the supporter cell, and the
      * playing and Training Only counts leave it out.
+     *
+     * 1.95.0, club decision 13 Nov 2026: a team's fee column can't change
+     * while its offers carry a quote (TeamOversight_Fee_Columns::save()), so
+     * an uncovered playing member offer on a team with a team fee column was
+     * quoted on that column's cell. A column key counts those offers (the
+     * teams of TeamOversight_Fee_Columns::teams_of()), and the playing member
+     * count leaves them out (a team manager offer there still counts: it is
+     * charged as a playing member). With no column in the season the query
+     * and the count are exactly as before.
      */
     public static function quoted_on_limit_count($season, $fee_class, $team_role) {
         global $wpdb;
@@ -1610,11 +1658,55 @@ class TeamOversight_Offers {
                 (string) $season, (string) $fee_class
             )));
         }
+        if (self::is_fee_column($team_role)) {
+            $teams = TeamOversight_Fee_Columns::teams_of((string) $team_role, (string) $season);
+            if (empty($teams)) {
+                return 0;
+            }
+            $team_in = implode(', ', array_fill(0, count($teams), '%s'));
+            return intval($wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM " . self::table() . " WHERE season = %s AND quote_basis = 'upper' AND quote_fee_class = %s AND role = 'playing_member' AND team IN ($team_in) AND state IN ($live) AND (quote_cover IS NULL OR quote_cover = '')",
+                array_merge(array((string) $season, (string) $fee_class), array_map('strval', $teams))
+            )));
+        }
         $roles = $team_role === 'training_only' ? array('training_only') : array('playing_member', 'team_manager');
         $in = "'" . implode("','", array_map('esc_sql', $roles)) . "'";
+        // 1.95.0: the playing member count without the playing member offers of teams with a team fee column.
+        $column_teams = ($team_role !== 'training_only' && class_exists('TeamOversight_Fee_Columns')) ? array_keys(TeamOversight_Fee_Columns::teams((string) $season)) : array();
+        if (!empty($column_teams)) {
+            $team_in = implode(', ', array_fill(0, count($column_teams), '%s'));
+            return intval($wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM " . self::table() . " WHERE season = %s AND quote_basis = 'upper' AND quote_fee_class = %s AND role IN ($in) AND state IN ($live) AND (quote_cover IS NULL OR quote_cover = '') AND NOT (role = 'playing_member' AND team IN ($team_in))",
+                array_merge(array((string) $season, (string) $fee_class), array_map('strval', $column_teams))
+            )));
+        }
         return intval($wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM " . self::table() . " WHERE season = %s AND quote_basis = 'upper' AND quote_fee_class = %s AND role IN ($in) AND state IN ($live) AND (quote_cover IS NULL OR quote_cover = '')",
             (string) $season, (string) $fee_class
+        )));
+    }
+
+    /**
+     * 1.95.0, club decision 13 Nov 2026: how many of the season's offers for
+     * a team are live playing offers carrying a quote (role playing_member;
+     * sent, accepted or locked in, on either basis, covered or not). A request
+     * awaiting approval has no quote yet and doesn't count. The only source of
+     * TeamOversight_Fee_Columns::save()'s guard: a team's fee column can only
+     * change before its offers carry a quote, so no offer is ever re-quoted by
+     * a column change. A pure read; 0 for anything that isn't a four-digit
+     * season and a team code.
+     */
+    public static function quoted_playing_offers($season, $team) {
+        global $wpdb;
+        $season = is_scalar($season) ? (string) $season : '';
+        $team = is_scalar($team) ? (string) $team : '';
+        if (preg_match('/^\d{4}$/D', $season) !== 1 || $team === '') {
+            return 0;
+        }
+        $live = "'" . implode("','", array(self::SENT, self::ACCEPTED, self::LOCKED_IN)) . "'";
+        return intval($wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM " . self::table() . " WHERE season = %s AND team = %s AND role = 'playing_member' AND state IN ($live)",
+            $season, $team
         )));
     }
 

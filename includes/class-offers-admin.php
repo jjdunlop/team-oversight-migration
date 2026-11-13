@@ -1093,7 +1093,8 @@ class TeamOversight_Offers_Admin {
             $app = isset($apps[$offer->application_id]) ? $apps[$offer->application_id] : null;
             $quote = TeamOversight_Offers::compute_quote($offer->user_id, $season, $offer->team, $offer->role, array('offer' => $offer, 'mode' => 'send', 'fees' => $fees));
             // 1.88.0: the limit of the column the quote is on (a covered player's is the supporter column).
-            $column = isset($quote['column']) && $quote['column'] !== '' ? $quote['column'] : TeamOversight_Fees::charged_as($offer->role);
+            // 1.95.0: a playing member on a team with a team fee column is on that column (the engine's one rule, also when the quote has none).
+            $column = isset($quote['column']) && $quote['column'] !== '' ? $quote['column'] : TeamOversight_Fees::column_for_place($offer->role, $offer->team, $season);
             $limit = $quote['fee_class'] !== '' ? TeamOversight_Fees::get_limit($quote['fee_class'], $column, $season) : null;
             $block = '';
             $warn = array();
@@ -1337,7 +1338,16 @@ class TeamOversight_Offers_Admin {
             echo substr(self::cover_chip($cover), strlen('<br>')) . '<br>';
         }
         if ($q['fee_class'] !== '') {
-            echo self::h($q['fee_class']) . '<br><span class="mo-small">' . ($c['limit'] !== null ? ($cover ? 'Supporter limit ' : 'Limit ') . self::h(TeamOversight_Offers::money($c['limit'])) : 'No limit set') . '</span><br>';
+            // 1.95.0, club decision 13 Nov 2026: a quote on a team fee column names it, "Specialist coach limit $X" (this page
+            // is for administrators only; the column's name never reaches a coach or a player). Every other row reads as before.
+            $limit_words = $cover ? 'Supporter limit ' : 'Limit ';
+            $no_limit = 'No limit set';
+            if (!$cover && isset($q['column']) && class_exists('TeamOversight_Fee_Columns') && TeamOversight_Fee_Columns::is_key((string) $q['column'])) {
+                $column_name = self::h(TeamOversight_Fees::column_label($q['column'], $season));
+                $limit_words = $column_name . ' limit ';
+                $no_limit = 'No ' . $column_name . ' limit set';
+            }
+            echo self::h($q['fee_class']) . '<br><span class="mo-small">' . ($c['limit'] !== null ? $limit_words . self::h(TeamOversight_Offers::money($c['limit'])) : $no_limit) . '</span><br>';
         }
         if ($q['ok']) {
             $basis_words = $cover ? ($q['basis'] === 'upper' ? 'supporter upper limit' : 'supporter fee') : ($q['basis'] === 'upper' ? 'upper limit' : 'real fee');

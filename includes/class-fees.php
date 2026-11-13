@@ -534,6 +534,15 @@ class TeamOversight_Fees {
     //     TeamOversight_Fee_Cover) has their playing member and
     //     training only buckets charged at the SUPPORTER rate too, for the
     //     whole season; their team manager places are still playing members.
+    //  1c. 1.95.0, club decision 13 Nov 2026, 2027 on: a team can be given
+    //     a team fee column (TeamOversight_Fee_Columns: a named column of
+    //     the season's matrix, e.g. "Specialist coach"). A playing member
+    //     place on that team is charged at that column of its class, for the
+    //     whole season (column_for_place() is the one rule). The fee cover
+    //     still wins (supporter). Training only, supporter, coach, assistant
+    //     coach and team manager places on that team are charged as on any
+    //     other team, and a blank column cell never falls back to the
+    //     playing member amount. Seasons before 2027 are untouched.
     //  2. The fee is the HIGHEST bucket. Buckets never add up.
     //  3. Pro-rata: the fee-segment history records the buckets for each
     //     stretch of the season; each stretch is charged for its share of
@@ -561,6 +570,87 @@ class TeamOversight_Fees {
     /** The matrix column a role is charged at. */
     public static function charged_as($role) {
         return isset(self::CHARGED_AS[$role]) ? self::CHARGED_AS[$role] : $role;
+    }
+
+    // ------------------------------------------------------------------
+    // Team fee columns (1.95.0, club decision 13 Nov 2026). The committee
+    // names a column of a 2027+ season's matrix and gives it to teams
+    // (TeamOversight_Fee_Columns); the playing member places on those teams
+    // are charged at it. Its amounts are fee_matrix / fee_matrix_limits
+    // rows whose team_role is the column's key, so rate() and the limits
+    // read them unchanged. The name is admin-only: column_label() prints it
+    // on admin screens, never to a player or a coach. A season before 2027,
+    // and every team without a column, prices exactly as before.
+    // ------------------------------------------------------------------
+
+    /** The team fee column a team's playing members are charged at in a season (a key), or '' (the Playing member column). */
+    public static function team_fee_column($team, $season) {
+        if (!class_exists('TeamOversight_Fee_Columns')) {
+            return '';
+        }
+        return TeamOversight_Fee_Columns::team_column($team, $season);
+    }
+
+    /**
+     * The ONE rule for the matrix column a place is charged at: 'supporter'
+     * for a covered person's playing or Training Only place
+     * (TeamOversight_Fee_Cover::COVERED_ROLES), else the team's fee column
+     * for a place whose RAW role is playing_member (a team manager, charged
+     * as a playing member, is not caught), else charged_as($role). The
+     * engine (timeline_stretches() and price_buckets()) and the offers
+     * (fee_cell(), compute_quote()) follow it.
+     */
+    public static function column_for_place($role, $team, $season, $covered = false) {
+        $role = (string) $role;
+        if ($covered && class_exists('TeamOversight_Fee_Cover') && in_array($role, TeamOversight_Fee_Cover::COVERED_ROLES, true)) {
+            return 'supporter';
+        }
+        if ($role === 'playing_member') {
+            $column = self::team_fee_column($team, $season);
+            if ($column !== '') {
+                return $column;
+            }
+        }
+        return self::charged_as($role);
+    }
+
+    /**
+     * A matrix column for an admin screen: a team fee column's name as the
+     * committee typed it (never lowercased; 'Team fee column' when the
+     * season is null or the name can't be found), anything else exactly
+     * role_label(). Admin-only: never print it to a player or a coach.
+     */
+    public static function column_label($column, $season = null) {
+        if (self::is_column_key($column)) {
+            $name = $season === null ? '' : TeamOversight_Fee_Columns::label((string) $column, $season);
+            return $name !== '' ? $name : 'Team fee column';
+        }
+        return self::role_label($column);
+    }
+
+    /** column_label() as a phrase: "Specialist coach column" (no second "column" when the name already ends with it). */
+    public static function column_phrase($column, $season = null) {
+        $label = self::column_label($column, $season);
+        return preg_match('/\bcolumn$/i', $label) === 1 ? $label : $label . ' column';
+    }
+
+    /** Is this matrix role a team fee column's key? */
+    private static function is_column_key($role) {
+        return class_exists('TeamOversight_Fee_Columns') && TeamOversight_Fee_Columns::is_key(is_scalar($role) ? (string) $role : '');
+    }
+
+    /** Is this matrix role a live team fee column of the season? */
+    private static function column_is_live($role, $season) {
+        return class_exists('TeamOversight_Fee_Columns') && TeamOversight_Fee_Columns::is_live(is_scalar($role) ? (string) $role : '', $season);
+    }
+
+    /**
+     * A matrix role in a cell's words ("Full Adult / playing member"): a
+     * team fee column's name as typed, anything else lowercased exactly as
+     * before (strtolower(role_label())).
+     */
+    private static function cell_role_words($role, $season = null) {
+        return self::is_column_key($role) ? self::column_label($role, $season) : strtolower(self::role_label($role));
     }
 
     /**
@@ -828,9 +918,9 @@ class TeamOversight_Fees {
         return implode(', ', array_slice($cells, 0, $max)) . ($more > 0 ? ' and ' . $more . ' more' : '');
     }
 
-    /** 'JPL / training only'. */
-    private static function cell_label($class, $role) {
-        return $class . ' / ' . strtolower(self::role_label($role));
+    /** 'JPL / training only' (1.95.0: a team fee column's cell 'JPL / Specialist coach', named from $season). */
+    private static function cell_label($class, $role, $season = null) {
+        return $class . ' / ' . self::cell_role_words($role, $season);
     }
 
     /**
@@ -1513,14 +1603,23 @@ class TeamOversight_Fees {
      * the supporter rate, team manager as a player), the highest bucket,
      * and so the rate charged. A bucket timeline_stretches() flagged
      * 'fee_cover' (1.88.0: a playing or Training Only place of a person the
-     * club covers) is charged at the supporter column of its class.
+     * club covers) is charged at the supporter column of its class. A
+     * bucket it gave a 'fee_column' (1.95.0: a playing member place on a
+     * team with a team fee column) is charged at that column of its class;
+     * a blank cell there is blank (never the playing member amount).
      */
     public function price_buckets($buckets, $season, $source = self::RATE_FEE) {
         $priced = array();
         $top = null;
         $missing = false;
         foreach ($buckets as $b) {
-            $b['charged_as'] = !empty($b['fee_cover']) ? 'supporter' : self::charged_as($b['role']);
+            if (!empty($b['fee_cover'])) {
+                $b['charged_as'] = 'supporter';
+            } elseif (isset($b['fee_column']) && is_string($b['fee_column']) && $b['fee_column'] !== '') {
+                $b['charged_as'] = $b['fee_column'];
+            } else {
+                $b['charged_as'] = self::charged_as($b['role']);
+            }
             $rate = $this->rate($b['class'], $b['charged_as'], $season, $source);
             $b['rate'] = $rate === null ? null : floatval($rate);
             $priced[] = $b;
@@ -1698,9 +1797,18 @@ class TeamOversight_Fees {
      * column. Null adds no key at all, so an uncovered person's buckets are
      * byte for byte what they were (the cover is season-wide, so the
      * neighbour merge below still compares like with like).
+     *
+     * Team fee columns (1.95.0): a bucket with no fee_cover whose RAW role
+     * is playing_member, on a team with a team fee column this season
+     * (team_fee_column(), looked up once per team per call), gets
+     * 'fee_column' => the column's key, which price_buckets() charges at
+     * (column_for_place()'s rule). No other bucket gets the key, so every
+     * other breakdown is byte for byte what it was; the column is
+     * season-wide, so the merge below still compares like with like.
      */
     private function timeline_stretches($email, $season, $rows, $fixed_class = null, $fee_cover = null) {
         $covered_roles = (is_array($fee_cover) && class_exists('TeamOversight_Fee_Cover')) ? TeamOversight_Fee_Cover::COVERED_ROLES : array();
+        $team_columns = array();
         $places = array();
         $points = array();
         foreach ((array) $rows as $row) {
@@ -1764,6 +1872,14 @@ class TeamOversight_Fees {
                     );
                     if ($covered_roles && in_array($place['role'], $covered_roles, true)) {
                         $bucket['fee_cover'] = true;
+                    }
+                    if (empty($bucket['fee_cover']) && $place['role'] === 'playing_member') {
+                        if (!array_key_exists($place['team'], $team_columns)) {
+                            $team_columns[$place['team']] = self::team_fee_column($place['team'], $season);
+                        }
+                        if ($team_columns[$place['team']] !== '') {
+                            $bucket['fee_column'] = $team_columns[$place['team']];
+                        }
                     }
                     $buckets[$place['team'] . '|' . $place['role']] = $bucket;
                 }
@@ -1887,7 +2003,10 @@ class TeamOversight_Fees {
      * stretch's buckets with their rates (and what each is charged as),
      * the highest fee, then pro-rata and the total. Flags a difference
      * from the invoiced amount ($manual: the fee was set with Edit Fee, so
-     * re-pricing keeps it and only Use calculated fee applies this).
+     * re-pricing keeps it and only Use calculated fee applies this). A
+     * bucket charged at a team fee column (1.95.0) reads "(charged as
+     * playing member, Specialist coach column)", the name from $season:
+     * Payment Management is for administrators only.
      */
     public function render_fee_breakdown($breakdown, $invoice_amount = null, $season = null, $manual = false) {
         $money = function ($n) { return '$' . number_format((float) $n, 2); };
@@ -1923,7 +2042,7 @@ class TeamOversight_Fees {
                         <?php foreach ($s['buckets'] as $b): ?>
                             <li>
                                 <?php echo esc_html(($b['team'] !== '' ? $b['team'] . ' · ' : '') . $b['class'] . ' · ' . self::role_label($b['role'])); ?>
-                                <?php if ($b['charged_as'] !== $b['role']): ?><span class="description">(charged as <?php echo esc_html(strtolower(self::role_label($b['charged_as']))); ?><?php echo !empty($b['fee_cover']) ? ': fee covered' : ''; ?>)</span><?php endif; ?>
+                                <?php if ($b['charged_as'] !== $b['role']): ?><span class="description">(charged as <?php echo esc_html((!empty($b['fee_column']) && $b['charged_as'] === $b['fee_column']) ? strtolower(self::role_label($b['role'])) . ', ' . self::column_phrase($b['fee_column'], $season) : strtolower(self::role_label($b['charged_as']))); ?><?php echo !empty($b['fee_cover']) ? ': fee covered' : ''; ?>)</span><?php endif; ?>
                                 — <?php echo $b['rate'] === null ? '<em>no amount in the fee matrix</em>' : esc_html($money($b['rate'])); ?>
                             </li>
                         <?php endforeach; ?>
@@ -2177,11 +2296,16 @@ class TeamOversight_Fees {
         return array_values($out);
     }
 
-    /** unpriced_cells() in words: "supporter fee for Other Student", two or more joined with "and" (cells_words() is the JPL/YSL step's own). */
-    public static function unpriced_words(array $cells) {
+    /**
+     * unpriced_cells() in words: "supporter fee for Other Student", two or
+     * more joined with "and" (cells_words() is the JPL/YSL step's own).
+     * 1.95.0: a team fee column's cell reads "Specialist coach fee for Full
+     * Adult", named from $season (null: "Team fee column fee for ...").
+     */
+    public static function unpriced_words(array $cells, $season = null) {
         $words = array();
         foreach ($cells as $cell) {
-            $words[] = strtolower(self::role_label($cell['column'])) . ' fee for ' . $cell['class'];
+            $words[] = self::cell_role_words($cell['column'], $season) . ' fee for ' . $cell['class'];
         }
         $last = array_pop($words);
         return empty($words) ? (string) $last : implode(', ', $words) . ' and ' . $last;
@@ -2295,8 +2419,8 @@ class TeamOversight_Fees {
         } elseif ($out['manual']) {
             $out['message'] = 'Their ' . $season . ' fee was set with Edit Fee, so it stays ' . $money($out['after']) . ' (Use calculated fee on Payment Management applies the new calculation).';
         } elseif (!empty($gap)) {
-            $out['message'] = 'The ' . $season . ' ' . self::unpriced_words($gap) . ' isn\'t set, so their ' . $season . ' fee couldn\'t be charged at it and is ' . $money($out['after']) . '. Set it on Configuration, Fee matrix: the daily check then works their fee out again.';
-            TeamOversight_Log::add('offer_alert', $season . ' fee cover: user #' . intval($uid) . '\'s fee is covered by the club, but the ' . self::unpriced_words($gap) . ' isn\'t set, so their invoice stays ' . $money($out['after']) . ($context !== '' ? ' (' . $context . ')' : '') . '. Set it on Configuration, Fee matrix: the daily check then works their fee out again.',
+            $out['message'] = 'The ' . $season . ' ' . self::unpriced_words($gap, $season) . ' isn\'t set, so their ' . $season . ' fee couldn\'t be charged at it and is ' . $money($out['after']) . '. Set it on Configuration, Fee matrix: the daily check then works their fee out again.';
+            TeamOversight_Log::add('offer_alert', $season . ' fee cover: user #' . intval($uid) . '\'s fee is covered by the club, but the ' . self::unpriced_words($gap, $season) . ' isn\'t set, so their invoice stays ' . $money($out['after']) . ($context !== '' ? ' (' . $context . ')' : '') . '. Set it on Configuration, Fee matrix: the daily check then works their fee out again.',
                 $uid > 0 ? array('user_id' => $uid) : array());
         } elseif ($out['repriced']) {
             $out['message'] = 'Their ' . $season . ' fee was worked out again: ' . $money($out['before']) . ' to ' . $money($out['after']) . '.';
@@ -2433,6 +2557,9 @@ class TeamOversight_Fees {
                     while (($data = fgetcsv($handle)) !== FALSE) {
                         if (count($data) >= 3 && !empty($data[0])) {
                             $line = array(sanitize_text_field($data[0]), sanitize_text_field($data[1]), floatval($data[2]), isset($data[3]) ? $data[3] : null);
+                            if (self::is_column_key($line[1]) && !self::column_is_live($line[1], $season)) {
+                                continue; // 1.95.0: a team fee column line only for a live column of this season
+                            }
                             $lines[] = $line;
                             if ($line[0] !== self::CLASS_JPL_YSL) {
                                 $explicit[$line[0] . '|' . $line[1]] = true;
@@ -2469,6 +2596,10 @@ class TeamOversight_Fees {
                         $fee_class = sanitize_text_field($data[0]);
                         $team_role = sanitize_text_field($data[1]);
                         $fee_amount = floatval($data[2]);
+                        // 1.95.0: a team fee column's line is taken only when the column is live in this season.
+                        if (self::is_column_key($team_role) && !self::column_is_live($team_role, $season)) {
+                            continue;
+                        }
                         
                         $wpdb->insert(
                             $wpdb->prefix . 'fee_matrix',
@@ -2526,7 +2657,11 @@ class TeamOversight_Fees {
      * release don't count; one with an amount, a raised fee or an Edit Fee
      * override does), a blank fee input also clears that fee (back to
      * "unknown"), so a fee filled in by a copy can be taken back. Nothing is
-     * refused, so a save is never half applied.
+     * refused, so a save is never half applied. A team fee column's cell
+     * (1.95.0) is saved like any other while the column is live in the
+     * season; a column the season no longer has (or any column before 2027)
+     * is skipped, and the answer warns and reloads. Log lines and warnings
+     * name a column's cell by the column's name (column_label()).
      */
     public function save_fee_matrix() {
         if (!isset($_POST['fee_nonce']) || !wp_verify_nonce($_POST['fee_nonce'], 'save_fee_matrix')) {
@@ -2563,7 +2698,7 @@ class TeamOversight_Fees {
                 return $v === null ? 'not set' : '$' . number_format($v, 2);
             };
             if ($old === null || $new === null || abs($old - $new) >= 0.005) {
-                TeamOversight_Log::add('fee_edit', $season . ' fee ' . $class . ' / ' . strtolower(self::role_label($role)) . ': ' . $money($old) . ' to ' . $money($new));
+                TeamOversight_Log::add('fee_edit', $season . ' fee ' . $class . ' / ' . self::cell_role_words($role, $season) . ': ' . $money($old) . ' to ' . $money($new));
             }
         };
         // A blank fee input clears the fee only while nothing could rely on
@@ -2583,9 +2718,22 @@ class TeamOversight_Fees {
         $is_stale = function ($class) use ($timeline, $season_league) {
             return $timeline && self::is_junior_league_class($class) && !in_array((string) $class, $season_league, true);
         };
+        // 1.95.0: a team fee column's cell is saved only while the column is
+        // live in this season (never before 2027). A page drawn before it was
+        // retired posts it anyway: skipped, never saved, and the page is
+        // reloaded. Every other role is saved exactly as before.
+        $stale_columns = 0;
+        $live_columns = ($timeline && class_exists('TeamOversight_Fee_Columns')) ? TeamOversight_Fee_Columns::live($season) : array();
+        $is_stale_column = function ($role) use ($live_columns) {
+            return self::is_column_key($role) && !isset($live_columns[(string) $role]);
+        };
 
         // Update fees for the specific season only
         foreach ($fees as $fee_id => $fee_amount) {
+            if (isset($by_id[intval($fee_id)]) && $is_stale_column($by_id[intval($fee_id)]->team_role)) {
+                $stale_columns++;
+                continue;
+            }
             if (trim((string) $fee_amount) === '') {
                 if ($may_clear_fees && isset($by_id[intval($fee_id)])) {
                     $row = $by_id[intval($fee_id)];
@@ -2625,6 +2773,10 @@ class TeamOversight_Fees {
                 $stale_classes[$class] = true;
                 continue;
             }
+            if ($is_stale_column($role)) {
+                $stale_columns++;
+                continue;
+            }
             $amount = max(0, floatval($cell['amount']));
             $existing = $wpdb->get_var($wpdb->prepare("SELECT id FROM $table WHERE season = %s AND fee_class = %s AND team_role = %s AND is_active = 1", $season, $class, $role));
             if ($existing) {
@@ -2661,6 +2813,10 @@ class TeamOversight_Fees {
                     $stale_classes[$class] = true;
                     continue;
                 }
+                if ($is_stale_column($role)) {
+                    $stale_columns++;
+                    continue;
+                }
                 $raw = isset($cell['amount']) ? trim((string) $cell['amount']) : '';
                 if ($raw !== '' && !is_numeric($raw)) {
                     continue; // not a number: leave that limit as it is
@@ -2672,7 +2828,7 @@ class TeamOversight_Fees {
                     if ($result['old'] !== null && class_exists('TeamOversight_Offers')) {
                         $kept = TeamOversight_Offers::quoted_on_limit_count($season, $class, $role);
                         if ($kept > 0) {
-                            $warnings[] = $class . ' / ' . strtolower(self::role_label($role)) . ': ' . $kept . ' offer' . ($kept === 1 ? ' was' : 's were') . ' quoted on the old limit and keep' . ($kept === 1 ? 's' : '') . ' that quote.';
+                            $warnings[] = $class . ' / ' . self::cell_role_words($role, $season) . ': ' . $kept . ' offer' . ($kept === 1 ? ' was' : 's were') . ' quoted on the old limit and keep' . ($kept === 1 ? 's' : '') . ' that quote.';
                         }
                     }
                 }
@@ -2690,6 +2846,9 @@ class TeamOversight_Fees {
                 ? 'This page was opened before the JPL and YSL split; nothing was saved for JPL/YSL. Reload the page.'
                 : 'This page shows JPL and YSL rows, but ' . $season . ' uses one JPL/YSL row; nothing was saved for JPL or YSL. Reload the page.';
         }
+        if ($stale_columns > 0) {
+            $warnings[] = 'This page shows a team fee column that ' . $season . ' no longer has; nothing was saved for it. Reload the page.';
+        }
 
         $message = 'Fees updated successfully for ' . $season . ' season';
         if ($cleared) {
@@ -2701,8 +2860,8 @@ class TeamOversight_Fees {
             'cleared' => $cleared,
             'limits_changed' => $limits_changed,
             'warnings' => $warnings,
-            'stale' => $stale,
-            'reload' => ($inserted > 0 || $cleared > 0 || $stale > 0),
+            'stale' => $stale + $stale_columns,
+            'reload' => ($inserted > 0 || $cleared > 0 || $stale > 0 || $stale_columns > 0),
         ));
     }
 
@@ -2958,8 +3117,12 @@ class TeamOversight_Fees {
                         : '<div class="notice notice-error"><p>Nothing copied — ' . esc_html($selected_season) . ' already has fees, or ' . esc_html($from) . ' has none.</p></div>';
                 }
                 // 1.87.0: JPL and YSL rows a season on the one JPL/YSL row can't read.
-                if (!empty($this->last_copy['skipped'])) {
-                    echo '<div class="notice notice-warning"><p>JPL and YSL rows not copied: ' . esc_html($selected_season) . ' uses one JPL/YSL row; type it on the grid (' . esc_html(implode(', ', $this->last_copy['skipped'])) . ').</p></div>';
+                if (!empty($this->last_copy_skipped['league'])) {
+                    echo '<div class="notice notice-warning"><p>JPL and YSL rows not copied: ' . esc_html($selected_season) . ' uses one JPL/YSL row; type it on the grid (' . esc_html(implode(', ', $this->last_copy_skipped['league'])) . ').</p></div>';
+                }
+                // 1.95.0: team fee column cells are never copied (a column belongs to one season).
+                if (!empty($this->last_copy_skipped['columns'])) {
+                    echo '<div class="notice notice-info"><p>Team fee column cells not copied: a team fee column belongs to one season, so ' . esc_html($selected_season) . ' starts without it (' . esc_html(implode(', ', $this->last_copy_skipped['columns'])) . '). To use one again, add it under Team fee columns and type its amounts.</p></div>';
                 }
             } else {
                 echo '<div class="notice notice-error"><p>Security check failed.</p></div>';
@@ -3138,7 +3301,12 @@ class TeamOversight_Fees {
             <?php if (class_exists('TeamOversight_Fee_Breakdown')): ?>
                 <?php // 1.89.0: Where your fees go on the Player Checklist, the committee's percentages (class-fee-breakdown.php). ?>
                 <?php TeamOversight_Fee_Breakdown::render_admin_box($selected_season); ?>
-            <?php endif; ?>
+            <?php endif;
+            // 1.95.0, club decision 13 Nov 2026: team fee columns (class-fee-columns.php). The box prints
+            // nothing before 2027, and this block itself prints nothing, so earlier seasons' page is unchanged.
+            if (class_exists('TeamOversight_Fee_Columns')) {
+                TeamOversight_Fee_Columns::render_admin_box($selected_season);
+            } ?>
 
             <?php if (class_exists('TeamOversight_Transfer_Limits')): ?>
                 <?php // 1.91.0: club transfer limits, this season's counts and exceptions (class-transfer-limits.php; 2027 on). ?>
@@ -3272,7 +3440,7 @@ class TeamOversight_Fees {
                                     <tr>
                                         <th>Fee class</th>
                                         <?php foreach ($grid['roles'] as $role): ?>
-                                            <th><?php echo esc_html(ucfirst(str_replace('_', ' ', $role))); ?></th>
+                                            <th><?php echo self::grid_heading($role, $grid, $selected_season); ?></th>
                                         <?php endforeach; ?>
                                     </tr>
                                 </thead>
@@ -3282,14 +3450,14 @@ class TeamOversight_Fees {
                                         <tr>
                                             <th scope="row"><strong><?php echo esc_html($class); ?></strong></th>
                                             <?php foreach ($grid['roles'] as $role): ?>
-                                                <?php $cell = isset($grid['cells'][$class][$role]) ? $grid['cells'][$class][$role] : null; ?>
+                                                <?php $cell = isset($grid['cells'][$class][$role]) ? $grid['cells'][$class][$role] : null; $role_words = isset($grid['columns'][$role]) ? $grid['columns'][$role] : $role; ?>
                                                 <td>
                                                     <?php if ($timeline_season): ?><span class="fee-cell-name">Fee</span><?php endif; ?>
-                                                    <span class="fee-cell">$<?php if ($cell): ?><input type="number" name="fees[<?php echo intval($cell->id); ?>]" value="<?php echo esc_attr(number_format($cell->fee_amount, 2, '.', '')); ?>" step="0.01" min="0" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role . ($timeline_season ? ', fee' : '')); ?>"><?php else: ?><input type="hidden" name="new_fees[<?php echo $n; ?>][class]" value="<?php echo esc_attr($class); ?>"><input type="hidden" name="new_fees[<?php echo $n; ?>][role]" value="<?php echo esc_attr($role); ?>"><input type="number" name="new_fees[<?php echo $n; ?>][amount]" value="" step="0.01" min="0" placeholder="<?php echo $timeline_season ? 'TBC' : '—'; ?>" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role . ($timeline_season ? ', fee' : '')); ?>"><?php $n++; endif; ?></span>
+                                                    <span class="fee-cell">$<?php if ($cell): ?><input type="number" name="fees[<?php echo intval($cell->id); ?>]" value="<?php echo esc_attr(number_format($cell->fee_amount, 2, '.', '')); ?>" step="0.01" min="0" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role_words . ($timeline_season ? ', fee' : '')); ?>"><?php else: ?><input type="hidden" name="new_fees[<?php echo $n; ?>][class]" value="<?php echo esc_attr($class); ?>"><input type="hidden" name="new_fees[<?php echo $n; ?>][role]" value="<?php echo esc_attr($role); ?>"><input type="number" name="new_fees[<?php echo $n; ?>][amount]" value="" step="0.01" min="0" placeholder="<?php echo $timeline_season ? 'TBC' : '—'; ?>" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role_words . ($timeline_season ? ', fee' : '')); ?>"><?php $n++; endif; ?></span>
                                                     <?php if ($timeline_season): ?>
                                                         <?php $cell_limit = isset($season_limits[$class][$role]) ? $season_limits[$class][$role] : null; ?>
                                                         <br><span class="fee-cell-name" title="The upper limit: the most this fee can be. Offers sent before fees are released are quoted on it.">Upper limit</span>
-                                                        <span class="fee-cell fee-cell-limit">$<input type="hidden" name="limit_cells[<?php echo $ln; ?>][class]" value="<?php echo esc_attr($class); ?>"><input type="hidden" name="limit_cells[<?php echo $ln; ?>][role]" value="<?php echo esc_attr($role); ?>"><input type="number" name="limit_cells[<?php echo $ln; ?>][amount]" value="<?php echo $cell_limit === null ? '' : esc_attr(number_format($cell_limit, 2, '.', '')); ?>" step="0.01" min="0" placeholder="set limit" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role . ', upper limit'); ?>"><?php $ln++; ?></span>
+                                                        <span class="fee-cell fee-cell-limit">$<input type="hidden" name="limit_cells[<?php echo $ln; ?>][class]" value="<?php echo esc_attr($class); ?>"><input type="hidden" name="limit_cells[<?php echo $ln; ?>][role]" value="<?php echo esc_attr($role); ?>"><input type="number" name="limit_cells[<?php echo $ln; ?>][amount]" value="<?php echo $cell_limit === null ? '' : esc_attr(number_format($cell_limit, 2, '.', '')); ?>" step="0.01" min="0" placeholder="set limit" onchange="markChanged()" aria-label="<?php echo esc_attr($class . ', ' . $role_words . ', upper limit'); ?>"><?php $ln++; ?></span>
                                                     <?php endif; ?>
                                                 </td>
                                             <?php endforeach; ?>
@@ -4142,6 +4310,11 @@ class TeamOversight_Fees {
      * roles, cell = the matrix row (or null when that combination has no
      * amount yet). Every season shows the standard rows and columns, so a
      * class missing from the matrix can still be filled in.
+     *
+     * 1.95.0: a season with live team fee columns (2027 on) shows them
+     * right after Playing member (roles holds their keys), and the result
+     * gains 'columns' (key => the committee's name, admin-only). A season
+     * without one returns exactly what it did, with no 'columns' key.
      */
     public function get_fee_grid($season) {
         $cells = array();
@@ -4160,7 +4333,38 @@ class TeamOversight_Fees {
         // Always exactly the paying columns; old coach/manager amounts in the
         // table are no longer used and aren't shown.
         $roles = self::standard_fee_roles();
-        return array('classes' => $classes, 'roles' => $roles, 'cells' => $cells);
+        // 1.95.0: plus the season's live team fee columns after Playing
+        // member (a retired column's rows are kept but not shown).
+        $columns = class_exists('TeamOversight_Fee_Columns') ? TeamOversight_Fee_Columns::live($season) : array();
+        if (empty($columns)) {
+            return array('classes' => $classes, 'roles' => $roles, 'cells' => $cells);
+        }
+        $with_columns = array();
+        foreach ($roles as $role) {
+            $with_columns[] = $role;
+            if ($role === 'playing_member') {
+                foreach (array_keys($columns) as $key) {
+                    $with_columns[] = (string) $key;
+                }
+            }
+        }
+        return array('classes' => $classes, 'roles' => $with_columns, 'cells' => $cells, 'columns' => $columns);
+    }
+
+    /**
+     * A Fee Matrix column heading (escaped HTML): the role as always, or
+     * (1.95.0) a team fee column's name with a small grey line under it
+     * naming the teams whose playing members are charged at it.
+     */
+    private static function grid_heading($role, array $grid, $season) {
+        if (!isset($grid['columns'][$role])) {
+            return esc_html(ucfirst(str_replace('_', ' ', $role)));
+        }
+        $teams = class_exists('TeamOversight_Fee_Columns') ? TeamOversight_Fee_Columns::teams_of((string) $role, $season) : array();
+        return esc_html($grid['columns'][$role])
+            . '<br><span style="font-size: 11px; font-weight: normal; color: #646970;">'
+            . esc_html(empty($teams) ? 'No team uses this column yet' : 'Playing members of: ' . implode(', ', $teams))
+            . '</span>';
     }
 
     /**
@@ -4189,10 +4393,17 @@ class TeamOversight_Fees {
      * the one JPL/YSL row (before 2027, or kept), the source's JPL and YSL
      * rows are not copied (nothing would read them) and are listed in
      * last_copy['skipped']; every other copy is exactly as before.
+     *
+     * Team fee columns (1.95.0): a column belongs to one season, so a fee
+     * or limit row whose role is a column key is never copied, into any
+     * season. Each is listed in last_copy['skipped'] (where it would have
+     * been copied: its fee with copy_fees or limits_from_fees, its limit
+     * with copy_limits), after the JPL and YSL cells.
      */
     public function copy_fee_matrix($from, $to, $opts = array()) {
         global $wpdb;
         $this->last_copy = array('fees' => 0, 'limits' => 0, 'limits_from_fees' => 0, 'limits_kept' => array(), 'skipped' => array());
+        $this->last_copy_skipped = array('league' => array(), 'columns' => array());
         $valid = function ($s) {
             return is_string($s) && preg_match('/^\d{4}$/D', $s) === 1;
         };
@@ -4208,7 +4419,18 @@ class TeamOversight_Fees {
         $unreadable = function ($class) use ($split_to, $split_from) {
             return $split_from && !$split_to && ((string) $class === self::CLASS_JPL || (string) $class === self::CLASS_YSL);
         };
-        $source_fees = $this->get_fee_matrix_for_season($from);
+        // 1.95.0: the source's team fee column rows are left out of everything below.
+        $column_skipped = array();
+        $source_fees = array();
+        foreach ((array) $this->get_fee_matrix_for_season($from) as $fee) {
+            if (self::is_column_key($fee->team_role)) {
+                if (!empty($opts['copy_fees']) || ($timeline && !empty($opts['limits_from_fees']))) {
+                    $column_skipped[] = self::cell_label($fee->fee_class, $fee->team_role, $from);
+                }
+                continue;
+            }
+            $source_fees[] = $fee;
+        }
         $explicit_fees = array();
         foreach ($source_fees as $fee) {
             $explicit_fees[$fee->fee_class . '|' . $fee->team_role] = true;
@@ -4253,6 +4475,10 @@ class TeamOversight_Fees {
             if (!empty($opts['copy_limits'])) {
                 foreach ($source_limits as $source_class => $by_role) {
                     foreach ($by_role as $role => $amount) {
+                        if (self::is_column_key($role)) {
+                            $column_skipped[] = self::cell_label($source_class, $role, $from);
+                            continue; // 1.95.0: a team fee column's limit is never copied
+                        }
                         if ($unreadable($source_class)) {
                             $skipped[] = self::cell_label($source_class, $role);
                             continue;
@@ -4302,12 +4528,16 @@ class TeamOversight_Fees {
             }
             $n += $limits + $from_fees;
         }
-        $this->last_copy['skipped'] = array_values(array_unique($skipped));
+        $this->last_copy_skipped = array('league' => array_values(array_unique($skipped)), 'columns' => array_values(array_unique($column_skipped)));
+        $this->last_copy['skipped'] = array_values(array_unique(array_merge($skipped, $column_skipped)));
         return $n;
     }
 
-    /** What the last copy_fee_matrix() call did: fees, limits, limits_from_fees, limits_kept (list of cells), skipped (1.87.0: JPL and YSL cells the target can't read). */
+    /** What the last copy_fee_matrix() call did: fees, limits, limits_from_fees, limits_kept (list of cells), skipped (1.87.0: JPL and YSL cells the target can't read; 1.95.0: then team fee column cells, never copied). */
     public $last_copy = array('fees' => 0, 'limits' => 0, 'limits_from_fees' => 0, 'limits_kept' => array(), 'skipped' => array());
+
+    /** last_copy['skipped'] in its two parts, for Configuration's two notices: league (JPL and YSL cells), columns (team fee column cells). */
+    private $last_copy_skipped = array('league' => array(), 'columns' => array());
 
     // ------------------------------------------------------------------
     // Upper limits (1.76.0). Every cell of the fee matrix holds two
@@ -4395,7 +4625,7 @@ class TeamOversight_Fees {
             $money = function ($v) {
                 return $v === null ? 'not set' : '$' . number_format($v, 2);
             };
-            TeamOversight_Log::add('fee_edit', $season . ' limit ' . $fee_class . ' / ' . strtolower(self::role_label($team_role)) . ': ' . $money($old) . ' to ' . $money($new));
+            TeamOversight_Log::add('fee_edit', $season . ' limit ' . $fee_class . ' / ' . self::cell_role_words($team_role, $season) . ': ' . $money($old) . ' to ' . $money($new));
         }
         return $result;
     }
@@ -4407,12 +4637,43 @@ class TeamOversight_Fees {
      * only columns (the supporter column and the Unknown row take a limit if
      * typed but never matter to offers). Returns a list of array(fee_class,
      * role). null = a season from 2027 on this site.
+     *
+     * Team fee columns (1.95.0): then, for each live column at least one
+     * team of the season is charged at (TeamOversight_Fee_Columns::
+     * in_use()), (class, key) for every person fee class when one of its
+     * teams is not a junior-league team, and the junior-league row of each
+     * junior-league team charged at it (no repeats). Never a training only
+     * cell, never Unknown. With no column in use (and for a null season)
+     * the list is exactly what it was.
      */
     public static function offerable_cells($season = null) {
         $cells = array();
         foreach (array_merge(self::person_fee_classes(), self::junior_league_classes($season)) as $class) {
             foreach (array('playing_member', 'training_only') as $role) {
                 $cells[] = array($class, $role);
+            }
+        }
+        if ($season === null || !class_exists('TeamOversight_Fee_Columns')) {
+            return $cells;
+        }
+        foreach (TeamOversight_Fee_Columns::in_use($season) as $key => $teams) {
+            $senior = false;
+            $junior_rows = array();
+            foreach ($teams as $team) {
+                $row = self::junior_league_class($team, $season);
+                if ($row === '') {
+                    $senior = true;
+                } elseif (!in_array($row, $junior_rows, true)) {
+                    $junior_rows[] = $row;
+                }
+            }
+            if ($senior) {
+                foreach (self::person_fee_classes() as $class) {
+                    $cells[] = array($class, (string) $key);
+                }
+            }
+            foreach ($junior_rows as $row) {
+                $cells[] = array($row, (string) $key);
             }
         }
         return $cells;
@@ -4422,7 +4683,10 @@ class TeamOversight_Fees {
      * A fee-timeline season's matrix at a glance, for the Configuration
      * page and tests: no_limit (offerable cells without an upper limit),
      * no_fee (offerable cells without a fee), above (cells whose fee is
-     * above their limit), each a list of "Class / role" labels.
+     * above their limit), each a list of "Class / role" labels. 1.95.0: a
+     * team fee column's cell is labelled "Class / NAME" (the name as typed),
+     * and a fee row of a column the season no longer has is left out of
+     * above.
      */
     public function matrix_report($season) {
         $fees = array();
@@ -4433,7 +4697,7 @@ class TeamOversight_Fees {
         $report = array('no_limit' => array(), 'no_fee' => array(), 'above' => array());
         foreach (self::offerable_cells($season) as $cell) {
             list($class, $role) = $cell;
-            $label = $class . ' / ' . strtolower(self::role_label($role));
+            $label = $class . ' / ' . self::cell_role_words($role, $season);
             if (!isset($limits[$class][$role])) {
                 $report['no_limit'][] = $label;
             }
@@ -4443,8 +4707,11 @@ class TeamOversight_Fees {
         }
         foreach ($fees as $class => $by_role) {
             foreach ($by_role as $role => $fee) {
+                if (self::is_column_key($role) && !self::column_is_live($role, $season)) {
+                    continue;
+                }
                 if (isset($limits[$class][$role]) && round($fee, 2) > round($limits[$class][$role], 2) + 0.004) {
-                    $report['above'][] = $class . ' / ' . strtolower(self::role_label($role));
+                    $report['above'][] = $class . ' / ' . self::cell_role_words($role, $season);
                 }
             }
         }

@@ -420,7 +420,7 @@ class TeamOversight_Fee_Cover {
         if (empty($new)) {
             return '';
         }
-        return 'the ' . $season . ' ' . TeamOversight_Fees::unpriced_words($new) . ' isn\'t set, so their ' . $season . ' fee can\'t be worked out ' . ($cover === null ? 'without the cover' : 'at the supporter fee') . '. Set it on Configuration, Fee matrix first.';
+        return 'the ' . $season . ' ' . TeamOversight_Fees::unpriced_words($new, $season) . ' isn\'t set, so their ' . $season . ' fee can\'t be worked out ' . ($cover === null ? 'without the cover' : 'at the supporter fee') . '. Set it on Configuration, Fee matrix first.';
     }
 
     /** One fee_cover log line about the player. */

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), coach profiles (Coaches), and the club's policies and AGM papers (Club documents).
- * Version: 1.94.1
+ * Version: 1.95.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.94.1');
+define('TEAM_OVERSIGHT_VERSION', '1.95.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -303,6 +303,8 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-fee-cover.php';
     // 1.89.0: Where your fees go, the committee's percentages shown on the Player Checklist.
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-fee-breakdown.php';
+    // 1.95.0: team fee columns, a named set of playing fees the committee gives a team (2027 on; the name is admin-only).
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-fee-columns.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-trials.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-trial-emails.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-imports.php';
@@ -373,6 +375,8 @@ function team_oversight_init() {
     TeamOversight_Fee_Cover::register_hooks();
     // 1.89.0: the Configuration box's admin-post handler (Where your fees go), added once.
     TeamOversight_Fee_Breakdown::register_hooks();
+    // 1.95.0: the Team fee columns box's admin-post handler and its cache flush on murvc_offers_cache_flushed, added once.
+    TeamOversight_Fee_Columns::register_hooks();
     // 1.91.0: the Club transfer limits box's admin-post handler, added once.
     TeamOversight_Transfer_Limits::register_hooks();
     // VVL Oversight → How it works: the calculator's AJAX hook, added once.
