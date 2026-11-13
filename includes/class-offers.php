@@ -2864,6 +2864,29 @@ class TeamOversight_Offers {
      * deposit_due.
      */
     public static function approve($offer_id, $admin_id, $opts = array()) {
+        // 1.95.0: the quote is fixed inside the lock a change to the team fee
+        // columns takes, on the columns as the database holds them now (a
+        // bulk approval is one long request, and get_option() would go on
+        // answering from its first read). A team's column can therefore
+        // never change between this quote and the offer becoming sent:
+        // TeamOversight_Fee_Columns::save() counts the quoted offers again
+        // inside the same lock.
+        if (!class_exists('TeamOversight_Fee_Columns')) {
+            return self::approve_locked($offer_id, $admin_id, $opts);
+        }
+        if (!TeamOversight_Fee_Columns::lock()) {
+            return self::res(false, 'refused', 'The team fee columns are being saved. Try again in a moment.');
+        }
+        try {
+            TeamOversight_Fee_Columns::refresh();
+            return self::approve_locked($offer_id, $admin_id, $opts);
+        } finally {
+            TeamOversight_Fee_Columns::unlock();
+        }
+    }
+
+    /** approve()'s work, inside the team fee columns lock. */
+    private static function approve_locked($offer_id, $admin_id, $opts) {
         global $wpdb;
         if (!self::can_approve($admin_id)) {
             return self::res(false, 'forbidden', 'Only administrators can approve offers.');

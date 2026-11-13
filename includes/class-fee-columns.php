@@ -70,6 +70,8 @@ class TeamOversight_Fee_Columns {
 
     /** Normalised entries read this request: season => entry. */
     private static $cache = array();
+    /** The whole option as refresh() read it from the database (null = read it with get_option()). */
+    private static $fresh = null;
 
     public static function register_hooks() {
         static $done = false;
@@ -85,6 +87,37 @@ class TeamOversight_Fee_Columns {
     /** Forget the entries read this request (save() calls it; so does every TeamOversight_Offers::flush_cache()). */
     public static function flush_cache() {
         self::$cache = array();
+        self::$fresh = null;
+    }
+
+    /**
+     * Read the stored columns straight from the database, for this request's
+     * reads until the next flush_cache(). get_option() keeps a request's
+     * first answer (or its "no such option" flag), so a long request, such
+     * as a bulk approval, would otherwise go on quoting from a copy another
+     * administrator has since changed. TeamOversight_Offers::approve() calls
+     * it inside lock().
+     */
+    public static function refresh() {
+        self::$cache = array();
+        self::$fresh = self::read_stored();
+    }
+
+    /** The one named lock a change to the columns and a quote being fixed at approval both take. */
+    public static function lock_name() {
+        global $wpdb;
+        return 'murvc_fee_columns_' . md5($wpdb->prefix);
+    }
+
+    /** Take the lock (true only when it was taken). */
+    public static function lock($seconds = 5) {
+        global $wpdb;
+        return (string) $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, %d)', self::lock_name(), intval($seconds))) === '1';
+    }
+
+    public static function unlock() {
+        global $wpdb;
+        $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', self::lock_name()));
     }
 
     public static function valid_season($season) {
@@ -123,7 +156,7 @@ class TeamOversight_Fee_Columns {
         }
         $season = (string) $season;
         if (!isset(self::$cache[$season])) {
-            $all = get_option(self::OPTION, array());
+            $all = is_array(self::$fresh) ? self::$fresh : get_option(self::OPTION, array());
             self::$cache[$season] = (is_array($all) && isset($all[$season])) ? self::normalise($all[$season]) : self::empty_entry();
         }
         return self::$cache[$season];
@@ -208,11 +241,22 @@ class TeamOversight_Fee_Columns {
         return $out;
     }
 
-    /** The column a team's playing members are charged at in the season (a key), or '' (the Playing member column). */
+    /**
+     * The column a team's playing members are charged at in the season (a
+     * key), or '' (the Playing member column). The stored tick decides, not
+     * teams(): pricing must not move because a team code was taken out of
+     * Team Management (a stopped place still prices its stretch), so a team
+     * with a column can't be deleted there either.
+     */
     public static function team_column($team, $season) {
-        $teams = self::teams($season);
+        $entry = self::get($season);
         $team = (string) $team;
-        return isset($teams[$team]) ? (string) $teams[$team] : '';
+        return isset($entry['teams'][$team]) ? (string) $entry['teams'][$team] : '';
+    }
+
+    /** What a form was drawn from: save() refuses a form drawn from an entry that has since changed. */
+    public static function entry_hash(array $entry) {
+        return md5((string) wp_json_encode($entry));
     }
 
     /** The codes of the teams charged at a column in the season. */
@@ -297,6 +341,10 @@ class TeamOversight_Fee_Columns {
         }
         $raw = isset($all[$season]) ? $all[$season] : array();
         $before = self::normalise($raw);
+        // A page drawn before another save (a second tab, another administrator) would post the old names and ticks back.
+        if (isset($fields['drawn']) && is_string($fields['drawn']) && $fields['drawn'] !== '' && !hash_equals(self::entry_hash($before), $fields['drawn'])) {
+            return self::result(false, false, array('The ' . $season . ' team fee columns changed since this page was opened. Reload the page and try again.'));
+        }
         $plan = self::plan($season, $before, $raw, $fields);
         if (!empty($plan['errors'])) {
             return self::result(false, false, $plan['errors']);
@@ -305,10 +353,8 @@ class TeamOversight_Fee_Columns {
             return self::result(true, false, array());
         }
 
-        global $wpdb;
-        $lock = 'murvc_fee_columns_' . md5($wpdb->prefix);
-        if ((string) $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, %d)', $lock, 5)) !== '1') {
-            return self::result(false, false, array('Another save of team fee columns is running. Try again in a moment.'));
+        if (!self::lock()) {
+            return self::result(false, false, array('Another save of team fee columns, or an offer approval, is running. Try again in a moment.'));
         }
         try {
             // Straight from the database, never get_option(): a stale
@@ -323,6 +369,13 @@ class TeamOversight_Fee_Columns {
             if ($now !== $before) {
                 return self::result(false, false, array('The ' . $season . ' team fee columns changed while you were saving. Reload the page and try again.'));
             }
+            // Counted again inside the lock: an approval fixes its quote inside the same lock, so none can land between this count and the write.
+            foreach ($plan['team_codes'] as $code) {
+                $quoted = self::quoted_offers($season, $code);
+                if ($quoted > 0) {
+                    return self::result(false, false, array(self::quoted_refusal($code, $quoted, self::teams_config($season))));
+                }
+            }
             $all[$season] = $plan['after'];
             update_option(self::OPTION, $all, false);
             wp_cache_delete(self::OPTION, 'options');
@@ -331,7 +384,7 @@ class TeamOversight_Fee_Columns {
                 return self::result(false, false, array('The database did not take the change. Try again.'));
             }
         } finally {
-            $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock));
+            self::unlock();
         }
 
         // The engine reads the team's column through this cache and the offers' team config.
@@ -492,11 +545,11 @@ class TeamOversight_Fee_Columns {
             }
             $quoted = self::quoted_offers($season, $code);
             if ($quoted > 0) {
-                $errors[] = self::team_words($code, $config) . ' has ' . $quoted . ' offer' . ($quoted === 1 ? '' : 's') . ' already sent with a quote. A team\'s fee column can only change before its offers are sent.';
+                $errors[] = self::quoted_refusal($code, $quoted, $config);
             }
         }
 
-        $out = array('after' => $before, 'errors' => array_values(array_unique($errors)), 'changes' => array(), 'teams_changed' => false);
+        $out = array('after' => $before, 'errors' => array_values(array_unique($errors)), 'changes' => array(), 'teams_changed' => false, 'team_codes' => array());
         if (!empty($out['errors'])) {
             return $out;
         }
@@ -542,7 +595,13 @@ class TeamOversight_Fee_Columns {
         }
         $out['changes'] = $changes;
         $out['teams_changed'] = !empty($team_changes);
+        $out['team_codes'] = array_map('strval', array_keys($team_changes));
         return $out;
+    }
+
+    /** The refusal for a team whose column would change while it has quoted playing offers. */
+    private static function quoted_refusal($code, $quoted, array $config) {
+        return self::team_words($code, $config) . ' has ' . intval($quoted) . ' offer' . (intval($quoted) === 1 ? '' : 's') . ' already sent with a quote. A team\'s fee column can only change before its offers are sent.';
     }
 
     /** "Playing member" for '', else "the NAME column" (the name as it is after the save, or before it for the "was"). */
@@ -550,7 +609,9 @@ class TeamOversight_Fee_Columns {
         if ($key === '') {
             return 'Playing member';
         }
-        return 'the ' . (isset($names[$key]) ? $names[$key] : 'retired') . ' column';
+        $name = isset($names[$key]) ? (string) $names[$key] : 'retired';
+        // TeamOversight_Fees::column_phrase()'s rule, kept here so the class loads without it.
+        return 'the ' . $name . (preg_match('/\bcolumn$/i', $name) === 1 ? '' : ' column');
     }
 
     /** A team named for a refusal: its code, with its name in brackets when it has another. */
@@ -782,6 +843,9 @@ class TeamOversight_Fee_Columns {
             $fields['retire'] = array_values(array_unique($fields['retire']));
         }
         $fields['new_label'] = isset($post['new_label']) ? $text($post['new_label']) : '';
+        if (isset($post['drawn']) && is_string($post['drawn'])) {
+            $fields['drawn'] = $key($post['drawn']);
+        }
         if (isset($post['shown_teams']) && is_array($post['shown_teams'])) {
             foreach (array_slice($post['shown_teams'], 0, 200) as $code) {
                 $code = $text($code);
@@ -919,6 +983,7 @@ class TeamOversight_Fee_Columns {
                 <input type="hidden" name="action" value="<?php echo esc_attr(self::ACTION); ?>">
                 <input type="hidden" name="season" value="<?php echo esc_attr($season); ?>">
                 <?php wp_nonce_field(self::NONCE_ACTION . $season, self::NONCE_FIELD); ?>
+                <input type="hidden" name="drawn" value="<?php echo esc_attr(self::entry_hash($entry)); ?>">
                 <?php if (empty($live)): ?>
                     <p>No team fee columns for <?php echo esc_html($season); ?> yet.</p>
                 <?php else: ?>

@@ -645,6 +645,37 @@ class TeamOversight_Fees {
     }
 
     /**
+     * A season's fee rows without those of a team fee column the season no
+     * longer has. A retired column's rows stay in the table (nothing is
+     * ever deleted for it) but nothing shows or reads them, so they must
+     * not count as "the season has fees". With no such row the list is the
+     * one given.
+     */
+    private static function without_dead_columns(array $rows, $season) {
+        $out = array();
+        foreach ($rows as $row) {
+            $role = (is_object($row) && isset($row->team_role)) ? $row->team_role : '';
+            if (self::is_column_key($role) && !self::column_is_live($role, $season)) {
+                continue;
+            }
+            $out[] = $row;
+        }
+        return $out;
+    }
+
+    /** The same for the limits map (class => role => amount): does the season have a limit anyone can see? */
+    private static function has_live_limits(array $limits, $season) {
+        foreach ($limits as $by_role) {
+            foreach ((array) $by_role as $role => $amount) {
+                if (!self::is_column_key($role) || self::column_is_live($role, $season)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * A matrix role in a cell's words ("Full Adult / playing member"): a
      * team fee column's name as typed, anything else lowercased exactly as
      * before (strtolower(role_label())).
@@ -3150,7 +3181,7 @@ class TeamOversight_Fees {
         // with a flash notice.
         echo TeamOversight_Offers::flash_notice();
 
-        $fee_matrix = $this->get_fee_matrix_for_season($selected_season);
+        $fee_matrix = self::without_dead_columns($this->get_fee_matrix_for_season($selected_season), $selected_season);
 
         // Get available seasons for the dropdown
         $available_seasons = $this->get_available_seasons();
@@ -3326,7 +3357,8 @@ class TeamOversight_Fees {
                     $season_limits = $timeline_season ? self::get_limits_for_season($selected_season) : array();
                     $matrix_report = $timeline_season ? $this->matrix_report($selected_season) : null;
                     $copy_sources = array();
-                    if (empty($fee_matrix) || ($timeline_season && empty($season_limits))) {
+                    $has_limits = self::has_live_limits($season_limits, $selected_season);
+                    if (empty($fee_matrix) || ($timeline_season && !$has_limits)) {
                         foreach ($available_seasons as $s) {
                             if ($s !== $selected_season && (!empty($this->get_fee_matrix_for_season($s)) || ($timeline_season && !empty(self::get_limits_for_season($s))))) {
                                 $copy_sources[] = $s;
@@ -3336,7 +3368,7 @@ class TeamOversight_Fees {
                     ?>
 
                     <?php if (empty($fee_matrix)): ?>
-                        <?php if ($timeline_season && !empty($season_limits)): ?>
+                        <?php if ($timeline_season && $has_limits): ?>
                             <div class="notice notice-info inline">
                                 <p><strong>Upper limits are set for <?php echo esc_html($selected_season); ?>.</strong> Fees are left blank until they are known.</p>
                             </div>
@@ -4440,7 +4472,7 @@ class TeamOversight_Fees {
         }
 
         $n = 0;
-        if (!empty($opts['copy_fees']) && empty($this->get_fee_matrix_for_season($to))) {
+        if (!empty($opts['copy_fees']) && empty(self::without_dead_columns($this->get_fee_matrix_for_season($to), $to))) {
             $version = 'copied-' . $from . '-' . $to . '-' . time();
             $written = array();
             foreach ($source_fees as $fee) {
@@ -5639,6 +5671,10 @@ class TeamOversight_Fees {
         if (!isset($teams[$key])) {
             wp_send_json_error('Team code not found in the ' . $season . ' season');
         }
+        // 1.95.0: its playing members are charged at a team fee column. Unticking it there checks its offers, logs the change and re-prices.
+        if (self::team_fee_column($team_code, $season) !== '') {
+            wp_send_json_error($team_code . ' has a team fee column in ' . $season . '. Untick it under Team fee columns first.');
+        }
 
         // Only THIS season's assignments block the delete — the same code
         // in another season is a different team entry.
@@ -5674,6 +5710,13 @@ class TeamOversight_Fees {
         }
 
         $season = $this->posted_team_season();
+        // 1.95.0: the default list would drop or replace teams that have a team fee column.
+        if (class_exists('TeamOversight_Fee_Columns')) {
+            $columns = TeamOversight_Fee_Columns::get($season);
+            if (!empty($columns['teams'])) {
+                wp_send_json_error(implode(', ', array_map('strval', array_keys($columns['teams']))) . (count($columns['teams']) === 1 ? ' has' : ' have') . ' a team fee column in ' . $season . '. Untick the teams under Team fee columns first.');
+            }
+        }
         $names = get_option('team_oversight_teams', array());
         $meta = get_option('team_oversight_team_meta', array());
 
