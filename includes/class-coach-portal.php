@@ -2310,7 +2310,8 @@ class TeamOversight_Coach_Portal {
                                         echo self::render_locked_in_chip($locked_offer, $season);
                                         ?>
                                     <?php endif; ?>
-                                    <?php echo $this->render_other_team_chips($claims, $app_ctx ? $app_ctx['id'] : 0, isset($member->user_id) ? $member->user_id : 0, $member->email, $teams_config); ?>
+                                    <?php // 1.96.1: on this team for good, so another team's Rejected says nothing new (2027 on). ?>
+                                    <?php echo $this->render_other_team_chips($claims, $app_ctx ? $app_ctx['id'] : 0, isset($member->user_id) ? $member->user_id : 0, $member->email, $teams_config, $offers_on); ?>
                                 </span>
                             </div>
                             <div class="cac-meta">
@@ -2370,7 +2371,7 @@ class TeamOversight_Coach_Portal {
                                     <?php else: ?>
                                     <span class="cac-verdicts"><?php echo self::render_board_verdict_chip(in_array($member->status, array('selected', 'training_only'), true) ? $member->status : 'tentative'); ?></span>
                                     <?php endif; ?>
-                                    <?php echo $this->render_other_team_chips($claims, $member->application_id, $member->user_id, $member->email, $teams_config); ?>
+                                    <?php echo $this->render_other_team_chips($claims, $member->application_id, $member->user_id, $member->email, $teams_config, $offers_on && !empty($m_offer) && isset($m_offer->state) && $m_offer->state === TeamOversight_Offers::LOCKED_IN); ?>
                                 </span>
                             </div>
                             <div class="cac-meta">
@@ -5676,8 +5677,15 @@ class TeamOversight_Coach_Portal {
     /**
      * Chips for one card: other teams' verdicts, with a confirmed place on
      * a team replacing the verdict that led to it.
+     *
+     * $locked_here (1.96.1, club request 14 Nov 2026): the player is locked
+     * into THIS team (a confirmed place, or an offer for it locked in). The
+     * coach no longer needs to know which other teams turned them down, so
+     * another team's Rejected chip is left out. Every other chip stays: a
+     * team that has them Tentative, Selected or Training Only (with its
+     * offer wording) or holds a confirmed place for them still matters.
      */
-    private function render_other_team_chips($claims, $application_id, $user_id, $email, $teams_config) {
+    private function render_other_team_chips($claims, $application_id, $user_id, $email, $teams_config, $locked_here = false) {
         list($verdicts, $placements, $offers) = $claims;
         $teams = isset($verdicts[intval($application_id)]) ? $verdicts[intval($application_id)] : array();
         $offer_states = isset($offers[intval($application_id)]) ? $offers[intval($application_id)] : array();
@@ -5701,6 +5709,9 @@ class TeamOversight_Coach_Portal {
         $labels['confirmed_training'] = 'Confirmed (Training Only)';
         $html = '';
         foreach ($teams as $team => $status) {
+            if ($locked_here && $status === 'rejected') {
+                continue;
+            }
             $label = isset($labels[$status]) ? $labels[$status] : ucfirst($status);
             if (strpos($status, 'confirmed') !== 0 && isset($offer_states[$team]['chip'])) {
                 // 2027 on: "Selected · offer sent", "Training Only · accepted", ...
