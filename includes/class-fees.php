@@ -3616,7 +3616,8 @@ class TeamOversight_Fees {
                                         <th><label for="team-age-rule">Age Eligibility</label></th>
                                         <td>
                                             <select id="team-age-rule" name="team_age_rule">
-                                                <?php foreach (TeamOversight_Database::get_age_rules() as $rule_key => $rule_label): ?>
+                                                <?php // 1.96.2: the U17 and U15 labels read the selected season's rule (31 August before 2027). ?>
+                                                <?php foreach (TeamOversight_Database::get_age_rules($selected_season) as $rule_key => $rule_label): ?>
                                                     <option value="<?php echo esc_attr($rule_key); ?>"><?php echo esc_html($rule_label); ?></option>
                                                 <?php endforeach; ?>
                                             </select>

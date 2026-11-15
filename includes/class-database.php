@@ -1217,25 +1217,47 @@ class TeamOversight_Database {
     }
 
     /**
+     * The first season whose Youth State League ages are measured on
+     * 31 December, like the JPL's (1.96.2: Volleyball Victoria moved the
+     * date from 31 August for the 2027 season). Earlier seasons keep
+     * 31 August, so their boards and flags read as they did.
+     */
+    const YSL_YEAR_END_FROM = 2027;
+
+    /** True when a season's U17 / U15 ages are measured on 31 December (2027 on), false when on 31 August. */
+    public static function ysl_age_at_year_end($season) {
+        return intval($season) >= self::YSL_YEAR_END_FROM;
+    }
+
+    /**
      * Age eligibility rules per the VVL By-Laws. The DOB cutoff is computed
      * from the season year (get_dob_cutoff), so nothing needs updating when
      * the season rolls over:
      *  - u19 (JPL/junior): must not turn 19 during the season's calendar year
-     *  - u17 (YSL): age 16 or younger as of 31 August of the season year
-     *  - u15 (YSL): age 14 or younger as of 31 August of the season year
+     *  - u17 (YSL): from 2027, must not turn 17 during the season's calendar
+     *    year; 2026 and earlier, age 16 or younger as of 31 August
+     *  - u15 (YSL): from 2027, must not turn 15 during the season's calendar
+     *    year; 2026 and earlier, age 14 or younger as of 31 August
+     *
+     * The keys never change. $season only picks the wording of the U17 and
+     * U15 labels: a season before 2027 reads the 31 August rule, any other
+     * season (or none) the rule in force from 2027.
      */
-    public static function get_age_rules() {
+    public static function get_age_rules($season = null) {
+        $year_end = $season === null || $season === '' || self::ysl_age_at_year_end($season);
         return array(
             '' => 'Open age',
             'u19' => 'U19 — Junior (JPL: no 19th birthday in the season year)',
-            'u17' => 'U17 — YSL (16 or younger on 31 August)',
-            'u15' => 'U15 — YSL (14 or younger on 31 August)',
+            'u17' => $year_end ? 'U17 — YSL (no 17th birthday in the season year)' : 'U17 — YSL (16 or younger on 31 August)',
+            'u15' => $year_end ? 'U15 — YSL (no 15th birthday in the season year)' : 'U15 — YSL (14 or younger on 31 August)',
         );
     }
 
     /**
      * Earliest allowed date of birth for an age rule in a given season.
      * Players must be born ON or AFTER this date. Null = no restriction.
+     * This is the ONE place the dates are worked out: the trial form's
+     * script is handed these dates, it never works them out itself.
      */
     public static function get_dob_cutoff($age_rule, $season) {
         $season = intval($season);
@@ -1243,9 +1265,9 @@ class TeamOversight_Database {
             case 'u19':
                 return ($season - 18) . '-01-01';
             case 'u17':
-                return ($season - 17) . '-09-01';
+                return self::ysl_age_at_year_end($season) ? ($season - 16) . '-01-01' : ($season - 17) . '-09-01';
             case 'u15':
-                return ($season - 15) . '-09-01';
+                return self::ysl_age_at_year_end($season) ? ($season - 14) . '-01-01' : ($season - 15) . '-09-01';
         }
         return null;
     }

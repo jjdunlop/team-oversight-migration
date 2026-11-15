@@ -868,17 +868,33 @@ class TeamOversight_Trials {
         jQuery(document).ready(function($) {
             // Team eligibility: grey out teams the player can't trial for,
             // based on competition (profile gender or the form question) and
-            // each team's VVL age rule. Cutoffs follow the VVL By-Laws:
-            // U19 = born on/after 1 Jan (season-18); U17/U15 (YSL) = born
-            // on/after 1 Sep of (season-17)/(season-15).
+            // each team's VVL age rule. The earliest dates of birth come from
+            // TeamOversight_Database::get_dob_cutoff(), the one rule, for each
+            // season this form can show (1.96.2: this script no longer works
+            // them out itself, so it can't disagree with the server's check).
             var murvcDob = '<?php echo esc_js($prefill['birth_date']); ?>';
             var murvcComp = '<?php echo esc_js($competition['competition'] ? $competition['competition'] : ''); ?>';
+            <?php
+            $dob_cutoff_seasons = self::get_open_seasons();
+            if (!empty($editing) && !empty($my_application->season)) {
+                $dob_cutoff_seasons[] = $my_application->season;
+            }
+            $dob_cutoffs = array();
+            foreach ($dob_cutoff_seasons as $dob_cutoff_season) {
+                $dob_cutoff_season = intval($dob_cutoff_season);
+                if ($dob_cutoff_season < 1) {
+                    continue;
+                }
+                foreach (array('u19', 'u17', 'u15') as $dob_cutoff_rule) {
+                    $dob_cutoffs['s' . $dob_cutoff_season][$dob_cutoff_rule] = TeamOversight_Database::get_dob_cutoff($dob_cutoff_rule, $dob_cutoff_season);
+                }
+            }
+            ?>
+            var murvcDobCutoffs = <?php echo wp_json_encode((object) $dob_cutoffs); ?>;
 
             function murvcDobCutoff(rule, seasonYear) {
-                if (rule === 'u19') return (seasonYear - 18) + '-01-01';
-                if (rule === 'u17') return (seasonYear - 17) + '-09-01';
-                if (rule === 'u15') return (seasonYear - 15) + '-09-01';
-                return null;
+                var season = murvcDobCutoffs['s' + seasonYear];
+                return (season && season[rule]) ? season[rule] : null;
             }
 
             function murvcFormatDate(iso) {
