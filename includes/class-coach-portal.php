@@ -5926,13 +5926,25 @@ class TeamOversight_Coach_Portal {
         // Skip anyone already confirmed in a PLAYING role. People confirmed
         // as coach/manager still show their player selection separately —
         // a coach can legitimately also be selected as a player.
+        // 1.96.3: matched by account as well as by email. A place written
+        // since 2027 carries the account's email (TeamOversight_Offers::place()),
+        // and the application keeps the email it was made with, so a player
+        // who changed their account email after applying was listed twice:
+        // Confirmed, and again in selection as "locked in, being placed".
         $playing_emails = array();
+        $playing_users = array();
         foreach ($roster as $member) {
             if (in_array($member->role, array('playing_member', 'training_only'), true)) {
                 $playing_emails[] = strtolower($member->email);
+                if (!empty($member->user_id) && intval($member->user_id) > 0) {
+                    $playing_users[] = intval($member->user_id);
+                }
             }
         }
-        $rows = array_values(array_filter($rows, function ($row) use ($playing_emails) {
+        $rows = array_values(array_filter($rows, function ($row) use ($playing_emails, $playing_users) {
+            if (intval($row->user_id) > 0 && in_array(intval($row->user_id), $playing_users, true)) {
+                return false;
+            }
             return !in_array(strtolower($row->email), $playing_emails, true);
         }));
 
