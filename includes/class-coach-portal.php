@@ -4725,7 +4725,20 @@ class TeamOversight_Coach_Portal {
             'Name', 'Verdict', 'Status', 'Role', 'Team Position', 'Applied Positions', 'Email', 'Mobile',
             'Date of Birth', 'Registration', 'Previous Club', 'Last VVL Season', 'Level Last Played', 'International',
         ));
+        // Who already has a row, by email and (1.96.3) by account: a 2027+
+        // place carries the account's email while the application keeps the
+        // email it was made with, so an email alone can miss the same person.
         $listed = array();
+        $listed_users = array();
+        $mark_listed = function ($email, $user_id) use (&$listed, &$listed_users) {
+            $listed[strtolower((string) $email)] = true;
+            if (intval($user_id) > 0) {
+                $listed_users[intval($user_id)] = true;
+            }
+        };
+        $is_listed = function ($email, $user_id) use (&$listed, &$listed_users) {
+            return isset($listed[strtolower((string) $email)]) || (intval($user_id) > 0 && isset($listed_users[intval($user_id)]));
+        };
         $unpaid = function ($application_status) {
             return $application_status === 'awaiting_payment' ? ' · trial fee unpaid' : '';
         };
@@ -4805,7 +4818,7 @@ class TeamOversight_Coach_Portal {
                 call_user_func($cell, $member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
             ), $extra($roster_user_ids[$i], isset($roster_apps[$i]) ? $roster_apps[$i] : null));
-            $listed[strtolower((string) $member->email)] = true;
+            $mark_listed($member->email, isset($member->user_id) ? $member->user_id : 0);
         }
 
         $verdict_labels = self::get_verdict_labels();
@@ -4846,7 +4859,7 @@ class TeamOversight_Coach_Portal {
             } else {
                 $rows[] = $row;
             }
-            $listed[strtolower((string) $member->email)] = true;
+            $mark_listed($member->email, $member->user_id);
         }
         // Declined (the player said no, or was moved to Declined) sit after Tentative and before Rejected.
         foreach ($declined_rows as $row) {
@@ -4855,7 +4868,7 @@ class TeamOversight_Coach_Portal {
 
         // Rejected for this team (by its coaches, or the application by the club).
         foreach ($rejected as $member) {
-            if (isset($listed[strtolower((string) $member->email)])) {
+            if ($is_listed($member->email, $member->user_id)) {
                 continue;
             }
             $rows[] = array_merge(array(
@@ -4868,12 +4881,12 @@ class TeamOversight_Coach_Portal {
                 call_user_func($cell, $member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
             ), $extra($member->user_id, $member));
-            $listed[strtolower((string) $member->email)] = true;
+            $mark_listed($member->email, $member->user_id);
         }
 
         // Applied for this team, no verdict for it yet.
         foreach ($applied as $member) {
-            if (isset($listed[strtolower((string) $member->email)])) {
+            if ($is_listed($member->email, $member->user_id)) {
                 continue;
             }
             $rows[] = array_merge(array(
@@ -4886,7 +4899,7 @@ class TeamOversight_Coach_Portal {
                 call_user_func($cell, $member->email),
                 $member->mobile ? self::format_phone($member->mobile) : '',
             ), $extra($member->user_id, $member));
-            $listed[strtolower((string) $member->email)] = true;
+            $mark_listed($member->email, $member->user_id);
         }
 
         return $rows;
