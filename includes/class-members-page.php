@@ -1488,6 +1488,9 @@ class TeamOversight_Members_Page {
         // Active grants are judged on the site's date, not the database
         // clock's (grants are dated in site time).
         $today = current_time('Y-m-d');
+        // 1.96.4: places and invoices belong to an account by their user_id,
+        // by email only for a legacy row with none (`uid` below), so a player
+        // who changed their account email keeps their teams and fees here.
         $where = '';
         $params = array($today, $today, $season, $season);
         if (!$show_all) {
@@ -1496,7 +1499,7 @@ class TeamOversight_Members_Page {
                     OR caps.meta_value LIKE %s
                     OR caps.meta_value LIKE %s
                     OR mem.user_id IS NOT NULL
-                    OR teams.email IS NOT NULL
+                    OR teams.uid IS NOT NULL
             ";
             $params[] = '%"life-member"%';
             $params[] = '%"full-member"%';
@@ -1532,18 +1535,22 @@ class TeamOversight_Members_Page {
                 GROUP BY user_id
             ) mem ON mem.user_id = u.ID
             LEFT JOIN (
-                SELECT email, GROUP_CONCAT(DISTINCT team ORDER BY team SEPARATOR '|') AS team_codes,
-                    GROUP_CONCAT(DISTINCT CONCAT(team, ' (', role, ')') ORDER BY team SEPARATOR ', ') AS team_list
-                FROM {$wpdb->prefix}team_assignments
-                WHERE season = %s AND is_active = 1
-                GROUP BY email
-            ) teams ON teams.email = u.user_email
+                SELECT COALESCE(NULLIF(ta.user_id, 0), tu.ID) AS uid,
+                    GROUP_CONCAT(DISTINCT ta.team ORDER BY ta.team SEPARATOR '|') AS team_codes,
+                    GROUP_CONCAT(DISTINCT CONCAT(ta.team, ' (', ta.role, ')') ORDER BY ta.team SEPARATOR ', ') AS team_list
+                FROM {$wpdb->prefix}team_assignments ta
+                LEFT JOIN {$wpdb->users} tu ON (ta.user_id IS NULL OR ta.user_id = 0) AND tu.user_email = ta.email
+                WHERE ta.season = %s AND ta.is_active = 1
+                GROUP BY uid
+            ) teams ON teams.uid = u.ID
             LEFT JOIN (
-                SELECT email, SUM(invoice_amount) AS invoiced, SUM(outstanding_amount) AS outstanding
-                FROM {$wpdb->prefix}team_invoices
-                WHERE season = %s
-                GROUP BY email
-            ) inv ON inv.email = u.user_email
+                SELECT COALESCE(NULLIF(i.user_id, 0), iu.ID) AS uid,
+                    SUM(i.invoice_amount) AS invoiced, SUM(i.outstanding_amount) AS outstanding
+                FROM {$wpdb->prefix}team_invoices i
+                LEFT JOIN {$wpdb->users} iu ON (i.user_id IS NULL OR i.user_id = 0) AND iu.user_email = i.email
+                WHERE i.season = %s
+                GROUP BY uid
+            ) inv ON inv.uid = u.ID
             LEFT JOIN (
                 SELECT email, MAX(accreditation_list) AS accreditation_list
                 FROM {$wpdb->prefix}team_accreditations

@@ -1882,6 +1882,11 @@ class TeamOversight_Admin {
             <h2>Team Details</h2>
             <?php foreach ($teams as $team_code => $team_name): 
                 
+                // 1.96.4: a place is matched to its account by user_id, by
+                // email only when the row has none (a legacy row), so a player
+                // who changed their account email after the place was written
+                // stays listed; their invoice is the account's (by email only
+                // when either row has no user_id, as before).
                 $team_members = $wpdb->get_results($wpdb->prepare("
                     SELECT 
                         ta.email,
@@ -1897,9 +1902,11 @@ class TeamOversight_Admin {
                         um_inst1.meta_value as institution1,
                         um_birthdate.meta_value as birth_date
                     FROM {$wpdb->prefix}team_assignments ta
-                    JOIN {$wpdb->users} u ON ta.email = u.user_email
+                    JOIN {$wpdb->users} u ON (ta.user_id = u.ID OR ((ta.user_id IS NULL OR ta.user_id = 0) AND ta.email = u.user_email))
                     LEFT JOIN {$wpdb->prefix}team_accreditations acc ON ta.email = acc.email
-                    LEFT JOIN {$wpdb->prefix}team_invoices inv ON ta.email = inv.email AND inv.season = ta.season
+                    LEFT JOIN {$wpdb->prefix}team_invoices inv ON inv.season = ta.season
+                        AND ((inv.user_id > 0 AND inv.user_id = u.ID)
+                            OR ((inv.user_id IS NULL OR inv.user_id = 0 OR ta.user_id IS NULL OR ta.user_id = 0) AND inv.email = ta.email))
                     LEFT JOIN {$wpdb->usermeta} um_degree1 ON u.ID = um_degree1.user_id AND um_degree1.meta_key = 'degree1type'
                     LEFT JOIN {$wpdb->usermeta} um_inst1 ON u.ID = um_inst1.user_id AND um_inst1.meta_key = 'institution1'
                     LEFT JOIN {$wpdb->usermeta} um_birthdate ON u.ID = um_birthdate.user_id AND um_birthdate.meta_key = 'birth_date'
@@ -2770,6 +2777,10 @@ class TeamOversight_Admin {
         // One row per invoice: assignments are aggregated into a team list
         // (multi-team players and coach+player dual roles would otherwise
         // duplicate the row per assignment).
+        // 1.96.4: the invoice's account is its user_id (its email only when it
+        // has none), and a place is the invoice's when it belongs to that
+        // account (by email only when either row has no user_id), so a player
+        // who changed their account email keeps their name, teams and team filter.
         $invoices = $wpdb->get_results($wpdb->prepare("
             SELECT
                 inv.*,
@@ -2777,8 +2788,10 @@ class TeamOversight_Admin {
                 MAX(u.display_name) AS name,
                 GROUP_CONCAT(DISTINCT ta.team ORDER BY ta.team SEPARATOR '|') AS team_codes
             FROM {$wpdb->prefix}team_invoices inv
-            LEFT JOIN {$wpdb->users} u ON inv.email = u.user_email
-            LEFT JOIN {$wpdb->prefix}team_assignments ta ON inv.email = ta.email AND inv.season = ta.season AND ta.is_active = 1
+            LEFT JOIN {$wpdb->users} u ON (inv.user_id = u.ID OR ((inv.user_id IS NULL OR inv.user_id = 0) AND inv.email = u.user_email))
+            LEFT JOIN {$wpdb->prefix}team_assignments ta ON inv.season = ta.season AND ta.is_active = 1
+                AND ((ta.user_id > 0 AND ta.user_id = COALESCE(NULLIF(inv.user_id, 0), u.ID))
+                    OR ((ta.user_id IS NULL OR ta.user_id = 0 OR inv.user_id IS NULL OR inv.user_id = 0) AND ta.email = inv.email))
             WHERE inv.season = %s
             GROUP BY inv.id
             ORDER BY inv.created_date DESC
@@ -3055,7 +3068,8 @@ class TeamOversight_Admin {
                             }
                             
                             // Get user meta for fee calculation transparency
-                            $user = get_user_by('email', $invoice->email);
+                            // (1.96.4: the invoice's account, by email only for a row with no user_id).
+                            $user = intval($invoice->user_id) > 0 ? get_userdata(intval($invoice->user_id)) : get_user_by('email', $invoice->email);
                             $fee_info = 'N/A';
                             if ($user) {
                                 $birth_date = get_user_meta($user->ID, 'birth_date', true);
@@ -3525,13 +3539,16 @@ class TeamOversight_Admin {
         global $wpdb;
         
         $season = $this->get_current_season();
-        
+
+        // 1.96.4: a place is matched to its account by user_id, by email only
+        // for a legacy row with none, so a place written before the player
+        // changed their account email is still listed.
         $assignments = $wpdb->get_results($wpdb->prepare("
             SELECT 
                 ta.*,
                 u.display_name as name
             FROM {$wpdb->prefix}team_assignments ta
-            JOIN {$wpdb->users} u ON ta.email = u.user_email
+            JOIN {$wpdb->users} u ON (ta.user_id = u.ID OR ((ta.user_id IS NULL OR ta.user_id = 0) AND ta.email = u.user_email))
             WHERE ta.season = %s
             ORDER BY ta.is_active DESC, ta.team, ta.role, u.display_name
         ", $season));
