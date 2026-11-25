@@ -71,6 +71,8 @@ class TeamOversight_Mailouts {
     const OPTOUT_VIA_META = 'murvc_news_optout_via';
     /** The unsubscribe page: admin-post.php?action=murvc_news&t=TOKEN (signed in or out). */
     const NEWS_ACTION = 'murvc_news';
+    /** The key unsubscribe links are signed with (not autoloaded; made on first use; never the site's salts). */
+    const SECRET_OPTION = 'murvc_news_secret';
     const LOG_TYPE = 'mailout';
     const MAILOUT_HEADER = 'X-MURVC-Mailout';
 
@@ -2286,11 +2288,27 @@ class TeamOversight_Mailouts {
         return intval($wpdb->get_var($wpdb->prepare("SELECT COUNT(DISTINCT user_id) FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value <> ''", self::OPTOUT_META)));
     }
 
-    private static function signature($user_id) {
-        return substr(hash_hmac('sha256', 'murvc-news|' . intval($user_id), wp_salt('auth')), 0, 24);
+    /**
+     * The key unsubscribe links are signed with: its own option, made on first
+     * use and never autoloaded. Not the site's salts, because changing those
+     * (a security plugin does it in one click) would break every link already
+     * sent, and an unsubscribe link has to keep working.
+     */
+    private static function secret() {
+        $secret = (string) get_option(self::SECRET_OPTION, '');
+        if (strlen($secret) >= 32) {
+            return $secret;
+        }
+        add_option(self::SECRET_OPTION, wp_generate_password(64, true, true), '', 'no');
+        $secret = (string) get_option(self::SECRET_OPTION, '');
+        return $secret !== '' ? $secret : wp_salt('auth');
     }
 
-    /** The account's unsubscribe token: ID.SIG (SIG = the first 24 hex of an HMAC of the id with the site's auth salt). */
+    private static function signature($user_id) {
+        return substr(hash_hmac('sha256', 'murvc-news|' . intval($user_id), self::secret()), 0, 24);
+    }
+
+    /** The account's unsubscribe token: ID.SIG (SIG = the first 24 hex of an HMAC of the id with the key in SECRET_OPTION). */
     public static function token($user_id) {
         return intval($user_id) . '.' . self::signature($user_id);
     }
