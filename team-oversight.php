@@ -364,12 +364,10 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-club-documents-route.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-club-documents-admin.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-club-documents-public.php';
-    // 1.97.0: Club mailouts (the groups, the paced sender, the club news unsubscribe). Its admin screens are
-    // class-mailouts-admin.php, loaded when present.
+    // 1.97.0: Club mailouts (the groups, the paced sender, the club news unsubscribe) and its
+    // screens (Club Membership → Mailouts).
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-mailouts.php';
-    if (file_exists(TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-mailouts-admin.php')) {
-        require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-mailouts-admin.php';
-    }
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-mailouts-admin.php';
     if (defined('WP_CLI') && WP_CLI) {
         require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-merge-cli.php';
     }
@@ -423,11 +421,11 @@ function team_oversight_init() {
     TeamOversight_Club_Documents_Route::register_hooks();
     TeamOversight_Club_Documents_Admin::register_hooks();
     TeamOversight_Club_Documents_Public::register_hooks();
-    // 1.97.0: Club mailouts: the five-minute schedule and its sender, the unsubscribe page, the daily prune. Added once.
+    // 1.97.0: Club mailouts: the five-minute schedule and its sender, the unsubscribe page, the daily prune;
+    // the Mailouts screen and its admin-post handlers; Member Lookup's Club news emails buttons. Each added once.
     TeamOversight_Mailouts::register_hooks();
-    if (class_exists('TeamOversight_Mailouts_Admin')) {
-        TeamOversight_Mailouts_Admin::register_hooks();
-    }
+    TeamOversight_Mailouts_Admin::register_hooks();
+    TeamOversight_Member_Lookup::register_hooks();
     new TeamOversight_Trials();
     new TeamOversight_Imports();
     new TeamOversight_Exports();

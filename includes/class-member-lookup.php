@@ -38,9 +38,116 @@ class TeamOversight_Member_Lookup {
         'emergency_contact_name_37' => 'emergency_contact_number_38',
     );
 
+    /** 1.97.0: the Club news emails row's two administrator buttons (admin-post). */
+    const NEWS_ACTION = 'murvc_news_admin';
+    const NEWS_FLASH_PREFIX = 'murvc_lookup_news_flash_';
+
+    private static $hooks_registered = false;
+
+    /** Added once, from team_oversight_init(): the Club news emails buttons' handler. */
+    public static function register_hooks() {
+        if (self::$hooks_registered) {
+            return;
+        }
+        self::$hooks_registered = true;
+        add_action('admin_post_' . self::NEWS_ACTION, array(__CLASS__, 'handle_news_admin'));
+    }
+
+    /** admin-post murvc_news_admin: Stop club news / Start them again for one account, then back to their page. */
+    public static function handle_news_admin() {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html('Only administrators can do this.'), '', array('response' => 403));
+        }
+        $out = self::process_news_admin($_POST, get_current_user_id());
+        wp_safe_redirect($out['redirect']);
+        exit;
+    }
+
+    /**
+     * The two buttons, without the redirect (the tests call it). $post: the
+     * slashed request (user, do = stop | start, _wpnonce for
+     * murvc_news_admin_<user id>). Administrators only; Stop records the
+     * opt-out as by an administrator (on the person's request), Start
+     * removes it (only when the person asks; the button's confirm says so).
+     * Leaves a notice for the person's page. Returns array(ok, message,
+     * redirect, refused ('' or cap, nonce, missing, action)).
+     */
+    public static function process_news_admin($post, $actor_id) {
+        $p = is_array($post) ? wp_unslash($post) : array();
+        $actor_id = intval($actor_id);
+        $user_id = isset($p['user']) && is_scalar($p['user']) ? absint($p['user']) : 0;
+        $do = isset($p['do']) && is_string($p['do']) ? sanitize_key($p['do']) : '';
+        $out = array('ok' => false, 'message' => '', 'redirect' => $user_id > 0 ? self::profile_url($user_id) : admin_url('admin.php?page=club-membership-lookup'), 'refused' => '');
+        if ($actor_id <= 0 || !user_can($actor_id, 'manage_options')) {
+            $out['message'] = 'Only administrators can do this.';
+            $out['refused'] = 'cap';
+            return $out;
+        }
+        $finish = function ($ok, $message, $refused = '') use (&$out, $actor_id) {
+            $out['ok'] = $ok;
+            $out['message'] = $message;
+            $out['refused'] = $refused;
+            set_transient(self::NEWS_FLASH_PREFIX . $actor_id, array($ok ? 'success' : 'error', $message), 5 * MINUTE_IN_SECONDS);
+            return $out;
+        };
+        $nonce = isset($p['_wpnonce']) && is_string($p['_wpnonce']) ? $p['_wpnonce'] : '';
+        if ($user_id <= 0 || $nonce === '' || !wp_verify_nonce($nonce, self::NEWS_ACTION . '_' . $user_id)) {
+            return $finish(false, 'This page has expired, so nothing was changed. Reload it and try again.', 'nonce');
+        }
+        if (!class_exists('TeamOversight_Mailouts') || !get_userdata($user_id)) {
+            return $finish(false, 'No account with that ID — it may have been deleted.', 'missing');
+        }
+        if ($do === 'stop') {
+            return TeamOversight_Mailouts::opt_out($user_id, 'admin')
+                ? $finish(true, 'Club news emails stopped for this account.')
+                : $finish(true, 'Club news emails were already stopped for this account.');
+        }
+        if ($do === 'start') {
+            return TeamOversight_Mailouts::opt_in($user_id, 'admin')
+                ? $finish(true, 'Club news emails started again for this account.')
+                : $finish(true, 'Club news emails were already on for this account.');
+        }
+        return $finish(false, 'That button isn\'t recognised. Reload the page and try again.', 'action');
+    }
+
+    /**
+     * The Profile card's Club news emails row (1.97.0): On, or Unsubscribed on
+     * DATE (via the email link / via one click / by an administrator), with
+     * the administrator's button. '' when mailouts aren't in this build.
+     */
+    public static function news_row_html($user_id) {
+        $user_id = intval($user_id);
+        if ($user_id <= 0 || !class_exists('TeamOversight_Mailouts')) {
+            return '';
+        }
+        $facts = TeamOversight_Mailouts::optout_facts($user_id);
+        $form = function ($do, $label, $confirm) use ($user_id) {
+            return '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" class="murvc-news-form"'
+                . ($confirm !== '' ? ' onsubmit="return confirm(' . esc_attr(wp_json_encode($confirm)) . ');"' : '') . '>'
+                . '<input type="hidden" name="action" value="' . esc_attr(self::NEWS_ACTION) . '">'
+                . '<input type="hidden" name="user" value="' . $user_id . '">'
+                . '<input type="hidden" name="do" value="' . esc_attr($do) . '">'
+                . '<input type="hidden" name="_wpnonce" value="' . esc_attr(wp_create_nonce(self::NEWS_ACTION . '_' . $user_id)) . '">'
+                . '<button type="submit" class="button button-small">' . esc_html($label) . '</button></form>';
+        };
+        if (!$facts['opted_out']) {
+            $cell = 'On ' . $form('stop', 'Stop club news', '') . ' <span class="murvc-muted">when they ask you to</span>';
+        } else {
+            $via = array('link' => '(via the email link)', 'one_click' => '(via one click in their email program)', 'admin' => '(by an administrator)');
+            $ts = strtotime($facts['at']);
+            $cell = esc_html('Unsubscribed on ' . ($ts ? date('j M Y', $ts) : $facts['at']) . ' ' . (isset($via[$facts['via']]) ? $via[$facts['via']] : $via['link']))
+                . ' ' . $form('start', 'Start them again', 'Only start club news again when the person has asked for it. Start sending them club news?');
+        }
+        return '<tr class="murvc-news-row"><th>Club news emails</th><td>' . $cell . '</td></tr>';
+    }
+
     public function render_page() {
         if (!current_user_can('manage_options')) {
             wp_die('Insufficient permissions');
+        }
+        $news_flash = get_transient(self::NEWS_FLASH_PREFIX . get_current_user_id());
+        if (is_array($news_flash)) {
+            delete_transient(self::NEWS_FLASH_PREFIX . get_current_user_id());
         }
 
         $term = isset($_GET['s']) ? trim(sanitize_text_field(wp_unslash($_GET['s']))) : '';
@@ -62,6 +169,10 @@ class TeamOversight_Member_Lookup {
             </p>
 
             <?php $this->render_styles(); ?>
+
+            <?php if (is_array($news_flash) && isset($news_flash[0], $news_flash[1])): ?>
+                <div class="notice notice-<?php echo esc_attr($news_flash[0] === 'success' ? 'success' : 'error'); ?> is-dismissible"><p><?php echo esc_html((string) $news_flash[1]); ?></p></div>
+            <?php endif; ?>
 
             <form method="get" class="murvc-lookup-search">
                 <input type="hidden" name="page" value="club-membership-lookup">
@@ -416,6 +527,7 @@ class TeamOversight_Member_Lookup {
                     <tr><th>Username</th><td><?php echo esc_html($user->user_login); ?></td></tr>
                     <tr><th>Account created</th><td><?php echo esc_html(date('j M Y', strtotime($user->user_registered))); ?></td></tr>
                     <tr><th>Last login</th><td><?php echo $last_login ? esc_html(date('j M Y', intval($last_login))) : '<span class="murvc-muted">never</span>'; ?></td></tr>
+                    <?php echo self::news_row_html($user->ID); // Built from escaped parts. ?>
                 </table>
             </div>
 
@@ -824,6 +936,7 @@ class TeamOversight_Member_Lookup {
         .murvc-lookup-head { margin: 20px 0 10px; }
         .murvc-lookup-head h2 { margin: 0 0 6px; }
         .murvc-lookup-links { margin: 8px 0 0; }
+        .murvc-news-form { display: inline-block; margin: 0 4px; }
         .murvc-chips { margin: 0; }
         .murvc-chip { display: inline-block; padding: 2px 9px; border-radius: 11px; font-size: 12px; margin-right: 5px; background: #eef1f4; color: #333; }
         .murvc-chip.chip-tier { background: #d8f0dd; color: #14611f; font-weight: 600; }

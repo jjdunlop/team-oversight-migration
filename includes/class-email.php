@@ -902,6 +902,17 @@ class TeamOversight_Email {
                 );
             }
         }
+        if (class_exists('TeamOversight_Mailouts')) {
+            // 1.97.0: written and sent by hand, one at a time, so there is no switch.
+            $rows[] = array(
+                'group' => 'Club mailouts',
+                'name' => 'Club mailout (a club notice or club news)',
+                'who' => 'Whoever an administrator picks: members, VVL teams, trial applicants, Club Programs participants or Reds Social League players. Club news leaves out anyone who has unsubscribed.',
+                'when' => 'When an administrator sends one, at up to ' . number_format(TeamOversight_Mailouts::HOUR_CAP) . ' an hour and ' . number_format(TeamOversight_Mailouts::DAY_CAP) . ' a day.',
+                'switch' => 'None: each one is sent by an administrator',
+                'url' => admin_url('admin.php?page=club-membership-mailouts'),
+            );
+        }
         return $rows;
     }
 
