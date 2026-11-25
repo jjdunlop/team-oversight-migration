@@ -41,10 +41,15 @@
   var COOLDOWN_MS = 180;       // touches closer than this count once (the site refuses under 120 ms)
   var REST = 0.78;             // the waiting ball's centre, as a share of the height
   var KEY_LOW = 0.6;           // Space or Enter hits only while the ball is falling below this share
+  var KEY_LOCK_MS = 350;       // a key press outside that window locks the keys this long (longer than the window), so mashing loses the ball
+  var LAG_MS = 100;            // a tap also counts on where the ball was drawn this recently (the screen and a finger lag the physics)
+  var TRAIL = 16;              // drawn positions kept for that (100 ms at up to 160 frames a second)
+  var START_WAIT_MS = 1500;    // a new game's start waits this long at most for the last game's save to land
   var WORDS = { 10: 'Nice dig!', 25: 'Rally!', 50: 'Libero!', 100: 'Hall of fame!', 150: 'Still up!', 200: 'Legend.' };
 
   var roots = [];
   var G = null; // the one game layer, made on the first Play
+  var memBest = 0; // a guest's best for this page's life, when the device won't keep it
 
   // ------------------------------------------------------------------ helpers
 
@@ -69,19 +74,25 @@
     return n >= 1000 ? String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : String(n);
   }
 
+  function clock() {
+    return window.performance && performance.now ? performance.now() : Date.now();
+  }
+
+  /** A guest's best: the device's, or this page's when the device won't keep it (storage blocked). */
   function readBest() {
+    var stored = 0;
     try {
       var n = parseInt(window.localStorage.getItem(STORE_KEY), 10);
-      return n > 0 ? n : 0;
-    } catch (e) {
-      return 0;
-    }
+      stored = n > 0 ? n : 0;
+    } catch (e) { /* storage blocked: the page's own best still counts */ }
+    return Math.max(memBest, stored);
   }
 
   function writeBest(n) {
+    if (n > memBest) { memBest = n; }
     try {
       window.localStorage.setItem(STORE_KEY, String(n));
-    } catch (e) { /* private window or storage switched off: the best just isn't kept */ }
+    } catch (e) { /* private window or storage switched off: the best is kept for this page only */ }
   }
 
   function withQuery(url, params) {
@@ -403,7 +414,8 @@
       x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, angle: 0, pa: 0, spin: 0,
       base: 30, r: 30, level: 0, g0: 1, g: 1, v0: 1, vside: 1,
       state: 'ready', resumeTo: 'playing', score: 0, touches: [], t0: 0, lastTouch: 0,
-      raf: 0, last: null, acc: 0, gameId: 0, run: null
+      raf: 0, last: null, acc: 0, gameId: 0, run: null,
+      drawX: 0, drawY: 0, trail: [], keyLock: 0, pendingFinish: null
     };
     var layer = el('div', 'murvc-kiu-layer');
     layer.setAttribute('role', 'dialog');
@@ -442,6 +454,8 @@
     over.setAttribute('aria-labelledby', 'murvc-kiu-over-title');
     var title = el('h2', '', 'Game over');
     title.id = 'murvc-kiu-over-title';
+    // Focus lands here at game over, never on Play again, so a late Space or Enter can't start the next game.
+    title.tabIndex = -1;
     var big = el('p', 'murvc-kiu-big', '0');
     var fresh = el('p', 'murvc-kiu-new', 'New best!');
     var bestLine = el('p', 'murvc-kiu-note');
@@ -473,7 +487,7 @@
     g.paused = paused;
     g.carry = carry;
     g.over = over;
-    g.o = { big: big, fresh: fresh, best: bestLine, saved: savedLine, place: placeLine, hidden: hiddenLine, login: loginLine, link: loginLink, again: again, quit: quit };
+    g.o = { title: title, big: big, fresh: fresh, best: bestLine, saved: savedLine, place: placeLine, hidden: hiddenLine, login: loginLine, link: loginLink, again: again, quit: quit };
 
     var down = function (e, kind) {
       if (e.cancelable) { e.preventDefault(); }
@@ -481,7 +495,8 @@
     };
     if (window.PointerEvent) {
       canvas.addEventListener('pointerdown', function (e) {
-        if (e.isPrimary === false) { return; }
+        // Every finger counts (a second thumb, a resting palm): the cooldown stops one hit counting twice. A mouse: the main button only.
+        if (e.pointerType === 'mouse' && e.button !== 0) { return; }
         down(e, e.pointerType === 'touch' ? 'touch' : 'mouse');
       });
     } else {
@@ -502,16 +517,26 @@
     quit.addEventListener('click', closeGame);
     again.addEventListener('click', function () { reset(); focusLayer(); });
     carry.addEventListener('click', function () { resume(); focusLayer(); });
-    window.addEventListener('resize', function () { if (G && G.open) { size(); } });
-    window.addEventListener('orientationchange', function () { if (G && G.open) { setTimeout(size, 120); } });
+    window.addEventListener('resize', function () { if (G && G.open) { fitLayer(); size(); } });
+    window.addEventListener('orientationchange', function () { if (G && G.open) { setTimeout(function () { fitLayer(); size(); }, 120); } });
+    if (window.visualViewport) {
+      // A pinch-zoomed page: keep the court on the part of the page the player can see.
+      var refit = function () { if (G && G.open) { fitLayer(); size(); } };
+      window.visualViewport.addEventListener('resize', refit);
+      window.visualViewport.addEventListener('scroll', refit);
+    }
     document.addEventListener('visibilitychange', function () {
       if (G && G.open && document.hidden) { pause(); }
     });
     return g;
   }
 
+  function focusOn(node) {
+    try { node.focus({ preventScroll: true }); } catch (e) { node.focus(); }
+  }
+
   function focusLayer() {
-    try { G.layer.focus({ preventScroll: true }); } catch (e) { G.layer.focus(); }
+    focusOn(G.layer);
   }
 
   function openGame(root) {
@@ -526,9 +551,35 @@
     G.open = true;
     G.W = 0;
     G.H = 0;
+    fitLayer();
     size();
     reset();
     focusLayer();
+  }
+
+  /**
+   * The layer covers the window; on a pinch-zoomed phone it covers the part
+   * of the page that is on the screen (the visual viewport), so the ball and
+   * the close button are never off it.
+   */
+  function fitLayer() {
+    var vv = window.visualViewport, s = G.layer.style;
+    if (vv && vv.scale > 1.01) {
+      s.left = vv.offsetLeft + 'px';
+      s.top = vv.offsetTop + 'px';
+      s.width = vv.width + 'px';
+      s.height = vv.height + 'px';
+      s.right = 'auto';
+      s.bottom = 'auto';
+    } else {
+      s.left = s.top = s.width = s.height = s.right = s.bottom = '';
+    }
+  }
+
+  /** Device pixels per CSS pixel on the screen (a pinch zoom included), at most 3. */
+  function pixelRatio() {
+    var vv = window.visualViewport, zoom = vv && vv.scale > 1 ? vv.scale : 1;
+    return Math.max(1, Math.min(3, (window.devicePixelRatio || 1) * zoom));
   }
 
   function closeGame() {
@@ -546,11 +597,12 @@
   /** Fit the court to the window: canvas pixels, the ball's size and the forces all follow the window. */
   function size() {
     var W = Math.max(1, G.layer.clientWidth || window.innerWidth), H = Math.max(1, G.layer.clientHeight || window.innerHeight);
-    var dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    var dpr = pixelRatio();
     if (G.W && G.H && (W !== G.W || H !== G.H)) {
       var sx = W / G.W, sy = H / G.H;
       G.x *= sx; G.px *= sx; G.vx *= sx;
       G.y *= sy; G.py *= sy; G.vy *= sy;
+      G.trail = [];
     }
     G.W = W;
     G.H = H;
@@ -589,6 +641,8 @@
     G.angle = G.pa = 0;
     G.spin = 0;
     G.run = null;
+    G.trail = [];
+    G.keyLock = 0;
     applyLevel();
     rest();
     G.hud.textContent = '0';
@@ -609,7 +663,7 @@
   function frame(ts) {
     G.raf = 0;
     if (!G.open) { return; }
-    if (Math.max(1, Math.min(3, window.devicePixelRatio || 1)) !== G.dpr) { size(); }
+    if (pixelRatio() !== G.dpr) { size(); }
     if (G.last === null) { G.last = ts; }
     var dt = Math.min(MAX_FRAME, Math.max(0, (ts - G.last) / 1000));
     G.last = ts;
@@ -626,6 +680,9 @@
     }
     draw(G.state === 'playing' ? G.acc / STEP : 1);
     if (G.state === 'playing' || G.state === 'ready') {
+      // Where the ball was drawn, and when: a tap is judged against these too (see hitAt()).
+      G.trail.push({ t: clock(), x: G.drawX, y: G.drawY });
+      if (G.trail.length > TRAIL) { G.trail.shift(); }
       G.raf = requestAnimationFrame(frame);
     }
   }
@@ -654,6 +711,8 @@
     if (!c) { return; }
     var W = G.W, H = G.H, r = G.r;
     var x = G.px + (G.x - G.px) * alpha, y = G.py + (G.y - G.py) * alpha, a = G.pa + (G.angle - G.pa) * alpha;
+    G.drawX = x;
+    G.drawY = y;
     c.setTransform(G.dpr, 0, 0, G.dpr, 0, 0);
     c.clearRect(0, 0, W, H);
     // The floor.
@@ -708,24 +767,53 @@
 
   // ------------------------------------------------------------------ touches
 
+  /**
+   * A tap or click at (cx, cy). What the player sees is a frame or more
+   * behind the physics, and a finger adds its own delay, so the tap counts
+   * when it is on the ball where it is now or where it was drawn in the last
+   * LAG_MS; the off-centre is measured from the nearest of those.
+   */
   function hitAt(cx, cy, kind) {
     if (!G || !G.open || (G.state !== 'ready' && G.state !== 'playing')) { return; }
     var rect = G.canvas.getBoundingClientRect();
-    var dx = cx - rect.left - G.x, dy = cy - rect.top - G.y;
+    var tx = cx - rect.left, ty = cy - rect.top;
     var reach = G.r + (kind === 'touch' ? GRACE_TOUCH : 0);
-    if (dx * dx + dy * dy > reach * reach) { return; }
-    touch(Math.max(-1, Math.min(1, dx / G.r)));
+    var now = clock();
+    var spots = [{ x: G.x, y: G.y }];
+    for (var i = 0; i < G.trail.length; i++) {
+      if (now - G.trail[i].t <= LAG_MS) { spots.push(G.trail[i]); }
+    }
+    var near = null, nearD = Infinity;
+    for (var j = 0; j < spots.length; j++) {
+      var ddx = tx - spots[j].x, ddy = ty - spots[j].y, d = ddx * ddx + ddy * ddy;
+      if (d < nearD) { nearD = d; near = spots[j]; }
+    }
+    if (!near || nearD > reach * reach) { return; }
+    touch(Math.max(-1, Math.min(1, (tx - near.x) / G.r)));
   }
 
-  /** Space or Enter: a dead-centre hit, only while the ball waits or is falling in the lower part of the window. */
+  /**
+   * Space or Enter: a dead-centre hit, only while the ball waits or is
+   * falling in the lower part of the window. A press at any other moment
+   * locks the keys for KEY_LOCK_MS (a press while locked starts it again),
+   * so pressing over and over loses the ball: timing still matters.
+   */
   function keyHit() {
-    if (G.state === 'ready' || (G.state === 'playing' && G.vy > 0 && G.y > G.H * KEY_LOW)) {
+    if (G.state === 'ready') {
       touch(0);
+      return;
     }
+    if (G.state !== 'playing') { return; }
+    var now = clock();
+    if (now < G.keyLock || !(G.vy > 0 && G.y > G.H * KEY_LOW)) {
+      G.keyLock = now + KEY_LOCK_MS;
+      return;
+    }
+    touch(0);
   }
 
   function touch(off) {
-    var now = window.performance && performance.now ? performance.now() : Date.now();
+    var now = clock();
     if (G.lastTouch && now - G.lastTouch < COOLDOWN_MS) { return; }
     if (G.state === 'ready') {
       G.state = 'playing';
@@ -812,7 +900,20 @@
 
   // ------------------------------------------------------------------ saving
 
-  /** A member's run starts on the site at the first touch; t0 is when it was asked for. */
+  /** Resolves when promise settles or after ms, whichever is first. */
+  function within(promise, ms) {
+    return new Promise(function (done) {
+      var timer = setTimeout(done, ms);
+      promise.then(function () { clearTimeout(timer); done(); }, function () { clearTimeout(timer); done(); });
+    });
+  }
+
+  /**
+   * A member's run starts on the site at the first touch; t0 is when it was
+   * asked for. A new start replaces the pending run on the site, so it waits
+   * (up to START_WAIT_MS, which the site's clock check allows for) until the
+   * last game's save has landed: Play again can't make that score be lost.
+   */
   function startRun() {
     var cfg = G.cfg;
     var run = { token: '', error: '', promise: null };
@@ -823,7 +924,13 @@
       run.promise = Promise.resolve();
       return;
     }
-    run.promise = call(cfg, 'POST', cfg.start, {}).then(function (r) {
+    var before = G.pendingFinish ? within(G.pendingFinish, START_WAIT_MS) : Promise.resolve();
+    run.promise = before.then(function () {
+      if (!cfg.nonce) {
+        return { status: 0, data: { reason: 'Your login has timed out. Reload the page to save scores.' } };
+      }
+      return call(cfg, 'POST', cfg.start, {});
+    }).then(function (r) {
       if (nonceExpired(r)) {
         forgetNonce();
         run.error = 'Your login has timed out. Reload the page to save scores.';
@@ -846,19 +953,25 @@
     o.place.textContent = '';
     o.hidden.hidden = true;
     o.login.hidden = true;
-    G.live.textContent = 'Game over. You kept it up ' + num(score) + (score === 1 ? ' touch.' : ' touches.');
+    var over = 'Game over. You kept it up ' + num(score) + (score === 1 ? ' touch.' : ' touches.');
     if (!cfg.member) {
       var before = readBest();
       if (score > before) { writeBest(score); }
       o.fresh.hidden = !(score > before);
       o.best.textContent = 'Your best on this device: ' + num(Math.max(score, before));
+      o.best.hidden = false;
       o.link.href = cfg.login || '#';
       o.login.hidden = !cfg.login;
+      G.live.textContent = over + (score > before ? ' New best!' : '');
     } else {
-      var known = cfg.viewer ? cfg.viewer.best_all || 0 : 0;
-      o.best.textContent = 'Your best: ' + num(Math.max(score, known));
+      // The saved best only: a score joins it when the site says it was saved. No board (a timed-out login): no line.
+      memberBest(o.best, cfg.viewer ? cfg.viewer.best_all || 0 : 0);
       o.saved.textContent = 'Saving...';
-      finish(cfg, run, score, touches).then(function (res) {
+      G.live.textContent = over;
+      var pending = finish(cfg, run, score, touches);
+      G.pendingFinish = pending;
+      pending.then(function (res) {
+        if (G.pendingFinish === pending) { G.pendingFinish = null; }
         var st = res.standing;
         if (st && cfg.viewer) {
           cfg.viewer.best_all = st.best_all;
@@ -871,17 +984,30 @@
         }
         if (G.gameId !== id) { return; }
         o.saved.textContent = res.line || '';
+        var heard = res.line || '';
         if (st) {
-          o.best.textContent = 'Your best: ' + num(st.best_all);
+          memberBest(o.best, st.best_all || 0);
           o.fresh.hidden = !st.new_best;
+          if (st.new_best) { heard += ' New best!'; }
           if (st.place_month > 0) {
             o.place.textContent = 'This month: ' + ord(st.place_month) + '. All time: ' + ord(st.place_all) + '.';
+            heard += ' ' + o.place.textContent;
           }
           o.hidden.hidden = st.shown !== false;
+        } else {
+          memberBest(o.best, cfg.viewer ? cfg.viewer.best_all || 0 : 0);
         }
+        // Screen readers hear whether it was saved and the places too, not only "Game over".
+        if (heard) { G.live.textContent = heard; }
       });
     }
-    setTimeout(function () { if (G.open && G.gameId === id) { o.again.focus(); } }, 50);
+    setTimeout(function () { if (G.open && G.gameId === id) { focusOn(o.title); } }, 50);
+  }
+
+  /** "Your best: N" on the game over panel, or no line when there is no saved best to show. */
+  function memberBest(node, n) {
+    node.textContent = n > 0 ? 'Your best: ' + num(n) : '';
+    node.hidden = !(n > 0);
   }
 
   /** Send a member's finished run: resolves {line, standing}. */

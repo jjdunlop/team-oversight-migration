@@ -71,11 +71,22 @@ class TeamOversight_Keep_It_Up {
     const ADMIN_BOARD_SIZE = 50;
     /** The name shown when an account has nothing usable. */
     const PLAYER = 'Player';
+    /**
+     * The public lists (hidden players left out) of this month and all time
+     * are kept between requests this long (a transient), because anyone can
+     * read the board and the HTTP answer is never cached. Every write drops
+     * them (flush_cache()), so a board is never older than the last write;
+     * a read racing a write can keep the old list for at most this long.
+     */
+    const SHARED_SECONDS = 30;
+    const SHARED_KEY = 'murvc_kiu_ranked_';
 
     private static $hooks_registered = false;
     private static $tables_exist = null;
     /** Request cache of ranked boards, key month|hidden. */
     private static $ranked = array();
+    /** Request cache of hidden_ids(). */
+    private static $hidden_ids = null;
 
     // ------------------------------------------------------------------
     // Hooks
@@ -89,11 +100,25 @@ class TeamOversight_Keep_It_Up {
         self::$hooks_registered = true;
         add_action('rest_api_init', array(__CLASS__, 'register_routes'));
         add_action('deleted_user', array(__CLASS__, 'forget_user'), 10, 1);
+        // A merge re-points scores and copies the hidden flag; its undo puts them back. Neither goes through our writers.
+        add_action('murvc_account_merged', array(__CLASS__, 'flush_cache'), 10, 0);
+        add_action('murvc_account_merge_undone', array(__CLASS__, 'flush_cache'), 10, 0);
     }
 
-    /** Forget what this request has read (writers and tests). */
+    /**
+     * Forget the boards read so far: this request's and the shared public
+     * lists of this month and all time (every writer calls it, and the tests).
+     */
     public static function flush_cache() {
         self::$ranked = array();
+        self::$hidden_ids = null;
+        delete_transient(self::shared_key(null));
+        delete_transient(self::shared_key(self::month_key()));
+    }
+
+    /** The transient that holds a shared public list ($month null: all time). */
+    public static function shared_key($month) {
+        return self::SHARED_KEY . ($month === null ? 'all' : (string) $month);
     }
 
     // ------------------------------------------------------------------
@@ -337,6 +362,17 @@ class TeamOversight_Keep_It_Up {
      * Removed rows never count; hidden players only with $include_hidden;
      * rows of an account that no longer exists never. Objects: id, user_id,
      * month, score, achieved_gmt, duration_ms.
+     *
+     * The reads grow with the rows, never with their square (1.98.0
+     * review): a GROUP BY finds each account's top score, the join keeps
+     * only rows with it, and the first of those per account in board order
+     * is its best (a correlated "no better row" check per row cost an
+     * account's rows squared, which a scripted account could inflate). The
+     * public list is that list less the hidden accounts (one query for them,
+     * hidden_ids()). The public lists of this month and all time are shared
+     * between requests for SHARED_SECONDS (see flush_cache()); the
+     * improvement check in process_finish() and the admin boards include
+     * hidden players, so they never read the shared copy.
      */
     public static function ranked($month = null, $include_hidden = false) {
         global $wpdb;
@@ -347,25 +383,65 @@ class TeamOversight_Keep_It_Up {
         if (isset(self::$ranked[$key])) {
             return self::$ranked[$key];
         }
+        if (!$include_hidden) {
+            $shared = $month === null || (string) $month === self::month_key();
+            if ($shared) {
+                $hit = get_transient(self::shared_key($month));
+                if (is_array($hit) && isset($hit['rows']) && is_array($hit['rows'])) {
+                    self::$ranked[$key] = $hit['rows'];
+                    return $hit['rows'];
+                }
+            }
+            $hidden = self::hidden_ids();
+            $rows = array();
+            foreach (self::ranked($month, true) as $r) {
+                if (!isset($hidden[$r->user_id])) {
+                    $rows[] = $r;
+                }
+            }
+            self::$ranked[$key] = $rows;
+            if ($shared) {
+                set_transient(self::shared_key($month), array('rows' => $rows), self::SHARED_SECONDS);
+            }
+            return $rows;
+        }
         $t = self::table();
         $sm = $month === null ? '' : $wpdb->prepare(' AND s.month = %s', $month);
-        $xm = $month === null ? '' : $wpdb->prepare(' AND x.month = %s', $month);
-        $hidden = $include_hidden ? '' : $wpdb->prepare(" AND NOT EXISTS (SELECT 1 FROM {$wpdb->usermeta} h WHERE h.user_id = s.user_id AND h.meta_key = %s AND h.meta_value = '1')", self::HIDDEN_META);
-        $rows = $wpdb->get_results("SELECT s.id, s.user_id, s.month, s.score, s.achieved_gmt, s.duration_ms FROM $t s
+        $bm = $month === null ? '' : $wpdb->prepare(' AND month = %s', $month);
+        $found = $wpdb->get_results("SELECT s.id, s.user_id, s.month, s.score, s.achieved_gmt, s.duration_ms FROM $t s
+            JOIN (SELECT user_id, MAX(score) AS top FROM $t WHERE removed = 0$bm GROUP BY user_id) b ON b.user_id = s.user_id AND b.top = s.score
             JOIN {$wpdb->users} u ON u.ID = s.user_id
-            WHERE s.removed = 0$sm$hidden
-            AND NOT EXISTS (SELECT 1 FROM $t x WHERE x.user_id = s.user_id AND x.removed = 0$xm
-                AND (x.score > s.score OR (x.score = s.score AND (x.achieved_gmt < s.achieved_gmt OR (x.achieved_gmt = s.achieved_gmt AND x.id < s.id)))))
+            WHERE s.removed = 0$sm
             ORDER BY s.score DESC, s.achieved_gmt ASC, s.id ASC");
-        $rows = is_array($rows) ? $rows : array();
-        foreach ($rows as $r) {
+        $rows = array();
+        $seen = array();
+        foreach (is_array($found) ? $found : array() as $r) {
             $r->id = intval($r->id);
             $r->user_id = intval($r->user_id);
             $r->score = intval($r->score);
             $r->duration_ms = intval($r->duration_ms);
+            // An account with its top score in more than one row (all time, or two rows after a merge): the first is its best.
+            if (isset($seen[$r->user_id])) {
+                continue;
+            }
+            $seen[$r->user_id] = true;
+            $rows[] = $r;
         }
         self::$ranked[$key] = $rows;
         return $rows;
+    }
+
+    /** The accounts that chose to stay off the leaderboard, as user id => true (one query a request). */
+    private static function hidden_ids() {
+        global $wpdb;
+        if (self::$hidden_ids === null) {
+            $ids = $wpdb->get_col($wpdb->prepare("SELECT DISTINCT user_id FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = '1'", self::HIDDEN_META));
+            self::$hidden_ids = array();
+            foreach (is_array($ids) ? $ids : array() as $id) {
+                self::$hidden_ids[intval($id)] = true;
+            }
+        }
+        return self::$hidden_ids;
     }
 
     /** $a ranks ahead of $b (higher score, then got it first). */
@@ -528,6 +604,8 @@ class TeamOversight_Keep_It_Up {
             return self::refuse(404, 'off', 'The game is switched off.');
         }
         $limit = max(1, min(self::BOARD_SIZE, intval($limit)));
+        // One reading of the clock, so the board's month and the viewer's standing agree across midnight on the 1st.
+        $now = $now === null ? microtime(true) : (float) $now;
         $month = self::month_key($now);
         $viewer_id = intval($viewer_id);
         $viewer = null;
