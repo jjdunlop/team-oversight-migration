@@ -1991,11 +1991,13 @@ class TeamOversight_Offers {
      * resolvable account is skipped.
      *
      * Primary (Reply-To and the sign-off name): $prefer_user_id (the
-     * requesting coach) if they hold a place on the team in one of
-     * $prefer_roles (the offers: a coach place only; the "not selected"
-     * email: coach or assistant coach, so whoever of the team pressed Send
-     * is the voice); else the lowest-id coach place; else the lowest-id
-     * assistant coach. Others: every other coach and assistant. A player
+     * person who asked for the offer, or pressed Send on a "not selected"
+     * email) if they hold a place on the team in one of $prefer_roles
+     * (coach or assistant coach, so whoever of the team asked is the voice;
+     * 1.96.5, club decision 25 Nov 2026: before it an assistant coach who
+     * asked for an offer was not); else, for anyone else (a committee
+     * member), the lowest-id coach place; else the lowest-id assistant
+     * coach. Others: every other coach and assistant. A player
      * email's Cc is the primary PLUS these (TeamOversight_Offer_Emails::
      * copied_coaches(), 1.80.1), so the Reply-To coach is copied too. The
      * player's own account ($exclude_user_id) is never listed.
@@ -2006,7 +2008,7 @@ class TeamOversight_Offers {
      * the trial Reply-To), coach_name, notice (a line for the admin when
      * there is no coach on file)).
      */
-    public static function team_contacts($team, $season, $prefer_user_id = 0, $exclude_user_id = 0, $prefer_roles = array('coach')) {
+    public static function team_contacts($team, $season, $prefer_user_id = 0, $exclude_user_id = 0, $prefer_roles = array('coach', 'assistant_coach')) {
         global $wpdb;
         $rows = $wpdb->get_results($wpdb->prepare("
             SELECT id, user_id, email, role FROM {$wpdb->prefix}team_assignments

@@ -332,7 +332,7 @@ An *Early Offer* is the same set of states; the wording just says so.
 
 | Email | Goes to | Sent when | Switch | Words |
 |---|---|---|---|---|
-| Offer | The player (Reply-To the team's coach, CC all the team's coaches) | The committee approves | Always on | Emails → Offers and selection |
+| Offer | The player (Reply-To the coach or assistant coach of the team who asked for it, else its head coach, and signed by them; CC all the team's coaches) | The committee approves | Always on | Emails → Offers and selection |
 | Reminder (no reply yet), Reminder (deposit still due) | The same | A coach or administrator presses Remind (at most once a day) | Always on | The same |
 | Offer withdrawn | The player (Reply-To the team's coach, CC all the team's coaches) | A coach or administrator withdraws | Always on | The same |
 | You're locked in | The player (Reply-To the team's coach, CC all the team's coaches) | The deposit completes | A tick | The same |

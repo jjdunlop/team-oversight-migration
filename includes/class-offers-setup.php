@@ -485,7 +485,7 @@ class TeamOversight_Offers_Setup {
         $from = trim((string) get_option(TeamOversight_Payments::EMAIL_FROM_OPTION, ''));
         $reply = trim((string) get_option(TeamOversight_Payments::EMAIL_REPLYTO_OPTION, ''));
         $contact = TeamOversight_Offers::club_contact();
-        $rows[] = self::row('sender', 'ok', 'Who offer emails come from', 'From: ' . ($from !== '' ? $from : 'the website\'s default sender') . '. Reply-To: the team\'s coach (the trial applications address when a team has no coach on file). The club contact players can be pointed to ({club_contact}): ' . ($contact !== '' ? $contact : 'none set') . '.', self::emails_url('overview', 'sender'), 'Sender settings');
+        $rows[] = self::row('sender', 'ok', 'Who offer emails come from', 'From: ' . ($from !== '' ? $from : 'the website\'s default sender') . '. Reply-To: the coach or assistant coach who asked for the offer, else the team\'s head coach (the trial applications address when a team has no coach on file). The club contact players can be pointed to ({club_contact}): ' . ($contact !== '' ? $contact : 'none set') . '.', self::emails_url('overview', 'sender'), 'Sender settings');
         $tested = get_option(self::TEST_SENT_OPTION, null);
         if (is_array($tested) && !empty($tested['at'])) {
             $rows[] = self::row('tested', 'ok', 'Test emails', 'The offer emails were last test-sent on ' . self::date_words(substr((string) $tested['at'], 0, 10)) . '.', self::emails_url('offers', 'offer-emails'), 'Offer emails');

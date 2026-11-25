@@ -448,7 +448,7 @@ class TeamOversight_Offer_Emails {
                 'type' => 'offer',
                 'switch' => false,
                 'when' => 'The committee approves an offer.',
-                'who' => 'To the player\'s account email. Reply-To the head coach who asked for the offer, else the team\'s first head coach on the roster (else its first assistant coach; the trial applications address when the team has no coach on file). An assistant coach or committee member who asked is not the Reply-To. Cc every coach and assistant coach of the team, including the one replies go to.',
+                'who' => 'To the player\'s account email. Reply-To the coach or assistant coach who asked for the offer, when they coach this team; when someone else asked (a committee member), the team\'s first head coach on the roster (else its first assistant coach; the trial applications address when the team has no coach on file). Signed by the coach replies go to. Cc every coach and assistant coach of the team, including the one replies go to.',
                 'program' => 'Offers · {season}',
                 'subject' => 'Your {offer_name} to join {team} for {season}',
                 'heading' => 'Your {offer_name} to join {team}',
