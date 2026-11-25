@@ -525,8 +525,12 @@
       });
     }
     close.addEventListener('click', function (e) {
-      // A click from the keyboard (detail 0) always closes.
-      if (g.closeOnBall && e.detail !== 0) { g.closeOnBall = false; return; }
+      // A click from the keyboard (detail 0) always closes. A swallowed click hands focus back to the court, so the next Space or Enter is a hit, not a close.
+      if (g.closeOnBall && e.detail !== 0) {
+        g.closeOnBall = false;
+        if (document.activeElement === close) { focusLayer(); }
+        return;
+      }
       g.closeOnBall = false;
       closeGame();
     });
