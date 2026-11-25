@@ -90,7 +90,7 @@ class TeamOversight_Offer_Wording {
         // 1.96.7 (club request, 25 Nov 2026): what the season fee covers, in every offer email (not only an Early Offer's).
         $c['fee_whole_season'] = self::item('early', 'What the season fee covers',
             'The offer email, as its own paragraph after the Early Offer explanation (for every offer, early or not), and the offer page while the offer waits for a reply. Left out for a player whose playing fee the club covers.',
-            'Unlike a lot of clubs, our season fee is all-inclusive. It covers you from the first pre-season training at the end of January to the last post-season training at the end of November.', array(), 3);
+            'Unlike a lot of clubs, our season fee covers all your training and coaching, from the first pre-season training at the end of January to the last post-season training at the end of November.', array(), 3);
         $c['early_set_deposit'] = self::item('early', 'Early Offer explanation: the deposit sentence once the fee is known',
             'Added after the sentence above when the offer has a deposit.',
             'Your deposit comes off your final fee.', array(), 2);
