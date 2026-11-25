@@ -87,6 +87,9 @@ class TeamOversight_Log {
                 // settings; and problems (the storage check failing, an address opened with its file missing).
                 'club_document' => 'Club document',
                 'club_document_problem' => 'Club documents problem',
+                // Club mailouts (1.97.0): a mailout sent, paused, resumed, cancelled or finished, and a
+                // member's club news unsubscribe or start again (the account in context, never an address).
+                'mailout' => 'Club mailout',
             ),
         );
 

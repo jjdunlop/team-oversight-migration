@@ -2,7 +2,7 @@
 /**
  * Plugin Name: MURVC Club Manager
  * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), coach profiles (Coaches), and the club's policies and AGM papers (Club documents).
- * Version: 1.96.7
+ * Version: 1.97.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.96.7');
+define('TEAM_OVERSIGHT_VERSION', '1.97.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -40,6 +40,8 @@ function team_oversight_deactivate() {
     if (function_exists('wp_unschedule_hook')) {
         wp_unschedule_hook('murvc_trial_payment_nudge');
     }
+    // 1.97.0: Club mailouts' five-minute sender. A mailout still sending waits, and Resume (or a new Send) schedules it again.
+    wp_clear_scheduled_hook('murvc_mailout_tick');
 }
 
 function team_oversight_create_tables() {
@@ -270,6 +272,11 @@ function team_oversight_create_tables() {
     foreach (TeamOversight_Club_Documents::tables_sql() as $short => $sql) {
         $tables[$short] = $sql;
     }
+    // 1.97.0: Club mailouts (one row per mailout, and its recipients).
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-mailouts.php';
+    foreach (TeamOversight_Mailouts::tables_sql() as $short => $sql) {
+        $tables[$short] = $sql;
+    }
 
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
 
@@ -357,6 +364,12 @@ function team_oversight_init() {
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-club-documents-route.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-club-documents-admin.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-club-documents-public.php';
+    // 1.97.0: Club mailouts (the groups, the paced sender, the club news unsubscribe). Its admin screens are
+    // class-mailouts-admin.php, loaded when present.
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-mailouts.php';
+    if (file_exists(TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-mailouts-admin.php')) {
+        require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-mailouts-admin.php';
+    }
     if (defined('WP_CLI') && WP_CLI) {
         require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-merge-cli.php';
     }
@@ -410,6 +423,11 @@ function team_oversight_init() {
     TeamOversight_Club_Documents_Route::register_hooks();
     TeamOversight_Club_Documents_Admin::register_hooks();
     TeamOversight_Club_Documents_Public::register_hooks();
+    // 1.97.0: Club mailouts: the five-minute schedule and its sender, the unsubscribe page, the daily prune. Added once.
+    TeamOversight_Mailouts::register_hooks();
+    if (class_exists('TeamOversight_Mailouts_Admin')) {
+        TeamOversight_Mailouts_Admin::register_hooks();
+    }
     new TeamOversight_Trials();
     new TeamOversight_Imports();
     new TeamOversight_Exports();

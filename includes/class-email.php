@@ -81,6 +81,15 @@ class TeamOversight_Email {
      *  button    array('url' => ..., 'label' => default words) or null
      *  preheader the line inboxes show after the subject (email text)
      *  why       why they're getting it, for the footer
+     *  image     (1.97.0, club mailouts) a picture above the message:
+     *            array('url' => ..., 'alt' => ..., 'link' => '' or an
+     *            http(s) address, 'width' => 536); left out of the text
+     *            version. null (the default) = no picture.
+     *  unsubscribe_url (1.97.0, club news only) the person's unsubscribe
+     *            page, offered after the why line in the footer. '' (the
+     *            default) = none.
+     * With neither image nor unsubscribe_url the email is byte for byte what
+     * it was before 1.97.0 (test-mailouts.php checks it).
      */
     public static function render($args) {
         $args = wp_parse_args($args, array(
@@ -92,6 +101,8 @@ class TeamOversight_Email {
             'button' => null,
             'preheader' => '',
             'why' => '',
+            'image' => null,
+            'unsubscribe_url' => '',
         ));
         $vars = self::plain_vars($args['vars']);
         $heading = self::fill($args['heading'], $vars);
@@ -112,11 +123,35 @@ class TeamOversight_Email {
         // Every email carries its own id (hidden), which also lets the
         // sending hook find this message and no other.
         $id = wp_generate_uuid4();
+        $unsubscribe = is_string($args['unsubscribe_url']) ? trim($args['unsubscribe_url']) : '';
         return array(
-            'html' => self::layout($args['program'], $heading, implode("\n", $html_parts), $preheader, $args['why'], $id),
-            'text' => self::text_layout($args['program'], $heading, $text_parts, $args['why']),
+            'html' => self::layout($args['program'], $heading, implode("\n", $html_parts), $preheader, $args['why'], $id, $args['image'], $unsubscribe),
+            'text' => self::text_layout($args['program'], $heading, $text_parts, $args['why'], $unsubscribe),
             'id' => $id,
         );
+    }
+
+    /**
+     * A picture drawn full width above the message (1.97.0, club mailouts):
+     * $image = array(url, alt, link, width). '' when there's no usable
+     * http(s) address. Linked to 'link' when that is an http(s) address.
+     */
+    private static function image_html($image) {
+        if (!is_array($image) || empty($image['url']) || !is_string($image['url']) || !preg_match('~^https?://~i', $image['url'])) {
+            return '';
+        }
+        $src = esc_url($image['url']);
+        if ($src === '') {
+            return '';
+        }
+        $alt = isset($image['alt']) && is_scalar($image['alt']) ? trim(preg_replace('/\s+/u', ' ', self::decode((string) $image['alt']))) : '';
+        $width = isset($image['width']) && intval($image['width']) > 0 ? min(536, intval($image['width'])) : 536;
+        $img = '<img src="' . $src . '" width="' . $width . '" alt="' . esc_attr($alt) . '" style="display:block;width:100%;max-width:' . $width . 'px;height:auto;border:0;outline:none;text-decoration:none;border-radius:6px;">';
+        $link = isset($image['link']) && is_string($image['link']) && preg_match('~^https?://~i', $image['link']) ? esc_url($image['link']) : '';
+        if ($link !== '') {
+            $img = '<a href="' . $link . '" style="display:block;border:0;text-decoration:none;">' . $img . '</a>';
+        }
+        return '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding:0 0 20px;">' . $img . '</td></tr></table>' . "\n";
     }
 
     /**
@@ -452,8 +487,14 @@ class TeamOversight_Email {
      * Member runs wp_kses_decode_entities() over the whole email, which
      * turns those into stray bytes. The characters themselves are used.
      */
-    private static function layout($program, $heading, $body_html, $preheader, $why, $id) {
+    private static function layout($program, $heading, $body_html, $preheader, $why, $id, $image = null, $unsubscribe_url = '') {
         $f = self::FONT;
+        // 1.97.0 (club mailouts): both '' unless a mailout passes them, so every other email is as before.
+        $image_html = self::image_html($image);
+        $unsubscribe_html = '';
+        if (is_string($unsubscribe_url) && $unsubscribe_url !== '' && esc_url($unsubscribe_url) !== '') {
+            $unsubscribe_html = '<br>Don\'t want club news emails? <a href="' . esc_url($unsubscribe_url) . '" style="color:' . self::MUTED . ';text-decoration:underline;">Unsubscribe</a>';
+        }
         $home = esc_url(home_url('/'));
         $site = esc_html(preg_replace('~^https?://~', '', untrailingslashit(home_url())));
         $title = esc_html($heading);
@@ -514,14 +555,14 @@ class TeamOversight_Email {
   <tr><td class="murvc-pad" style="padding:28px 32px 12px;">
     ' . $program_html . '
     <h1 class="murvc-h1" style="margin:0 0 18px;font-family:' . $f . ';font-size:25px;line-height:1.25;font-weight:800;color:' . self::NAVY . ';">' . $title . '</h1>
-' . $body_html . '
+' . $image_html . $body_html . '
   </td></tr>
   </table>
 </td></tr>
 <tr><td class="murvc-pad" style="padding:20px 32px;text-align:center;font-family:' . $f . ';font-size:12px;line-height:1.6;color:' . self::MUTED . ';">
   Questions? Just reply to this email.<br>
   <a href="' . $home . '" style="color:' . self::MUTED . ';font-weight:700;text-decoration:none;">' . esc_html(self::CLUB_NAME) . '</a> &middot; <a href="' . $home . '" style="color:' . self::MUTED . ';text-decoration:underline;">' . $site . '</a>'
-            . ($why !== '' ? '<br>' . esc_html($why) : '') . $unique . '
+            . ($why !== '' ? '<br>' . esc_html($why) : '') . $unsubscribe_html . $unique . '
 </td></tr>
 </table>
 <!--[if mso]></td></tr></table><![endif]-->
@@ -531,8 +572,8 @@ class TeamOversight_Email {
 </html>';
     }
 
-    /** The plain-text version: the same words, blocks as short text. */
-    private static function text_layout($program, $heading, $parts, $why) {
+    /** The plain-text version: the same words, blocks as short text (a mailout's picture is left out). */
+    private static function text_layout($program, $heading, $parts, $why, $unsubscribe_url = '') {
         $lines = array();
         if ($program !== '') {
             $lines[] = function_exists('mb_strtoupper') ? mb_strtoupper($program, 'UTF-8') : strtoupper($program);
@@ -540,7 +581,8 @@ class TeamOversight_Email {
         $lines[] = $heading;
         return implode("\n", $lines) . "\n\n" . implode("\n\n", $parts)
             . "\n\n--\nQuestions? Just reply to this email.\n" . self::CLUB_NAME . "\n" . home_url('/')
-            . ($why !== '' ? "\n" . $why : '');
+            . ($why !== '' ? "\n" . $why : '')
+            . ((is_string($unsubscribe_url) && $unsubscribe_url !== '') ? "\nDon't want club news emails? Unsubscribe: " . $unsubscribe_url : '');
     }
 
     // ------------------------------------------------------------------

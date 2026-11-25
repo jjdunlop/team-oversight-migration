@@ -176,6 +176,14 @@ class TeamOversight_Account_Merge {
             array('team_club_document_versions', 'uploaded_by'),
             array('team_club_document_versions', 'file_deleted_by'),
             array('team_club_document_changes', 'recorded_by'),
+            // 1.97.0: Club mailouts: who made, last changed, test-sent and sent a mailout, and each
+            // recipient row's account (its email and name are what it was sent to, kept as history;
+            // the table has no unique key on user_id, so a merge never collides).
+            array('team_mailouts', 'created_by'),
+            array('team_mailouts', 'updated_by'),
+            array('team_mailouts', 'sent_by'),
+            array('team_mailouts', 'tested_by'),
+            array('team_mailout_recipients', 'user_id'),
         );
     }
 
@@ -283,6 +291,8 @@ class TeamOversight_Account_Merge {
                 'team_2025', '_team_2025', 'fee_type_2025', '_fee_type_2025', 'discount_check_2025',
                 '_discount_check_2025', 'top_number', '_top_number', '_team_history', 'murvc_shirt_credit', 'murvc_vvid',
                 'profile_privacy', 'profile_noindex', 'hide_in_members', 'um_show_last_login',
+                // 1.97.0: a club news unsubscribe on either account carries to the kept account.
+                'murvc_news_optout', 'murvc_news_optout_via',
             ));
         }
         return isset($keys[$key]) || preg_match('/^intended_?membership/i', $key);
@@ -945,6 +955,7 @@ class TeamOversight_Account_Merge {
                     'team_trial_notes' => 'Trial notes written',
                     'team_trial_selections' => 'Trial verdicts recorded',
                     'team_coach_profiles' => 'Coach profile link',
+                    'team_mailout_recipients' => 'Club mailouts received',
                 );
                 $key = isset($label[$short]) && $col !== 'granted_by' && $col !== 'actor_id' && $col !== 'marked_by' ? $label[$short] : 'Other club records (staff columns)';
                 $moves[$key] = (isset($moves[$key]) ? $moves[$key] : 0) + $n;
