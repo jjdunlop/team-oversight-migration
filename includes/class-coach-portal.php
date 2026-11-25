@@ -71,6 +71,20 @@ class TeamOversight_Coach_Portal {
     /** The verdicts that are an offer (Tentative and Rejected can't be offered). */
     const OFFER_VERDICTS = array('selected', 'training_only');
 
+    /**
+     * The selection board's order once offers are on (1.96.5, club request
+     * 25 Nov 2026), by offer_phase(), furthest along first: locked in
+     * (being placed), accepted, offer sent, awaiting approval, not approved,
+     * Selected or Training Only with no offer out, Tentative, trial fee not
+     * paid. Overdue sits with its step. Within a group the board keeps its
+     * own order (Selected, Training Only, Tentative, then trial number).
+     * Declined players are on the Declined list, not the board.
+     */
+    const BOARD_PHASE_ORDER = array(
+        'locked_in' => 0, 'accepted' => 1, 'accepted_overdue' => 1, 'sent' => 2, 'sent_overdue' => 2,
+        'awaiting' => 3, 'not_approved' => 4, 'unsent' => 5, 'withdrawn' => 5, 'left' => 5, 'none' => 6, 'unpaid' => 7,
+    );
+
     /** Verdicts that carry a team position (1.74.0). */
     const POSITION_STATUSES = array('tentative', 'selected', 'training_only');
 
@@ -1082,6 +1096,7 @@ class TeamOversight_Coach_Portal {
      * Selected / Training Only with no live offer, so a request that was
      * cancelled or an offer that was withdrawn waits there too; Not approved
      * is its own exit). Overdue players are also counted in their step.
+     * The board comes back in BOARD_PHASE_ORDER (1.96.5).
      */
     private function offer_snapshot($team, $season, $roster, $selection_roster) {
         $index = TeamOversight_Offers::index_for_team($team, $season);
@@ -1105,6 +1120,7 @@ class TeamOversight_Coach_Portal {
             }
         }
         $board = array();
+        $board_rank = array();
         $declined = array();
         $offers = array();
         $accepted_offers = array();
@@ -1125,6 +1141,7 @@ class TeamOversight_Coach_Portal {
                 continue;
             }
             $board[] = $member;
+            $board_rank[] = array_key_exists($phase, self::BOARD_PHASE_ORDER) ? self::BOARD_PHASE_ORDER[$phase] : count(self::BOARD_PHASE_ORDER);
             $counts['board']++;
             $offers[$application_id] = $offer;
             switch ($phase) {
@@ -1166,6 +1183,16 @@ class TeamOversight_Coach_Portal {
                     break;
             }
         }
+        // 1.96.5: furthest along first; a group keeps the board's own order (Selected, Training Only, Tentative, then trial number).
+        $positions = array_keys($board);
+        usort($positions, function ($x, $y) use ($board_rank) {
+            return $board_rank[$x] === $board_rank[$y] ? $x - $y : $board_rank[$x] - $board_rank[$y];
+        });
+        $sorted = array();
+        foreach ($positions as $position) {
+            $sorted[] = $board[$position];
+        }
+        $board = $sorted;
         $locked_by_app = array();
         $locked_by_user = array();
         foreach ($index as $offer) {
