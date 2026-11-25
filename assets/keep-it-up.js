@@ -421,7 +421,7 @@
     tip.setAttribute('aria-hidden', 'true');
     var live = el('p', 'murvc-kiu-sr');
     live.setAttribute('aria-live', 'polite');
-    var close = el('button', 'murvc-kiu-close', '×');
+    var close = el('button', 'murvc-kiu-close', '\u00d7');
     close.type = 'button';
     close.setAttribute('aria-label', 'Close the game');
 
