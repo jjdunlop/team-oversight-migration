@@ -95,6 +95,7 @@ class TeamOversight_Mailouts_Admin {
             self::$flash = self::take_flash(get_current_user_id());
             self::$flash_taken = true;
             TeamOversight_Mailouts::heal_schedule(true);
+            TeamOversight_Mailouts::ensure_secret();
         }
     }
 

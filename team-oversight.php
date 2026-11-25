@@ -27,6 +27,7 @@ function team_oversight_activate() {
     // (team_oversight_create_tables() has loaded the class).
     if (class_exists('TeamOversight_Mailouts')) {
         TeamOversight_Mailouts::heal_schedule(true);
+        TeamOversight_Mailouts::ensure_secret();
     }
 }
 

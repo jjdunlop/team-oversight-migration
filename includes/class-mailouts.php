@@ -69,6 +69,15 @@ class TeamOversight_Mailouts {
     /** Club news opt-out: user meta (site time 'Y-m-d H:i:s') and how (link, one_click, admin). */
     const OPTOUT_META = 'murvc_news_optout';
     const OPTOUT_VIA_META = 'murvc_news_optout_via';
+    /**
+     * An unsubscribe through an earlier email to an account since merged into
+     * this one: OPTOUT_FROM_META = that account's id when the request made
+     * this account's opt-out, and OPTOUT_ASKED_META = every such account id
+     * that asked. If the merge is undone, the request goes back to the account
+     * whose email it came from (after_merge_undone()).
+     */
+    const OPTOUT_FROM_META = 'murvc_news_optout_from';
+    const OPTOUT_ASKED_META = 'murvc_news_optout_asked';
     /** The unsubscribe page: admin-post.php?action=murvc_news&t=TOKEN (signed in or out). */
     const NEWS_ACTION = 'murvc_news';
     /** The key unsubscribe links are signed with (not autoloaded; made on first use; never the site's salts). */
@@ -112,6 +121,8 @@ class TeamOversight_Mailouts {
     const FIRST_TEAM_SEASON = '2027';
 
     private static $hooks_registered = false;
+    /** The signing key, once read in this request (secret()). */
+    private static $secret = null;
     private static $tables_exist = null;
 
     // ------------------------------------------------------------------
@@ -131,6 +142,64 @@ class TeamOversight_Mailouts {
         add_action('admin_post_nopriv_' . self::NEWS_ACTION, array(__CLASS__, 'handle_unsubscribe'));
         if (class_exists('TeamOversight_Memberships')) {
             add_action(TeamOversight_Memberships::CRON_HOOK, array(__CLASS__, 'prune'), 30);
+        }
+        add_action('murvc_account_merge_undone', array(__CLASS__, 'after_merge_undone'), 20, 3);
+    }
+
+    /**
+     * After an account merge was undone (murvc_account_merge_undone: the kept
+     * account, the restored ones, the merge id). Never throws.
+     * - Club news: an unsubscribe that came through a restored account's
+     *   earlier email (OPTOUT_ASKED_META on the kept account) is given back to
+     *   that account, and the kept account's own opt-out goes when that request
+     *   is what made it (OPTOUT_FROM_META): the kept account never asked.
+     * - A sending or paused mailout's rows of these accounts that were left out
+     *   as 'duplicate' wait again; the send-time check decides afresh, by
+     *   account and by the address a row already went to.
+     */
+    public static function after_merge_undone($keep_id, $restored_ids, $merge_id = 0) {
+        try {
+            global $wpdb;
+            $keep_id = intval($keep_id);
+            $restored = array_values(array_filter(array_map('intval', (array) $restored_ids)));
+            if ($keep_id <= 0 || !$restored) {
+                return;
+            }
+            $asked = self::asked_list($keep_id);
+            $back = array_values(array_intersect($asked, $restored));
+            if ($back) {
+                $via = (string) get_user_meta($keep_id, self::OPTOUT_VIA_META, true);
+                $via = in_array($via, self::OPTOUT_VIA, true) ? $via : 'link';
+                foreach ($back as $restored_id) {
+                    self::opt_out($restored_id, $via);
+                }
+                $left = array_values(array_diff($asked, $back));
+                if ($left) {
+                    update_user_meta($keep_id, self::OPTOUT_ASKED_META, $left);
+                } else {
+                    delete_user_meta($keep_id, self::OPTOUT_ASKED_META);
+                }
+            }
+            $from = intval(get_user_meta($keep_id, self::OPTOUT_FROM_META, true));
+            if ($from > 0 && in_array($from, $restored, true)) {
+                delete_user_meta($keep_id, self::OPTOUT_META);
+                delete_user_meta($keep_id, self::OPTOUT_VIA_META);
+                delete_user_meta($keep_id, self::OPTOUT_FROM_META);
+                TeamOversight_Log::add(self::LOG_TYPE, 'Club news back on: the unsubscribe came through an earlier email to account #' . $from . ', and that merge was undone, so it went back to that account', array('user_id' => $keep_id));
+            }
+            if (!self::tables_exist()) {
+                return;
+            }
+            $ids = implode(',', array_map('intval', array_merge(array($keep_id), $restored)));
+            $n = $wpdb->query('UPDATE ' . self::recipients_table() . ' r JOIN ' . self::table() . " m ON m.id = r.mailout_id
+                SET r.status = 'pending', r.reason = '', r.final = 0, r.tries = 0, r.next_try_at = NULL, r.claimed_at = NULL
+                WHERE m.state IN ('sending', 'paused') AND r.status = 'skipped' AND r.reason = 'duplicate' AND r.user_id IN ($ids)");
+            if (intval($n) > 0) {
+                TeamOversight_Log::add(self::LOG_TYPE, 'Account merge undone: ' . intval($n) . ' ' . (intval($n) === 1 ? 'person' : 'people') . ' left out of a mailout as already on the list wait to be sent again', array('user_id' => $keep_id));
+                self::heal_schedule(true);
+            }
+        } catch (\Throwable $e) {
+            // A listener must never break the undo.
         }
     }
 
@@ -1961,6 +2030,13 @@ class TeamOversight_Mailouts {
                     if (!self::claim(intval($r->id))) {
                         continue;
                     }
+                    // The account as the row holds it now: an account merge that committed since the list was
+                    // read re-points rows (the claim waits for its row lock), and the old account is then gone.
+                    $fresh = $wpdb->get_row($wpdb->prepare('SELECT user_id, group_keys FROM ' . self::recipients_table() . ' WHERE id = %d', intval($r->id)));
+                    if ($fresh) {
+                        $r->user_id = $fresh->user_id;
+                        $r->group_keys = $fresh->group_keys;
+                    }
                     $report['claimed']++;
                     $mailout_id = intval($r->mailout_id);
                     if (!isset($mailouts[$mailout_id])) {
@@ -2044,6 +2120,14 @@ class TeamOversight_Mailouts {
             return 'returned';
         }
         $user = get_userdata(intval($r->user_id));
+        if (!$user && intval($r->user_id) > 0 && class_exists('TeamOversight_Account_Merge') && method_exists('TeamOversight_Account_Merge', 'kept_account_for')) {
+            // An account merged away whose row wasn't re-pointed: the person is the kept account.
+            $kept = intval(TeamOversight_Account_Merge::kept_account_for(intval($r->user_id)));
+            $user = $kept > 0 ? get_userdata($kept) : false;
+            if ($user) {
+                self::finish_row($id, array('user_id' => intval($user->ID)));
+            }
+        }
         if (!$user) {
             self::finish_row($id, array('status' => 'skipped', 'reason' => 'no_account', 'final' => 1));
             return 'skipped';
@@ -2057,12 +2141,13 @@ class TeamOversight_Mailouts {
             self::finish_row($id, array('status' => 'skipped', 'reason' => 'unsubscribed', 'final' => 1));
             return 'skipped';
         }
-        // One email per account: an account merge after Send re-points a row to an account that may
-        // already have one here. Another row of this mailout for the account that went, is going or
-        // may have gone means this one is left out.
+        // One email per person: an account merge after Send re-points a row to an account that may
+        // already have one here, and an undo of that merge points it back. Another row of this mailout
+        // for the account, or that went to this address, that went, is going or may have gone means
+        // this one is left out.
         $other = intval($wpdb->get_var($wpdb->prepare(
-            'SELECT COUNT(*) FROM ' . self::recipients_table() . " WHERE mailout_id = %d AND user_id = %d AND id <> %d AND status IN ('sent', 'sending', 'unknown')",
-            intval($mailout->id), intval($user->ID), $id
+            'SELECT COUNT(*) FROM ' . self::recipients_table() . " WHERE mailout_id = %d AND id <> %d AND (user_id = %d OR email = %s) AND status IN ('sent', 'sending', 'unknown')",
+            intval($mailout->id), $id, intval($user->ID), $email_address
         )));
         if ($other > 0) {
             self::finish_row($id, array('status' => 'skipped', 'reason' => 'duplicate', 'final' => 1));
@@ -2254,30 +2339,78 @@ class TeamOversight_Mailouts {
 
     /**
      * Stop club news for an account. $via: link, one_click or admin (an
-     * administrator's handler checks its own capability). True when it
-     * changed something (already unsubscribed = false).
+     * administrator's handler checks its own capability). $for_merged: the
+     * account whose earlier email's link asked, when it has since been merged
+     * into this one (remembered so an undo of that merge can give the request
+     * back to it). True when it changed something (already unsubscribed = false).
      */
-    public static function opt_out($user_id, $via) {
+    public static function opt_out($user_id, $via, $for_merged = 0) {
         $user_id = intval($user_id);
+        $for_merged = intval($for_merged);
         $via = in_array($via, self::OPTOUT_VIA, true) ? $via : 'link';
-        if ($user_id <= 0 || !get_userdata($user_id) || self::is_opted_out($user_id)) {
+        if ($user_id <= 0 || !get_userdata($user_id)) {
+            return false;
+        }
+        if ($for_merged > 0 && $for_merged !== $user_id) {
+            $asked = self::asked_list($user_id);
+            if (!in_array($for_merged, $asked, true)) {
+                $asked[] = $for_merged;
+                update_user_meta($user_id, self::OPTOUT_ASKED_META, $asked);
+            }
+        } else {
+            $for_merged = 0;
+        }
+        if (self::is_opted_out($user_id)) {
+            if ($for_merged === 0) {
+                // The account's own request now stands behind the opt-out too.
+                delete_user_meta($user_id, self::OPTOUT_FROM_META);
+            }
             return false;
         }
         update_user_meta($user_id, self::OPTOUT_META, self::now());
         update_user_meta($user_id, self::OPTOUT_VIA_META, $via);
-        TeamOversight_Log::add(self::LOG_TYPE, 'Club news unsubscribed (' . self::via_words($via) . ')', array('user_id' => $user_id));
+        if ($for_merged > 0) {
+            update_user_meta($user_id, self::OPTOUT_FROM_META, $for_merged);
+        } else {
+            delete_user_meta($user_id, self::OPTOUT_FROM_META);
+        }
+        TeamOversight_Log::add(self::LOG_TYPE, 'Club news unsubscribed (' . self::via_words($via) . ')'
+            . ($for_merged > 0 ? ', through an earlier email to account #' . $for_merged . ', since merged into this one' : ''), array('user_id' => $user_id));
         return true;
     }
 
-    /** Start club news again (deletes both metas). True when it changed something. */
-    public static function opt_in($user_id, $via) {
+    /** The merged-away account ids whose earlier emails' links asked this account to stop club news. */
+    private static function asked_list($user_id) {
+        $asked = get_user_meta(intval($user_id), self::OPTOUT_ASKED_META, true);
+        return is_array($asked) ? array_values(array_unique(array_filter(array_map('intval', $asked)))) : array();
+    }
+
+    /**
+     * Start club news again (deletes the opt-out metas). $for_merged: as for
+     * opt_out(), the merged-away account whose earlier email's link was used;
+     * its earlier request is withdrawn. True when it changed something.
+     */
+    public static function opt_in($user_id, $via, $for_merged = 0) {
         $user_id = intval($user_id);
+        $for_merged = intval($for_merged);
         $via = in_array($via, self::OPTOUT_VIA, true) ? $via : 'link';
+        if ($user_id > 0 && $for_merged > 0) {
+            $asked = self::asked_list($user_id);
+            $left = array_values(array_diff($asked, array($for_merged)));
+            if (count($left) !== count($asked)) {
+                if ($left) {
+                    update_user_meta($user_id, self::OPTOUT_ASKED_META, $left);
+                } else {
+                    delete_user_meta($user_id, self::OPTOUT_ASKED_META);
+                }
+            }
+        }
         if ($user_id <= 0 || !self::is_opted_out($user_id)) {
             return false;
         }
         delete_user_meta($user_id, self::OPTOUT_META);
         delete_user_meta($user_id, self::OPTOUT_VIA_META);
+        delete_user_meta($user_id, self::OPTOUT_FROM_META);
         TeamOversight_Log::add(self::LOG_TYPE, 'Club news started again (' . self::via_words($via) . ')', array('user_id' => $user_id));
         return true;
     }
@@ -2295,13 +2428,63 @@ class TeamOversight_Mailouts {
      * sent, and an unsubscribe link has to keep working.
      */
     private static function secret() {
-        $secret = (string) get_option(self::SECRET_OPTION, '');
-        if (strlen($secret) >= 32) {
-            return $secret;
+        if (is_string(self::$secret) && strlen(self::$secret) >= 32) {
+            return self::$secret;
         }
-        add_option(self::SECRET_OPTION, wp_generate_password(64, true, true), '', 'no');
-        $secret = (string) get_option(self::SECRET_OPTION, '');
-        return $secret !== '' ? $secret : wp_salt('auth');
+        // Read from the table itself, never get_option(): a stale "doesn't exist" in the object cache, or one
+        // failed read cached as missing, must never lead to a new key, because a new key breaks every link
+        // already sent. A new key is made only when the row is really absent, by INSERT IGNORE, so a key
+        // that exists is never replaced, and the row is read back so two first uses end up with the same key.
+        $stored = self::read_secret();
+        if ($stored === null) {
+            global $wpdb;
+            $wpdb->query($wpdb->prepare(
+                "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
+                self::SECRET_OPTION, wp_generate_password(64, true, true)
+            ));
+            wp_cache_delete(self::SECRET_OPTION, 'options');
+            $notoptions = wp_cache_get('notoptions', 'options');
+            if (is_array($notoptions) && isset($notoptions[self::SECRET_OPTION])) {
+                unset($notoptions[self::SECRET_OPTION]);
+                wp_cache_set('notoptions', $notoptions, 'options');
+            }
+            $stored = self::read_secret();
+        }
+        if ($stored === null || strlen($stored) < 32) {
+            // Never sign with anything else: a link signed some other way would never check out later.
+            throw new \RuntimeException('The club news signing key could not be read.');
+        }
+        self::$secret = $stored;
+        return $stored;
+    }
+
+    /** The stored key, or null when there is no row. Throws when the read fails (a failure is never "no key"). */
+    private static function read_secret() {
+        global $wpdb;
+        $wpdb->last_error = '';
+        $row = $wpdb->get_row($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1", self::SECRET_OPTION));
+        if ((string) $wpdb->last_error !== '') {
+            throw new \RuntimeException('The club news signing key could not be read.');
+        }
+        return $row ? (string) $row->option_value : null;
+    }
+
+    /**
+     * Makes the signing key now if it isn't there yet (the Mailouts page and
+     * activation call it, so a signed-out request rarely has to). Never throws.
+     */
+    public static function ensure_secret() {
+        try {
+            self::secret();
+            return true;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /** Tests only: forget the key this request read, so the next use reads the table again. */
+    public static function forget_secret() {
+        self::$secret = null;
     }
 
     private static function signature($user_id) {
@@ -2337,7 +2520,12 @@ class TeamOversight_Mailouts {
 
     /** The account's unsubscribe page (admin-post: never page-cached, works signed out). */
     public static function unsubscribe_url($user_id) {
-        return admin_url('admin-post.php?action=' . self::NEWS_ACTION . '&t=' . rawurlencode(self::token($user_id)));
+        return self::token_url(self::token($user_id));
+    }
+
+    /** The unsubscribe page for a token already checked. */
+    private static function token_url($token) {
+        return admin_url('admin-post.php?action=' . self::NEWS_ACTION . '&t=' . rawurlencode((string) $token));
     }
 
     /** admin_post(_nopriv)_murvc_news: the unsubscribe page, its two buttons and the one-click POST. */
@@ -2351,6 +2539,9 @@ class TeamOversight_Mailouts {
             exit;
         }
         status_header($result['status']);
+        if ($result['status'] === 503) {
+            header('Retry-After: 300', true);
+        }
         if ($result['html'] !== '') {
             header('Content-Type: text/html; charset=utf-8', true);
             echo $result['html']; // Built from escaped parts in unsubscribe_page().
@@ -2370,15 +2561,29 @@ class TeamOversight_Mailouts {
         $get = is_array($get) ? $get : array();
         $post = is_array($post) ? $post : array();
         $token = isset($get['t']) && is_string($get['t']) ? $get['t'] : (isset($post['t']) && is_string($post['t']) ? $post['t'] : '');
-        $user_id = self::check_token($token);
         $out = array('status' => 200, 'html' => '', 'redirect' => '', 'done' => '');
+        $one_click = strtoupper((string) $method) === 'POST' && isset($post['List-Unsubscribe']) && is_string($post['List-Unsubscribe']) && trim($post['List-Unsubscribe']) === 'One-Click';
+        try {
+            $user_id = self::check_token($token);
+        } catch (\Throwable $e) {
+            // The signing key couldn't be read just now: never "isn't valid" (the link is fine). A mail
+            // program's one-click request gets 503, which it retries; a person gets a try-again page.
+            $out['status'] = 503;
+            if (!$one_click) {
+                $out['html'] = self::unsubscribe_page('error', '', '');
+            }
+            return $out;
+        }
+        // The account the link was made for, when it has since been merged into $user_id.
+        $token_id = $user_id ? intval(substr($token, 0, strpos($token, '.'))) : 0;
+        $for_merged = ($token_id > 0 && $token_id !== $user_id) ? $token_id : 0;
         if (strtoupper((string) $method) === 'POST') {
-            if (isset($post['List-Unsubscribe']) && is_string($post['List-Unsubscribe']) && trim($post['List-Unsubscribe']) === 'One-Click') {
+            if ($one_click) {
                 if (!$user_id) {
                     $out['status'] = 400;
                     return $out;
                 }
-                self::opt_out($user_id, 'one_click');
+                self::opt_out($user_id, 'one_click', $for_merged);
                 $out['done'] = 'one_click';
                 return $out;
             }
@@ -2388,12 +2593,13 @@ class TeamOversight_Mailouts {
             }
             $do = isset($post['do']) && is_string($post['do']) ? $post['do'] : '';
             if ($do === 'stop') {
-                self::opt_out($user_id, 'link');
+                self::opt_out($user_id, 'link', $for_merged);
             } elseif ($do === 'start') {
-                self::opt_in($user_id, 'link');
+                self::opt_in($user_id, 'link', $for_merged);
             }
             $out['done'] = in_array($do, array('stop', 'start'), true) ? $do : '';
-            $out['redirect'] = self::unsubscribe_url($user_id) . ($out['done'] !== '' ? '&done=' . $out['done'] : '');
+            // Back to the same link (not the kept account's), so a later click there still counts as that email's.
+            $out['redirect'] = self::token_url($token) . ($out['done'] !== '' ? '&done=' . $out['done'] : '');
             return $out;
         }
         if (!$user_id) {
@@ -2403,7 +2609,7 @@ class TeamOversight_Mailouts {
         $user = get_userdata($user_id);
         $first = TeamOversight_Email::first_name($user_id, $user ? (string) $user->display_name : '');
         $state = self::is_opted_out($user_id) ? 'done' : ((isset($get['done']) && $get['done'] === 'start') ? 'started' : 'ask');
-        $out['html'] = self::unsubscribe_page($state, $first, self::unsubscribe_url($user_id));
+        $out['html'] = self::unsubscribe_page($state, $first, self::token_url($token));
         return $out;
     }
 
@@ -2422,7 +2628,10 @@ class TeamOversight_Mailouts {
             return '<form method="post" action="' . esc_url($action_url) . '"><input type="hidden" name="do" value="' . esc_attr($do) . '">'
                 . '<button type="submit" class="' . ($primary ? 'go' : 'quiet') . '">' . esc_html($label) . '</button></form>';
         };
-        if ($state === 'bad') {
+        if ($state === 'error') {
+            $heading = 'Club news emails';
+            $body = '<p>Something went wrong on our side. Try the link again in a few minutes.</p>';
+        } elseif ($state === 'bad') {
             $heading = 'Club news emails';
             $email_club = $club !== '' ? '<a href="mailto:' . esc_attr($club) . '">Email the club</a>' : 'Email the club';
             $body = '<p>This link isn\'t valid. ' . $email_club . ' to be taken off the list.</p>';
