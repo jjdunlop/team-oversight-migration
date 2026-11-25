@@ -21,8 +21,10 @@ class TeamOversight_Keep_It_Up_Public {
     const ATTS = array('compact' => '');
     /** The game script's handle (assets/keep-it-up.js, in the footer, the plugin version). */
     const SCRIPT = 'murvc-keep-it-up';
-    /** Before the theme's credit line (Poseidon adds it at 10). */
-    const FOOTER_PRIORITY = 5;
+    /** After the theme's credit line (Poseidon adds it at 10), which stays where it is. */
+    const FOOTER_PRIORITY = 15;
+    /** The footer link's name for screen readers and its tooltip (the link itself reads "Play"). */
+    const FOOTER_NAME = 'Play Keep it up';
     const HOW = 'Tap the ball to keep it up. Hit it in the middle to send it straight up. Don\'t let it touch the floor.';
     /** The note on an administrator's card while the game is off (they still see and play it). */
     const PREVIEW_NOTE = 'Keep it up is switched off, so only administrators can see this. A score you save now will be on the leaderboard when it\'s switched on.';
@@ -57,14 +59,18 @@ class TeamOversight_Keep_It_Up_Public {
     // The footer link
     // ------------------------------------------------------------------
 
-    /** poseidon_footer_text, priority 5: the link, before the credit. */
+    /** poseidon_footer_text, priority 15: the link, after the credit. */
     public static function print_footer_link() {
         echo self::footer_html(); // phpcs:ignore WordPress.Security.EscapeOutput -- built escaped below.
     }
 
     /**
-     * A small volleyball and "Play Keep it up", linking to the game page;
-     * '' unless the game is on and its page is set and published.
+     * A small volleyball and "Play" at the right of the footer, linking to
+     * the game page (club request 25 Nov 2026); '' unless the game is on and
+     * its page is set and published. The credit keeps its place on the left:
+     * above the theme's 60em breakpoint the footer line becomes a flex row
+     * and the link is pushed right; below it, where the theme centres the
+     * footer, the link sits centred under the credit.
      */
     public static function footer_html() {
         if (is_admin() || !TeamOversight_Keep_It_Up::is_on()) {
@@ -74,10 +80,12 @@ class TeamOversight_Keep_It_Up_Public {
         if ($url === '') {
             return '';
         }
-        return '<span class="murvc-kiu-footer" style="display:inline-block;margin:0 1.5em 0 0;white-space:nowrap">'
-            . '<a href="' . esc_url($url) . '">'
+        return '<style>@media only screen and (min-width:60.01em){.site-footer .site-info{float:none;display:flex;align-items:center}.site-footer .murvc-kiu-footer{order:2;margin-left:auto}}'
+            . '@media only screen and (max-width:60em){.site-footer .murvc-kiu-footer{display:block;margin:.75em 0 0}}</style>'
+            . '<span class="murvc-kiu-footer" style="white-space:nowrap">'
+            . '<a href="' . esc_url($url) . '" title="' . esc_attr(self::FOOTER_NAME) . '" aria-label="' . esc_attr(self::FOOTER_NAME) . '">'
             . '<img src="' . esc_url(self::ball_url()) . '" alt="" width="16" height="16" style="display:inline-block;width:16px;height:16px;margin:0 6px 0 0;vertical-align:-3px;border:0;box-shadow:none">'
-            . 'Play Keep it up</a></span>';
+            . 'Play</a></span>';
     }
 
     // ------------------------------------------------------------------
