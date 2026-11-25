@@ -52,6 +52,17 @@ class TeamOversight_Mailouts {
     const STUCK_MINUTES = 10;
     /** The most time one tick spends sending. */
     const TICK_SECONDS = 25;
+    /**
+     * Set (autoloaded, '1') while a mailout is sending, so every request can
+     * put a lost five-minute event back without a query (heal_schedule()).
+     */
+    const SENDING_FLAG = 'murvc_mailouts_sending';
+    /**
+     * A sending mailout held this long (the email permission closed) is
+     * paused when emails can go again, so an administrator decides whether it
+     * still goes (as offer emails older than a day are held).
+     */
+    const HELD_PAUSE_SECONDS = 86400;
     /** Recipient rows of a mailout finished longer ago than this are deleted (the mailout keeps its totals). */
     const KEEP_DAYS = 400;
 
@@ -113,6 +124,7 @@ class TeamOversight_Mailouts {
         self::$hooks_registered = true;
         add_filter('cron_schedules', array(__CLASS__, 'cron_schedules'));
         add_action(self::TICK_HOOK, array(__CLASS__, 'cron_tick'));
+        add_action('init', array(__CLASS__, 'heal_on_init'), 30);
         add_action('admin_post_' . self::NEWS_ACTION, array(__CLASS__, 'handle_unsubscribe'));
         add_action('admin_post_nopriv_' . self::NEWS_ACTION, array(__CLASS__, 'handle_unsubscribe'));
         if (class_exists('TeamOversight_Memberships')) {
@@ -134,6 +146,11 @@ class TeamOversight_Mailouts {
         self::tick();
     }
 
+    /** init: put the five-minute event back if a mailout is sending and it is gone (no query: the flag is autoloaded). */
+    public static function heal_on_init() {
+        self::heal_schedule(false);
+    }
+
     // ------------------------------------------------------------------
     // Tables
     // ------------------------------------------------------------------
@@ -153,7 +170,8 @@ class TeamOversight_Mailouts {
      * TeamOversight_Database::migrate_database() (behind SHOW TABLES checks),
      * create_tables() and team_oversight_create_tables(). The recipients table
      * has NO unique key on user_id: an account merge re-points user ids, and a
-     * unique key would make it fail; send() dedupes in code. Its groups column
+     * unique key would make it fail; send() dedupes in code, and the sender
+     * leaves out a row whose account already has one sent (process_row()). Its groups column
      * is group_keys, because GROUPS is a reserved word in MySQL 8.
      */
     public static function tables_sql() {
@@ -332,20 +350,67 @@ class TeamOversight_Mailouts {
     }
 
     /**
-     * Roughly when a list of $total would finish from now at the caps (35
-     * every five minutes, 400 an hour, 1,200 a day), as a timestamp. WP-cron
-     * runs on visits, so it can be later overnight; the page says so.
+     * Roughly when a list of $total would finish from $from (now) at the caps
+     * (35 every five minutes, 400 an hour, 1,200 a day), as a timestamp.
+     * $day_used: mailout emails already sent in the last 24 hours, the first
+     * of them at $window_start (a timestamp; default $from): only DAY_CAP
+     * less those can go before that day is used up, and each later 1,200 goes
+     * a day after. WP-cron runs on visits, so it can be later overnight; the
+     * page says so.
      */
-    public static function finish_estimate($total, $from = null) {
+    public static function finish_estimate($total, $from = null, $day_used = 0, $window_start = null) {
         $total = max(0, intval($total));
         $from = $from === null ? time() : intval($from);
         if ($total === 0) {
             return $from;
         }
         $per_hour = min(self::HOUR_CAP, self::BATCH * intval(3600 / self::SCHEDULE_SECONDS));
-        $days = intdiv($total - 1, self::DAY_CAP);
-        $rest = $total - $days * self::DAY_CAP;
-        return $from + $days * DAY_IN_SECONDS + (int) ceil($rest / $per_hour * HOUR_IN_SECONDS);
+        $room = max(0, self::DAY_CAP - max(0, intval($day_used)));
+        if ($total <= $room) {
+            return $from + (int) ceil($total / $per_hour * HOUR_IN_SECONDS);
+        }
+        $window_start = $window_start === null ? $from : min($from, intval($window_start));
+        $rest = $total - $room;
+        $days = intdiv($rest - 1, self::DAY_CAP) + 1;
+        $last = $rest - ($days - 1) * self::DAY_CAP;
+        return max($from, $window_start + $days * DAY_IN_SECONDS) + (int) ceil($last / $per_hour * HOUR_IN_SECONDS);
+    }
+
+    /**
+     * finish_estimate() for a mailout in the queue: it goes after the waiting
+     * rows of the sending mailouts ahead of it (every sending one for a new
+     * mailout, $mailout_id 0; else those started before it, the order tick()
+     * sends in), and after what the last 24 hours already used of the day
+     * cap. Returns array(at (timestamp), ahead (emails waiting ahead of it)).
+     */
+    public static function queue_estimate($total, $mailout_id = 0) {
+        global $wpdb;
+        $total = max(0, intval($total));
+        if (!self::tables_exist()) {
+            return array('at' => self::finish_estimate($total), 'ahead' => 0);
+        }
+        $where = "m.state = 'sending'";
+        $row = intval($mailout_id) > 0 ? self::get($mailout_id) : null;
+        if ($row) {
+            $started = !empty($row->started_at) ? (string) $row->started_at : self::now();
+            $where .= $wpdb->prepare(' AND m.id <> %d AND (m.started_at < %s OR (m.started_at = %s AND m.id < %d))', intval($row->id), $started, $started, intval($row->id));
+        }
+        $ahead = intval($wpdb->get_var('SELECT COUNT(*) FROM ' . self::recipients_table() . ' r JOIN ' . self::table() . " m ON m.id = r.mailout_id
+            WHERE $where AND r.final = 0 AND r.status IN ('pending', 'sending', 'failed')"));
+        $day_used = self::sent_in_window(DAY_IN_SECONDS);
+        $window_start = null;
+        if ($day_used > 0) {
+            $since = self::time_ago(DAY_IN_SECONDS);
+            $firsts = array_filter(array(
+                (string) $wpdb->get_var($wpdb->prepare('SELECT MIN(sent_at) FROM ' . self::recipients_table() . " WHERE status = 'sent' AND sent_at >= %s", $since)),
+                (string) $wpdb->get_var($wpdb->prepare('SELECT MIN(last_try_at) FROM ' . self::recipients_table() . " WHERE status IN ('failed', 'unknown', 'sending') AND last_try_at >= %s", $since)),
+            ), 'strlen');
+            if ($firsts) {
+                // Site-time strings: how long ago, then back from the real clock.
+                $window_start = time() - max(0, strtotime(self::now()) - strtotime(min($firsts)));
+            }
+        }
+        return array('at' => self::finish_estimate($ahead + $total, null, $day_used, $window_start), 'ahead' => $ahead);
     }
 
     // ------------------------------------------------------------------
@@ -442,18 +507,34 @@ class TeamOversight_Mailouts {
         return $available;
     }
 
-    /** League seasons with teams, key => label, newest first. */
+    /**
+     * League seasons with teams or free agents (a sign-up season can have free
+     * agents before any team), key => label, newest first in the league's own
+     * calendar order (RSL_Seasons::ordinal(): pre, mid1, mid2, post; never the
+     * keys compared as text, which puts 2027-pre before 2027-post).
+     */
     public static function league_seasons() {
         global $wpdb;
         if (!self::league_available()) {
             return array();
         }
-        $out = array();
-        foreach ((array) $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}rsl_teams ORDER BY season DESC") as $season) {
-            $season = (string) $season;
-            if (self::valid_league_season($season)) {
-                $out[$season] = self::league_label($season);
+        $keys = (array) $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}rsl_teams");
+        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->prefix . 'rsl_free_agents')))) {
+            $keys = array_merge($keys, (array) $wpdb->get_col("SELECT DISTINCT season FROM {$wpdb->prefix}rsl_free_agents"));
+        }
+        $keys = array_values(array_unique(array_filter(array_map('strval', $keys), array(__CLASS__, 'valid_league_season'))));
+        $ordinal = class_exists('RSL_Seasons') && method_exists('RSL_Seasons', 'ordinal');
+        usort($keys, function ($a, $b) use ($ordinal) {
+            $x = $ordinal ? intval(RSL_Seasons::ordinal($a)) : -1;
+            $y = $ordinal ? intval(RSL_Seasons::ordinal($b)) : -1;
+            if ($x !== $y) {
+                return $x < $y ? 1 : -1;
             }
+            return strcmp($b, $a);
+        });
+        $out = array();
+        foreach ($keys as $season) {
+            $out[$season] = self::league_label($season);
         }
         return $out;
     }
@@ -1548,6 +1629,7 @@ class TeamOversight_Mailouts {
         }
         $wpdb->query('COMMIT');
         self::log($row, 'sent to ' . number_format($total) . ' ' . ($total === 1 ? 'person' : 'people') . ' by ' . self::actor_name($actor) . ($left ? ' (' . number_format($left) . ' left out)' : ''));
+        self::set_sending_flag();
         self::ensure_schedule();
         self::spawn();
         $out['ok'] = true;
@@ -1589,6 +1671,7 @@ class TeamOversight_Mailouts {
     public static function resume($id, $actor) {
         $out = self::change_state($id, $actor, array('paused'), 'sending', 'resumed');
         if ($out['ok']) {
+            self::set_sending_flag();
             self::ensure_schedule();
             self::spawn();
         }
@@ -1608,7 +1691,8 @@ class TeamOversight_Mailouts {
             return $out;
         }
         $in = implode(',', array_fill(0, count($from), '%s'));
-        $n = $wpdb->query($wpdb->prepare('UPDATE ' . self::table() . " SET state = %s WHERE id = %d AND state IN ($in)", array_merge(array($to, intval($id)), $from)));
+        // held_since goes either way: an administrator has decided (a paused mailout keeps one only when the sender paused it after a long hold).
+        $n = $wpdb->query($wpdb->prepare('UPDATE ' . self::table() . " SET state = %s, held_since = NULL WHERE id = %d AND state IN ($in)", array_merge(array($to, intval($id)), $from)));
         if ($n !== 1) {
             $out['errors'][] = 'This mailout isn\'t ' . ($to === 'paused' ? 'sending' : 'paused') . ' any more. Reload the page.';
             return $out;
@@ -1807,7 +1891,9 @@ class TeamOversight_Mailouts {
      * with a pre_wp_mail catcher installed. $only: mailout ids to send for (the
      * tests; null = every sending mailout). While the gate is closed it sends
      * nothing and notes held_since on the sending mailouts. Else, under a
-     * named lock (not granted = another tick is running: return): rows left
+     * named lock (not granted = another tick is running: return): a mailout
+     * held for more than HELD_PAUSE_SECONDS is paused (an administrator
+     * resumes it on purpose), the others' held_since is cleared; rows left
      * in 'sending' for STUCK_MINUTES become 'unknown'; room = BATCH, less what
      * the hour and day caps have left; then oldest mailout first, row by row:
      * claim (compare-and-set), check, send, record; finished mailouts are
@@ -1816,7 +1902,7 @@ class TeamOversight_Mailouts {
      */
     public static function tick($live = null, $only = null) {
         global $wpdb;
-        $report = array('live' => false, 'held' => false, 'busy' => false, 'stuck' => 0, 'hour' => 0, 'day' => 0, 'room' => 0, 'capped' => false, 'claimed' => 0, 'sent' => 0, 'failed' => 0, 'skipped' => 0, 'finished' => array());
+        $report = array('live' => false, 'held' => false, 'busy' => false, 'paused' => array(), 'stuck' => 0, 'hour' => 0, 'day' => 0, 'room' => 0, 'capped' => false, 'claimed' => 0, 'sent' => 0, 'failed' => 0, 'skipped' => 0, 'finished' => array());
         if (!self::tables_exist()) {
             return $report;
         }
@@ -1838,6 +1924,17 @@ class TeamOversight_Mailouts {
             return $report;
         }
         try {
+            // Held for more than a day (the email permission was closed): paused, not sent, so an
+            // administrator decides whether it still goes. held_since stays on it for the page.
+            $stale = $wpdb->get_results($wpdb->prepare('SELECT m.* FROM ' . self::table() . " m WHERE m.state = 'sending' AND m.held_since IS NOT NULL AND m.held_since < %s" . $only_sql . ' ORDER BY m.id', self::time_ago(self::HELD_PAUSE_SECONDS)));
+            foreach ((array) $stale as $m) {
+                $n = $wpdb->query($wpdb->prepare('UPDATE ' . self::table() . " SET state = 'paused' WHERE id = %d AND state = 'sending' AND held_since IS NOT NULL", intval($m->id)));
+                if ($n === 1) {
+                    $report['paused'][] = intval($m->id);
+                    $ts = strtotime((string) $m->held_since);
+                    self::log($m, 'paused: emails were held from ' . ($ts ? date('j M Y, g:ia', $ts) : 'more than a day ago') . ', so it waits for an administrator to resume it');
+                }
+            }
             $wpdb->query('UPDATE ' . self::table() . " m SET m.held_since = NULL WHERE m.state = 'sending' AND m.held_since IS NOT NULL" . $only_sql);
             $report['stuck'] = self::mark_stuck();
             $report['hour'] = self::sent_in_window(HOUR_IN_SECONDS);
@@ -1958,6 +2055,17 @@ class TeamOversight_Mailouts {
             self::finish_row($id, array('status' => 'skipped', 'reason' => 'unsubscribed', 'final' => 1));
             return 'skipped';
         }
+        // One email per account: an account merge after Send re-points a row to an account that may
+        // already have one here. Another row of this mailout for the account that went, is going or
+        // may have gone means this one is left out.
+        $other = intval($wpdb->get_var($wpdb->prepare(
+            'SELECT COUNT(*) FROM ' . self::recipients_table() . " WHERE mailout_id = %d AND user_id = %d AND id <> %d AND status IN ('sent', 'sending', 'unknown')",
+            intval($mailout->id), intval($user->ID), $id
+        )));
+        if ($other > 0) {
+            self::finish_row($id, array('status' => 'skipped', 'reason' => 'duplicate', 'final' => 1));
+            return 'skipped';
+        }
         $error = '';
         $catch = function ($wp_error) use (&$error) {
             if (is_wp_error($wp_error)) {
@@ -2035,7 +2143,7 @@ class TeamOversight_Mailouts {
         return true;
     }
 
-    /** The sender's five-minute event, scheduled once (on Send and Resume). */
+    /** The sender's five-minute event, scheduled once (on Send and Resume, and by heal_schedule()). */
     public static function ensure_schedule() {
         if (!has_filter('cron_schedules', array(__CLASS__, 'cron_schedules'))) {
             add_filter('cron_schedules', array(__CLASS__, 'cron_schedules'));
@@ -2045,16 +2153,73 @@ class TeamOversight_Mailouts {
         }
     }
 
-    /** Clear the five-minute event when no mailout is sending. */
-    public static function clear_schedule_if_idle() {
+    /** How many mailouts are sending. */
+    public static function sending_count() {
         global $wpdb;
-        if (!self::tables_exist()) {
+        return self::tables_exist() ? intval($wpdb->get_var('SELECT COUNT(*) FROM ' . self::table() . " WHERE state = 'sending'")) : 0;
+    }
+
+    /**
+     * SENDING_FLAG is set. Read from the autoloaded options only, so a site
+     * with nothing sending (no such option) issues no query on any request,
+     * as get_option() would for a missing option.
+     */
+    private static function flag_on() {
+        $all = wp_load_alloptions();
+        return is_array($all) && isset($all[self::SENDING_FLAG]) && (string) $all[self::SENDING_FLAG] === '1';
+    }
+
+    private static function set_sending_flag() {
+        if (!self::flag_on()) {
+            update_option(self::SENDING_FLAG, '1', true);
+        }
+    }
+
+    /**
+     * Clear the five-minute event (and SENDING_FLAG) when no mailout is
+     * sending. Then count again: a Send or Resume that committed while this
+     * ran saw the old event and added none, so the schedule goes back.
+     */
+    public static function clear_schedule_if_idle() {
+        if (!self::tables_exist() || self::sending_count() > 0) {
             return;
         }
-        $sending = intval($wpdb->get_var('SELECT COUNT(*) FROM ' . self::table() . " WHERE state = 'sending'"));
-        if ($sending === 0 && wp_next_scheduled(self::TICK_HOOK)) {
+        if (wp_next_scheduled(self::TICK_HOOK)) {
             wp_clear_scheduled_hook(self::TICK_HOOK);
         }
+        if (self::flag_on()) {
+            delete_option(self::SENDING_FLAG);
+        }
+        if (self::sending_count() > 0) {
+            self::set_sending_flag();
+            self::ensure_schedule();
+        }
+    }
+
+    /**
+     * Put the five-minute event back when a mailout is sending and the event
+     * is gone, so a mailout never stalls: WordPress keeps every cron event in
+     * one option, and a request saving an older copy of it can drop the
+     * event; clearing can race with another administrator's Send; switching
+     * the plugin off clears it. $check_db false (init, every request): trust
+     * SENDING_FLAG, which is autoloaded, so this costs no query; true (the
+     * Mailouts page, the daily membership cron, activation): count the
+     * sending mailouts and set the flag to match. True when it scheduled.
+     */
+    public static function heal_schedule($check_db = false) {
+        if ($check_db === true) {
+            if (self::sending_count() === 0) {
+                return false;
+            }
+            self::set_sending_flag();
+        } elseif (!self::flag_on()) {
+            return false;
+        }
+        if (wp_next_scheduled(self::TICK_HOOK)) {
+            return false;
+        }
+        self::ensure_schedule();
+        return true;
     }
 
     /** Ask WP-cron to run now, so the first emails don't wait for the next visit (not from WP-CLI). */
@@ -2130,7 +2295,12 @@ class TeamOversight_Mailouts {
         return intval($user_id) . '.' . self::signature($user_id);
     }
 
-    /** The account a token belongs to (it must exist), else 0. Compared with hash_equals(). */
+    /**
+     * The account a token belongs to, else 0. Compared with hash_equals(). An
+     * account merged away since the email went is followed to the account it
+     * was merged into (the same person; the merge carries an opt-out there
+     * too), so an earlier email's link still works.
+     */
     public static function check_token($token) {
         if (!is_string($token) || preg_match('/^([1-9][0-9]{0,19})\.([0-9a-f]{24})$/D', $token, $m) !== 1) {
             return 0;
@@ -2139,7 +2309,12 @@ class TeamOversight_Mailouts {
         if (!hash_equals(self::signature($user_id), $m[2])) {
             return 0;
         }
-        return get_userdata($user_id) ? $user_id : 0;
+        if (get_userdata($user_id)) {
+            return $user_id;
+        }
+        return (class_exists('TeamOversight_Account_Merge') && method_exists('TeamOversight_Account_Merge', 'kept_account_for'))
+            ? intval(TeamOversight_Account_Merge::kept_account_for($user_id))
+            : 0;
     }
 
     /** The account's unsubscribe page (admin-post: never page-cached, works signed out). */
@@ -2291,14 +2466,16 @@ button.quiet{background:#fff;color:' . $c['navy'] . ';border:2px solid ' . $c['n
     /**
      * Daily (the membership cron): recipient rows of a mailout finished more
      * than KEEP_DAYS ago are deleted (the mailout keeps its totals); rows left
-     * in 'sending' are settled as 'unknown'. Nothing else is deleted. Returns
-     * the number of rows deleted.
+     * in 'sending' are settled as 'unknown'; a sending mailout whose
+     * five-minute event is gone gets it back. Nothing else is deleted.
+     * Returns the number of rows deleted.
      */
     public static function prune() {
         global $wpdb;
         if (!self::tables_exist()) {
             return 0;
         }
+        self::heal_schedule(true);
         self::mark_stuck();
         $ids = $wpdb->get_col($wpdb->prepare(
             'SELECT m.id FROM ' . self::table() . " m WHERE m.state IN ('done', 'cancelled') AND m.finished_at IS NOT NULL AND m.finished_at < %s AND EXISTS (SELECT 1 FROM " . self::recipients_table() . ' r WHERE r.mailout_id = m.id)',
@@ -2328,7 +2505,8 @@ button.quiet{background:#fff;color:' . $c['navy'] . ';border:2px solid ' . $c['n
 
     /**
      * A recipient row's status in words: Sent DATE, Waiting, Problem: why,
-     * Left out: unsubscribed / no email / no account, Cancelled.
+     * Left out: unsubscribed / no email / no account / merged into an account
+     * already on the list, Cancelled.
      */
     public static function status_words($r) {
         $r = (object) $r;
@@ -2344,7 +2522,7 @@ button.quiet{background:#fff;color:' . $c['navy'] . ';border:2px solid ' . $c['n
             case 'unknown':
                 return 'Problem: stopped part-way, it may or may not have been delivered';
             case 'skipped':
-                $reasons = array('unsubscribed' => 'unsubscribed', 'no_email' => 'no email', 'no_account' => 'no account');
+                $reasons = array('unsubscribed' => 'unsubscribed', 'no_email' => 'no email', 'no_account' => 'no account', 'duplicate' => 'merged into an account already on the list');
                 return 'Left out: ' . (isset($reasons[(string) $r->reason]) ? $reasons[(string) $r->reason] : 'left out');
             case 'cancelled':
                 return 'Cancelled';

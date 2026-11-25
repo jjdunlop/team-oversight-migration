@@ -4157,10 +4157,14 @@ class TeamOversight_Offers {
             <?php if (!$live): ?>
                 <p style="margin: 0 0 6px;">While sending is off, approving an offer still makes it live: its reply-by and deposit dates start that day and the player can see it on their own pages, but nobody is emailed. On the live website, allow sending before the committee approves the first offer.</p>
             <?php endif; ?>
+            <?php $mailouts = class_exists('TeamOversight_Mailouts'); ?>
+            <?php if ($mailouts): ?>
+                <p style="margin: 0 0 6px;">Club mailouts (Club Membership &rarr; Mailouts) go out only while this is on. A mailout held for more than a day is paused when sending starts again, for an administrator to resume or cancel.</p>
+            <?php endif; ?>
             <?php if ($live): ?>
-                <?php echo $form('emails_off', 'Pause offer emails', 'Pause offer emails? Nothing will be sent until you allow this website to send them again; queued messages wait. Offers already out stay live: their dates keep running.', false); ?>
+                <?php echo $form('emails_off', 'Pause offer emails', 'Pause offer emails? Nothing will be sent until you allow this website to send them again; queued messages wait. Offers already out stay live: their dates keep running.' . ($mailouts ? ' Club mailouts stop too.' : ''), false); ?>
             <?php else: ?>
-                <?php echo $form('emails_on', 'Allow this website to send offer emails', 'Allow ' . $host . ' to send offer emails? Only do this on the live website. Real players and coaches will be emailed. Messages that have waited more than a day are held for you to send or discard. Coaches are emailed a "deadline not met" notice by the next daily check for each offer that is overdue then.', false); ?>
+                <?php echo $form('emails_on', 'Allow this website to send offer emails', 'Allow ' . $host . ' to send offer emails? Only do this on the live website. Real players and coaches will be emailed. Messages that have waited more than a day are held for you to send or discard. Coaches are emailed a "deadline not met" notice by the next daily check for each offer that is overdue then.' . ($mailouts ? ' Club mailouts start again; one held for more than a day is paused for you to resume or cancel on Club Membership, Mailouts.' : ''), false); ?>
             <?php endif; ?>
             <?php if ($held > 0): ?>
                 <p style="margin: 8px 0 6px;"><strong><?php echo intval($held); ?> message(s) older than a day are being held</strong> (queued during a pause or a long gap). Send them only if they are still wanted. An offer email that is discarded leaves the offer live and its dates running, with the player never emailed: remind them from Waiting on players (Remind), give them more time (+7 days) or withdraw the offer. A "not selected" email that is discarded leaves that player not told: they go back on the Offers page's Not selected tab (and their coach's card) as not told yet, where it can be sent again.</p>

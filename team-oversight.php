@@ -23,6 +23,11 @@ register_activation_hook(__FILE__, 'team_oversight_activate');
 function team_oversight_activate() {
     team_oversight_create_tables();
     flush_rewrite_rules();
+    // 1.97.0: a mailout left sending when the plugin was switched off gets its five-minute sender back
+    // (team_oversight_create_tables() has loaded the class).
+    if (class_exists('TeamOversight_Mailouts')) {
+        TeamOversight_Mailouts::heal_schedule(true);
+    }
 }
 
 // Deactivation hook
@@ -40,7 +45,8 @@ function team_oversight_deactivate() {
     if (function_exists('wp_unschedule_hook')) {
         wp_unschedule_hook('murvc_trial_payment_nudge');
     }
-    // 1.97.0: Club mailouts' five-minute sender. A mailout still sending waits, and Resume (or a new Send) schedules it again.
+    // 1.97.0: Club mailouts' five-minute sender. A mailout still sending waits; once the plugin is back,
+    // activation and the first request after it (TeamOversight_Mailouts::heal_schedule()) schedule it again.
     wp_clear_scheduled_hook('murvc_mailout_tick');
 }
 

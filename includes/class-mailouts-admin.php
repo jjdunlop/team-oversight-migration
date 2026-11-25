@@ -85,11 +85,16 @@ class TeamOversight_Mailouts_Admin {
         }
     }
 
-    /** load-{hook}: take this administrator's flash before anything is printed. */
+    /**
+     * load-{hook}: take this administrator's flash before anything is printed,
+     * and put the sender's five-minute event back if a mailout is sending
+     * without one (TeamOversight_Mailouts::heal_schedule()).
+     */
     public static function load_page() {
         if (current_user_can('manage_options')) {
             self::$flash = self::take_flash(get_current_user_id());
             self::$flash_taken = true;
+            TeamOversight_Mailouts::heal_schedule(true);
         }
     }
 
@@ -677,10 +682,30 @@ class TeamOversight_Mailouts_Admin {
 </style>';
     }
 
-    /** The red line shown while emails can't leave this site. '' when they can. */
-    private static function held_line() {
-        if (class_exists('TeamOversight_Offers') && TeamOversight_Offers::emails_live()) {
+    /**
+     * The red line shown while emails can't leave this site, worded by why:
+     * offer emails paused on this site, permission given to another address
+     * (a copy of the site, or the site's address changed), or never given.
+     * '' when they can go.
+     */
+    public static function held_line() {
+        if (!class_exists('TeamOversight_Offers')) {
+            return '<p class="mo-held">Emails are held on this copy of the site. Nothing will be sent until it is the live site and offer emails are allowed.</p>';
+        }
+        if (TeamOversight_Offers::emails_live()) {
             return '';
+        }
+        $gate = TeamOversight_Offers::email_gate();
+        $host = TeamOversight_Offers::site_host();
+        $given_to = !empty($gate['host']) ? (string) $gate['host'] : (!empty($gate['was_host']) ? (string) $gate['was_host'] : '');
+        $where = ' <a href="' . esc_url(admin_url('admin.php?page=team-oversight-emails&tab=offers#offer-gate')) . '">The email permission</a> is on VVL Oversight &rarr; Emails, Offers and selection.';
+        if ($given_to !== '' && $given_to === $host) {
+            return '<p class="mo-held">Emails are held: offer emails are paused on this site. Nothing will be sent until an administrator allows them again.' . $where
+                . ' A mailout held for more than a day is then paused for you to resume or cancel.</p>';
+        }
+        if ($given_to !== '') {
+            return '<p class="mo-held">Emails are held: permission to send was given to ' . esc_html($given_to) . ', not to this address (' . esc_html($host)
+                . '), so nothing is sent from here. If this is the live site and its address has changed, allow offer emails again.' . $where . '</p>';
         }
         return '<p class="mo-held">Emails are held on this copy of the site. Nothing will be sent until it is the live site and offer emails are allowed.</p>';
     }
@@ -1261,9 +1286,13 @@ class TeamOversight_Mailouts_Admin {
             return;
         }
         $total = intval($resolved['total']);
+        $estimate = TeamOversight_Mailouts::queue_estimate($total);
         echo '<div class="mo-section">';
         echo '<p class="mo-total">Send "' . self::h($row->subject) . '" to ' . esc_html(self::people($total)) . '? At up to ' . number_format(TeamOversight_Mailouts::HOUR_CAP)
-            . ' an hour it should finish around ' . esc_html(self::when_words(TeamOversight_Mailouts::finish_estimate($total))) . ' (later if the site is quiet overnight). You can pause it or cancel the rest.</p>';
+            . ' an hour it should finish around ' . esc_html(self::when_words($estimate['at'])) . ' (later if the site is quiet overnight). You can pause it or cancel the rest.</p>';
+        if ($estimate['ahead'] > 0) {
+            echo '<p>It goes after the ' . esc_html(number_format($estimate['ahead'])) . ' ' . ($estimate['ahead'] === 1 ? 'email' : 'emails') . ' still waiting in mailouts already sending.</p>';
+        }
         echo '<p><strong>' . esc_html(self::kind_words($row->kind)) . '.</strong> ' . esc_html($row->kind === 'news' ? 'It carries an unsubscribe link.' : 'No unsubscribe link: it must not promote anything.') . '</p>';
         echo '<p><strong>Who:</strong> ' . esc_html(TeamOversight_Mailouts::audience_words(TeamOversight_Mailouts::audience_of($row))) . '</p>';
         self::render_counts($row, $resolved, false);
@@ -1309,7 +1338,11 @@ class TeamOversight_Mailouts_Admin {
         echo '<div class="mo-section"><h2>Progress</h2><p class="mo-total">' . implode(' &middot; ', array_map('esc_html', $parts)) . '</p>'
             . '<div class="mo-bar" role="progressbar" aria-label="Sent" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' . $pct . '"><span style="width:' . $pct . '%"></span></div>';
         if ($row->state === 'sending' && $c['waiting'] > 0) {
-            echo '<p>At this pace the rest should go by around ' . esc_html(self::when_words(TeamOversight_Mailouts::finish_estimate($c['waiting']))) . ' (later if the site is quiet overnight).</p>';
+            $estimate = TeamOversight_Mailouts::queue_estimate($c['waiting'], $id);
+            echo '<p>At this pace the rest should go by around ' . esc_html(self::when_words($estimate['at'])) . ' (later if the site is quiet overnight)'
+                . ($estimate['ahead'] > 0 ? ', after the ' . esc_html(number_format($estimate['ahead'])) . ' still waiting in mailouts sent before it' : '') . '.</p>';
+        } elseif ($row->state === 'paused' && !empty($row->held_since)) {
+            echo '<p class="mo-held">Paused by the site: emails were held from ' . esc_html(self::dt($row->held_since)) . ' for more than a day. Resume it if it should still go, or cancel the rest.</p>';
         } elseif ($row->state === 'paused') {
             echo '<p>Paused. Nothing more goes until you resume it.</p>';
         }
@@ -1328,7 +1361,7 @@ class TeamOversight_Mailouts_Admin {
 
         echo '<div class="mo-section"><h2>Who it went to</h2><p>' . esc_html((string) $row->audience_words !== '' ? (string) $row->audience_words : TeamOversight_Mailouts::audience_words(TeamOversight_Mailouts::audience_of($row))) . '</p>';
         if ($c['skipped_reasons']) {
-            $words = array('unsubscribed' => 'unsubscribed from club news', 'no_email' => 'no valid email address', 'no_account' => 'account gone');
+            $words = array('unsubscribed' => 'unsubscribed from club news', 'no_email' => 'no valid email address', 'no_account' => 'account gone', 'duplicate' => 'merged into an account already on the list');
             $lines = array();
             foreach ($c['skipped_reasons'] as $reason => $n) {
                 $lines[] = number_format($n) . ' ' . (isset($words[$reason]) ? $words[$reason] : $reason);

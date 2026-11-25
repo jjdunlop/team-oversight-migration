@@ -178,13 +178,42 @@ class TeamOversight_Account_Merge {
             array('team_club_document_changes', 'recorded_by'),
             // 1.97.0: Club mailouts: who made, last changed, test-sent and sent a mailout, and each
             // recipient row's account (its email and name are what it was sent to, kept as history;
-            // the table has no unique key on user_id, so a merge never collides).
+            // the table has no unique key on user_id, so a merge never collides; a mailout still
+            // sending then holds two rows for the kept account, and its sender sends only one).
             array('team_mailouts', 'created_by'),
             array('team_mailouts', 'updated_by'),
             array('team_mailouts', 'sent_by'),
             array('team_mailouts', 'tested_by'),
             array('team_mailout_recipients', 'user_id'),
         );
+    }
+
+    /**
+     * The account a deleted account was merged into, or 0: the newest merge
+     * (not undone) whose merged ids include it, followed when that account was
+     * merged away in turn (at most five steps). An undone merge brings the
+     * account back, so it is never followed. 1.97.0: a club news unsubscribe
+     * link sent to an account before it was merged still works.
+     */
+    public static function kept_account_for($user_id) {
+        global $wpdb;
+        $id = (int) $user_id;
+        if ($id <= 0 || !self::table_exists(self::table())) {
+            return 0;
+        }
+        $seen = array($id => true);
+        for ($step = 0; $step < 5; $step++) {
+            $kept = (int) $wpdb->get_var($wpdb->prepare('SELECT kept_user_id FROM ' . self::table() . " WHERE status = 'done' AND FIND_IN_SET(%s, merged_user_ids) ORDER BY id DESC LIMIT 1", (string) $id));
+            if ($kept <= 0 || isset($seen[$kept])) {
+                return 0;
+            }
+            if (get_userdata($kept)) {
+                return $kept;
+            }
+            $seen[$kept] = true;
+            $id = $kept;
+        }
+        return 0;
     }
 
     private static function table_exists($table) {
