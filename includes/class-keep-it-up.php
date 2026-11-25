@@ -191,6 +191,24 @@ class TeamOversight_Keep_It_Up {
         return $s['on'];
     }
 
+    /**
+     * The game answers this account: the table exists and the game is on,
+     * or the account is an administrator (club decision 25 Nov 2026: the
+     * committee checks the page before launch, so an administrator gets the
+     * board and saves scores like anyone while the game is off). A guest or
+     * any other member while off gets the refusals (board 404, POSTs 403).
+     */
+    public static function is_open_for($user_id) {
+        if (!self::tables_exist()) {
+            return false;
+        }
+        if (self::is_on()) {
+            return true;
+        }
+        $user_id = intval($user_id);
+        return $user_id > 0 && user_can($user_id, 'manage_options');
+    }
+
     /** The game page's address while the page is set and published, else ''. */
     public static function page_url() {
         $s = self::settings();
@@ -270,27 +288,42 @@ class TeamOversight_Keep_It_Up {
      * source the 1.94.1 greetings use), else of its first name when that is a
      * plain name, then a space, the first letter of the last name and a full
      * stop ("Sam K."). No usable last name: the first name alone. Nothing
-     * usable: "Player". Never a username, a display name or an email.
+     * usable: "Player". Never a username, a display name or an email. Both
+     * names go through board_clean() first, here only (the email greetings
+     * read the names as before).
      */
     public static function board_name($user_id) {
         $user_id = intval($user_id);
         if ($user_id <= 0) {
             return self::PLAYER;
         }
-        $given = TeamOversight_Email::preferred_given($user_id);
+        $given = self::board_clean(TeamOversight_Email::preferred_given($user_id));
         if ($given === '') {
-            $given = TeamOversight_Email::plain_name(get_user_meta($user_id, 'first_name', true));
+            $given = self::board_clean(TeamOversight_Email::plain_name(get_user_meta($user_id, 'first_name', true)));
         }
         $first = self::first_word($given);
         if ($first === '') {
             return self::PLAYER;
         }
-        $last = TeamOversight_Email::plain_name(get_user_meta($user_id, 'last_name', true), 60);
+        $last = self::board_clean(TeamOversight_Email::plain_name(get_user_meta($user_id, 'last_name', true), 60));
         if ($last !== '' && preg_match('/\p{L}/u', $last, $m)) {
             $initial = function_exists('mb_strtoupper') ? mb_strtoupper($m[0], 'UTF-8') : strtoupper($m[0]);
             return $first . ' ' . $initial . '.';
         }
         return $first;
+    }
+
+    /**
+     * A plain name made safe for a public board (1.98.0 review): the letters
+     * that draw nothing (the Hangul fillers U+115F, U+1160, U+3164, U+FFA0
+     * and the Khmer U+17B4, U+17B5) are taken out, and a run of more than
+     * two combining marks is cut to two, so a name can't be blank or pile
+     * marks over the other rows. Spaces collapsed; '' when nothing is left.
+     */
+    private static function board_clean($text) {
+        $text = (string) preg_replace('/[\x{115F}\x{1160}\x{3164}\x{FFA0}\x{17B4}\x{17B5}]/u', '', (string) $text);
+        $text = (string) preg_replace('/(\p{M}{2})\p{M}+/u', '$1', $text);
+        return trim((string) preg_replace('/\s+/u', ' ', $text));
     }
 
     /** The first word of a plain name, without trailing dots, hyphens or apostrophes ('' if none starts with a letter). */
@@ -587,7 +620,7 @@ class TeamOversight_Keep_It_Up {
         if (!is_string($nonce) || $nonce === '' || !wp_verify_nonce($nonce, 'wp_rest')) {
             return self::refuse(403, 'nonce', 'Your login has timed out. Reload the page to save scores.');
         }
-        if (!self::is_on() || !self::tables_exist()) {
+        if (!self::is_open_for($user_id)) {
             return self::refuse(403, 'off', 'The game is switched off.');
         }
         return null;
@@ -597,10 +630,11 @@ class TeamOversight_Keep_It_Up {
      * The leaderboard for anyone: this month's and all time's top $limit
      * (10, or 3 for the compact board), the month's name, and for a
      * logged-in viewer their own standing (bests and places, also when
-     * hidden). 404 while the game is off.
+     * hidden). 404 while the game is off, except for an administrator
+     * (is_open_for()).
      */
     public static function process_board($viewer_id, $limit = self::BOARD_SIZE, $now = null) {
-        if (!self::is_on() || !self::tables_exist()) {
+        if (!self::is_open_for($viewer_id)) {
             return self::refuse(404, 'off', 'The game is switched off.');
         }
         $limit = max(1, min(self::BOARD_SIZE, intval($limit)));

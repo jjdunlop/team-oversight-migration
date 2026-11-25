@@ -24,6 +24,8 @@ class TeamOversight_Keep_It_Up_Public {
     /** Before the theme's credit line (Poseidon adds it at 10). */
     const FOOTER_PRIORITY = 5;
     const HOW = 'Tap the ball to keep it up. Hit it in the middle to send it straight up. Don\'t let it touch the floor.';
+    /** The note on an administrator's card while the game is off (they still see and play it). */
+    const PREVIEW_NOTE = 'Keep it up is switched off, so only administrators can see this. A score you save now will be on the leaderboard when it\'s switched on.';
 
     /** What has been printed this request (styles): once. */
     private static $printed = array();
@@ -92,11 +94,17 @@ class TeamOversight_Keep_It_Up_Public {
     /**
      * [club_keep_it_up] and [club_keep_it_up compact="1"]. Returns the HTML,
      * never echoes; '' inside wp_head (so a thrown-away render can't use up
-     * the print-once styles), while the game is off, or before the table
-     * exists. Writes nothing.
+     * the print-once styles), before the table exists, or while the game is
+     * off, except for an administrator (club decision 25 Nov 2026: the
+     * committee checks the page before launch), whose card then starts with
+     * PREVIEW_NOTE. Writes nothing.
      */
     public static function render_shortcode($atts = array()) {
-        if (doing_action('wp_head') || !TeamOversight_Keep_It_Up::is_on() || !TeamOversight_Keep_It_Up::tables_exist()) {
+        if (doing_action('wp_head') || !TeamOversight_Keep_It_Up::tables_exist()) {
+            return '';
+        }
+        $preview = !TeamOversight_Keep_It_Up::is_on();
+        if ($preview && !current_user_can('manage_options')) {
             return '';
         }
         $compact = self::is_compact($atts);
@@ -111,6 +119,9 @@ class TeamOversight_Keep_It_Up_Public {
         $noscript = '<noscript><p class="murvc-kiu-small">The game needs JavaScript.</p></noscript>';
 
         $html = '<div class="murvc-kiu murvc-kiu--' . ($compact ? 'compact' : 'full') . '" data-config="' . esc_attr(wp_json_encode($config)) . '">';
+        if ($preview) {
+            $html .= '<p class="murvc-kiu-preview">' . esc_html(self::PREVIEW_NOTE) . '</p>';
+        }
         $html .= '<div class="murvc-kiu-card">' . $ball . '<div class="murvc-kiu-text">';
         if ($compact) {
             $html .= '<p class="murvc-kiu-lead">Keep this one up instead.</p>';
@@ -122,7 +133,8 @@ class TeamOversight_Keep_It_Up_Public {
             } else {
                 $html .= '<p class="murvc-kiu-small"><a href="' . esc_url($config['login']) . '">Log in</a> to get on the leaderboard.</p>';
             }
-            $html .= '<p class="murvc-kiu-small">On a keyboard, Space or Enter hits the ball while it\'s falling low.</p>';
+            // Hidden on a touch-only device (styles()), where there is no keyboard to press.
+            $html .= '<p class="murvc-kiu-small murvc-kiu-keys">On a keyboard, Space or Enter hits the ball while it\'s falling low.</p>';
         }
         $html .= $noscript . '</div></div>';
         $html .= '<div class="murvc-kiu-board" role="region" aria-label="' . esc_attr($compact ? 'Top 3 this month' : 'Leaderboard') . '">'
@@ -187,6 +199,7 @@ class TeamOversight_Keep_It_Up_Public {
         return '<style>
         .murvc-kiu{--kiu-red:var(--wp--preset--color--accent-1,#c8102e);--kiu-blue:var(--wp--preset--color--accent-2,#1f4e9c);--kiu-navy:var(--wp--preset--color--accent-3,#0f2a52);--kiu-muted:var(--wp--preset--color--accent-4,#5b6474);--kiu-bg:var(--wp--preset--color--accent-5,#f3f5f8);--kiu-border:var(--wp--preset--color--accent-6,#d9dee6);--kiu-tint:#fbe9ec;margin:16px 0;color:var(--kiu-navy)}
         .murvc-kiu [hidden]{display:none!important}
+        .murvc-kiu p.murvc-kiu-preview{margin:0 0 10px;padding:8px 12px;border-radius:8px;background:var(--kiu-tint);font-size:14px;color:var(--kiu-navy)}
         .murvc-kiu-card{display:flex;gap:16px;align-items:center;background:var(--kiu-bg);border-left:5px solid var(--kiu-red);border-radius:10px;padding:16px 18px}
         .murvc-kiu-icon{flex:0 0 auto;width:80px;height:80px;border:0;box-shadow:none;animation:murvc-kiu-bob 2.4s ease-in-out infinite}
         .murvc-kiu--compact .murvc-kiu-icon{width:56px;height:56px}
@@ -212,7 +225,7 @@ class TeamOversight_Keep_It_Up_Public {
         .murvc-kiu button.murvc-kiu-tab[aria-selected=true]{background:var(--kiu-blue);color:#fff}
         .murvc-kiu button.murvc-kiu-tab:focus-visible{outline:3px solid var(--kiu-navy);outline-offset:2px}
         .murvc-kiu ol.murvc-kiu-list{list-style:none;margin:0;padding:0;max-width:30rem}
-        .murvc-kiu-list li{display:flex;gap:10px;align-items:baseline;margin:0;padding:7px 10px;border-bottom:1px solid var(--kiu-border)}
+        .murvc-kiu-list li{display:flex;gap:10px;align-items:baseline;margin:0;padding:7px 10px;border-bottom:1px solid var(--kiu-border);overflow:hidden}
         .murvc-kiu-list li.is-me{background:var(--kiu-tint);border-left:4px solid var(--kiu-red);font-weight:700}
         .murvc-kiu-place{flex:0 0 2.6em;font-weight:700;color:var(--kiu-muted)}
         .murvc-kiu-name{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
@@ -222,6 +235,7 @@ class TeamOversight_Keep_It_Up_Public {
         .murvc-kiu-sr{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
         @media (max-width:480px){.murvc-kiu-card{padding:14px;gap:12px;align-items:flex-start}.murvc-kiu-icon,.murvc-kiu--compact .murvc-kiu-icon{width:44px;height:44px}}
         @media (prefers-reduced-motion:reduce){.murvc-kiu-icon{animation:none}}
+        @media (hover:none) and (pointer:coarse){.murvc-kiu p.murvc-kiu-keys{display:none}}
         html.murvc-kiu-open,html.murvc-kiu-open body{overflow:hidden!important;overscroll-behavior:none}
         .murvc-kiu-layer{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147482000;background:linear-gradient(#e8eef8,#fdfdfb 70%);color:#0f2a52;touch-action:none;overscroll-behavior:contain;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;font-family:inherit;line-height:1.4}
         .murvc-kiu-layer:focus{outline:none}

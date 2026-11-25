@@ -41,7 +41,7 @@
   var COOLDOWN_MS = 180;       // touches closer than this count once (the site refuses under 120 ms)
   var REST = 0.78;             // the waiting ball's centre, as a share of the height
   var KEY_LOW = 0.6;           // Space or Enter hits only while the ball is falling below this share
-  var KEY_LOCK_MS = 350;       // a key press outside that window locks the keys this long (longer than the window), so mashing loses the ball
+  var KEY_LOCK_MS = 350;       // a second key press outside that window since the last hit locks the keys this long (longer than the window), so mashing loses the ball
   var LAG_MS = 100;            // a tap also counts on where the ball was drawn this recently (the screen and a finger lag the physics)
   var TRAIL = 16;              // drawn positions kept for that (100 ms at up to 160 frames a second)
   var START_WAIT_MS = 1500;    // a new game's start waits this long at most for the last game's save to land
@@ -415,7 +415,7 @@
       base: 30, r: 30, level: 0, g0: 1, g: 1, v0: 1, vside: 1,
       state: 'ready', resumeTo: 'playing', score: 0, touches: [], t0: 0, lastTouch: 0,
       raf: 0, last: null, acc: 0, gameId: 0, run: null,
-      drawX: 0, drawY: 0, trail: [], keyLock: 0, pendingFinish: null
+      drawX: 0, drawY: 0, trail: [], keyLock: 0, keyMiss: 0, pendingFinish: null, closeOnBall: false
     };
     var layer = el('div', 'murvc-kiu-layer');
     layer.setAttribute('role', 'dialog');
@@ -513,7 +513,23 @@
       if (!over.contains(e.target) && e.cancelable) { e.preventDefault(); }
     }, { passive: false });
     layer.addEventListener('keydown', onKey);
-    close.addEventListener('click', closeGame);
+    if (window.PointerEvent) {
+      // The close button sits over the court: a tap there that is on the ball is a hit, and the click after it doesn't close.
+      close.addEventListener('pointerdown', function (e) {
+        g.closeOnBall = false;
+        if (e.pointerType === 'mouse' && e.button !== 0) { return; }
+        if (hitAt(e.clientX, e.clientY, e.pointerType === 'touch' ? 'touch' : 'mouse')) {
+          g.closeOnBall = true;
+          if (e.cancelable) { e.preventDefault(); }
+        }
+      });
+    }
+    close.addEventListener('click', function (e) {
+      // A click from the keyboard (detail 0) always closes.
+      if (g.closeOnBall && e.detail !== 0) { g.closeOnBall = false; return; }
+      g.closeOnBall = false;
+      closeGame();
+    });
     quit.addEventListener('click', closeGame);
     again.addEventListener('click', function () { reset(); focusLayer(); });
     carry.addEventListener('click', function () { resume(); focusLayer(); });
@@ -544,7 +560,9 @@
     if (G.open) { return; }
     G.root = root;
     G.cfg = root.kiu;
-    G.opener = document.activeElement;
+    // Safari doesn't focus a clicked button, so the page itself is active then: Close falls back to this card's Play.
+    var active = document.activeElement;
+    G.opener = active && active !== document.body && active !== document.documentElement ? active : null;
     loadBall(G.cfg.ball);
     document.documentElement.classList.add('murvc-kiu-open');
     document.body.appendChild(G.layer);
@@ -564,7 +582,7 @@
    */
   function fitLayer() {
     var vv = window.visualViewport, s = G.layer.style;
-    if (vv && vv.scale > 1.01) {
+    if (zoom() > 1) {
       s.left = vv.offsetLeft + 'px';
       s.top = vv.offsetTop + 'px';
       s.width = vv.width + 'px';
@@ -576,10 +594,20 @@
     }
   }
 
+  /**
+   * The pinch zoom fitLayer() fits the layer to (1 when it doesn't). The
+   * ball's size limits and a finger's grace are screen pixels, so they are
+   * divided by it: the ball keeps the same share of the screen zoomed or not.
+   */
+  function zoom() {
+    var vv = window.visualViewport;
+    return vv && vv.scale > 1.01 ? vv.scale : 1;
+  }
+
   /** Device pixels per CSS pixel on the screen (a pinch zoom included), at most 3. */
   function pixelRatio() {
-    var vv = window.visualViewport, zoom = vv && vv.scale > 1 ? vv.scale : 1;
-    return Math.max(1, Math.min(3, (window.devicePixelRatio || 1) * zoom));
+    var vv = window.visualViewport, scale = vv && vv.scale > 1 ? vv.scale : 1;
+    return Math.max(1, Math.min(3, (window.devicePixelRatio || 1) * scale));
   }
 
   function closeGame() {
@@ -609,7 +637,8 @@
     G.dpr = dpr;
     G.canvas.width = Math.round(W * dpr);
     G.canvas.height = Math.round(H * dpr);
-    G.base = Math.max(SIZE_LO, Math.min(SIZE_HI, SIZE_SHARE * Math.min(W, H))) / 2;
+    var z = zoom();
+    G.base = Math.max(SIZE_LO / z, Math.min(SIZE_HI / z, SIZE_SHARE * Math.min(W, H))) / 2;
     G.g0 = 2 * RISE * H / (APEX * APEX);
     G.v0 = G.g0 * APEX;
     G.vside = SIDE * Math.min(W, H);
@@ -643,9 +672,12 @@
     G.run = null;
     G.trail = [];
     G.keyLock = 0;
+    G.keyMiss = 0;
     applyLevel();
     rest();
     G.hud.textContent = '0';
+    G.hud.hidden = false;
+    G.live.textContent = '';
     G.tip.hidden = false;
     G.over.hidden = true;
     G.paused.hidden = true;
@@ -771,13 +803,15 @@
    * A tap or click at (cx, cy). What the player sees is a frame or more
    * behind the physics, and a finger adds its own delay, so the tap counts
    * when it is on the ball where it is now or where it was drawn in the last
-   * LAG_MS; the off-centre is measured from the nearest of those.
+   * LAG_MS; the off-centre is measured from the nearest of those. Returns
+   * true when the tap was on the ball (a touch, or a second tap the
+   * cooldown folds into the last one), so the close button can tell.
    */
   function hitAt(cx, cy, kind) {
-    if (!G || !G.open || (G.state !== 'ready' && G.state !== 'playing')) { return; }
+    if (!G || !G.open || (G.state !== 'ready' && G.state !== 'playing')) { return false; }
     var rect = G.canvas.getBoundingClientRect();
     var tx = cx - rect.left, ty = cy - rect.top;
-    var reach = G.r + (kind === 'touch' ? GRACE_TOUCH : 0);
+    var reach = G.r + (kind === 'touch' ? GRACE_TOUCH / zoom() : 0);
     var now = clock();
     var spots = [{ x: G.x, y: G.y }];
     for (var i = 0; i < G.trail.length; i++) {
@@ -788,15 +822,17 @@
       var ddx = tx - spots[j].x, ddy = ty - spots[j].y, d = ddx * ddx + ddy * ddy;
       if (d < nearD) { nearD = d; near = spots[j]; }
     }
-    if (!near || nearD > reach * reach) { return; }
+    if (!near || nearD > reach * reach) { return false; }
     touch(Math.max(-1, Math.min(1, (tx - near.x) / G.r)));
+    return true;
   }
 
   /**
    * Space or Enter: a dead-centre hit, only while the ball waits or is
    * falling in the lower part of the window. A press at any other moment
-   * locks the keys for KEY_LOCK_MS (a press while locked starts it again),
-   * so pressing over and over loses the ball: timing still matters.
+   * does nothing, and the second such press since the last hit (or any
+   * press while locked) locks the keys for KEY_LOCK_MS, so one early press
+   * is forgiven but pressing over and over loses the ball: timing matters.
    */
   function keyHit() {
     if (G.state === 'ready') {
@@ -806,7 +842,7 @@
     if (G.state !== 'playing') { return; }
     var now = clock();
     if (now < G.keyLock || !(G.vy > 0 && G.y > G.H * KEY_LOW)) {
-      G.keyLock = now + KEY_LOCK_MS;
+      if (G.keyMiss++ >= 1) { G.keyLock = now + KEY_LOCK_MS; }
       return;
     }
     touch(0);
@@ -823,6 +859,7 @@
       loop();
     }
     G.lastTouch = now;
+    G.keyMiss = 0;
     var side = Math.abs(off) <= DEAD ? 0 : (Math.abs(off) - DEAD) / (1 - DEAD);
     G.vx = (off < 0 ? 1 : -1) * side * G.vside;
     G.vy = -G.v0;
@@ -947,13 +984,22 @@
     var id = G.gameId, cfg = G.cfg, score = G.score, touches = G.touches.slice(), run = G.run, o = G.o;
     G.over.hidden = false;
     G.close.hidden = true;
+    // On a short window the score at the top peeks out behind the panel, which has the score too.
+    G.hud.hidden = true;
     o.big.textContent = num(score);
     o.fresh.hidden = true;
     o.saved.textContent = '';
     o.place.textContent = '';
     o.hidden.hidden = true;
     o.login.hidden = true;
-    var over = 'Game over. You kept it up ' + num(score) + (score === 1 ? ' touch.' : ' touches.');
+    var over = 'Game over. ' + num(score) + (score === 1 ? ' touch.' : ' touches.');
+    // What the live region reads. Moving focus to the heading cuts off a message spoken before it, so nothing
+    // is said until focus has moved, and every message starts with the score.
+    var focused = false, said = over;
+    var say = function (text) {
+      said = text;
+      if (focused) { G.live.textContent = text; }
+    };
     if (!cfg.member) {
       var before = readBest();
       if (score > before) { writeBest(score); }
@@ -962,12 +1008,11 @@
       o.best.hidden = false;
       o.link.href = cfg.login || '#';
       o.login.hidden = !cfg.login;
-      G.live.textContent = over + (score > before ? ' New best!' : '');
+      say(over + (score > before ? ' New best!' : ''));
     } else {
       // The saved best only: a score joins it when the site says it was saved. No board (a timed-out login): no line.
       memberBest(o.best, cfg.viewer ? cfg.viewer.best_all || 0 : 0);
       o.saved.textContent = 'Saving...';
-      G.live.textContent = over;
       var pending = finish(cfg, run, score, touches);
       G.pendingFinish = pending;
       pending.then(function (res) {
@@ -984,7 +1029,7 @@
         }
         if (G.gameId !== id) { return; }
         o.saved.textContent = res.line || '';
-        var heard = res.line || '';
+        var heard = over + (res.line ? ' ' + res.line : '');
         if (st) {
           memberBest(o.best, st.best_all || 0);
           o.fresh.hidden = !st.new_best;
@@ -997,11 +1042,17 @@
         } else {
           memberBest(o.best, cfg.viewer ? cfg.viewer.best_all || 0 : 0);
         }
-        // Screen readers hear whether it was saved and the places too, not only "Game over".
-        if (heard) { G.live.textContent = heard; }
+        // Screen readers hear the score, whether it was saved, a new best and the places.
+        say(heard);
       });
     }
-    setTimeout(function () { if (G.open && G.gameId === id) { focusOn(o.title); } }, 50);
+    setTimeout(function () {
+      if (G.open && G.gameId === id) {
+        focusOn(o.title);
+        focused = true;
+        G.live.textContent = said;
+      }
+    }, 50);
   }
 
   /** "Your best: N" on the game over panel, or no line when there is no saved best to show. */

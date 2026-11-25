@@ -23,6 +23,8 @@ class TeamOversight_Keep_It_Up_Admin {
     const FLASH_PREFIX = 'murvc_keep_it_up_flash_';
     const FLASH_SECONDS = 300;
     const ACTIONS = array('settings', 'remove');
+    /** By the on/off switch: administrators still see the game while it's off. */
+    const PREVIEW_WORDS = 'Administrators still see the game on its page while it\'s off, so it can be checked first (a draft page works through Preview).';
 
     private static $hooks_registered = false;
     private static $flash = null;
@@ -214,7 +216,8 @@ class TeamOversight_Keep_It_Up_Admin {
             . '<input type="hidden" name="_wpnonce" value="' . esc_attr(wp_create_nonce(self::nonce_action('settings'))) . '">';
         echo '<table class="form-table" role="presentation"><tbody>';
         echo '<tr><th scope="row">The game</th><td><label><input type="checkbox" name="on" value="1"' . ($s['on'] ? ' checked' : '') . '> Switch the game on</label>'
-            . '<p class="description">Off hides the footer link and shows nothing where the game\'s shortcode is. Scores are kept either way.</p></td></tr>';
+            . '<p class="description">Off hides the footer link and shows nothing where the game\'s shortcode is. Scores are kept either way.</p>'
+            . '<p class="description">' . esc_html(self::PREVIEW_WORDS) . '</p></td></tr>';
         $dropdown = wp_dropdown_pages(array(
             'name' => 'page_id',
             'id' => 'kiu-page',
