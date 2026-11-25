@@ -42,6 +42,8 @@ class TeamOversight_Offers_Admin {
     /** The VVL Oversight top-level menu. */
     const PARENT_SLUG = 'team-oversight';
     const PER_PAGE = 40;
+    /** Waiting on players shows more a page (1.97.0, club request 25 Nov 2026): a just-accepted offer sorts last and was easy to miss on page 2. */
+    const WAITING_PER_PAGE = 100;
     /** The most rows one list loads (list_offers() caps at 500). */
     const LOAD_LIMIT = 500;
     /** At most 200 offers in one bulk request. */
@@ -920,8 +922,8 @@ class TeamOversight_Offers_Admin {
     // Pagination
     // ------------------------------------------------------------------
 
-    private static function paginate($total, $paged, array $args = array()) {
-        $pages = max(1, (int) ceil($total / self::PER_PAGE));
+    private static function paginate($total, $paged, array $args = array(), $per_page = self::PER_PAGE) {
+        $pages = max(1, (int) ceil($total / max(1, (int) $per_page)));
         if ($pages < 2) {
             return;
         }
@@ -1441,9 +1443,9 @@ class TeamOversight_Offers_Admin {
             return $c !== 0 ? $c : $a->id - $b->id;
         });
         $total = count($rows);
-        $paged = min(self::get_paged(), max(1, (int) ceil($total / self::PER_PAGE)));
+        $paged = min(self::get_paged(), max(1, (int) ceil($total / self::WAITING_PER_PAGE)));
         self::$view['paged'] = $paged;
-        $page_rows = array_slice($rows, ($paged - 1) * self::PER_PAGE, self::PER_PAGE);
+        $page_rows = array_slice($rows, ($paged - 1) * self::WAITING_PER_PAGE, self::WAITING_PER_PAGE);
 
         $user_ids = array();
         $accepted = array();
@@ -1546,7 +1548,7 @@ class TeamOversight_Offers_Admin {
             echo '</td></tr>';
         }
         echo '</tbody></table></div>';
-        self::paginate($total, $paged, self::view_args());
+        self::paginate($total, $paged, self::view_args(), self::WAITING_PER_PAGE);
     }
 
     // ------------------------------------------------------------------
