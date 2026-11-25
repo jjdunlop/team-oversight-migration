@@ -67,10 +67,10 @@ class TeamOversight_Keep_It_Up_Public {
     /**
      * A small volleyball and "Play" at the right of the footer, linking to
      * the game page (club request 25 Nov 2026); '' unless the game is on and
-     * its page is set and published. The credit keeps its place on the left:
-     * above the theme's 60em breakpoint the footer line becomes a flex row
-     * and the link is pushed right; below it, where the theme centres the
-     * footer, the link sits centred under the credit.
+     * its page is set and published. The footer line becomes one flex row at
+     * every width (1.98.1, club request 25 Nov 2026: on a phone it stacked):
+     * the credit on the left, the link on the right; it wraps only when the
+     * two can't fit side by side.
      */
     public static function footer_html() {
         if (is_admin() || !TeamOversight_Keep_It_Up::is_on()) {
@@ -80,8 +80,7 @@ class TeamOversight_Keep_It_Up_Public {
         if ($url === '') {
             return '';
         }
-        return '<style>@media only screen and (min-width:60.01em){.site-footer .site-info{float:none;display:flex;align-items:center}.site-footer .murvc-kiu-footer{order:2;margin-left:auto}}'
-            . '@media only screen and (max-width:60em){.site-footer .murvc-kiu-footer{display:block;margin:.75em 0 0}}</style>'
+        return '<style>.site-footer .site-info{float:none;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5em 1.5em}.site-footer .murvc-kiu-footer{order:2;margin-left:auto}</style>'
             . '<span class="murvc-kiu-footer" style="white-space:nowrap">'
             . '<a href="' . esc_url($url) . '" title="' . esc_attr(self::FOOTER_NAME) . '" aria-label="' . esc_attr(self::FOOTER_NAME) . '">'
             . '<img src="' . esc_url(self::ball_url()) . '" alt="" width="16" height="16" style="display:inline-block;width:16px;height:16px;margin:0 6px 0 0;vertical-align:-3px;border:0;box-shadow:none">'
