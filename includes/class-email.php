@@ -199,8 +199,20 @@ class TeamOversight_Email {
         if ($user_id <= 0) {
             return '';
         }
-        $preferred = trim((string) preg_replace('/\s+/u', ' ', self::decode((string) get_user_meta($user_id, 'preferred_name', true))));
-        return ($preferred !== '' && preg_match('/^\p{L}[\p{L}\p{M}\x{2019}\' .\-]{0,39}\z/u', $preferred) === 1) ? $preferred : '';
+        return self::plain_name(get_user_meta($user_id, 'preferred_name', true));
+    }
+
+    /**
+     * Some text as a plain name (1.98.0, the one rule preferred_name() and
+     * the Keep it up leaderboard use): entities decoded, spaces collapsed,
+     * then letters, spaces, apostrophes, hyphens and dots only, starting
+     * with a letter, at most $max characters. '' for anything else (an
+     * address, a number, brackets, a value that isn't text).
+     */
+    public static function plain_name($text, $max = 40) {
+        $max = max(1, intval($max));
+        $name = trim((string) preg_replace('/\s+/u', ' ', self::decode(is_scalar($text) ? (string) $text : '')));
+        return ($name !== '' && preg_match('/^\p{L}[\p{L}\p{M}\x{2019}\' .\-]{0,' . ($max - 1) . '}\z/u', $name) === 1) ? $name : '';
     }
 
     /**

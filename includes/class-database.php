@@ -635,6 +635,18 @@ class TeamOversight_Database {
             }
         }
 
+        // 1.98.0: Keep it up (TeamOversight_Keep_It_Up::tables_sql()): one row
+        // per improvement on a player's best this month. Behind its SHOW TABLES
+        // check, so a normal load issues no CREATE or ALTER.
+        if (class_exists('TeamOversight_Keep_It_Up')) {
+            foreach (TeamOversight_Keep_It_Up::tables_sql() as $short => $sql) {
+                if (!$wpdb->get_var("SHOW TABLES LIKE '{$wpdb->prefix}{$short}'")) {
+                    require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+                    dbDelta($sql);
+                }
+            }
+        }
+
         // 1.84.0: one tick per order line for dated Club Programs sessions
         // (written from 1.85.0). Never pruned, never dropped; the old
         // team_program_attendance table is untouched.
@@ -1157,6 +1169,12 @@ class TeamOversight_Database {
         // 1.97.0: Club mailouts.
         if (class_exists('TeamOversight_Mailouts')) {
             foreach (TeamOversight_Mailouts::tables_sql() as $short => $sql) {
+                $tables[$short] = $sql;
+            }
+        }
+        // 1.98.0: Keep it up.
+        if (class_exists('TeamOversight_Keep_It_Up')) {
+            foreach (TeamOversight_Keep_It_Up::tables_sql() as $short => $sql) {
                 $tables[$short] = $sql;
             }
         }

@@ -90,6 +90,9 @@ class TeamOversight_Log {
                 // Club mailouts (1.97.0): a mailout sent, paused, resumed, cancelled or finished, and a
                 // member's club news unsubscribe or start again (the account in context, never an address).
                 'mailout' => 'Club mailout',
+                // Keep it up (1.98.0): the game switched on or off, its page set, and a score removed
+                // from the boards (the player in context).
+                'keep_it_up' => 'Keep it up',
             ),
         );
 

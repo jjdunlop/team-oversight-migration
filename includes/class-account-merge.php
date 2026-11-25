@@ -185,6 +185,10 @@ class TeamOversight_Account_Merge {
             array('team_mailouts', 'sent_by'),
             array('team_mailouts', 'tested_by'),
             array('team_mailout_recipients', 'user_id'),
+            // 1.98.0: Keep it up scores (no unique key on user_id, so the kept account can then hold
+            // two rows for a month; every board takes the best per account) and who removed one.
+            array('team_keep_it_up_scores', 'user_id'),
+            array('team_keep_it_up_scores', 'removed_by'),
         );
     }
 
@@ -284,6 +288,8 @@ class TeamOversight_Account_Merge {
             '/^(?:ac_preferences_|wpforms_|woocommerce_admin_|sbi_|cff_|wpcode_|aioseo_|_aioseo_|bookly_|seen_more_|leadin_|cf_pointer|thwcfd_|wppb_|wp_mail_smtp_|_wc_plugin_framework_)/',
             '/^dismissed_.*_notice$/',
             '/^murvc_(?:coach|trial)_flash/',
+            // 1.98.0: Keep it up's pending run and start counts belong to the account that started them.
+            '/^murvc_keep_it_up_(?:run|starts)$/',
         );
         foreach ($patterns as $p) {
             if (preg_match($p, $key)) {
@@ -322,6 +328,8 @@ class TeamOversight_Account_Merge {
                 'profile_privacy', 'profile_noindex', 'hide_in_members', 'um_show_last_login',
                 // 1.97.0: a club news unsubscribe on either account carries to the kept account.
                 'murvc_news_optout', 'murvc_news_optout_via',
+                // 1.98.0: staying off the Keep it up leaderboard on either account carries to the kept account.
+                'murvc_keep_it_up_hidden',
             ));
         }
         return isset($keys[$key]) || preg_match('/^intended_?membership/i', $key);
@@ -985,8 +993,9 @@ class TeamOversight_Account_Merge {
                     'team_trial_selections' => 'Trial verdicts recorded',
                     'team_coach_profiles' => 'Coach profile link',
                     'team_mailout_recipients' => 'Club mailouts received',
+                    'team_keep_it_up_scores' => 'Keep it up scores',
                 );
-                $key = isset($label[$short]) && $col !== 'granted_by' && $col !== 'actor_id' && $col !== 'marked_by' ? $label[$short] : 'Other club records (staff columns)';
+                $key = isset($label[$short]) && $col !== 'granted_by' && $col !== 'actor_id' && $col !== 'marked_by' && $col !== 'removed_by' ? $label[$short] : 'Other club records (staff columns)';
                 $moves[$key] = (isset($moves[$key]) ? $moves[$key] : 0) + $n;
             }
         }

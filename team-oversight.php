@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: MURVC Club Manager
- * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), coach profiles (Coaches), and the club's policies and AGM papers (Club documents).
- * Version: 1.97.1
+ * Description: MURVC club management: membership tiers and reporting (Club Membership), VVL trials, selections, assignments, fees and readiness (VVL Oversight), casual program attendance (Club Programs), coach profiles (Coaches), the club's policies and AGM papers (Club documents), and the Keep it up volleyball game with its members' leaderboard.
+ * Version: 1.98.0
  * Author: MURVC
  * Requires at least: 5.0
  * Requires PHP: 7.4
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TEAM_OVERSIGHT_VERSION', '1.97.1');
+define('TEAM_OVERSIGHT_VERSION', '1.98.0');
 define('TEAM_OVERSIGHT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('TEAM_OVERSIGHT_PLUGIN_URL', plugin_dir_url(__FILE__));
 
@@ -284,6 +284,11 @@ function team_oversight_create_tables() {
     foreach (TeamOversight_Mailouts::tables_sql() as $short => $sql) {
         $tables[$short] = $sql;
     }
+    // 1.98.0: Keep it up (one row per improvement on a player's best this month).
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-keep-it-up.php';
+    foreach (TeamOversight_Keep_It_Up::tables_sql() as $short => $sql) {
+        $tables[$short] = $sql;
+    }
 
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
 
@@ -375,6 +380,11 @@ function team_oversight_init() {
     // screens (Club Membership → Mailouts).
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-mailouts.php';
     require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-mailouts-admin.php';
+    // 1.98.0: Keep it up, the volleyball game and its members' leaderboard (the scores, runs and REST
+    // routes; the shortcode and the footer link; Club Membership → Keep it up).
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-keep-it-up.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-keep-it-up-public.php';
+    require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-keep-it-up-admin.php';
     if (defined('WP_CLI') && WP_CLI) {
         require_once TEAM_OVERSIGHT_PLUGIN_DIR . 'includes/class-account-merge-cli.php';
     }
@@ -433,6 +443,11 @@ function team_oversight_init() {
     TeamOversight_Mailouts::register_hooks();
     TeamOversight_Mailouts_Admin::register_hooks();
     TeamOversight_Member_Lookup::register_hooks();
+    // 1.98.0: Keep it up: the REST routes and the deleted-account cleanup; the shortcode and the footer
+    // link; the Keep it up screen and its admin-post handler. Each added once.
+    TeamOversight_Keep_It_Up::register_hooks();
+    TeamOversight_Keep_It_Up_Public::register_hooks();
+    TeamOversight_Keep_It_Up_Admin::register_hooks();
     new TeamOversight_Trials();
     new TeamOversight_Imports();
     new TeamOversight_Exports();
