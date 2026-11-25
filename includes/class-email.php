@@ -65,6 +65,17 @@ class TeamOversight_Email {
      */
     const TOKEN_PATTERN = '/^\{\s*(fees|details|button|offer|terms|next_steps|extras)\s*(?::\s*([^{}\r\n]{1,60}?)\s*)?\}$/i';
 
+    /**
+     * 1.97.1 (club mailouts): a button with its own link, on a line of its
+     * own: {button:Register a team https://...} (a | between the words and the
+     * address is fine too). Drawn only when render() is given
+     * 'link_buttons' => true; every other email reads such a line as before.
+     */
+    const LINK_BUTTON_PATTERN = '~^\{\s*button\s*:\s*([^{}\r\n|]*?)\s*\|?\s*(https://[^\s{}<>"\']+)\s*\}$~i';
+    /** The words on a link button typed with none. */
+    const LINK_BUTTON_DEFAULT = 'Find out more';
+    const LINK_BUTTON_URL_MAX = 500;
+
     // ------------------------------------------------------------------
     // Building an email
     // ------------------------------------------------------------------
@@ -103,16 +114,18 @@ class TeamOversight_Email {
             'why' => '',
             'image' => null,
             'unsubscribe_url' => '',
+            'link_buttons' => false,
         ));
         $vars = self::plain_vars($args['vars']);
+        $link_buttons = !empty($args['link_buttons']);
         $heading = self::fill($args['heading'], $vars);
         $preheader = self::fill($args['preheader'], $vars);
 
         $html_parts = array();
         $text_parts = array();
         foreach (self::paragraphs($args['body']) as $paragraph) {
-            foreach (self::split_tokens($paragraph) as $piece) {
-                list($html, $text) = self::render_piece($piece, $vars, $args['blocks'], $args['button']);
+            foreach (self::split_tokens($paragraph, $link_buttons) as $piece) {
+                list($html, $text) = self::render_piece($piece, $vars, $args['blocks'], $args['button'], $link_buttons);
                 if ($html !== '') {
                     $html_parts[] = $html;
                     $text_parts[] = $text;
@@ -294,11 +307,11 @@ class TeamOversight_Email {
      * A paragraph cut around any block token on a line of its own, so
      * "Pay online:\n{button}" is the words, then the button.
      */
-    private static function split_tokens($paragraph) {
+    private static function split_tokens($paragraph, $link_buttons = false) {
         $pieces = array();
         $words = array();
         foreach (explode("\n", $paragraph) as $line) {
-            if (preg_match(self::TOKEN_PATTERN, trim($line))) {
+            if (preg_match(self::TOKEN_PATTERN, trim($line)) || ($link_buttons && self::link_button($line) !== null)) {
                 if ($words) {
                     $pieces[] = implode("\n", $words);
                     $words = array();
@@ -315,8 +328,13 @@ class TeamOversight_Email {
     }
 
     /** One piece as array(html, text): a block, a note or plain words. */
-    private static function render_piece($piece, $vars, $blocks, $button) {
+    private static function render_piece($piece, $vars, $blocks, $button, $link_buttons = false) {
         $trimmed = trim($piece);
+
+        if ($link_buttons && ($link = self::link_button($trimmed)) !== null) {
+            $label = $link[0] !== '' ? self::fill($link[0], $vars) : self::LINK_BUTTON_DEFAULT;
+            return array(self::button($label, $link[1]), $label . ': ' . $link[1]);
+        }
 
         if (preg_match(self::TOKEN_PATTERN, $trimmed, $m)) {
             $token = strtolower($m[1]);
@@ -630,6 +648,22 @@ class TeamOversight_Email {
      * The button: a table cell (Outlook pads the cell; everything else pads
      * the link, so the whole button is clickable).
      */
+    /**
+     * A line that is a button with its own link (LINK_BUTTON_PATTERN): its
+     * array(words, address), words '' when none were typed; else null (also
+     * for an address that isn't a clean https one or is too long).
+     */
+    public static function link_button($line) {
+        if (!preg_match(self::LINK_BUTTON_PATTERN, trim((string) $line), $m)) {
+            return null;
+        }
+        $url = esc_url_raw($m[2], array('https'));
+        if ($url === '' || strlen($url) > self::LINK_BUTTON_URL_MAX || stripos($url, 'https://') !== 0) {
+            return null;
+        }
+        return array(trim($m[1]), $url);
+    }
+
     public static function button($label, $url) {
         $href = esc_url($url);
         if ($href === '') {

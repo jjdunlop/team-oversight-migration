@@ -1861,14 +1861,59 @@ class TeamOversight_Mailouts {
         return is_string($url) && preg_match('~^https?://~i', $url) ? $url : '';
     }
 
-    /** The message has a {button} line of its own. */
+    /** The message has a {button} line of its own (for the Button box's button; a line with its own link doesn't count). */
     private static function has_button_line($body) {
         foreach (explode("\n", str_replace(array("\r\n", "\r"), "\n", (string) $body)) as $line) {
+            if (TeamOversight_Email::link_button($line) !== null) {
+                continue;
+            }
             if (preg_match(TeamOversight_Email::TOKEN_PATTERN, trim($line), $m) && strtolower($m[1]) === 'button') {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * 1.97.1: the message without its button lines that have their own link
+     * ({button:Words https://...}), for the warnings that are about the
+     * Button box's {button} and other placeholders.
+     */
+    public static function without_link_buttons($body) {
+        $keep = array();
+        foreach (explode("\n", str_replace(array("\r\n", "\r"), "\n", (string) $body)) as $line) {
+            if (TeamOversight_Email::link_button($line) === null) {
+                $keep[] = $line;
+            }
+        }
+        return implode("\n", $keep);
+    }
+
+    /**
+     * 1.97.1: warnings about button lines with their own link: a line that
+     * looks like one (it starts {button and has an address in it) but isn't
+     * right, or words longer than BUTTON_LABEL_MAX. Plain sentences.
+     */
+    public static function link_button_problems($body) {
+        $problems = array();
+        foreach (explode("\n", str_replace(array("\r\n", "\r"), "\n", (string) $body)) as $line) {
+            $line = trim($line);
+            if (stripos($line, '{button') !== 0) {
+                continue;
+            }
+            $link = TeamOversight_Email::link_button($line);
+            if ($link === null) {
+                if (strpos($line, '://') !== false || stripos($line, 'www.') !== false) {
+                    $shown = self::length($line) > 70 ? mb_substr($line, 0, 67) . '...' : $line;
+                    $problems[] = 'This button line won\'t work as it is: ' . $shown . ' A button with its own link needs the words, then a web address starting with https://, all inside the braces on a line of its own, like {button:Register a team https://...}';
+                }
+                continue;
+            }
+            if (self::length($link[0]) > self::BUTTON_LABEL_MAX) {
+                $problems[] = 'The words on the button "' . mb_substr($link[0], 0, 40) . '..." are long. Keep button words to ' . self::BUTTON_LABEL_MAX . ' characters or fewer.';
+            }
+        }
+        return $problems;
     }
 
     /**
@@ -1939,6 +1984,7 @@ class TeamOversight_Mailouts {
             'why' => self::why_line($groups, self::audience_of($row)),
             'image' => $image,
             'unsubscribe_url' => ($kind === 'news' && $user_id > 0) ? self::unsubscribe_url($user_id) : '',
+            'link_buttons' => true,
         ));
         $subject = TeamOversight_Email::fill($row->subject, $vars);
         if ($test) {

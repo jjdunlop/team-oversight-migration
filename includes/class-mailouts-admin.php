@@ -1053,11 +1053,12 @@ class TeamOversight_Mailouts_Admin {
         echo '<tr>' . $row_th('mo-preheader', 'Preview line') . '<td><input type="text" id="mo-preheader" name="preheader" class="large-text" maxlength="' . intval(TeamOversight_Mailouts::TEXT_MAX) . '" value="' . esc_attr($v['preheader']) . '">'
             . '<p class="description">Optional. What inboxes show after the subject.</p></td></tr>';
         echo '<tr>' . $row_th('mo-body', 'Message') . '<td><textarea id="mo-body" name="body" rows="14" class="large-text">' . esc_textarea($v['body']) . '</textarea>'
-            . '<p class="description">' . TeamOversight_Email::format_help() . ' Write <code>{first_name}</code> for the person\'s first name.</p>';
-        $warnings = $v['body'] !== '' ? TeamOversight_Email::check_text($v['body'], array('{first_name}'), array('button')) : array();
+            . '<p class="description">' . TeamOversight_Email::format_help() . ' For more buttons, each with its own link, put a line like <code>{button:Register a team https://...}</code> wherever each one should go: the words, then the web address. Write <code>{first_name}</code> for the person\'s first name.</p>';
+        $plain_body = TeamOversight_Mailouts::without_link_buttons($v['body']);
+        $warnings = $v['body'] !== '' ? array_merge(TeamOversight_Email::check_text($plain_body, array('{first_name}'), array('button')), TeamOversight_Mailouts::link_button_problems($v['body'])) : array();
         if ($v['body'] !== '' && $v['button_url'] === '') {
             foreach (array('{button}', '{button:') as $token) {
-                if (stripos($v['body'], $token) !== false) {
+                if (stripos($plain_body, $token) !== false) {
                     $warnings[] = 'The message has a {button} line but no button link is set, so no button will show.';
                     break;
                 }
