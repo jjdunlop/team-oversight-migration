@@ -23,14 +23,14 @@
   var STORE_KEY = 'murvc-keep-it-up-best';
   var STEP = 1 / 120;          // fixed physics step, seconds
   var MAX_FRAME = 0.1;         // a longer frame (a hiccup) counts as this much
-  var RISE = 0.68;             // a touch lifts the ball about this share of the window's height
-  var APEX = 0.78;             // seconds to the top of that rise at the start
+  var RISE = 0.62;             // a touch lifts the ball about this share of the window's height
+  var APEX = 0.72;             // seconds to the top of that rise at the start
   var GRAVITY_STEP = 1.05;     // every 10 touches gravity grows by this much...
   var GRAVITY_MAX = 1.5;       // ...up to this much in all
   var SIZE_STEP = 0.96;        // every 10 touches the ball shrinks by this much...
   var SIZE_MIN = 0.6;          // ...down to this share of its first size
   var SIZE_SHARE = 0.11;       // the ball's width: this share of the window's smaller side...
-  var SIZE_LO = 52;            // ...at least this many pixels...
+  var SIZE_LO = 56;            // ...at least this many pixels...
   var SIZE_HI = 120;           // ...and at most this many
   var SIDE = 0.75;             // an edge hit's sideways speed: this share of the smaller side a second
   var DEAD = 0.06;             // a hit this close to the middle goes straight up
@@ -40,7 +40,7 @@
   var GRACE_TOUCH = 8;         // extra pixels around the ball for a finger (a mouse gets none)
   var COOLDOWN_MS = 180;       // touches closer than this count once (the site refuses under 120 ms)
   var REST = 0.78;             // the waiting ball's centre, as a share of the height
-  var KEY_LOW = 0.55;          // Space or Enter hits only while the ball is falling below this share
+  var KEY_LOW = 0.6;           // Space or Enter hits only while the ball is falling below this share
   var WORDS = { 10: 'Nice dig!', 25: 'Rally!', 50: 'Libero!', 100: 'Hall of fame!', 150: 'Still up!', 200: 'Legend.' };
 
   var roots = [];
@@ -859,20 +859,25 @@
       o.best.textContent = 'Your best: ' + num(Math.max(score, known));
       o.saved.textContent = 'Saving...';
       finish(cfg, run, score, touches).then(function (res) {
-        if (!G.open || G.gameId !== id) { return; }
+        var st = res.standing;
+        if (st && cfg.viewer) {
+          cfg.viewer.best_all = st.best_all;
+          cfg.viewer.best_month = st.best_month;
+        }
+        if (!G.open) {
+          // Closed while it was saving: the boards drawn at Close may be from before it, so draw them again.
+          roots.forEach(function (r) { showBest(r); loadBoard(r); });
+          return;
+        }
+        if (G.gameId !== id) { return; }
         o.saved.textContent = res.line || '';
-        if (res.standing) {
-          var st = res.standing;
+        if (st) {
           o.best.textContent = 'Your best: ' + num(st.best_all);
           o.fresh.hidden = !st.new_best;
           if (st.place_month > 0) {
             o.place.textContent = 'This month: ' + ord(st.place_month) + '. All time: ' + ord(st.place_all) + '.';
           }
           o.hidden.hidden = st.shown !== false;
-          if (cfg.viewer) {
-            cfg.viewer.best_all = st.best_all;
-            cfg.viewer.best_month = st.best_month;
-          }
         }
       });
     }

@@ -220,7 +220,7 @@ class TeamOversight_Keep_It_Up_Public {
         .murvc-kiu-me,.murvc-kiu-status{margin:8px 0 0;font-size:14px;color:var(--kiu-muted)}
         .murvc-kiu-more{margin:8px 0 0}
         .murvc-kiu-sr{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-        @media (max-width:480px){.murvc-kiu-card{padding:14px}.murvc-kiu-icon{width:60px;height:60px}}
+        @media (max-width:480px){.murvc-kiu-card{padding:14px;gap:12px;align-items:flex-start}.murvc-kiu-icon,.murvc-kiu--compact .murvc-kiu-icon{width:44px;height:44px}}
         @media (prefers-reduced-motion:reduce){.murvc-kiu-icon{animation:none}}
         html.murvc-kiu-open,html.murvc-kiu-open body{overflow:hidden!important;overscroll-behavior:none}
         .murvc-kiu-layer{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147482000;background:linear-gradient(#e8eef8,#fdfdfb 70%);color:#0f2a52;touch-action:none;overscroll-behavior:contain;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;font-family:inherit;line-height:1.4}

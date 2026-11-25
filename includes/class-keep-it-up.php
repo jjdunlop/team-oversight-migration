@@ -336,7 +336,7 @@ class TeamOversight_Keep_It_Up {
      * achieved_gmt, then the lower id. $month a 'Y-m' or null for all time.
      * Removed rows never count; hidden players only with $include_hidden;
      * rows of an account that no longer exists never. Objects: id, user_id,
-     * score, achieved_gmt, duration_ms.
+     * month, score, achieved_gmt, duration_ms.
      */
     public static function ranked($month = null, $include_hidden = false) {
         global $wpdb;
@@ -351,7 +351,7 @@ class TeamOversight_Keep_It_Up {
         $sm = $month === null ? '' : $wpdb->prepare(' AND s.month = %s', $month);
         $xm = $month === null ? '' : $wpdb->prepare(' AND x.month = %s', $month);
         $hidden = $include_hidden ? '' : $wpdb->prepare(" AND NOT EXISTS (SELECT 1 FROM {$wpdb->usermeta} h WHERE h.user_id = s.user_id AND h.meta_key = %s AND h.meta_value = '1')", self::HIDDEN_META);
-        $rows = $wpdb->get_results("SELECT s.id, s.user_id, s.score, s.achieved_gmt, s.duration_ms FROM $t s
+        $rows = $wpdb->get_results("SELECT s.id, s.user_id, s.month, s.score, s.achieved_gmt, s.duration_ms FROM $t s
             JOIN {$wpdb->users} u ON u.ID = s.user_id
             WHERE s.removed = 0$sm$hidden
             AND NOT EXISTS (SELECT 1 FROM $t x WHERE x.user_id = s.user_id AND x.removed = 0$xm
@@ -464,21 +464,13 @@ class TeamOversight_Keep_It_Up {
      * array(id, user_id, place, name, score, achieved_gmt, month, hidden).
      */
     public static function admin_board($month, $limit = self::ADMIN_BOARD_SIZE) {
-        global $wpdb;
         $top = array_slice(self::ranked($month, true), 0, max(1, intval($limit)));
         $ids = array();
         foreach ($top as $r) {
             $ids[] = $r->user_id;
         }
-        $months = array();
         if ($ids) {
             update_meta_cache('user', $ids);
-            $row_ids = implode(',', array_map(function ($r) {
-                return intval($r->id);
-            }, $top));
-            foreach ((array) $wpdb->get_results('SELECT id, month FROM ' . self::table() . " WHERE id IN ($row_ids)") as $m) {
-                $months[intval($m->id)] = (string) $m->month;
-            }
         }
         $out = array();
         $shown_place = 0;
@@ -491,7 +483,7 @@ class TeamOversight_Keep_It_Up {
                 'name' => self::board_name($r->user_id),
                 'score' => $r->score,
                 'achieved_gmt' => $r->achieved_gmt,
-                'month' => isset($months[$r->id]) ? $months[$r->id] : '',
+                'month' => (string) $r->month,
                 'hidden' => $hidden,
             );
         }
