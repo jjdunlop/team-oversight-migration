@@ -5829,7 +5829,8 @@ class TeamOversight_Offers {
         $out['ok'] = true;
         $out['code'] = 'done';
         $out['amount_cents'] = $amount_cents;
-        $out['redirect'] = function_exists('wc_get_checkout_url') ? (string) wc_get_checkout_url() : $out['redirect'];
+        // 1.96.6: to the cart, never straight to the checkout, so the player sees anything else in it before paying.
+        $out['redirect'] = TeamOversight_Payments::to_cart(str_replace('**', '', self::wording('page_deposit_in_cart', array('{amount}' => self::money($amount)))));
         return $out;
     }
 

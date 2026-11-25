@@ -2037,9 +2037,37 @@ class TeamOversight_Payments {
         $amount = min($amount, round($total_outstanding, 2));
 
         if (self::add_fee_payment_to_cart($user, $amount)) {
-            wp_safe_redirect(wc_get_checkout_url());
+            wp_safe_redirect(self::to_cart('Your club fee payment of ' . self::money_text($amount) . ' is in your cart.'));
             exit;
         }
+    }
+
+    /**
+     * The second sentence of every "it's in your cart" notice (1.96.6).
+     */
+    const CART_CHECK_WORDS = 'Remove anything you don\'t want to pay for now, then go to checkout.';
+
+    /**
+     * 1.96.6 (club decision, 25 Nov 2026): a fee payment, an offer deposit or
+     * a trial fee goes in the cart and the member is taken to the CART, never
+     * straight to the checkout, so they see everything they are about to pay
+     * for (the checkout page lists the items but can't remove one). The one
+     * place that decides where they go: it leaves "$first In your cart ...
+     * Remove anything ..." as a WooCommerce notice above the cart (plain text,
+     * escaped here; nothing is added without a WooCommerce session, e.g. a
+     * test run from the command line before any cart was loaded) and returns
+     * the cart's address.
+     */
+    public static function to_cart($first = '') {
+        if ($first !== '' && function_exists('wc_add_notice') && function_exists('WC') && WC()->session) {
+            wc_add_notice(esc_html(trim($first . ' ' . self::CART_CHECK_WORDS)), 'notice');
+        }
+        return function_exists('wc_get_cart_url') ? (string) wc_get_cart_url() : home_url('/');
+    }
+
+    /** "$1,234.50" from a money value, plain text, for the cart notice. */
+    private static function money_text($amount) {
+        return '$' . number_format((float) $amount, 2);
     }
 
     /**

@@ -438,6 +438,14 @@ class TeamOversight_Offers_Player {
             <p class="murvc-offer-eyebrow"><?php echo esc_html($offer->season); ?> season <?php echo self::pill($state, $early); ?></p>
             <h3><?php echo $state === TeamOversight_Offers::SENT ? 'Your ' . esc_html(TeamOversight_Offers::offer_name($offer)) . ' to join ' : 'Your place with '; ?><?php echo esc_html($name); ?></h3>
 
+            <?php if ($state === TeamOversight_Offers::ACCEPTED && !$decline): ?>
+                <?php // 1.96.6 (club request, 25 Nov 2026): an accepted offer opens with what to do next, the deposit and its pay button, straight under the heading (right after Accept and on every later visit); the facts follow. ?>
+                <div class="murvc-offer-paynow" id="pay-deposit">
+                    <p class="murvc-offer-lead"><?php echo TeamOversight_Offer_Wording::html(TeamOversight_Offers::is_covered($offer) ? 'page_cover_accepted_lead' : 'page_accepted_lead', array('{by_date}' => $offer->deposit_due ? ' by ' . self::fmt($offer->deposit_due) : '')); ?></p>
+                    <?php echo self::render_deposit_box($offer); ?>
+                </div>
+            <?php endif; ?>
+
             <?php if ($state === TeamOversight_Offers::SENT || $state === TeamOversight_Offers::ACCEPTED || $state === TeamOversight_Offers::LOCKED_IN): ?>
                 <table class="murvc-offer-facts">
                     <tr><th>Team</th><td><?php echo esc_html($name); ?></td></tr>
@@ -657,19 +665,19 @@ class TeamOversight_Offers_Player {
     }
 
     /**
-     * An accepted offer: the deposit box (or the decline confirm), the
-     * commitments, and the way on to the Player Checklist, which is live
-     * from the moment the offer is accepted (1.79.0). No read-only preview
-     * here (1.79.1): its "If you accept" heading and "nothing to tick here"
-     * note are for an offer still to be answered.
+     * An accepted offer, below the facts: the Decline link (or the decline
+     * confirm), the commitments, and the way on to the Player Checklist,
+     * which is live from the moment the offer is accepted (1.79.0). The lead
+     * line and the deposit box sit at the top of the page since 1.96.6
+     * (render_offer()). No read-only preview here (1.79.1): its "If you
+     * accept" heading and "nothing to tick here" note are for an offer still
+     * to be answered.
      */
     private static function accepted_block($user, $offer, $name, $target, $status, $decline) {
         ob_start();
         if ($decline) {
             echo self::decline_panel($offer, $name);
         } else {
-            echo '<p class="murvc-offer-lead">' . TeamOversight_Offer_Wording::html(TeamOversight_Offers::is_covered($offer) ? 'page_cover_accepted_lead' : 'page_accepted_lead', array('{by_date}' => $offer->deposit_due ? ' by ' . self::fmt($offer->deposit_due) : '')) . '</p>';
-            echo self::render_deposit_box($offer);
             echo '<p><a class="murvc-offer-decline-link" href="' . esc_url(add_query_arg('decline', 1, TeamOversight_Offers::offer_url($offer))) . '">Decline this offer</a></p>';
         }
         echo '<details class="murvc-offer-more"><summary>' . esc_html(self::terms_summary($offer)) . '</summary><div class="murvc-offer-terms">' . self::terms_html($offer) . '</div></details>';
@@ -1007,6 +1015,10 @@ class TeamOversight_Offers_Player {
         .murvc-offer-decline-panel { border: 2px solid #dc3232; background: #fdf0f0; border-radius: 6px; padding: 12px 16px; margin: 12px 0; }
         .murvc-offer-danger { background: #a00 !important; border-color: #a00 !important; color: #fff !important; }
         .murvc-offer-deposit { margin: 8px 0; }
+        .murvc-offer-paynow { background: #fff; border: 2px solid #2271b1; border-left-width: 6px; border-radius: 8px; padding: 14px 16px; margin: 4px 0 16px 0; }
+        .murvc-offer-paynow .murvc-offer-lead { margin-top: 0; }
+        .murvc-offer-paynow .murvc-pay-box { margin-bottom: 0; }
+        .murvc-offer-paynow .murvc-pay-submit { font-size: 16px; padding: 6px 18px; min-height: 40px; }
         .murvc-offer-deposit-line { margin: 6px 0; font-size: 15px; }
         .murvc-offer-notice { border-radius: 6px; padding: 10px 14px; margin: 0 0 14px 0; font-weight: 600; }
         .murvc-offer-notice-ok { background: #d4edda; border: 1px solid #c3e6cb; color: #155724; }

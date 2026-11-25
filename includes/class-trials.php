@@ -123,15 +123,16 @@ class TeamOversight_Trials {
         add_action('wp_ajax_nopriv_submit_trial_application', array($this, 'handle_trial_submission'));
 
         // Trial fee payment via WooCommerce: the form saves the application as
-        // awaiting_payment, sends the user to checkout with the configured fee
-        // product, and the paid order flips the application to pending.
+        // awaiting_payment, sends the user to the cart (1.96.6; the checkout
+        // before) with the configured fee product, and the paid order flips
+        // the application to pending.
         add_action('woocommerce_checkout_create_order_line_item', array($this, 'attach_application_to_order_item'), 10, 3);
         add_action('woocommerce_order_status_processing', array($this, 'handle_trial_payment'));
         add_action('woocommerce_order_status_completed', array($this, 'handle_trial_payment'));
         add_filter('woocommerce_get_item_data', array($this, 'display_application_in_cart'), 10, 2);
 
         // "Pay the trial fee" on an unpaid application: rebuild the cart
-        // line and hand them to checkout, without re-submitting the form.
+        // line and take them to the cart, without re-submitting the form.
         add_action('template_redirect', array($this, 'maybe_resume_trial_payment'));
 
         // A paid trial fee refunded or cancelled in WooCommerce leaves the
@@ -146,6 +147,8 @@ class TeamOversight_Trials {
             add_action('admin_notices', array($this, 'render_refund_notice'));
             // 1.93.0: a top-up line is the full fee product at the difference.
             add_action('woocommerce_before_calculate_totals', array(__CLASS__, 'apply_topup_prices'), 20);
+            // 1.96.6: people now see the cart before paying, so a trial fee line can't be set to quantity 2.
+            add_filter('woocommerce_is_sold_individually', array(__CLASS__, 'fee_sold_individually'), 10, 2);
         }
     }
     
@@ -595,7 +598,7 @@ class TeamOversight_Trials {
                 ?>
                 <div class="trial-fee-notice" id="trial-fee-notice">
                     <p><strong>Trial registration fee: <?php echo wp_kses_post($fee_product->get_price_html()); ?></strong><br>
-                    <?php if ($who_text !== ''): ?>The fee applies to players <strong><?php echo esc_html($who_text); ?></strong> — after<?php else: ?>After<?php endif; ?> submitting you'll be taken to the checkout to pay. Coaches can't select you for a team until the fee is paid.<?php if (empty($fee_rules['charge_returning'])): ?> If you played for Renegades last season you can ignore this message, as your yearly membership covers your cost.<?php endif; ?></p>
+                    <?php if ($who_text !== ''): ?>The fee applies to players <strong><?php echo esc_html($who_text); ?></strong> — after<?php else: ?>After<?php endif; ?> submitting you'll be taken to your cart to pay. Coaches can't select you for a team until the fee is paid.<?php if (empty($fee_rules['charge_returning'])): ?> If you played for Renegades last season you can ignore this message, as your yearly membership covers your cost.<?php endif; ?></p>
                     <?php if ($viewer_free_by_age): ?>
                         <?php $ysl_product = self::fee_product('ysl'); ?>
                         <?php if ($ysl_product): ?>
@@ -1066,7 +1069,7 @@ class TeamOversight_Trials {
                     success: function(response) {
                         if (response.success) {
                             if (response.data.redirect) {
-                                // Fee due: straight to checkout.
+                                // Fee due: on to the cart (1.96.6).
                                 $('#trial-application-form').html('<div class="notice notice-success"><p>' + response.data.message + '</p></div>');
                                 window.location.href = response.data.redirect;
                             } else if (response.data.reload) {
@@ -1736,7 +1739,7 @@ class TeamOversight_Trials {
         // stands: fee due, a confirmed application changed, or confirmed
         // (a new application, or an unpaid one that no longer owes). The
         // fee-due email waits 15 minutes and goes only if it is still
-        // unpaid (1.80.3), since the player is usually at the checkout now.
+        // unpaid (1.80.3), since the player is usually paying for it now.
         if ($charge_fee) {
             TeamOversight_Trial_Emails::schedule_payment_nudge($application_id);
         } else {
@@ -1758,22 +1761,22 @@ class TeamOversight_Trials {
             wp_send_json_success(array('message' => $flash, 'reload' => true));
         }
 
-        $checkout_url = $this->add_fee_to_cart($fee_product, $application_id, $topup_cents);
+        $cart_url = $this->add_fee_to_cart($fee_product, $application_id, $topup_cents);
 
-        if (!$checkout_url) {
+        if (!$cart_url) {
             wp_send_json_error(array('message' => 'Your application was saved, but the trial fee could not be added to your cart. Please contact the club to arrange payment.'));
         }
 
         if ($topup_cents > 0) {
-            $message = 'Your changes have been saved. Junior Premier League and senior trials cost the full trial fee, so the rest of it (' . esc_html(self::money_text($topup_cents)) . ') is now due. Your trial number is still <strong>#' . $trial_number . '</strong>. Taking you to the checkout&hellip;';
+            $message = 'Your changes have been saved. Junior Premier League and senior trials cost the full trial fee, so the rest of it (' . esc_html(self::money_text($topup_cents)) . ') is now due. Your trial number is still <strong>#' . $trial_number . '</strong>. Taking you to your cart&hellip;';
         } elseif ($is_edit) {
-            $message = 'Your changes have been saved, but they mean the trial fee now applies. Your trial number is still <strong>#' . $trial_number . '</strong>. Taking you to the checkout&hellip;';
+            $message = 'Your changes have been saved, but they mean the trial fee now applies. Your trial number is still <strong>#' . $trial_number . '</strong>. Taking you to your cart&hellip;';
         } else {
-            $message = 'Application saved — your trial number is <strong>#' . $trial_number . '</strong>. Taking you to the checkout to pay the trial fee&hellip;';
+            $message = 'Application saved — your trial number is <strong>#' . $trial_number . '</strong>. Taking you to your cart to pay the trial fee&hellip;';
         }
         wp_send_json_success(array(
             'message' => $message,
-            'redirect' => $checkout_url
+            'redirect' => $cart_url
         ));
     }
 
@@ -1864,7 +1867,7 @@ class TeamOversight_Trials {
 
     /**
      * Link that puts an unpaid application's fee back in the cart and
-     * sends the applicant to checkout. Nonced and bound to the
+     * sends the applicant to the cart. Nonced and bound to the
      * application, so it can only ever resume the owner's own payment.
      */
     public static function resume_payment_url($application_id) {
@@ -1878,7 +1881,7 @@ class TeamOversight_Trials {
     /**
      * Handles that link. Re-adds the configured fee product for an
      * application that is genuinely the current user's and genuinely
-     * unpaid, then redirects to checkout. Anything else falls through to
+     * unpaid, then redirects to the cart. Anything else falls through to
      * the page with a flash message rather than a blank failure.
      */
     public function maybe_resume_trial_payment() {
@@ -1908,9 +1911,9 @@ class TeamOversight_Trials {
 
         // The fee this application owes: the full fee, the YSL fee or the top-up (1.93.0).
         $due = self::fee_due($owned);
-        $checkout_url = $due ? $this->add_fee_to_cart($due['product'], $application_id, $due['kind'] === 'topup' ? $due['cents'] : 0) : false;
+        $cart_url = $due ? $this->add_fee_to_cart($due['product'], $application_id, $due['kind'] === 'topup' ? $due['cents'] : 0) : false;
 
-        wp_safe_redirect($checkout_url ? $checkout_url : $target);
+        wp_safe_redirect($cart_url ? $cart_url : $target);
         exit;
     }
 
@@ -1948,7 +1951,32 @@ class TeamOversight_Trials {
             $added = WC()->cart->add_to_cart($product->get_id(), 1, 0, array(), $data);
         }
 
-        return $added ? wc_get_checkout_url() : false;
+        if (!$added) {
+            return false;
+        }
+        // 1.96.6: to the cart, never straight to the checkout (TeamOversight_Payments::to_cart()).
+        $cents = intval($topup_cents) > 0 ? intval($topup_cents) : self::price_cents($product);
+        $first = intval($topup_cents) > 0
+            ? 'The rest of your trial fee, ' . self::money_text($cents) . ', is in your cart.'
+            : ($cents !== null ? 'Your trial fee of ' . self::money_text($cents) . ' is in your cart.' : 'Your trial fee is in your cart.');
+        return TeamOversight_Payments::to_cart($first);
+    }
+
+    /**
+     * 1.96.6: a trial fee line is one fee, so it is sold individually: the
+     * cart shows "1" with no quantity box, and quantity 2 can't charge it
+     * twice. Matches the full and YSL fee products (the variation or its
+     * variable parent, like payment_product_sold_individually()).
+     */
+    public static function fee_sold_individually($sold_individually, $product) {
+        if (!is_object($product)) {
+            return $sold_individually;
+        }
+        $ids = array_filter(array(intval(get_option(self::FEE_PRODUCT_OPTION)), intval(get_option(self::YSL_FEE_PRODUCT_OPTION))));
+        if ($ids && (in_array(intval($product->get_id()), $ids, true) || in_array(intval($product->get_parent_id()), $ids, true))) {
+            return true;
+        }
+        return $sold_individually;
     }
 
     /** Takes an application's trial fee line out of the cart, when there is a cart (1.93.1). */

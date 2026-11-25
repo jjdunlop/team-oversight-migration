@@ -281,6 +281,11 @@ class TeamOversight_Offer_Wording {
             'The line under that heading, above the amount to pay and the button.',
             'It is paid in one payment and comes off your season fee. Apart from the deposit, your fee won\'t be due for a while, and you\'ll be able to pay it off gradually through the season.', array(), 2);
 
+        // 1.96.6: the notice above the cart after Pay your deposit (the shop's own sentence about removing other items follows it).
+        $c['page_deposit_in_cart'] = self::item('page', 'Deposit in the cart',
+            'The notice at the top of the cart after the player presses the deposit\'s pay button. A second sentence follows it: Remove anything you don\'t want to pay for now, then go to checkout.',
+            'Your deposit of {amount} is in your cart.', array('{amount}' => 'the deposit payment'), 1);
+
         // 1.79.1: the offers banner at the top of the Player Checklist (one short card per offer).
         $c['banner_sent_head'] = self::item('page', 'Checklist banner: an offer to answer',
             'The heading of the banner card for an offer the player has not answered yet.',
