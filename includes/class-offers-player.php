@@ -508,6 +508,11 @@ class TeamOversight_Offers_Player {
                 <?php if ($early_note !== ''): ?>
                     <p class="murvc-offer-early"><strong>Early Offer.</strong> <?php echo esc_html($early_note); ?></p>
                 <?php endif; ?>
+                <?php // 1.96.7 (club request, 25 Nov 2026): what the season fee covers, as in the offer email, while the offer waits for a reply (not for a player whose playing fee the club covers). ?>
+                <?php $fee_covers = ($state === TeamOversight_Offers::SENT && $cover === null && !$cover_moved) ? TeamOversight_Offers::wording('fee_whole_season') : ''; ?>
+                <?php if (trim($fee_covers) !== ''): ?>
+                    <p class="murvc-offer-note murvc-offer-fee-covers"><?php echo TeamOversight_Offer_Wording::to_html($fee_covers); ?></p>
+                <?php endif; ?>
                 <?php if (!empty($places)): ?>
                     <p class="murvc-offer-note">Your fee and deposit count your other <?php echo count($places) > 1 ? 'places' : 'place'; ?> this season as well, because your fee is worked out on the highest-priced place you hold.</p>
                 <?php endif; ?>

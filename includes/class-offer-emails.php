@@ -462,6 +462,7 @@ class TeamOversight_Offer_Emails {
                     . "The coaching panel would love you to join {team} for the {season} season.\n\n"
                     . "{offer}\n\n"
                     . "{early_note}\n\n"
+                    . "{fee_covers}\n\n"
                     . "{button:Accept or decline your offer}\n\n"
                     . "Your offer page shows your fee and what you'll need to do before the season, including the uniform. You can accept or decline the offer there. " . self::training_line() . "\n\n"
                     . "{extras}\n\n"
@@ -1051,6 +1052,8 @@ class TeamOversight_Offer_Emails {
             '{fee_limit}' => (string) $f['fee_limit'],
             '{offer_name}' => $offer_name,
             '{early_note}' => (string) $f['early_note'],
+            // 1.96.7: what the season fee covers (the registry's fee_whole_season), for every offer; '' when the club covers the playing fee.
+            '{fee_covers}' => empty($f['cover']) ? TeamOversight_Offers::wording('fee_whole_season') : '',
             '{deposit}' => $deposit,
             '{reply_by}' => $reply,
             '{deposit_due}' => $due,
@@ -2511,7 +2514,7 @@ class TeamOversight_Offer_Emails {
                 The offer and its reminder, a withdrawal, the &quot;you're locked in&quot; note, the coaches' notices and the &quot;not selected&quot; email (sent only when someone presses Send, about one team; Reply-To the coach who pressed it when they coach that team, else its head coach; every coach and assistant coach of the team copied, the Reply-To coach included).
                 Each is queued when something happens and sent from here once the site has been opened for sending (the box just below). A message is checked again just before it goes, so an offer withdrawn while its email waited is never mailed as an offer; the player's address is read from their account at that moment, and the coaches from the team's current roster.
                 An offer sent before the season's fees are released is an <strong>Early Offer</strong> (quoted on the upper limit): <code>{offer_name}</code> turns into &quot;Early Offer&quot; (else &quot;offer&quot;) in the subject and heading, and <code>{early_note}</code> is the plain-words paragraph that explains it (the fee isn't set yet, it won't be more than the upper limit, the deposit is 10% of that limit and comes off the final fee; empty for an ordinary offer). The offer and its two reminders are previewed and test-sent both ways.
-                Placeholders: <code>{first_name}</code> <code>{name}</code> <code>{team}</code> <code>{season}</code> <code>{role}</code> <code>{fee}</code> <code>{fee_limit}</code> <code>{deposit}</code> <code>{reply_by}</code> <code>{deposit_due}</code> <code>{offer_name}</code> <code>{early_note}</code> <code>{coach_name}</code> <code>{coach_email}</code> <code>{link}</code> <code>{training_link}</code> and, for the coaches, <code>{player_name}</code> <code>{trial_number}</code> <code>{reason_line}</code>; each email's box lists what it can fill.
+                Placeholders: <code>{first_name}</code> <code>{name}</code> <code>{team}</code> <code>{season}</code> <code>{role}</code> <code>{fee}</code> <code>{fee_limit}</code> <code>{deposit}</code> <code>{reply_by}</code> <code>{deposit_due}</code> <code>{offer_name}</code> <code>{early_note}</code> <code>{fee_covers}</code> <code>{coach_name}</code> <code>{coach_email}</code> <code>{link}</code> <code>{training_link}</code> and, for the coaches, <code>{player_name}</code> <code>{trial_number}</code> <code>{reason_line}</code>; each email's box lists what it can fill.
                 <?php echo TeamOversight_Email::format_help(true); ?>
                 Clear a subject, heading or message and save to go back to the built-in wording.
             </p>
