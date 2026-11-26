@@ -70,7 +70,10 @@ class TeamOversight_Keep_It_Up_Public {
      * its page is set and published. The footer line becomes one flex row at
      * every width (1.98.1, club request 25 Nov 2026: on a phone it stacked):
      * the credit on the left, the link on the right; it wraps only when the
-     * two can't fit side by side.
+     * two can't fit side by side. Since 1.98.2 (club request 26 Nov 2026) the
+     * footer is as wide as the window, not the theme's 1280px column, so on a
+     * wide screen the two sit at the window's edges (the theme's 28px side
+     * padding stays); on a phone nothing changes.
      */
     public static function footer_html() {
         if (is_admin() || !TeamOversight_Keep_It_Up::is_on()) {
@@ -80,7 +83,7 @@ class TeamOversight_Keep_It_Up_Public {
         if ($url === '') {
             return '';
         }
-        return '<style>.site-footer .site-info{float:none;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5em 1.5em}.site-footer .murvc-kiu-footer{order:2;margin-left:auto}</style>'
+        return '<style>.site-footer.container{max-width:none}.site-footer .site-info{float:none;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5em 1.5em}.site-footer .murvc-kiu-footer{order:2;margin-left:auto}</style>'
             . '<span class="murvc-kiu-footer" style="white-space:nowrap">'
             . '<a href="' . esc_url($url) . '" title="' . esc_attr(self::FOOTER_NAME) . '" aria-label="' . esc_attr(self::FOOTER_NAME) . '">'
             . '<img src="' . esc_url(self::ball_url()) . '" alt="" width="16" height="16" style="display:inline-block;width:16px;height:16px;margin:0 6px 0 0;vertical-align:-3px;border:0;box-shadow:none">'
