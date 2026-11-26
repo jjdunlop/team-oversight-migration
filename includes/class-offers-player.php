@@ -396,6 +396,53 @@ class TeamOversight_Offers_Player {
         return TeamOversight_Offers::money($target) . $pct;
     }
 
+    /**
+     * 1.99.0: the placeholders of the lines about what the player has already
+     * paid this season (a deposit_position() result): {deposit} the whole
+     * deposit shown (the accept target), {paid}, {remaining}, {season} and
+     * {by_date}. Plain values; the registry escapes them once.
+     */
+    private static function position_vars($offer, $target, array $position) {
+        return array(
+            '{deposit}' => TeamOversight_Offers::money($target),
+            '{paid}' => self::money_cents(intval($position['paid_cents'])),
+            '{remaining}' => self::money_cents(intval($position['remaining_cents'])),
+            '{season}' => (string) $offer->season,
+            '{by_date}' => $offer->deposit_due ? ' by ' . self::fmt($offer->deposit_due) : '',
+        );
+    }
+
+    /**
+     * The Deposit cell of a sent or accepted offer (HTML). 1.99.0: a sent
+     * offer whose deposit what the player has already paid this season covers
+     * reads deposit_row_paid, one with part of it covered deposit_row_part;
+     * anything else is deposit_words(), escaped, exactly as before.
+     */
+    private static function deposit_cell($offer, $target, $position = null) {
+        $state = is_array($position) && isset($position['state']) ? (string) $position['state'] : '';
+        if ($state === 'paid' || $state === 'part') {
+            return TeamOversight_Offer_Wording::html($state === 'paid' ? 'deposit_row_paid' : 'deposit_row_part', self::position_vars($offer, $target, $position));
+        }
+        return esc_html(self::deposit_words($offer, $target));
+    }
+
+    /**
+     * The line above Accept for an offer the club doesn't cover (plain text).
+     * 1.99.0: page_consent_deposit_paid when what the player has already paid
+     * this season covers the deposit, page_consent_deposit_part when it covers
+     * part; else page_consent_deposit, or page_consent for a $0 deposit, as
+     * before.
+     */
+    private static function consent_words($offer, $target, $position = null) {
+        $state = is_array($position) && isset($position['state']) ? (string) $position['state'] : '';
+        if ($state === 'paid' || $state === 'part') {
+            return TeamOversight_Offers::wording($state === 'paid' ? 'page_consent_deposit_paid' : 'page_consent_deposit_part', self::position_vars($offer, $target, $position));
+        }
+        return TeamOversight_Offers::to_cents($target) > 0
+            ? TeamOversight_Offers::wording('page_consent_deposit', array('{deposit}' => TeamOversight_Offers::money($target), '{by_date}' => $offer->deposit_due ? ' by ' . self::fmt($offer->deposit_due) : ''))
+            : TeamOversight_Offers::wording('page_consent');
+    }
+
     /** One offer, in full. */
     private static function render_offer($user, $offer, $decline) {
         $name = self::team_name($offer->season, $offer->team);
@@ -431,6 +478,15 @@ class TeamOversight_Offers_Player {
         // 1.88.0 review: a second covered offer whose supporter fee is already paid (decision 6): nothing to pay, no date.
         $cover_paid = $cover !== null && $state === TeamOversight_Offers::SENT && TeamOversight_Offers::remaining_cents($offer) <= 0
             && TeamOversight_Offers::to_cents($target) <= TeamOversight_Offers::to_cents($offer->deposit_target);
+        // 1.99.0 (club request, 26 Nov 2026): for a sent offer the club doesn't cover, what the player has already paid this
+        // season, read once (TeamOversight_Offers::deposit_position(), a pure reader): when it covers the deposit the page
+        // says so and accepting locks them in; when it covers part, it asks only for the rest. Nothing paid (or a $0
+        // deposit) reads exactly as before. $target stays the whole deposit accepting stores: player_accept() compares it.
+        $position = null;
+        if ($state === TeamOversight_Offers::SENT && $cover === null && !$cover_moved) {
+            $position = TeamOversight_Offers::deposit_position($offer);
+        }
+        $deposit_state = $position !== null ? (string) $position['state'] : '';
 
         ob_start();
         ?>
@@ -476,11 +532,11 @@ class TeamOversight_Offers_Player {
                     <?php elseif ($state === TeamOversight_Offers::LOCKED_IN): ?>
                         <tr><th>Deposit</th><td>Complete</td></tr>
                     <?php else: ?>
-                        <tr><th>Deposit</th><td><?php echo esc_html(self::deposit_words($offer, $target)); ?></td></tr>
+                        <tr><th>Deposit</th><td><?php echo self::deposit_cell($offer, $target, $position); ?></td></tr>
                         <?php if ($state === TeamOversight_Offers::SENT && $offer->reply_by): ?>
                             <tr class="<?php echo ($status['overdue'] && $status['kind'] === 'reply') ? 'murvc-offer-late' : ''; ?>"><th>Reply by</th><td><?php echo esc_html(self::fmt($offer->reply_by)); ?></td></tr>
                         <?php endif; ?>
-                        <?php if ($offer->deposit_due && TeamOversight_Offers::to_cents($target) > 0): ?>
+                        <?php if ($offer->deposit_due && TeamOversight_Offers::to_cents($target) > 0 && $deposit_state !== 'paid'): ?>
                             <tr class="<?php echo ($status['overdue'] && $status['kind'] === 'deposit') ? 'murvc-offer-late' : ''; ?>"><th>Deposit due by</th><td><?php echo esc_html(self::fmt($offer->deposit_due)); ?></td></tr>
                         <?php endif; ?>
                     <?php endif; ?>
@@ -521,7 +577,7 @@ class TeamOversight_Offers_Player {
             <?php
             switch ($state) {
                 case TeamOversight_Offers::SENT:
-                    echo self::sent_block($user, $view, $name, $target, $status, $decline);
+                    echo self::sent_block($user, $view, $name, $target, $status, $decline, $position);
                     break;
                 case TeamOversight_Offers::ACCEPTED:
                     echo self::accepted_block($user, $offer, $name, $target, $status, $decline);
@@ -613,12 +669,13 @@ class TeamOversight_Offers_Player {
         return '<p class="murvc-offer-extras" data-extras="' . esc_attr($line['kind']) . '">' . $line['html'] . '</p>';
     }
 
-    private static function preview_html($user, $offer, $target) {
+    /** The read-only Player Checklist preview under a sent offer. 1.99.0: $position (deposit_position()) words its fee step. */
+    private static function preview_html($user, $offer, $target, $position = null) {
         if (!class_exists('TeamOversight_Readiness')) {
             return '';
         }
         try {
-            $html = TeamOversight_Readiness::render_offer_preview($user, $offer, $target);
+            $html = TeamOversight_Readiness::render_offer_preview($user, $offer, $target, $position);
         } catch (\Throwable $e) {
             $html = '';
         }
@@ -628,8 +685,12 @@ class TeamOversight_Offers_Player {
         return '<div class="murvc-offer-preview"><p class="murvc-offer-note">' . TeamOversight_Offer_Wording::e(TeamOversight_Offers::wording('page_preview_note')) . '</p>' . $html . '</div>';
     }
 
-    /** A sent offer: the commitments, the checklist preview, Accept, and Decline (or its confirm panel). */
-    private static function sent_block($user, $offer, $name, $target, $status, $decline) {
+    /**
+     * A sent offer: the commitments, the checklist preview, Accept, and Decline
+     * (or its confirm panel). 1.99.0: $position (deposit_position(), null for
+     * a covered offer) words the consent line and the preview's fee step.
+     */
+    private static function sent_block($user, $offer, $name, $target, $status, $decline, $position = null) {
         ob_start();
         if ($decline) {
             echo self::decline_panel($offer, $name);
@@ -640,7 +701,7 @@ class TeamOversight_Offers_Player {
         echo '<div class="murvc-offer-terms">' . self::terms_html($offer) . '</div>';
         echo self::training_html($offer);
         echo self::extras_html($offer);
-        echo self::preview_html($user, $offer, $target);
+        echo self::preview_html($user, $offer, $target, $position);
         if (!$decline) {
             ?>
             <form method="post" class="murvc-offer-accept murvc-offer-once">
@@ -655,9 +716,7 @@ class TeamOversight_Offers_Player {
                         ? TeamOversight_Offers::wording('page_cover_consent_paid', array('{season}' => $offer->season))
                         : TeamOversight_Offers::wording('page_cover_consent', array('{deposit}' => TeamOversight_Offers::money($target), '{by_date}' => $offer->deposit_due ? ' by ' . self::fmt($offer->deposit_due) : ''))); ?></p>
                 <?php else: ?>
-                <p><?php echo TeamOversight_Offer_Wording::e(TeamOversight_Offers::to_cents($target) > 0
-                    ? TeamOversight_Offers::wording('page_consent_deposit', array('{deposit}' => TeamOversight_Offers::money($target), '{by_date}' => $offer->deposit_due ? ' by ' . self::fmt($offer->deposit_due) : ''))
-                    : TeamOversight_Offers::wording('page_consent')); ?></p>
+                <p><?php echo TeamOversight_Offer_Wording::e(self::consent_words($offer, $target, $position)); ?></p>
                 <?php endif; ?>
                 <p>
                     <button type="submit" class="button button-primary murvc-offer-accept-button">Accept and commit</button>

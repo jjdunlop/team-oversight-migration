@@ -4716,6 +4716,74 @@ class TeamOversight_Offers {
     }
 
     /**
+     * 1.99.0 (club request, 26 Nov 2026): where an offer's deposit stands, for
+     * the words a player reads (the offer email and its reminders, the offer
+     * page and its Player Checklist preview), so a player whose money this
+     * season already covers the deposit is told accepting locks them in, and
+     * one who paid part of it is asked only for the rest. A pure reader: it
+     * never calls a writer (lock_in_if_met(), apply_release_drop() and
+     * process_deposit_post() all write), and the money rules don't change.
+     *
+     * Returns array(state, target_cents, paid_cents, remaining_cents):
+     *  - a covered offer (is_covered()): state 'covered', the rest 0 (the
+     *    1.88.0 cover wording keeps deciding for it);
+     *  - SENT: the target is what accepting will store (accept_figures(),
+     *    else the stored deposit_target when it can't be priced), never
+     *    remaining_cents()'s effective_target(), which ignores a place
+     *    accepted since sending: that place can raise the target, and the
+     *    words must never promise a lock-in that accepting then refuses;
+     *  - ACCEPTED: effective_target();
+     *  - any other state: 'other', zeros.
+     * paid is paid_toward_deposit_cents() (what lock-in counts); remaining is
+     * the target less paid, never below 0. The state, in this order: 'none'
+     * (a $0 target), 'unpaid' (nothing paid), 'paid' (nothing left: paid
+     * reaches the target accepting will store, exactly lock_in_if_met()'s
+     * test after the accept), else 'part'. Never infer 'paid' from a 0 left
+     * amount anywhere else: ask this.
+     */
+    public static function deposit_position($offer) {
+        $out = array('state' => 'other', 'target_cents' => 0, 'paid_cents' => 0, 'remaining_cents' => 0);
+        if (!is_object($offer)) {
+            return $out;
+        }
+        if (self::is_covered($offer)) {
+            $out['state'] = 'covered';
+            return $out;
+        }
+        $state = isset($offer->state) ? (string) $offer->state : '';
+        if ($state === self::SENT) {
+            $target = self::stored_target_cents($offer);
+            try {
+                $figures = self::accept_figures($offer);
+                if (!empty($figures['ok'])) {
+                    $target = self::to_cents($figures['target']);
+                }
+            } catch (\Throwable $e) {
+                // A figure that only words an email or a page never stops it: the stored target stands in, as when it can't be priced.
+            }
+        } elseif ($state === self::ACCEPTED) {
+            $target = self::to_cents(self::effective_target($offer));
+        } else {
+            return $out;
+        }
+        $paid = max(0, intval(self::paid_toward_deposit_cents($offer)));
+        $remaining = max(0, $target - $paid);
+        if ($target <= 0) {
+            $out['state'] = 'none';
+        } elseif ($paid <= 0) {
+            $out['state'] = 'unpaid';
+        } elseif ($remaining <= 0) {
+            $out['state'] = 'paid';
+        } else {
+            $out['state'] = 'part';
+        }
+        $out['target_cents'] = $target;
+        $out['paid_cents'] = $paid;
+        $out['remaining_cents'] = $remaining;
+        return $out;
+    }
+
+    /**
      * What stage an invoice's money is at, for the pages a player reads (the
      * offer page, [member_fees], the Player Checklist), or null for an
      * invoice with no offer, a plain fee invoice, or an empty holding invoice

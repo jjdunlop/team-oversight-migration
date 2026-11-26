@@ -452,7 +452,8 @@ class TeamOversight_Offer_Emails {
                 'program' => 'Offers · {season}',
                 'subject' => 'Your {offer_name} to join {team} for {season}',
                 'heading' => 'Your {offer_name} to join {team}',
-                'preheader' => 'Accept by {reply_by} and pay your deposit by {deposit_due} to lock in your place.',
+                // 1.99.0: the preview line follows what the player has already paid this season (email_preheader_*; nothing paid reads as before).
+                'preheader' => '{offer_preheader}',
                 'button' => 'Accept or decline your offer',
                 'why' => 'You\'re getting this because the {team} coaches have offered you a place.',
                 'blocks' => array('offer', 'terms', 'extras', 'button'),
@@ -467,7 +468,7 @@ class TeamOversight_Offer_Emails {
                     . "Your offer page shows your fee and what you'll need to do before the season, including the uniform. You can accept or decline the offer there. " . self::training_line() . "\n\n"
                     . "{extras}\n\n"
                     . "## Locking in your place\n"
-                    . "Accept by {reply_by}. Then pay your deposit of {deposit} by {deposit_due} to lock in your place. It's paid in one payment and comes off your season fee. If it isn't paid by then, your place may be offered to someone else. Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
+                    . "{lock_in_steps} Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
                     . "{terms}\n\n"
                     . self::sign_off(),
             ),
@@ -521,7 +522,7 @@ class TeamOversight_Offer_Emails {
                     . "{button:Accept or decline your offer}\n\n"
                     . "You can accept or decline on your offer page. " . self::training_line() . "\n\n"
                     . "## Locking in your place\n"
-                    . "{reply_sentence} {deposit_sentence} It's paid in one payment and comes off your season fee. If it isn't paid in time, your place may be offered to someone else. Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
+                    . "{reply_sentence} {deposit_sentence} {deposit_tail} Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
                     . "{terms}\n\n"
                     . self::sign_off(),
             ),
@@ -571,7 +572,7 @@ class TeamOversight_Offer_Emails {
                     . "{early_note}\n\n"
                     . "{button:See your offer}\n\n"
                     . "## Your deposit\n"
-                    . "You've accepted this offer. {deposit_sentence} It's paid in one payment and comes off your season fee. If it isn't paid in time, your place may be offered to someone else. Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
+                    . "You've accepted this offer. {deposit_sentence} {deposit_tail} Apart from the deposit, your fee won't be due for a while, and you'll be able to pay it off gradually through the season.\n\n"
                     . "{terms}\n\n"
                     . self::sign_off(),
             ),
@@ -889,7 +890,12 @@ class TeamOversight_Offer_Emails {
      * address to link becomes a plain full stop, a paragraph that comes out
      * empty once its placeholders are filled is removed, and so is a line of
      * a longer paragraph that comes out empty (the sign-off's {coach_title}
-     * when no coach can be named), so neither leaves a gap.
+     * when no coach can be named), so neither leaves a gap. 1.99.0: an empty
+     * {deposit_tail} (the deposit is already paid) goes with the space before
+     * it (or, at the start of a line, the space after it), so the sentences
+     * around it keep one space between them; a token alone on its line
+     * (a customised body) is left to the empty-line drop below, so it never
+     * splits the paragraph (1.99.0 review).
      */
     private static function tidy_body($body, array $vars) {
         $plain = array();
@@ -898,6 +904,9 @@ class TeamOversight_Offer_Emails {
         }
         if (isset($plain['{training_link}']) && $plain['{training_link}'] === '') {
             $body = preg_replace('/\s*:\s*\{training_link\}/i', '.', (string) $body);
+        }
+        if (isset($plain['{deposit_tail}']) && $plain['{deposit_tail}'] === '') {
+            $body = preg_replace('/[ \t]+\{deposit_tail\}|\{deposit_tail\}[ \t]+/', '', (string) $body);
         }
         $keep = array();
         foreach (TeamOversight_Email::paragraphs($body) as $paragraph) {
@@ -962,6 +971,9 @@ class TeamOversight_Offer_Emails {
             'cover_paid' => false, 'change_kind' => '', 'fee_month' => 'January',
             // 1.88.0 review: the season's fees are released (the covered limit note then says nothing about when).
             'fees_released' => false,
+            // 1.99.0: where the deposit stands (TeamOversight_Offers::deposit_position()'s state: unpaid, part, paid, none,
+            // covered). Never worked out from a 0 left amount: a fact that isn't given reads as unpaid, today's wording.
+            'deposit_state' => 'unpaid',
         );
     }
 
@@ -980,14 +992,43 @@ class TeamOversight_Offer_Emails {
         $w = function ($key, array $more = array()) use ($reply, $due, $deposit) {
             return TeamOversight_Offers::wording($key, array_merge(array('{reply_by}' => $reply, '{deposit_due}' => $due, '{deposit}' => $deposit), $more));
         };
+        // 1.99.0 (club request, 26 Nov 2026): what the player has already paid this season toward the deposit (the facts carry
+        // TeamOversight_Offers::deposit_position()'s state and figures). 'paid': it covers the deposit, so accepting locks
+        // them in; 'part': ask only for the rest. Every other state (unpaid, none, covered) reads exactly as before.
+        $deposit_state = (string) $f['deposit_state'];
+        $is_paid = $deposit_state === 'paid';
+        $is_part = $deposit_state === 'part';
+        $money = ($is_paid || $is_part)
+            ? array('{paid}' => self::cents_words($f['paid_cents']), '{remaining}' => self::cents_words($f['left_cents']))
+            : array('{paid}' => '', '{remaining}' => '');
+        $mw = array_merge($money, array('{season}' => (string) $f['season']));
+
         $reply_sentence = '';
         $deposit_sentence = '';
         if ($f['state'] === 'sent') {
             $reply_sentence = $reply === '' ? '' : ($reply_late ? $w('email_reply_late') : $w('email_reply_future'));
-            $deposit_sentence = $due === '' ? '' : ($due_late ? $w('email_deposit_late') : $w('email_deposit_future'));
+            if ($is_paid) {
+                $deposit_sentence = $w('email_deposit_paid', $mw);
+            } elseif ($is_part) {
+                $deposit_sentence = $due === '' ? '' : ($due_late ? $w('email_deposit_part_late', $mw) : $w('email_deposit_part_future', $mw));
+            } else {
+                $deposit_sentence = $due === '' ? '' : ($due_late ? $w('email_deposit_late') : $w('email_deposit_future'));
+            }
         } elseif ($f['state'] === 'accepted') {
-            $deposit_sentence = $due === '' ? '' : ($due_late ? $w('email_accepted_late') : $w('email_accepted_future'));
+            // An accepted offer that is paid but not locked in yet (lock-in normally happens at accept) keeps today's lines.
+            if ($is_part) {
+                $deposit_sentence = $due === '' ? '' : ($due_late ? $w('email_accepted_part_late', $mw) : $w('email_accepted_part_future', $mw));
+            } else {
+                $deposit_sentence = $due === '' ? '' : ($due_late ? $w('email_accepted_late') : $w('email_accepted_future'));
+            }
         }
+        // The offer email's "Locking in your place" sentences and its preview line; the unpaid ones are today's text (also for a
+        // $0 deposit and every covered offer, whose own wording doesn't use them). The reminders' "how it is paid" sentences,
+        // left out when the deposit is already paid (tidy_body() takes the space with it).
+        $lock_kind = $is_paid ? 'paid' : ($is_part ? 'part' : 'unpaid');
+        $lock_in_steps = $w('email_lock_' . $lock_kind, $mw);
+        $offer_preheader = $w('email_preheader_' . $lock_kind, $mw);
+        $deposit_tail = $is_paid ? '' : $w('email_deposit_tail', $mw);
 
         // What the coaches are told about the deposit when the player accepts.
         $deposit_status = '';
@@ -1063,6 +1104,13 @@ class TeamOversight_Offer_Emails {
             '{training_link}' => $f['training_url'],
             '{reply_sentence}' => $reply_sentence,
             '{deposit_sentence}' => $deposit_sentence,
+            // 1.99.0: always present ('' where they don't apply): money already paid this season and what is left of the
+            // deposit (only when part or all of it is covered), and the three sentences built from them above.
+            '{paid}' => $money['{paid}'],
+            '{remaining}' => $money['{remaining}'],
+            '{lock_in_steps}' => $lock_in_steps,
+            '{offer_preheader}' => $offer_preheader,
+            '{deposit_tail}' => $deposit_tail,
             '{deposit_status}' => $deposit_status,
             '{reason}' => $reason,
             '{reason_line}' => $reason !== '' ? $w('email_reason_line', array('{reason}' => $reason)) : '',
@@ -1143,15 +1191,25 @@ class TeamOversight_Offer_Emails {
         } elseif ($f['state'] === 'locked_in') {
             $rows[] = array('Deposit', $f['deposit'] . ', paid');
         } else {
-            $rows[] = array('Deposit', $f['deposit']);
-            if ($f['state'] === 'accepted' && intval($f['paid_cents']) > 0) {
+            // 1.99.0: a sent offer whose deposit what the player has already paid this season covers says so (and has no due
+            // date); one with part of it covered shows the whole deposit with the accepted offer's two rows. Else as before.
+            $sent_paid = $f['state'] === 'sent' && $f['deposit_state'] === 'paid';
+            $sent_part = $f['state'] === 'sent' && $f['deposit_state'] === 'part';
+            if ($sent_paid) {
+                $rows[] = array('Deposit', str_replace('**', '', TeamOversight_Offers::wording('deposit_row_paid', array(
+                    '{deposit}' => $f['deposit'], '{paid}' => self::cents_words($f['paid_cents']), '{remaining}' => self::cents_words($f['left_cents']), '{season}' => (string) $f['season'],
+                ))));
+            } else {
+                $rows[] = array('Deposit', $f['deposit']);
+            }
+            if (($f['state'] === 'accepted' && intval($f['paid_cents']) > 0) || $sent_part) {
                 $rows[] = array('Paid so far', self::cents_words($f['paid_cents']));
                 $rows[] = array('Still to pay', self::cents_words($f['left_cents']));
             }
             if ($f['state'] === 'sent' && self::date_words($f['reply_by']) !== '') {
                 $rows[] = array('Reply by', self::date_words($f['reply_by']));
             }
-            if (self::date_words($f['deposit_due']) !== '') {
+            if (!$sent_paid && self::date_words($f['deposit_due']) !== '') {
                 $rows[] = array('Deposit due', self::date_words($f['deposit_due']));
             }
         }
@@ -1370,6 +1428,14 @@ class TeamOversight_Offer_Emails {
             if ($key === 'offer') {
                 $variants['junior'] = array('Preview: Early Offer, player under 18 (the extra training line)', ' (under 18)');
             }
+            // 1.99.0: what the player has already paid this season covers the deposit (paid) or part of it (part), as for an
+            // offer for a second team; a player who has accepted only ever has part of it left to pay.
+            if ($key === 'offer' || $key === 'reminder') {
+                $variants['paid'] = array('Preview: Early Offer, the deposit already paid (an offer for a second team)', ' (deposit already paid)');
+                $variants['part'] = array('Preview: Early Offer, part of the deposit already paid (an offer for a second team)', ' (part of the deposit already paid)');
+            } else {
+                $variants['part'] = array('Preview: Early Offer, part of the deposit paid', ' (part of the deposit paid)');
+            }
             return $variants;
         }
         if ($key === 'locked_in') {
@@ -1443,6 +1509,16 @@ class TeamOversight_Offer_Emails {
             }
             // The extra training / extra games line: 18 and over unless the 'junior' variant asks for a player under 18.
             $facts['extras'] = TeamOversight_Offers::extras_for_kind($variant === 'junior' ? 'junior' : 'adult', true);
+        }
+        // 1.99.0: where the deposit stands. Nothing paid unless the 'paid' or 'part' shape asks (the sample's $61.20 deposit:
+        // all of it already paid this season, or $40.00 of it with $21.20 to go). Never left to be guessed from a 0 left amount.
+        $facts['deposit_state'] = 'unpaid';
+        $facts['paid_cents'] = 0;
+        $facts['left_cents'] = 0;
+        if (in_array($key, self::early_variants(), true) && ($variant === 'paid' || $variant === 'part')) {
+            $facts['deposit_state'] = $variant;
+            $facts['paid_cents'] = $variant === 'paid' ? 6120 : 4000;
+            $facts['left_cents'] = $variant === 'paid' ? 0 : 2120;
         }
         // 1.88.0: the covered wordings and "offer changed" (cover_variants()): never an Early Offer.
         if (isset(self::cover_variants()[$key])) {
@@ -1657,11 +1733,29 @@ class TeamOversight_Offer_Emails {
         $deadline = TeamOversight_Offers::deadline_status($offer);
         $paid = 0;
         $left = 0;
+        $coach_side = strpos($type, 'coach_') === 0;
+        // 1.99.0 (club request, 26 Nov 2026): where the deposit stands, for the player's own emails about a live offer
+        // (TeamOversight_Offers::deposit_position(), a pure reader). A sent offer takes its figures from it too: the target
+        // accepting will store, so the email never promises a lock-in that accepting then refuses. An accepted one keeps
+        // today's sources, which give the same figures. {deposit} stays the whole deposit: for a sent offer whose deposit is
+        // paid or part paid it is the target the position was worked out on, so the box's figures add up.
+        $deposit_state = 'unpaid';
+        $deposit_money = TeamOversight_Offers::money(TeamOversight_Offers::effective_target($offer));
+        if (!$coach_side && in_array($offer->state, array('sent', 'accepted'), true)) {
+            $position = TeamOversight_Offers::deposit_position($offer);
+            $deposit_state = (string) $position['state'];
+            if ($offer->state === 'sent' && $deposit_state !== 'covered') {
+                $paid = intval($position['paid_cents']);
+                $left = intval($position['remaining_cents']);
+                if ($deposit_state === 'paid' || $deposit_state === 'part') {
+                    $deposit_money = TeamOversight_Offers::money($position['target_cents'] / 100);
+                }
+            }
+        }
         if ($offer->state === 'accepted') {
             $paid = intval(TeamOversight_Offers::paid_toward_deposit_cents($offer));
             $left = intval(TeamOversight_Offers::remaining_cents($offer));
         }
-        $coach_side = strpos($type, 'coach_') === 0;
         $facts = array_merge(self::blank_facts(), array(
             'state' => (string) $offer->state,
             'name' => $name,
@@ -1672,11 +1766,12 @@ class TeamOversight_Offer_Emails {
             'season' => (string) $offer->season,
             'role' => (string) $offer->role,
             'fee' => TeamOversight_Offers::fee_words($offer),
-            'deposit' => TeamOversight_Offers::money(TeamOversight_Offers::effective_target($offer)),
+            'deposit' => $deposit_money,
             'reply_by' => $offer->reply_by ? (string) $offer->reply_by : '',
             'deposit_due' => $offer->deposit_due ? (string) $offer->deposit_due : '',
             'paid_cents' => $paid,
             'left_cents' => $left,
+            'deposit_state' => $deposit_state,
             // 1.94.1: the coach signs with their preferred name when their account has one.
             'coach_name' => $contacts['primary'] ? TeamOversight_Email::sign_off_name($contacts['primary']['user_id'], (string) $contacts['coach_name']) : (string) $contacts['coach_name'],
             'coach_email' => $contacts['primary'] ? (string) $contacts['primary']['email'] : '',
@@ -2514,7 +2609,8 @@ class TeamOversight_Offer_Emails {
                 The offer and its reminder, a withdrawal, the &quot;you're locked in&quot; note, the coaches' notices and the &quot;not selected&quot; email (sent only when someone presses Send, about one team; Reply-To the coach who pressed it when they coach that team, else its head coach; every coach and assistant coach of the team copied, the Reply-To coach included).
                 Each is queued when something happens and sent from here once the site has been opened for sending (the box just below). A message is checked again just before it goes, so an offer withdrawn while its email waited is never mailed as an offer; the player's address is read from their account at that moment, and the coaches from the team's current roster.
                 An offer sent before the season's fees are released is an <strong>Early Offer</strong> (quoted on the upper limit): <code>{offer_name}</code> turns into &quot;Early Offer&quot; (else &quot;offer&quot;) in the subject and heading, and <code>{early_note}</code> is the plain-words paragraph that explains it (the fee isn't set yet, it won't be more than the upper limit, the deposit is 10% of that limit and comes off the final fee; empty for an ordinary offer). The offer and its two reminders are previewed and test-sent both ways.
-                Placeholders: <code>{first_name}</code> <code>{name}</code> <code>{team}</code> <code>{season}</code> <code>{role}</code> <code>{fee}</code> <code>{fee_limit}</code> <code>{deposit}</code> <code>{reply_by}</code> <code>{deposit_due}</code> <code>{offer_name}</code> <code>{early_note}</code> <code>{fee_covers}</code> <code>{coach_name}</code> <code>{coach_email}</code> <code>{link}</code> <code>{training_link}</code> and, for the coaches, <code>{player_name}</code> <code>{trial_number}</code> <code>{reason_line}</code>; each email's box lists what it can fill.
+                Placeholders: <code>{first_name}</code> <code>{name}</code> <code>{team}</code> <code>{season}</code> <code>{role}</code> <code>{fee}</code> <code>{fee_limit}</code> <code>{deposit}</code> <code>{reply_by}</code> <code>{deposit_due}</code> <code>{offer_name}</code> <code>{early_note}</code> <code>{fee_covers}</code> <code>{paid}</code> <code>{remaining}</code> <code>{lock_in_steps}</code> <code>{deposit_tail}</code> <code>{offer_preheader}</code> <code>{coach_name}</code> <code>{coach_email}</code> <code>{link}</code> <code>{training_link}</code> and, for the coaches, <code>{player_name}</code> <code>{trial_number}</code> <code>{reason_line}</code>; each email's box lists what it can fill.
+                <code>{lock_in_steps}</code> (the offer's Locking in your place sentences), <code>{offer_preheader}</code> (its preview line) and <code>{deposit_tail}</code> (how the deposit is paid, in the reminders) follow what the player has already paid this season: when it covers the deposit they say accepting locks the place in (and <code>{deposit_tail}</code> is left out); when it covers part, they ask only for the rest. <code>{paid}</code> and <code>{remaining}</code> are those two amounts, empty when nothing has been paid. The sentences are on the Offer wording panel below.
                 <?php echo TeamOversight_Email::format_help(true); ?>
                 Clear a subject, heading or message and save to go back to the built-in wording.
             </p>

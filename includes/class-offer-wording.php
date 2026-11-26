@@ -47,7 +47,7 @@ class TeamOversight_Offer_Wording {
             'early' => array('Early Offer and the fee', 'What an Early Offer is, and how the fee is described before it is set.'),
             'cover' => array('Fee covered by the club', 'What a player whose playing fee the club covers reads: a Premier League MVP the committee marks on their trial application. Their offer quotes the supporter fee and the deposit is all of it.'),
             'policy' => array('Money policy', 'What happens to a deposit. These sentences are quoted by the commitments list and by the notes on a withdrawal, a decline and a finished offer, so a change here reaches all of them.'),
-            'email' => array('Sentences used inside the offer emails', 'The short sentences the email wording fills in with {reply_sentence}, {deposit_sentence}, {deposit_status}, {reason_line}, {deposit_line}, {deposit_note} and {overdue_what}, and the "not selected" email\'s {other_teams}, its suggestions for what to do next and its sign-off ({reply_line}, {coach_title}, and {coach_name} when no coach can be named).'),
+            'email' => array('Sentences used inside the offer emails', 'The short sentences the email wording fills in with {reply_sentence}, {deposit_sentence}, {deposit_tail}, {lock_in_steps}, {offer_preheader}, {deposit_status}, {reason_line}, {deposit_line}, {deposit_note} and {overdue_what}, and the "not selected" email\'s {other_teams}, its suggestions for what to do next and its sign-off ({reply_line}, {coach_title}, and {coach_name} when no coach can be named).'),
             'page' => array('The offer page', 'What the player reads on their offer page, in the deposit box, in the offers banner at the top of the Player Checklist, and on the Player Checklist once they have accepted an offer.'),
             'coach' => array('The coach portal', 'The flow chart, the hints and the confirm boxes, and the Send "not selected" email button with what the card says about it. Coaches see percentages only, so these may never carry a dollar figure.'),
         );
@@ -160,6 +160,63 @@ class TeamOversight_Offer_Wording {
             '{deposit_sentence} in the deposit reminder once the date has passed.',
             'Your deposit of {deposit} was due by {deposit_due}, so please pay it as soon as you can.',
             array('{deposit}' => 'the deposit', '{deposit_due}' => 'the deposit due date'), 2);
+
+        // 1.99.0 (club request, 26 Nov 2026): what the player has already paid this season (TeamOversight_Offers::deposit_position()).
+        // When it covers the deposit the emails say accepting locks them in; when it covers part, they ask only for the rest.
+        // The "nothing paid" lines are the text these emails always had, character for character.
+        $already = array('{paid}' => 'what the player has already paid toward the season\'s fee, e.g. $70.00', '{season}' => 'the season, e.g. 2027');
+        $rest = array('{remaining}' => 'what is left of the deposit to pay, e.g. $10.00');
+        $reply_var = array('{reply_by}' => 'the reply-by date');
+        $deposit_var = array('{deposit}' => 'the whole deposit, e.g. $70.00');
+        $due_var = array('{deposit_due}' => 'the deposit due date');
+        $c['email_lock_unpaid'] = self::item('email', 'Offer email, Locking in your place: nothing paid yet',
+            '{lock_in_steps} in the offer email, when nothing the player has paid this season counts toward the deposit yet (and for a $0 deposit).',
+            'Accept by {reply_by}. Then pay your deposit of {deposit} by {deposit_due} to lock in your place. It\'s paid in one payment and comes off your season fee. If it isn\'t paid by then, your place may be offered to someone else.',
+            array_merge($reply_var, $deposit_var, $due_var), 3);
+        $c['email_lock_part'] = self::item('email', 'Offer email, Locking in your place: part of the deposit already paid',
+            '{lock_in_steps} in the offer email, when what the player has already paid this season covers part of the deposit (an offer for a second team).',
+            'Accept by {reply_by}. You\'ve already paid {paid} toward your {season} fee, so pay the rest of your deposit, {remaining}, by {deposit_due} to lock in your place. It\'s paid in one payment and comes off your season fee. If it isn\'t paid by then, your place may be offered to someone else.',
+            array_merge($reply_var, $already, $rest, $due_var, $deposit_var), 3);
+        $c['email_lock_paid'] = self::item('email', 'Offer email, Locking in your place: the deposit is already paid',
+            '{lock_in_steps} in the offer email, when what the player has already paid this season covers the deposit (an offer for a second team).',
+            'Accept by {reply_by} and your place is locked in straight away. The {paid} you\'ve already paid toward your {season} fee covers your deposit, so there\'s nothing more to pay now.',
+            array_merge($reply_var, $already, $deposit_var), 3);
+        $c['email_preheader_unpaid'] = self::item('email', 'Offer email, the preview line: nothing paid yet',
+            '{offer_preheader}, the line inbox previews show for the offer email, when nothing paid counts toward the deposit yet.',
+            'Accept by {reply_by} and pay your deposit by {deposit_due} to lock in your place.',
+            array_merge($reply_var, $due_var, $deposit_var), 1);
+        $c['email_preheader_part'] = self::item('email', 'Offer email, the preview line: part of the deposit already paid',
+            'The same when part of the deposit is already paid.',
+            'Accept by {reply_by} and pay the rest of your deposit, {remaining}, by {deposit_due} to lock in your place.',
+            array_merge($reply_var, $rest, $due_var, $already, $deposit_var), 1);
+        $c['email_preheader_paid'] = self::item('email', 'Offer email, the preview line: the deposit is already paid',
+            'The same when the deposit is already paid.',
+            'Accept by {reply_by} to lock in your place. Your deposit is already paid.',
+            array_merge($reply_var, $already, $deposit_var), 1);
+        $c['email_deposit_part_future'] = self::item('email', 'Deposit sentence, before the player has accepted, part already paid (date ahead)',
+            '{deposit_sentence} in the offer reminder, when what the player has already paid this season covers part of the deposit.',
+            'You\'ve already paid {paid} toward your {season} fee, so once you accept, pay the rest of your deposit, {remaining}, by {deposit_due} to lock in your place.',
+            array_merge($already, $rest, $due_var, $deposit_var), 2);
+        $c['email_deposit_part_late'] = self::item('email', 'Deposit sentence, before the player has accepted, part already paid (date passed)',
+            'The same once the deposit date has passed.',
+            'You\'ve already paid {paid} toward your {season} fee, so once you accept, please pay the rest of your deposit, {remaining}, as soon as you can to lock in your place.',
+            array_merge($already, $rest, $deposit_var), 2);
+        $c['email_deposit_paid'] = self::item('email', 'Deposit sentence, before the player has accepted, the deposit already paid',
+            '{deposit_sentence} in the offer reminder, when what the player has already paid this season covers the deposit.',
+            'The {paid} you\'ve already paid toward your {season} fee covers your deposit, so accepting locks in your place straight away.',
+            array_merge($already, $deposit_var), 2);
+        $c['email_deposit_tail'] = self::item('email', 'Reminders: how the deposit is paid',
+            '{deposit_tail} in the two reminders, after the deposit sentence. Left out when the deposit is already paid.',
+            'It\'s paid in one payment and comes off your season fee. If it isn\'t paid in time, your place may be offered to someone else.',
+            array(), 2);
+        $c['email_accepted_part_future'] = self::item('email', 'Deposit sentence, after the player accepted, part already paid (date ahead)',
+            '{deposit_sentence} in the deposit reminder, when part of the deposit is already paid.',
+            'You\'ve paid {paid} so far, so pay the rest of your deposit, {remaining}, by {deposit_due}.',
+            array_merge($already, $rest, $due_var, $deposit_var), 1);
+        $c['email_accepted_part_late'] = self::item('email', 'Deposit sentence, after the player accepted, part already paid (date passed)',
+            'The same once the deposit date has passed.',
+            'You\'ve paid {paid} so far. The rest of your deposit, {remaining}, was due by {deposit_due}, so please pay it as soon as you can.',
+            array_merge($already, $rest, $due_var, $deposit_var), 2);
         $c['email_status_locked'] = self::item('email', 'Coaches\' accepted email: the player is locked in',
             '{deposit_status} when the player accepted and no deposit is needed.',
             'Their deposit is complete, so they are locked in.', array(), 1);
@@ -242,6 +299,31 @@ class TeamOversight_Offer_Wording {
         $c['page_consent'] = self::item('page', 'Above the Accept button (no deposit)',
             'Above Accept and commit when the offer needs no deposit.',
             'By accepting you agree to the commitments above.', array(), 1);
+        // 1.99.0 (club request, 26 Nov 2026): a sent offer when what the player has already paid this season covers the
+        // deposit, or part of it (TeamOversight_Offers::deposit_position()). Nothing paid reads exactly as before.
+        $row_vars = array('{deposit}' => 'the whole deposit, e.g. $70.00', '{paid}' => 'what the player has already paid toward the season\'s fee, e.g. $70.00', '{remaining}' => 'what is left of the deposit to pay, e.g. $10.00', '{season}' => 'the season, e.g. 2027');
+        $c['deposit_row_paid'] = self::item('page', 'The Deposit row: the deposit is already paid',
+            'The Deposit row on the offer page and in the offer email\'s box, for a sent offer whose deposit what the player has already paid this season covers. There is no deposit due date then.',
+            '{deposit}, already paid', $row_vars, 1);
+        $c['deposit_row_part'] = self::item('page', 'The Deposit row: part of the deposit is already paid',
+            'The Deposit row on the offer page, for a sent offer when what the player has already paid this season covers part of the deposit (the offer email\'s box shows the whole deposit with Paid so far and Still to pay rows instead).',
+            '{deposit}: {paid} already paid, {remaining} to pay', $row_vars, 1);
+        $c['page_consent_deposit_paid'] = self::item('page', 'Above the Accept button (the deposit is already paid)',
+            'Above Accept and commit when what the player has already paid this season covers the deposit.',
+            'By accepting you agree to the commitments above. The {paid} you\'ve already paid toward your {season} fee covers your deposit, so accepting locks in your place straight away.',
+            $row_vars, 2);
+        $c['page_consent_deposit_part'] = self::item('page', 'Above the Accept button (part of the deposit already paid)',
+            'Above Accept and commit when what the player has already paid this season covers part of the deposit.',
+            'By accepting you agree to the commitments above and to pay the rest of your deposit, {remaining}{by_date}.',
+            array_merge($row_vars, array('{by_date}' => '" by 14 Nov 2026", or nothing when there is no date')), 2);
+        $c['preview_deposit_paid'] = self::item('page', 'Player Checklist preview: the deposit is already paid',
+            'The fees step of the read-only Player Checklist preview under a sent offer, after the fee, when what the player has already paid this season covers the deposit (in place of "You pay a deposit of ... to lock in your place").',
+            'The {paid} you\'ve already paid toward your {season} fee covers your deposit, so accepting locks in your place straight away. The rest is paid as your payment schedule says once fees are released.',
+            $row_vars, 2);
+        $c['preview_deposit_part'] = self::item('page', 'Player Checklist preview: part of the deposit is already paid',
+            'The same when what the player has already paid this season covers part of the deposit.',
+            'You\'ve already paid {paid} toward your {season} fee, so you pay {remaining} more to complete your deposit and lock in your place. The rest is paid as your payment schedule says once fees are released.',
+            $row_vars, 2);
         // 1.79.1: the Player Checklist opens when the offer is accepted (1.79.0), not once the player is on the team.
         $c['page_preview_note'] = self::item('page', 'Note above the Player Checklist preview',
             'Above the read-only checklist preview under an offer that has been sent and not answered yet (an accepted offer shows the line below instead).',

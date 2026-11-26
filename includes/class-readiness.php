@@ -988,10 +988,14 @@ class TeamOversight_Readiness {
      * registration, shirt(s), shorts and socks), computed for the player with
      * the offered team counted as theirs, and a fees step written from the
      * offer. No ticks, forms, shop links or pay box. Writes nothing. $target:
-     * the deposit to say (money), else the offer's stored one. Returns HTML
-     * ('' when nothing can be computed).
+     * the deposit to say (money), else the offer's stored one. 1.99.0:
+     * $position, the offer page's TeamOversight_Offers::deposit_position()
+     * (null: as before), so the fees step never asks a player whose money
+     * this season already covers the deposit to pay one, and asks one who
+     * paid part of it only for the rest. Returns HTML ('' when nothing can be
+     * computed).
      */
-    public static function render_offer_preview($user, $offer, $target = null) {
+    public static function render_offer_preview($user, $offer, $target = null, $position = null) {
         if (!$user || !$offer) {
             return '';
         }
@@ -1000,16 +1004,19 @@ class TeamOversight_Readiness {
         if ($checklist === null) {
             return '';
         }
-        $checklist['steps']['fees'] = self::offer_fees_step($offer, $target);
+        $checklist['steps']['fees'] = self::offer_fees_step($offer, $target, $position);
         return self::render_panel($season, $checklist, array('read_only' => true, 'only_teams' => array($offer->team)));
     }
 
     /**
      * The fees step of the preview, from the offer: the fee as the player was
      * told it, the deposit, and that the rest follows their payment schedule
-     * once fees are released. Plain text.
+     * once fees are released. Plain text. 1.99.0: with $position (a
+     * deposit_position() result) whose state is 'paid' or 'part', the deposit
+     * sentence is the registry's preview_deposit_paid / preview_deposit_part;
+     * any other state, or none, reads exactly as before.
      */
-    private static function offer_fees_step($offer, $target = null) {
+    private static function offer_fees_step($offer, $target = null, $position = null) {
         $fee = TeamOversight_Offers::fee_words($offer);
         $target = $target === null ? (($offer->deposit_target !== null) ? floatval($offer->deposit_target) : 0.0) : floatval($target);
         $upper = ($offer->quote_basis === 'upper' && !TeamOversight_Fees::fees_released($offer->season));
@@ -1020,7 +1027,16 @@ class TeamOversight_Readiness {
         } else {
             $detail = 'Your season fee is confirmed by the club.';
         }
-        if (TeamOversight_Offers::to_cents($target) > 0) {
+        $position_state = (is_array($position) && isset($position['state'])) ? (string) $position['state'] : '';
+        if ($position_state === 'paid' || $position_state === 'part') {
+            // Plain text here (the step is escaped when drawn), so a **bold** marker is dropped.
+            $detail .= ' ' . str_replace('**', '', TeamOversight_Offers::wording($position_state === 'paid' ? 'preview_deposit_paid' : 'preview_deposit_part', array(
+                '{deposit}' => TeamOversight_Offers::money($target),
+                '{paid}' => TeamOversight_Offers::money(intval($position['paid_cents']) / 100),
+                '{remaining}' => TeamOversight_Offers::money(intval($position['remaining_cents']) / 100),
+                '{season}' => (string) $offer->season,
+            )));
+        } elseif (TeamOversight_Offers::to_cents($target) > 0) {
             $detail .= ' You pay a deposit of ' . TeamOversight_Offers::money($target) . ' to lock in your place, and it comes off your fee. The rest is paid as your payment schedule says once fees are released.';
         } else {
             $detail .= ' No deposit is needed to lock in your place. The fee is paid as your payment schedule says once fees are released.';
