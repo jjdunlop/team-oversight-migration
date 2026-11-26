@@ -21,11 +21,17 @@ if (!defined('ABSPATH')) {
  *    the token, the count, the order and gaps of the touches, the touches
  *    against the server's clock, the run's length and the score's size; a
  *    failed check saves nothing and says why in plain words.
- *  - Only a score that beats the player's best this year is stored, so the
- *    table holds each player's improvements. A year is the calendar year in
- *    the site's timezone at the moment the game ended (1.98.3, club request
- *    26 Nov 2026: the boards were this month and all time in 1.98.0 to
- *    1.98.2). Each row still records the site month it was got in.
+ *  - Only a score that beats the player's best this MONTH is stored, so the
+ *    table holds each player's improvements month by month. A month is the
+ *    calendar month in the site's timezone at the moment the game ended.
+ *  - The boards are this YEAR and all time (1.98.3, club request 26 Nov
+ *    2026; this month and all time in 1.98.0 to 1.98.2). A year is the
+ *    calendar year in the site's time, and its board is each player's best
+ *    over that year's months. Saving stays monthly on purpose (1.98.3
+ *    review): when an administrator removes a doubtful score, the player's
+ *    best of every other month is still there to show, so Remove never
+ *    costs them more than that month's lower games. The game says Saved.
+ *    only for a new best this year.
  *  - A board is each player's best (this year, or all time): higher score
  *    first, then whoever got it first (achieved_gmt, then id). Removed rows
  *    and hidden players are left out; a hidden player still gets their own
@@ -140,7 +146,7 @@ class TeamOversight_Keep_It_Up {
      * the run took, when it was got (UTC, so a tie is decided right across a
      * daylight-saving change) and the removal marks. No unique key on
      * user_id: an account merge re-points ids, so the kept account can hold
-     * two bests for a year, and every reader takes the best per account.
+     * two rows for a month, and every reader takes the best per account.
      */
     public static function tables_sql() {
         global $wpdb;
@@ -473,7 +479,7 @@ class TeamOversight_Keep_It_Up {
             $r->user_id = intval($r->user_id);
             $r->score = intval($r->score);
             $r->duration_ms = intval($r->duration_ms);
-            // An account with its top score in more than one row (all time, rows from 1.98.0's monthly saving, or two rows after a merge): the first is its best.
+            // An account with its top score in more than one row (a year or all time: one row a month, or two rows after a merge): the first is its best.
             if (isset($seen[$r->user_id])) {
                 continue;
             }
@@ -526,6 +532,20 @@ class TeamOversight_Keep_It_Up {
     public static function best_score($user_id, $year = null) {
         $r = self::best_row($user_id, $year);
         return $r ? $r->score : 0;
+    }
+
+    /**
+     * An account's best score in one site month ('Y-m'), removed rows left
+     * out, 0 with none: the saving rule's bar (process_finish()). One
+     * indexed read (user_month); not cached, since it is read once a game.
+     */
+    public static function best_month($user_id, $month) {
+        global $wpdb;
+        $user_id = intval($user_id);
+        if ($user_id <= 0 || !is_string($month) || preg_match('/^\d{4}-\d{2}$/D', $month) !== 1 || !self::tables_exist()) {
+            return 0;
+        }
+        return intval($wpdb->get_var($wpdb->prepare('SELECT MAX(score) FROM ' . self::table() . ' WHERE user_id = %d AND month = %s AND removed = 0', $user_id, $month)));
     }
 
     /**
@@ -728,8 +748,11 @@ class TeamOversight_Keep_It_Up {
      * server's elapsed time plus NETWORK_SLACK_MS; the run is at most
      * MAX_RUN_MS; the score at most MAX_SCORE. A failed check stores nothing
      * and answers 200 with saved false and a plain reason (fails quietly).
-     * A score that beats the player's best this year is stored. The answer
-     * carries the player's standing either way.
+     * A score that beats the player's best this month is stored (kept for
+     * the record, so a removal falls back to the other months' bests); only
+     * one that beats their best this year is Saved. for the player (code
+     * saved, saved true). The answer carries the player's standing either
+     * way.
      */
     public static function process_finish($user_id, $nonce, $params, $now = null) {
         global $wpdb;
@@ -796,14 +819,17 @@ class TeamOversight_Keep_It_Up {
             return $quiet('elapsed', 'The game\'s timing doesn\'t match the site\'s clock.');
         }
 
+        // The same clock reading for both, so the row's month always falls in the year it is judged against.
+        $month = self::month_key($now);
         $year = self::year_key($now);
+        $best_month = self::best_month($user_id, $month);
         $best_year = self::best_score($user_id, $year);
         $best_all = self::best_score($user_id, null);
         $stored = false;
-        if ($score > $best_year) {
+        if ($score > $best_month) {
             $stored = (bool) $wpdb->insert(self::table(), array(
                 'user_id' => $user_id,
-                'month' => self::month_key($now),
+                'month' => $month,
                 'score' => $score,
                 'duration_ms' => max(0, min(4294967295, $elapsed)),
                 'achieved_gmt' => gmdate('Y-m-d H:i:s', (int) floor($now)),
@@ -811,16 +837,18 @@ class TeamOversight_Keep_It_Up {
             ), array('%d', '%s', '%d', '%d', '%s', '%d'));
             self::flush_cache();
         }
-        if (!$stored && $score > $best_year) {
+        if (!$stored && $score > $best_month) {
             return $quiet('store', 'The site couldn\'t save it just now.');
         }
+        // For the player, Saved. means it counts on the boards: a new best this year (a month's record alone is kept quietly).
+        $saved = $stored && $score > $best_year;
         return self::out(200, array_merge(array(
             'ok' => true,
-            'saved' => $stored,
-            'new_best' => $stored && $score > $best_all,
-            'code' => $stored ? 'saved' : 'not_better',
-            'reason' => $stored ? '' : 'Your best this year is ' . number_format($best_year) . '.',
-            'line' => $stored ? 'Saved.' : 'Not saved. Your best this year is ' . number_format($best_year) . '.',
+            'saved' => $saved,
+            'new_best' => $saved && $score > $best_all,
+            'code' => $saved ? 'saved' : 'not_better',
+            'reason' => $saved ? '' : 'Your best this year is ' . number_format($best_year) . '.',
+            'line' => $saved ? 'Saved.' : 'Not a new best. Your best this year is ' . number_format($best_year) . '.',
         ), self::standing($user_id, $now)));
     }
 
