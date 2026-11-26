@@ -147,8 +147,8 @@ class TeamOversight_Keep_It_Up_Public {
             $html .= '<p class="murvc-kiu-small murvc-kiu-keys">On a keyboard, Space or Enter hits the ball while it\'s falling low.</p>';
         }
         $html .= $noscript . '</div></div>';
-        $html .= '<div class="murvc-kiu-board" role="region" aria-label="' . esc_attr($compact ? 'Top 3 this month' : 'Leaderboard') . '">'
-            . '<h2 class="murvc-kiu-board-title">' . esc_html($compact ? 'Top 3 this month' : 'Leaderboard') . '</h2>'
+        $html .= '<div class="murvc-kiu-board" role="region" aria-label="' . esc_attr($compact ? 'Top 3 this year' : 'Leaderboard') . '">'
+            . '<h2 class="murvc-kiu-board-title">' . esc_html($compact ? 'Top 3 this year' : 'Leaderboard') . '</h2>'
             . '<div class="murvc-kiu-board-body"><p class="murvc-kiu-status">Loading the leaderboard...</p></div>';
         if ($compact && $config['page'] !== '') {
             $html .= '<p class="murvc-kiu-more"><a href="' . esc_url($config['page']) . '">Full leaderboard</a></p>';
@@ -229,7 +229,7 @@ class TeamOversight_Keep_It_Up_Public {
         .murvc-kiu-show-note{font-size:14px;color:var(--kiu-muted)}
         .murvc-kiu-board{margin:16px 0 0}
         .murvc-kiu h2.murvc-kiu-board-title{margin:0 0 8px;font-size:1.25em}
-        .murvc-kiu-month{margin:0 0 8px;font-size:14px;color:var(--kiu-muted)}
+        .murvc-kiu-period{margin:0 0 8px;font-size:14px;color:var(--kiu-muted)}
         .murvc-kiu-tabs{display:flex;gap:8px;margin:0 0 10px}
         .murvc-kiu button.murvc-kiu-tab{font:inherit;font-size:14px;line-height:1.2;text-transform:none;letter-spacing:normal;margin:0;padding:6px 14px;border-radius:20px;border:2px solid var(--kiu-blue);background:#fff;color:var(--kiu-blue);cursor:pointer;box-shadow:none}
         .murvc-kiu button.murvc-kiu-tab[aria-selected=true]{background:var(--kiu-blue);color:#fff}

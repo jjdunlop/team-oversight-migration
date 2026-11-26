@@ -21,10 +21,12 @@ if (!defined('ABSPATH')) {
  *    the token, the count, the order and gaps of the touches, the touches
  *    against the server's clock, the run's length and the score's size; a
  *    failed check saves nothing and says why in plain words.
- *  - Only a score that beats the player's best this month is stored, so the
- *    table holds each player's improvements. A month is the calendar month
- *    in the site's timezone at the moment the game ended.
- *  - A board is each player's best (this month, or all time): higher score
+ *  - Only a score that beats the player's best this year is stored, so the
+ *    table holds each player's improvements. A year is the calendar year in
+ *    the site's timezone at the moment the game ended (1.98.3, club request
+ *    26 Nov 2026: the boards were this month and all time in 1.98.0 to
+ *    1.98.2). Each row still records the site month it was got in.
+ *  - A board is each player's best (this year, or all time): higher score
  *    first, then whoever got it first (achieved_gmt, then id). Removed rows
  *    and hidden players are left out; a hidden player still gets their own
  *    best and the place they would have.
@@ -72,7 +74,7 @@ class TeamOversight_Keep_It_Up {
     /** The name shown when an account has nothing usable. */
     const PLAYER = 'Player';
     /**
-     * The public lists (hidden players left out) of this month and all time
+     * The public lists (hidden players left out) of this year and all time
      * are kept between requests this long (a transient), because anyone can
      * read the board and the HTTP answer is never cached. Every write drops
      * them (flush_cache()), so a board is never older than the last write;
@@ -83,7 +85,7 @@ class TeamOversight_Keep_It_Up {
 
     private static $hooks_registered = false;
     private static $tables_exist = null;
-    /** Request cache of ranked boards, key month|hidden. */
+    /** Request cache of ranked boards, key year|hidden. */
     private static $ranked = array();
     /** Request cache of hidden_ids(). */
     private static $hidden_ids = null;
@@ -107,18 +109,18 @@ class TeamOversight_Keep_It_Up {
 
     /**
      * Forget the boards read so far: this request's and the shared public
-     * lists of this month and all time (every writer calls it, and the tests).
+     * lists of this year and all time (every writer calls it, and the tests).
      */
     public static function flush_cache() {
         self::$ranked = array();
         self::$hidden_ids = null;
         delete_transient(self::shared_key(null));
-        delete_transient(self::shared_key(self::month_key()));
+        delete_transient(self::shared_key(self::year_key()));
     }
 
-    /** The transient that holds a shared public list ($month null: all time). */
-    public static function shared_key($month) {
-        return self::SHARED_KEY . ($month === null ? 'all' : (string) $month);
+    /** The transient that holds a shared public list ($year null: all time). */
+    public static function shared_key($year) {
+        return self::SHARED_KEY . ($year === null ? 'all' : (string) $year);
     }
 
     // ------------------------------------------------------------------
@@ -138,7 +140,7 @@ class TeamOversight_Keep_It_Up {
      * the run took, when it was got (UTC, so a tie is decided right across a
      * daylight-saving change) and the removal marks. No unique key on
      * user_id: an account merge re-points ids, so the kept account can hold
-     * two rows for a month, and every reader takes the best per account.
+     * two bests for a year, and every reader takes the best per account.
      */
     public static function tables_sql() {
         global $wpdb;
@@ -359,10 +361,25 @@ class TeamOversight_Keep_It_Up {
     }
 
     // ------------------------------------------------------------------
-    // Months and the clock
+    // Years, months and the clock
     // ------------------------------------------------------------------
 
-    /** The site month ('Y-m') at a unix time (seconds, a float is fine). */
+    /**
+     * The site year ('Y', e.g. '2026') at a unix time (seconds, a float is
+     * fine): the boards' period since 1.98.3. Worked out from the same clock
+     * reading as month_key(), so a row's month always falls in its year.
+     */
+    public static function year_key($now = null) {
+        $now = $now === null ? microtime(true) : (float) $now;
+        return wp_date('Y', (int) floor($now));
+    }
+
+    /** $year is a board's period: four digits ('2026'). */
+    private static function is_year($year) {
+        return is_string($year) && preg_match('/^\d{4}$/D', $year) === 1;
+    }
+
+    /** The site month ('Y-m') at a unix time (seconds, a float is fine): the month a row was got in. */
     public static function month_key($now = null) {
         $now = $now === null ? microtime(true) : (float) $now;
         return wp_date('Y-m', (int) floor($now));
@@ -391,10 +408,12 @@ class TeamOversight_Keep_It_Up {
 
     /**
      * Each account's best row, best first: higher score, then the earlier
-     * achieved_gmt, then the lower id. $month a 'Y-m' or null for all time.
-     * Removed rows never count; hidden players only with $include_hidden;
-     * rows of an account that no longer exists never. Objects: id, user_id,
-     * month, score, achieved_gmt, duration_ms.
+     * achieved_gmt, then the lower id. $year a site year ('2026', from
+     * year_key(): the rows whose month falls in it) or null for all time;
+     * anything else is an empty board. Removed rows never count; hidden
+     * players only with $include_hidden; rows of an account that no longer
+     * exists never. Objects: id, user_id, month, score, achieved_gmt,
+     * duration_ms.
      *
      * The reads grow with the rows, never with their square (1.98.0
      * review): a GROUP BY finds each account's top score, the join keeps
@@ -402,24 +421,24 @@ class TeamOversight_Keep_It_Up {
      * is its best (a correlated "no better row" check per row cost an
      * account's rows squared, which a scripted account could inflate). The
      * public list is that list less the hidden accounts (one query for them,
-     * hidden_ids()). The public lists of this month and all time are shared
+     * hidden_ids()). The public lists of this year and all time are shared
      * between requests for SHARED_SECONDS (see flush_cache()); the
      * improvement check in process_finish() and the admin boards include
      * hidden players, so they never read the shared copy.
      */
-    public static function ranked($month = null, $include_hidden = false) {
+    public static function ranked($year = null, $include_hidden = false) {
         global $wpdb;
-        if (!self::tables_exist()) {
+        if (!self::tables_exist() || ($year !== null && !self::is_year($year))) {
             return array();
         }
-        $key = ($month === null ? '*' : (string) $month) . '|' . ($include_hidden ? 1 : 0);
+        $key = ($year === null ? '*' : $year) . '|' . ($include_hidden ? 1 : 0);
         if (isset(self::$ranked[$key])) {
             return self::$ranked[$key];
         }
         if (!$include_hidden) {
-            $shared = $month === null || (string) $month === self::month_key();
+            $shared = $year === null || $year === self::year_key();
             if ($shared) {
-                $hit = get_transient(self::shared_key($month));
+                $hit = get_transient(self::shared_key($year));
                 if (is_array($hit) && isset($hit['rows']) && is_array($hit['rows'])) {
                     self::$ranked[$key] = $hit['rows'];
                     return $hit['rows'];
@@ -427,20 +446,21 @@ class TeamOversight_Keep_It_Up {
             }
             $hidden = self::hidden_ids();
             $rows = array();
-            foreach (self::ranked($month, true) as $r) {
+            foreach (self::ranked($year, true) as $r) {
                 if (!isset($hidden[$r->user_id])) {
                     $rows[] = $r;
                 }
             }
             self::$ranked[$key] = $rows;
             if ($shared) {
-                set_transient(self::shared_key($month), array('rows' => $rows), self::SHARED_SECONDS);
+                set_transient(self::shared_key($year), array('rows' => $rows), self::SHARED_SECONDS);
             }
             return $rows;
         }
         $t = self::table();
-        $sm = $month === null ? '' : $wpdb->prepare(' AND s.month = %s', $month);
-        $bm = $month === null ? '' : $wpdb->prepare(' AND month = %s', $month);
+        // A year's rows are its twelve months ('2026-01' to '2026-12'): a range on the month column, so the month_score key serves it.
+        $sm = $year === null ? '' : $wpdb->prepare(' AND s.month BETWEEN %s AND %s', $year . '-01', $year . '-12');
+        $bm = $year === null ? '' : $wpdb->prepare(' AND month BETWEEN %s AND %s', $year . '-01', $year . '-12');
         $found = $wpdb->get_results("SELECT s.id, s.user_id, s.month, s.score, s.achieved_gmt, s.duration_ms FROM $t s
             JOIN (SELECT user_id, MAX(score) AS top FROM $t WHERE removed = 0$bm GROUP BY user_id) b ON b.user_id = s.user_id AND b.top = s.score
             JOIN {$wpdb->users} u ON u.ID = s.user_id
@@ -453,7 +473,7 @@ class TeamOversight_Keep_It_Up {
             $r->user_id = intval($r->user_id);
             $r->score = intval($r->score);
             $r->duration_ms = intval($r->duration_ms);
-            // An account with its top score in more than one row (all time, or two rows after a merge): the first is its best.
+            // An account with its top score in more than one row (all time, rows from 1.98.0's monthly saving, or two rows after a merge): the first is its best.
             if (isset($seen[$r->user_id])) {
                 continue;
             }
@@ -488,13 +508,13 @@ class TeamOversight_Keep_It_Up {
         return $a->id < $b->id;
     }
 
-    /** An account's best row for a month (or all time), hidden or not; null with none. */
-    public static function best_row($user_id, $month = null) {
+    /** An account's best row for a year (or all time), hidden or not; null with none. */
+    public static function best_row($user_id, $year = null) {
         $user_id = intval($user_id);
         if ($user_id <= 0) {
             return null;
         }
-        foreach (self::ranked($month, true) as $r) {
+        foreach (self::ranked($year, true) as $r) {
             if ($r->user_id === $user_id) {
                 return $r;
             }
@@ -502,9 +522,9 @@ class TeamOversight_Keep_It_Up {
         return null;
     }
 
-    /** An account's best score for a month (or all time), 0 with none. */
-    public static function best_score($user_id, $month = null) {
-        $r = self::best_row($user_id, $month);
+    /** An account's best score for a year (or all time), 0 with none. */
+    public static function best_score($user_id, $year = null) {
+        $r = self::best_row($user_id, $year);
         return $r ? $r->score : 0;
     }
 
@@ -513,13 +533,13 @@ class TeamOversight_Keep_It_Up {
      * its best (so a hidden player gets the place they would have). 0 with
      * no score.
      */
-    public static function place($user_id, $month = null) {
-        $mine = self::best_row($user_id, $month);
+    public static function place($user_id, $year = null) {
+        $mine = self::best_row($user_id, $year);
         if (!$mine) {
             return 0;
         }
         $place = 1;
-        foreach (self::ranked($month, false) as $r) {
+        foreach (self::ranked($year, false) as $r) {
             if ($r->user_id !== $mine->user_id && self::ahead($r, $mine)) {
                 $place++;
             }
@@ -527,15 +547,15 @@ class TeamOversight_Keep_It_Up {
         return $place;
     }
 
-    /** A player's standing at $now: shown, bests and places this month and all time. */
+    /** A player's standing at $now: shown, bests and places this year and all time. */
     public static function standing($user_id, $now = null) {
-        $month = self::month_key($now);
+        $year = self::year_key($now);
         return array(
             'shown' => !self::is_hidden($user_id),
-            'month' => $month,
-            'best_month' => self::best_score($user_id, $month),
+            'year' => $year,
+            'best_year' => self::best_score($user_id, $year),
             'best_all' => self::best_score($user_id, null),
-            'place_month' => self::place($user_id, $month),
+            'place_year' => self::place($user_id, $year),
             'place_all' => self::place($user_id, null),
         );
     }
@@ -545,9 +565,9 @@ class TeamOversight_Keep_It_Up {
      * score and me (true on the viewer's own row). No account id, username or
      * email ever goes in it.
      */
-    public static function board($month, $limit, $viewer_id = 0) {
+    public static function board($year, $limit, $viewer_id = 0) {
         $viewer_id = intval($viewer_id);
-        $top = array_slice(self::ranked($month, false), 0, max(1, intval($limit)));
+        $top = array_slice(self::ranked($year, false), 0, max(1, intval($limit)));
         $ids = array();
         foreach ($top as $r) {
             $ids[] = $r->user_id;
@@ -570,10 +590,11 @@ class TeamOversight_Keep_It_Up {
     /**
      * The admin's board: the top $limit players, hidden ones included and
      * marked, each with the id of its best row (for Remove). Rows of
-     * array(id, user_id, place, name, score, achieved_gmt, month, hidden).
+     * array(id, user_id, place, name, score, achieved_gmt, month (the month
+     * the score was got in), hidden). $year a site year or null for all time.
      */
-    public static function admin_board($month, $limit = self::ADMIN_BOARD_SIZE) {
-        $top = array_slice(self::ranked($month, true), 0, max(1, intval($limit)));
+    public static function admin_board($year, $limit = self::ADMIN_BOARD_SIZE) {
+        $top = array_slice(self::ranked($year, true), 0, max(1, intval($limit)));
         $ids = array();
         foreach ($top as $r) {
             $ids[] = $r->user_id;
@@ -627,8 +648,8 @@ class TeamOversight_Keep_It_Up {
     }
 
     /**
-     * The leaderboard for anyone: this month's and all time's top $limit
-     * (10, or 3 for the compact board), the month's name, and for a
+     * The leaderboard for anyone: this year's and all time's top $limit
+     * (10, or 3 for the compact board), the year ('2026'), and for a
      * logged-in viewer their own standing (bests and places, also when
      * hidden). 404 while the game is off, except for an administrator
      * (is_open_for()).
@@ -638,22 +659,21 @@ class TeamOversight_Keep_It_Up {
             return self::refuse(404, 'off', 'The game is switched off.');
         }
         $limit = max(1, min(self::BOARD_SIZE, intval($limit)));
-        // One reading of the clock, so the board's month and the viewer's standing agree across midnight on the 1st.
+        // One reading of the clock, so the board's year and the viewer's standing agree across midnight on New Year's Eve.
         $now = $now === null ? microtime(true) : (float) $now;
-        $month = self::month_key($now);
+        $year = self::year_key($now);
         $viewer_id = intval($viewer_id);
         $viewer = null;
         if ($viewer_id > 0 && get_userdata($viewer_id)) {
             $viewer = self::standing($viewer_id, $now);
-            unset($viewer['month']);
+            unset($viewer['year']);
         }
         return self::out(200, array(
             'ok' => true,
-            'month' => $month,
-            'month_label' => self::month_label($month),
+            'year' => $year,
             'limit' => $limit,
             'boards' => array(
-                'month' => self::board($month, $limit, $viewer_id),
+                'year' => self::board($year, $limit, $viewer_id),
                 'all' => self::board(null, $limit, $viewer_id),
             ),
             'viewer' => $viewer,
@@ -708,7 +728,7 @@ class TeamOversight_Keep_It_Up {
      * server's elapsed time plus NETWORK_SLACK_MS; the run is at most
      * MAX_RUN_MS; the score at most MAX_SCORE. A failed check stores nothing
      * and answers 200 with saved false and a plain reason (fails quietly).
-     * A score that beats the player's best this month is stored. The answer
+     * A score that beats the player's best this year is stored. The answer
      * carries the player's standing either way.
      */
     public static function process_finish($user_id, $nonce, $params, $now = null) {
@@ -776,14 +796,14 @@ class TeamOversight_Keep_It_Up {
             return $quiet('elapsed', 'The game\'s timing doesn\'t match the site\'s clock.');
         }
 
-        $month = self::month_key($now);
-        $best_month = self::best_score($user_id, $month);
+        $year = self::year_key($now);
+        $best_year = self::best_score($user_id, $year);
         $best_all = self::best_score($user_id, null);
         $stored = false;
-        if ($score > $best_month) {
+        if ($score > $best_year) {
             $stored = (bool) $wpdb->insert(self::table(), array(
                 'user_id' => $user_id,
-                'month' => $month,
+                'month' => self::month_key($now),
                 'score' => $score,
                 'duration_ms' => max(0, min(4294967295, $elapsed)),
                 'achieved_gmt' => gmdate('Y-m-d H:i:s', (int) floor($now)),
@@ -791,7 +811,7 @@ class TeamOversight_Keep_It_Up {
             ), array('%d', '%s', '%d', '%d', '%s', '%d'));
             self::flush_cache();
         }
-        if (!$stored && $score > $best_month) {
+        if (!$stored && $score > $best_year) {
             return $quiet('store', 'The site couldn\'t save it just now.');
         }
         return self::out(200, array_merge(array(
@@ -799,8 +819,8 @@ class TeamOversight_Keep_It_Up {
             'saved' => $stored,
             'new_best' => $stored && $score > $best_all,
             'code' => $stored ? 'saved' : 'not_better',
-            'reason' => $stored ? '' : 'Your best this month is ' . number_format($best_month) . '.',
-            'line' => $stored ? 'Saved.' : 'Not saved. Your best this month is ' . number_format($best_month) . '.',
+            'reason' => $stored ? '' : 'Your best this year is ' . number_format($best_year) . '.',
+            'line' => $stored ? 'Saved.' : 'Not saved. Your best this year is ' . number_format($best_year) . '.',
         ), self::standing($user_id, $now)));
     }
 

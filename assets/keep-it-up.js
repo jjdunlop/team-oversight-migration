@@ -152,7 +152,7 @@
       return;
     }
     cfg.uid = 'murvc-kiu-' + index;
-    cfg.tab = 'month';
+    cfg.tab = 'year';
     cfg.viewer = null;
     root.kiu = cfg;
     roots.push(root);
@@ -177,7 +177,7 @@
     var text = '';
     if (cfg.member && cfg.viewer) {
       if (cfg.viewer.best_all > 0) {
-        text = 'Your best: ' + num(cfg.viewer.best_all) + '. This month: ' + num(cfg.viewer.best_month) + '.';
+        text = 'Your best: ' + num(cfg.viewer.best_all) + '. This year: ' + num(cfg.viewer.best_year) + '.';
       }
     } else if (!cfg.member) {
       var b = readBest();
@@ -250,7 +250,7 @@
       if (rows[i].me) { return ''; }
     }
     if (place > 0) { return 'You\'re ' + ord(place) + ', with a best of ' + num(best) + '.'; }
-    return which === 'month' ? 'No score from you this month yet.' : 'No score from you yet.';
+    return which === 'year' ? 'No score from you this year yet.' : 'No score from you yet.';
   }
 
   function renderBoard(root, data) {
@@ -258,10 +258,10 @@
     if (!body) { return; }
     clear(body);
     if (cfg.compact) {
-      body.appendChild(listOf(data.boards.month, 'No scores yet this month.'));
+      body.appendChild(listOf(data.boards.year, 'No scores yet this year.'));
       return;
     }
-    var keys = [['month', 'This month'], ['all', 'All time']];
+    var keys = [['year', 'This year'], ['all', 'All time']];
     var tabs = el('div', 'murvc-kiu-tabs');
     tabs.setAttribute('role', 'tablist');
     tabs.setAttribute('aria-label', 'Leaderboards');
@@ -285,10 +285,10 @@
       p.setAttribute('aria-labelledby', b.id);
       p.hidden = !on;
       var rows = data.boards[k[0]] || [];
-      if (k[0] === 'month' && data.month_label) {
-        p.appendChild(el('p', 'murvc-kiu-month', data.month_label));
+      if (k[0] === 'year' && data.year) {
+        p.appendChild(el('p', 'murvc-kiu-period', String(data.year)));
       }
-      p.appendChild(listOf(rows, k[0] === 'month' ? 'No scores yet this month.' : 'No scores yet.'));
+      p.appendChild(listOf(rows, k[0] === 'year' ? 'No scores yet this year.' : 'No scores yet.'));
       var line = meLine(data.viewer, k[0], rows);
       if (line) { p.appendChild(el('p', 'murvc-kiu-me', line)); }
       panels.push(p);
@@ -1024,7 +1024,7 @@
         var st = res.standing;
         if (st && cfg.viewer) {
           cfg.viewer.best_all = st.best_all;
-          cfg.viewer.best_month = st.best_month;
+          cfg.viewer.best_year = st.best_year;
         }
         if (!G.open) {
           // Closed while it was saving: the boards drawn at Close may be from before it, so draw them again.
@@ -1038,8 +1038,8 @@
           memberBest(o.best, st.best_all || 0);
           o.fresh.hidden = !st.new_best;
           if (st.new_best) { heard += ' New best!'; }
-          if (st.place_month > 0) {
-            o.place.textContent = 'This month: ' + ord(st.place_month) + '. All time: ' + ord(st.place_all) + '.';
+          if (st.place_year > 0) {
+            o.place.textContent = 'This year: ' + ord(st.place_year) + '. All time: ' + ord(st.place_all) + '.';
             heard += ' ' + o.place.textContent;
           }
           o.hidden.hidden = st.shown !== false;

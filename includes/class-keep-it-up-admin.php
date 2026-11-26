@@ -7,7 +7,8 @@ if (!defined('ABSPATH')) {
 /**
  * Club Membership -> Keep it up (1.98.0, club request 25 Nov 2026): the
  * game on or off, the page that holds it (for the footer link), and the two
- * boards (top 50 this month and all time, hidden players marked) with
+ * boards (top 50 this year and all time, hidden players marked; this
+ * month until 1.98.3) with
  * Remove beside each score. Administrators only (manage_options); every
  * rule is TeamOversight_Keep_It_Up's.
  *
@@ -185,9 +186,9 @@ class TeamOversight_Keep_It_Up_Admin {
         }
         echo '<p>A volleyball game members can play on the website, with a leaderboard for logged-in members. Names show as first name and last initial; members can untick <em>Show me on the leaderboard</em> to stay off it.</p>';
         self::render_settings();
-        $month = TeamOversight_Keep_It_Up::month_key();
+        $year = TeamOversight_Keep_It_Up::year_key();
         echo '<div id="kiu-boards">';
-        self::render_board('This month (' . TeamOversight_Keep_It_Up::month_label($month) . ')', TeamOversight_Keep_It_Up::admin_board($month), 'No scores yet this month.');
+        self::render_board('This year (' . $year . ')', TeamOversight_Keep_It_Up::admin_board($year), 'No scores yet this year.');
         self::render_board('All time', TeamOversight_Keep_It_Up::admin_board(null), 'No scores yet.');
         echo '</div>';
         echo '<p class="description">Remove takes a score off the boards and keeps it on record; the player\'s next best shows in its place. Each removal and each change above is logged on Club Membership &rarr; Logs as <em>Keep it up</em>.</p>';
@@ -234,7 +235,7 @@ class TeamOversight_Keep_It_Up_Admin {
         }
         echo '</td></tr></tbody></table>';
         echo '<p class="submit"><button type="submit" class="button button-primary">Save</button></p></form>';
-        echo '<p>For the 404 page, add <code>[club_keep_it_up compact="1"]</code>: a smaller card with Play, this month\'s top 3 and a link to the game page.</p>';
+        echo '<p>For the 404 page, add <code>[club_keep_it_up compact="1"]</code>: a smaller card with Play, this year\'s top 3 and a link to the game page.</p>';
         echo '<p class="description">Pages the site\'s page cache already holds show the footer link (or stop showing it) once that cache is cleared.</p>';
         echo '</div>';
     }
