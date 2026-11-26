@@ -645,6 +645,8 @@ class TeamOversight_Database {
                     dbDelta($sql);
                 }
             }
+            // 1.98.4: the run_stats column on a table made before it (one guarded ALTER).
+            TeamOversight_Keep_It_Up::migrate_columns();
         }
 
         // 1.84.0: one tick per order line for dated Club Programs sessions

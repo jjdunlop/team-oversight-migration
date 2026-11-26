@@ -330,6 +330,8 @@ class TeamOversight_Account_Merge {
                 'murvc_news_optout', 'murvc_news_optout_via',
                 // 1.98.0: staying off the Keep it up leaderboard on either account carries to the kept account.
                 'murvc_keep_it_up_hidden',
+                // 1.98.4: so does the club keeping a player off it.
+                'murvc_keep_it_up_kept_off',
             ));
         }
         return isset($keys[$key]) || preg_match('/^intended_?membership/i', $key);

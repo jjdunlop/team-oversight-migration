@@ -26,6 +26,8 @@ class TeamOversight_Keep_It_Up_Public {
     /** The footer link's name for screen readers and its tooltip (the link itself reads "Play"). */
     const FOOTER_NAME = 'Play Keep it up';
     const HOW = 'Tap the ball to keep it up. Hit it in the middle to send it straight up. Don\'t let it touch the floor.';
+    /** 1.98.4: in place of the Show me box for a player the club keeps off the leaderboard (the game script says the same). */
+    const KEPT_OFF_WORDS = 'The club has taken you off the leaderboard.';
     /** The note on an administrator's card while the game is off (they still see and play it). */
     const PREVIEW_NOTE = 'Keep it up is switched off, so only administrators can see this. A score you save now will be on the leaderboard when it\'s switched on.';
 
@@ -138,7 +140,10 @@ class TeamOversight_Keep_It_Up_Public {
         }
         $html .= '<p class="murvc-kiu-how">' . esc_html(self::HOW) . '</p>' . $play;
         if (!$compact) {
-            if ($user_id > 0) {
+            if ($user_id > 0 && TeamOversight_Keep_It_Up::is_kept_off($user_id)) {
+                // 1.98.4: the club's decision, so no box to change it.
+                $html .= '<p class="murvc-kiu-small murvc-kiu-kept-off">' . esc_html(self::KEPT_OFF_WORDS) . '</p>';
+            } elseif ($user_id > 0) {
                 $html .= '<p class="murvc-kiu-show"><label><input type="checkbox" class="murvc-kiu-show-box"' . (TeamOversight_Keep_It_Up::is_hidden($user_id) ? '' : ' checked') . ' disabled> Show me on the leaderboard</label> <span class="murvc-kiu-show-note" role="status"></span></p>';
             } else {
                 $html .= '<p class="murvc-kiu-small"><a href="' . esc_url($config['login']) . '">Log in</a> to get on the leaderboard.</p>';
@@ -188,7 +193,7 @@ class TeamOversight_Keep_It_Up_Public {
             'settings' => TeamOversight_Keep_It_Up::route_url('settings'),
             'nonce' => $user_id > 0 ? wp_create_nonce('wp_rest') : '',
             'member' => $user_id > 0,
-            'shown' => $user_id > 0 ? !TeamOversight_Keep_It_Up::is_hidden($user_id) : true,
+            'shown' => $user_id > 0 ? (!TeamOversight_Keep_It_Up::is_hidden($user_id) && !TeamOversight_Keep_It_Up::is_kept_off($user_id)) : true,
             'login' => $login,
             'page' => $compact ? $page : '',
             'ball' => self::ball_url(),

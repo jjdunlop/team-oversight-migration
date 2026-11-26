@@ -23,7 +23,10 @@ class TeamOversight_Keep_It_Up_Admin {
     const ACTION = 'murvc_keep_it_up';
     const FLASH_PREFIX = 'murvc_keep_it_up_flash_';
     const FLASH_SECONDS = 300;
-    const ACTIONS = array('settings', 'remove');
+    const ACTIONS = array('settings', 'remove', 'keep_off', 'put_back');
+    /** 1.98.4: under the boards, what the Check column means. */
+    const CHECK_WORDS = 'Check (from 1.98.4): the game ignores scripted taps and key presses, and each saved score keeps a few facts about how it was played. A score is marked when its timing was very steady or every tap landed dead centre, which a script does and a person doesn\'t. A mark is a reason to look, not proof: Remove or Keep off are yours to decide. Scores saved before 1.98.4 have no facts.';
+
     /** By the on/off switch: administrators still see the game while it's off. */
     const PREVIEW_WORDS = 'Administrators still see the game on its page while it\'s off, so it can be checked first (a draft page works through Preview).';
 
@@ -63,8 +66,9 @@ class TeamOversight_Keep_It_Up_Admin {
         return add_query_arg($args, admin_url('admin.php?page=' . self::PAGE_SLUG));
     }
 
+    /** One nonce per button: Remove by score id, Keep off and Put back (1.98.4) by account id. */
     public static function nonce_action($do, $id = 0) {
-        return 'murvc_keep_it_up_' . $do . ($do === 'remove' ? '_' . intval($id) : '');
+        return 'murvc_keep_it_up_' . $do . (in_array($do, array('remove', 'keep_off', 'put_back'), true) ? '_' . intval($id) : '');
     }
 
     // ------------------------------------------------------------------
@@ -130,7 +134,8 @@ class TeamOversight_Keep_It_Up_Admin {
         $p = is_array($post) ? wp_unslash($post) : array();
         $user_id = intval($user_id);
         $do = isset($p['do']) && is_string($p['do']) ? sanitize_key($p['do']) : '';
-        $id = isset($p['score']) && is_scalar($p['score']) && ctype_digit((string) $p['score']) ? intval($p['score']) : 0;
+        $field = in_array($do, array('keep_off', 'put_back'), true) ? 'user' : 'score';
+        $id = isset($p[$field]) && is_scalar($p[$field]) && ctype_digit((string) $p[$field]) ? intval($p[$field]) : 0;
         $out = array('ok' => false, 'type' => 'error', 'message' => '', 'lines' => array(), 'redirect' => self::page_url(), 'refused' => '');
         if ($user_id <= 0 || !user_can($user_id, 'manage_options')) {
             $out['message'] = 'Only administrators can change Keep it up.';
@@ -163,6 +168,11 @@ class TeamOversight_Keep_It_Up_Admin {
             }
             return $done(true, 'success', $r['message'], $r['changed'], '');
         }
+        if ($do === 'keep_off' || $do === 'put_back') {
+            $r = TeamOversight_Keep_It_Up::set_kept_off($id, $do === 'keep_off', $user_id);
+            $out['redirect'] = self::page_url() . '#kiu-boards';
+            return $done($r['ok'], $r['ok'] ? 'success' : 'error', $r['message'], array(), $r['ok'] ? '' : 'engine');
+        }
         $r = TeamOversight_Keep_It_Up::remove_score($id, $user_id);
         $out['redirect'] = self::page_url() . '#kiu-boards';
         return $done($r['ok'], $r['ok'] ? 'success' : 'error', $r['message'], array(), $r['ok'] ? '' : 'engine');
@@ -190,8 +200,10 @@ class TeamOversight_Keep_It_Up_Admin {
         echo '<div id="kiu-boards">';
         self::render_board('This year (' . $year . ')', TeamOversight_Keep_It_Up::admin_board($year), 'No scores yet this year.');
         self::render_board('All time', TeamOversight_Keep_It_Up::admin_board(null), 'No scores yet.');
+        self::render_kept_off();
         echo '</div>';
-        echo '<p class="description">Remove takes a score off the boards and keeps it on record; the player\'s next best shows in its place. Each removal and each change above is logged on Club Membership &rarr; Logs as <em>Keep it up</em>.</p>';
+        echo '<p class="description">Remove takes a score off the boards and keeps it on record; the player\'s next best shows in its place. Keep off takes a player off the leaderboard altogether (their scores are kept and still saved, and they can\'t put themselves back); Put back undoes it. Each removal and each change above is logged on Club Membership &rarr; Logs as <em>Keep it up</em>.</p>';
+        echo '<p class="description">' . esc_html(self::CHECK_WORDS) . '</p>';
         echo '</div>';
     }
 
@@ -204,6 +216,9 @@ class TeamOversight_Keep_It_Up_Admin {
 .murvc-kiu-admin table.widefat { max-width: 900px; margin-bottom: 18px; }
 .murvc-kiu-admin .kiu-hidden { display: inline-block; padding: 1px 8px; border-radius: 10px; background: #f0f0f1; font-size: 12px; }
 .murvc-kiu-admin form.kiu-inline { display: inline; margin: 0; }
+.murvc-kiu-admin .kiu-kept-off { background: #fcf0f1; color: #8a2424; }
+.murvc-kiu-admin .kiu-flag { display: inline-block; padding: 1px 8px; border-radius: 10px; background: #fcf9e8; border: 1px solid #dba617; color: #6b4f00; font-size: 12px; margin: 0 4px 2px 0; }
+.murvc-kiu-admin .kiu-facts { display: block; font-size: 12px; color: #646970; }
 .murvc-kiu-admin code { user-select: all; }
 </style>';
     }
@@ -269,25 +284,88 @@ class TeamOversight_Keep_It_Up_Admin {
             echo '<p>' . esc_html($empty) . '</p>';
             return;
         }
-        echo '<table class="widefat striped"><thead><tr><th>Place</th><th>Name on the board</th><th>Account</th><th>Score</th><th>Got it</th><th>Shown</th><th></th></tr></thead><tbody>';
+        echo '<table class="widefat striped"><thead><tr><th>Place</th><th>Name on the board</th><th>Account</th><th>Score</th><th>Got it</th><th>Shown</th><th>Check</th><th></th></tr></thead><tbody>';
         foreach ($rows as $r) {
             $user = get_userdata($r['user_id']);
             $account = $user ? TeamOversight_Email::decode((string) $user->display_name) : '#' . $r['user_id'];
             $ts = strtotime((string) $r['achieved_gmt'] . ' UTC');
             $confirm = 'Remove this score of ' . number_format($r['score']) . '? It stays on record but leaves the boards, and their next best shows.';
+            $kept_off = !empty($r['kept_off']);
+            $shown = $kept_off ? '<span class="kiu-hidden kiu-kept-off">Kept off</span>' : ($r['hidden'] ? '<span class="kiu-hidden">Hidden</span>' : 'Yes');
             echo '<tr>'
                 . '<td data-sort="' . ($r['place'] > 0 ? intval($r['place']) : 9999) . '">' . ($r['place'] > 0 ? intval($r['place']) : '&mdash;') . '</td>'
                 . '<td>' . esc_html($r['name']) . '</td>'
                 . '<td><a href="' . esc_url(admin_url('admin.php?page=club-membership-lookup&user=' . intval($r['user_id']))) . '">' . esc_html($account) . '</a></td>'
                 . '<td>' . esc_html(number_format($r['score'])) . '</td>'
                 . '<td data-sort="' . esc_attr((string) $r['achieved_gmt']) . '">' . esc_html($ts ? wp_date('j M Y, g:ia', $ts) : '') . '</td>'
-                . '<td>' . ($r['hidden'] ? '<span class="kiu-hidden">Hidden</span>' : 'Yes') . '</td>'
+                . '<td>' . $shown . '</td>'
+                . '<td>' . self::check_cell(isset($r['stats']) ? $r['stats'] : null) . '</td>'
                 . '<td><form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" class="kiu-inline" onsubmit="return confirm(' . esc_attr(wp_json_encode($confirm)) . ');">'
                 . '<input type="hidden" name="action" value="' . esc_attr(self::ACTION) . '">'
                 . '<input type="hidden" name="do" value="remove">'
                 . '<input type="hidden" name="score" value="' . intval($r['id']) . '">'
                 . '<input type="hidden" name="_wpnonce" value="' . esc_attr(wp_create_nonce(self::nonce_action('remove', $r['id']))) . '">'
-                . '<button type="submit" class="button button-small">Remove</button></form></td>'
+                . '<button type="submit" class="button button-small">Remove</button></form> '
+                . self::keep_off_form($r['user_id'], !$kept_off, $r['name'])
+                . '</td>'
+                . '</tr>';
+        }
+        echo '</tbody></table>';
+    }
+
+    /** 1.98.4: a score's Check cell: its flags in words, then its facts small, or a dash for a score saved before 1.98.4. */
+    private static function check_cell($stats) {
+        if (!is_array($stats)) {
+            return '<span class="description">&mdash;</span>';
+        }
+        $html = '';
+        foreach ($stats['f'] as $flag) {
+            $html .= '<span class="kiu-flag">' . esc_html(TeamOversight_Keep_It_Up::FLAG_WORDS[$flag]) . '</span> ';
+        }
+        $words = TeamOversight_Keep_It_Up::stats_words($stats);
+        if ($words !== '') {
+            $html .= '<span class="kiu-facts">' . esc_html($words) . '</span>';
+        }
+        return $html !== '' ? $html : '<span class="description">&mdash;</span>';
+    }
+
+    /** 1.98.4: the Keep off (or Put back) button for one account. */
+    private static function keep_off_form($user_id, $keep_off, $name) {
+        $do = $keep_off ? 'keep_off' : 'put_back';
+        $confirm = $keep_off
+            ? 'Keep ' . $name . ' off the leaderboard? Their scores are kept and still saved, they can\'t put themselves back, and Put back undoes it.'
+            : 'Put ' . $name . ' back on the leaderboard?';
+        return '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" class="kiu-inline" onsubmit="return confirm(' . esc_attr(wp_json_encode($confirm)) . ');">'
+            . '<input type="hidden" name="action" value="' . esc_attr(self::ACTION) . '">'
+            . '<input type="hidden" name="do" value="' . esc_attr($do) . '">'
+            . '<input type="hidden" name="user" value="' . intval($user_id) . '">'
+            . '<input type="hidden" name="_wpnonce" value="' . esc_attr(wp_create_nonce(self::nonce_action($do, $user_id))) . '">'
+            . '<button type="submit" class="button button-small">' . ($keep_off ? 'Keep off' : 'Put back') . '</button></form>';
+    }
+
+    /** 1.98.4: the players the club keeps off the leaderboard, with who did it, when, and Put back. */
+    private static function render_kept_off() {
+        $list = TeamOversight_Keep_It_Up::kept_off_list();
+        echo '<h2>Kept off the leaderboard</h2>';
+        if (!$list) {
+            echo '<p>Nobody is kept off.</p>';
+            return;
+        }
+        echo '<table class="widefat striped"><thead><tr><th>Name on the board</th><th>Account</th><th>Kept off by</th><th>When</th><th></th></tr></thead><tbody>';
+        foreach ($list as $uid => $facts) {
+            $user = get_userdata($uid);
+            if (!$user) {
+                continue;
+            }
+            $by = $facts['by'] > 0 ? get_userdata($facts['by']) : false;
+            $ts = $facts['at'] !== '' ? strtotime($facts['at'] . ' UTC') : false;
+            $name = TeamOversight_Keep_It_Up::board_name($uid);
+            echo '<tr>'
+                . '<td>' . esc_html($name) . '</td>'
+                . '<td><a href="' . esc_url(admin_url('admin.php?page=club-membership-lookup&user=' . intval($uid))) . '">' . esc_html(TeamOversight_Email::decode((string) $user->display_name)) . '</a></td>'
+                . '<td>' . esc_html($by ? TeamOversight_Email::decode((string) $by->display_name) : '') . '</td>'
+                . '<td data-sort="' . esc_attr($facts['at']) . '">' . esc_html($ts ? wp_date('j M Y, g:ia', $ts) : '') . '</td>'
+                . '<td>' . self::keep_off_form($uid, false, $name) . '</td>'
                 . '</tr>';
         }
         echo '</tbody></table>';

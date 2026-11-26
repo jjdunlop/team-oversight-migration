@@ -57,6 +57,34 @@ class TeamOversight_Keep_It_Up {
     const RUN_META = 'murvc_keep_it_up_run';
     /** Starts: "LAST_START_MS|Y-m-d|COUNT" (the site's day). Per account; the merge never copies it. */
     const STARTS_META = 'murvc_keep_it_up_starts';
+    /**
+     * 1.98.4 (club request 27 Nov 2026, after a player used AI to play): the
+     * club keeps this account off the leaderboard, "ADMIN_ID|Y-m-d H:i:s"
+     * (UTC). Unlike HIDDEN_META the player can't undo it. In the merge's
+     * copy_if_empty().
+     */
+    const KEPT_OFF_META = 'murvc_keep_it_up_kept_off';
+
+    /**
+     * 1.98.4: the Check flags on a saved run (run_stats(); shown to
+     * administrators only, never acted on by themselves). A run is judged
+     * from JUDGE_FROM touches; its timing is "very steady" when the median
+     * spread of the gaps between touches, within each speed band of 10
+     * touches, is under STEADY_MS; its taps are "dead centre" when at least
+     * CENTRE_FROM of them were mouse or finger taps and they landed, on
+     * average, within CENTRE_MAX of the ball's radius from its middle. A
+     * person's timing and aim both wander; a script's don't.
+     */
+    const JUDGE_FROM = 30;
+    const STEADY_MS = 12;
+    const CENTRE_FROM = 20;
+    const CENTRE_MAX = 0.03;
+    /** The flags a run can carry, with their words for the admin screen. */
+    const FLAG_WORDS = array(
+        'steady' => 'Very steady timing',
+        'centre' => 'Every tap dead centre',
+        'no_details' => 'Sent without the game\'s touch details',
+    );
 
     const REST_NS = 'murvc/v1';
     const REST_BASE = '/keep-it-up';
@@ -162,12 +190,29 @@ class TeamOversight_Keep_It_Up {
                 removed tinyint(1) NOT NULL DEFAULT 0,
                 removed_by bigint(20) unsigned DEFAULT NULL,
                 removed_at datetime DEFAULT NULL,
+                run_stats varchar(191) DEFAULT NULL,
                 PRIMARY KEY  (id),
                 KEY user_month (user_id, month),
                 KEY month_score (month, removed, score),
                 KEY removed_score (removed, score)
             ) ENGINE=InnoDB $charset_collate;",
         );
+    }
+
+    /**
+     * 1.98.4: the run_stats column on a table made by 1.98.0 to 1.98.3. One
+     * SHOW COLUMNS a load (behind the table's own check), and an ALTER only
+     * when the column is missing. Called by migrate_database().
+     */
+    public static function migrate_columns() {
+        global $wpdb;
+        $t = self::table();
+        if (!$wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($t)))) {
+            return;
+        }
+        if (!$wpdb->get_var("SHOW COLUMNS FROM $t LIKE 'run_stats'")) {
+            $wpdb->query("ALTER TABLE $t ADD COLUMN run_stats varchar(191) DEFAULT NULL AFTER removed_at");
+        }
     }
 
     /** The table exists (the migration runs on init; a request before it can't use the game). */
@@ -351,6 +396,70 @@ class TeamOversight_Keep_It_Up {
         return $user_id > 0 && (string) get_user_meta($user_id, self::HIDDEN_META, true) === '1';
     }
 
+    /** 1.98.4: the club keeps this player off the leaderboard. */
+    public static function is_kept_off($user_id) {
+        $user_id = intval($user_id);
+        return $user_id > 0 && (string) get_user_meta($user_id, self::KEPT_OFF_META, true) !== '';
+    }
+
+    /** 1.98.4: who kept a player off and when (array(by, at UTC)), or null. */
+    public static function kept_off_facts($user_id) {
+        $raw = (string) get_user_meta(intval($user_id), self::KEPT_OFF_META, true);
+        if ($raw === '') {
+            return null;
+        }
+        $p = explode('|', $raw, 2);
+        return array('by' => isset($p[0]) && ctype_digit($p[0]) ? intval($p[0]) : 0, 'at' => isset($p[1]) ? (string) $p[1] : '');
+    }
+
+    /** 1.98.4: every account the club keeps off the leaderboard, user id => facts (for the admin screen). */
+    public static function kept_off_list() {
+        global $wpdb;
+        $out = array();
+        foreach ((array) $wpdb->get_results($wpdb->prepare("SELECT user_id, meta_value FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value <> '' ORDER BY umeta_id", self::KEPT_OFF_META)) as $row) {
+            $p = explode('|', (string) $row->meta_value, 2);
+            $out[intval($row->user_id)] = array('by' => isset($p[0]) && ctype_digit($p[0]) ? intval($p[0]) : 0, 'at' => isset($p[1]) ? (string) $p[1] : '');
+        }
+        return $out;
+    }
+
+    /**
+     * 1.98.4: keep a player off the leaderboard, or put them back
+     * (administrators only). Their scores are kept either way and still
+     * saved; the public boards leave them out like a hidden player, and
+     * their own Show me box can't bring them back. One log line against the
+     * player. Returns array(ok, message).
+     */
+    public static function set_kept_off($user_id, $keep_off, $actor) {
+        $user_id = intval($user_id);
+        $actor = intval($actor);
+        if ($actor <= 0 || !user_can($actor, 'manage_options')) {
+            return array('ok' => false, 'message' => 'Only administrators can keep a player off the leaderboard.');
+        }
+        if ($user_id <= 0 || !get_userdata($user_id)) {
+            return array('ok' => false, 'message' => 'That account doesn\'t exist any more.');
+        }
+        $name = self::board_name($user_id);
+        if ($keep_off) {
+            if (self::is_kept_off($user_id)) {
+                return array('ok' => false, 'message' => $name . ' is already kept off the leaderboard.');
+            }
+            update_user_meta($user_id, self::KEPT_OFF_META, $actor . '|' . gmdate('Y-m-d H:i:s'));
+            $line = 'Keep it up: kept off the leaderboard by the club (scores kept)';
+            $message = $name . ' is off the leaderboard. Their scores are kept, and Put back undoes it.';
+        } else {
+            if (!self::is_kept_off($user_id)) {
+                return array('ok' => false, 'message' => $name . ' isn\'t kept off the leaderboard.');
+            }
+            delete_user_meta($user_id, self::KEPT_OFF_META);
+            $line = 'Keep it up: put back on the leaderboard by the club';
+            $message = $name . ' is back on the leaderboard' . (self::is_hidden($user_id) ? ', but stays hidden because they unticked Show me on the leaderboard.' : '.');
+        }
+        self::flush_cache();
+        TeamOversight_Log::add(self::LOG_TYPE, $line, array('user_id' => $user_id));
+        return array('ok' => true, 'message' => $message);
+    }
+
     /** Show or hide a player on the leaderboard (their scores are kept either way). */
     public static function set_shown($user_id, $show) {
         $user_id = intval($user_id);
@@ -467,7 +576,7 @@ class TeamOversight_Keep_It_Up {
         // A year's rows are its twelve months ('2026-01' to '2026-12'): a range on the month column, so the month_score key serves it.
         $sm = $year === null ? '' : $wpdb->prepare(' AND s.month BETWEEN %s AND %s', $year . '-01', $year . '-12');
         $bm = $year === null ? '' : $wpdb->prepare(' AND month BETWEEN %s AND %s', $year . '-01', $year . '-12');
-        $found = $wpdb->get_results("SELECT s.id, s.user_id, s.month, s.score, s.achieved_gmt, s.duration_ms FROM $t s
+        $found = $wpdb->get_results("SELECT s.id, s.user_id, s.month, s.score, s.achieved_gmt, s.duration_ms, s.run_stats FROM $t s
             JOIN (SELECT user_id, MAX(score) AS top FROM $t WHERE removed = 0$bm GROUP BY user_id) b ON b.user_id = s.user_id AND b.top = s.score
             JOIN {$wpdb->users} u ON u.ID = s.user_id
             WHERE s.removed = 0$sm
@@ -490,11 +599,15 @@ class TeamOversight_Keep_It_Up {
         return $rows;
     }
 
-    /** The accounts that chose to stay off the leaderboard, as user id => true (one query a request). */
+    /**
+     * The accounts left off the public boards, as user id => true (one query
+     * a request): those that chose to stay off, and (1.98.4) those the club
+     * keeps off.
+     */
     private static function hidden_ids() {
         global $wpdb;
         if (self::$hidden_ids === null) {
-            $ids = $wpdb->get_col($wpdb->prepare("SELECT DISTINCT user_id FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = '1'", self::HIDDEN_META));
+            $ids = $wpdb->get_col($wpdb->prepare("SELECT DISTINCT user_id FROM {$wpdb->usermeta} WHERE (meta_key = %s AND meta_value = '1') OR (meta_key = %s AND meta_value <> '')", self::HIDDEN_META, self::KEPT_OFF_META));
             self::$hidden_ids = array();
             foreach (is_array($ids) ? $ids : array() as $id) {
                 self::$hidden_ids[intval($id)] = true;
@@ -567,11 +680,17 @@ class TeamOversight_Keep_It_Up {
         return $place;
     }
 
-    /** A player's standing at $now: shown, bests and places this year and all time. */
+    /**
+     * A player's standing at $now: shown, bests and places this year and all
+     * time. 1.98.4: shown is false for a player the club keeps off too, and
+     * kept_off says so (the game words it differently from hiding).
+     */
     public static function standing($user_id, $now = null) {
         $year = self::year_key($now);
+        $kept_off = self::is_kept_off($user_id);
         return array(
-            'shown' => !self::is_hidden($user_id),
+            'shown' => !$kept_off && !self::is_hidden($user_id),
+            'kept_off' => $kept_off,
             'year' => $year,
             'best_year' => self::best_score($user_id, $year),
             'best_all' => self::best_score($user_id, null),
@@ -611,7 +730,10 @@ class TeamOversight_Keep_It_Up {
      * The admin's board: the top $limit players, hidden ones included and
      * marked, each with the id of its best row (for Remove). Rows of
      * array(id, user_id, place, name, score, achieved_gmt, month (the month
-     * the score was got in), hidden). $year a site year or null for all time.
+     * the score was got in), hidden, kept_off (1.98.4), stats (1.98.4: the
+     * run's run_stats() as stored, or null for a run saved before 1.98.4)).
+     * $year a site year or null for all time. A kept-off player has no
+     * public place, like a hidden one.
      */
     public static function admin_board($year, $limit = self::ADMIN_BOARD_SIZE) {
         $top = array_slice(self::ranked($year, true), 0, max(1, intval($limit)));
@@ -626,15 +748,18 @@ class TeamOversight_Keep_It_Up {
         $shown_place = 0;
         foreach ($top as $r) {
             $hidden = self::is_hidden($r->user_id);
+            $kept_off = self::is_kept_off($r->user_id);
             $out[] = array(
                 'id' => $r->id,
                 'user_id' => $r->user_id,
-                'place' => $hidden ? 0 : ++$shown_place,
+                'place' => ($hidden || $kept_off) ? 0 : ++$shown_place,
                 'name' => self::board_name($r->user_id),
                 'score' => $r->score,
                 'achieved_gmt' => $r->achieved_gmt,
                 'month' => (string) $r->month,
                 'hidden' => $hidden,
+                'kept_off' => $kept_off,
+                'stats' => self::stats_of(isset($r->run_stats) ? $r->run_stats : null),
             );
         }
         return $out;
@@ -827,6 +952,8 @@ class TeamOversight_Keep_It_Up {
         $best_all = self::best_score($user_id, null);
         $stored = false;
         if ($score > $best_month) {
+            // 1.98.4: the run's stats and Check flags go with the row (administrators only; a flag never stops a save).
+            $stats = self::run_stats(array_map('intval', $touches), isset($params['kinds']) ? $params['kinds'] : null, isset($params['offs']) ? $params['offs'] : null);
             $stored = (bool) $wpdb->insert(self::table(), array(
                 'user_id' => $user_id,
                 'month' => $month,
@@ -834,7 +961,8 @@ class TeamOversight_Keep_It_Up {
                 'duration_ms' => max(0, min(4294967295, $elapsed)),
                 'achieved_gmt' => gmdate('Y-m-d H:i:s', (int) floor($now)),
                 'removed' => 0,
-            ), array('%d', '%s', '%d', '%d', '%s', '%d'));
+                'run_stats' => self::stats_json($stats),
+            ), array('%d', '%s', '%d', '%d', '%s', '%d', '%s'));
             self::flush_cache();
         }
         if (!$stored && $score > $best_month) {
@@ -852,6 +980,136 @@ class TeamOversight_Keep_It_Up {
         ), self::standing($user_id, $now)));
     }
 
+    // ------------------------------------------------------------------
+    // Run checks (1.98.4)
+    // ------------------------------------------------------------------
+
+    /**
+     * A run's stats and Check flags, worked out from what finish() was sent.
+     * Pure. $times: the touch times in ms (already checked by finish()).
+     * $kinds: one letter a touch, m (mouse), t (finger) or k (Space or
+     * Enter), as the 1.98.4 game sends them; $offs: a whole number a touch,
+     * -100 to 100, how far from the ball's middle the touch landed as a
+     * share of its radius (0 for a key). Anything else in those two (a game
+     * from before 1.98.4, or a request made without the game) leaves the
+     * details out and flags no_details. Returns array(v 1, n, k (% of
+     * touches from keys, or null), c (average distance from the middle of
+     * the mouse and finger taps, % of the radius, or null with none), j (the
+     * median spread of the gaps between touches within each speed band, ms,
+     * or null with no band of 5 gaps), f (flags, in FLAG_WORDS order)).
+     */
+    public static function run_stats(array $times, $kinds, $offs) {
+        $n = count($times);
+        $out = array('v' => 1, 'n' => $n, 'k' => null, 'c' => null, 'j' => null, 'f' => array());
+        $details = is_string($kinds) && strlen($kinds) === $n && preg_match('/^[mtk]*$/D', $kinds) === 1 && is_array($offs) && count($offs) === $n;
+        $off = array();
+        if ($details) {
+            foreach (array_values($offs) as $i => $o) {
+                $whole = is_int($o) || (is_float($o) && floor($o) === $o) || (is_string($o) && preg_match('/^-?\d{1,3}$/D', $o) === 1);
+                if (!$whole || intval($o) < -100 || intval($o) > 100 || ($kinds[$i] === 'k' && intval($o) !== 0)) {
+                    $details = false;
+                    break;
+                }
+                $off[] = intval($o);
+            }
+        }
+        if ($details && $n > 0) {
+            $keys = substr_count($kinds, 'k');
+            $out['k'] = (int) round(100 * $keys / $n);
+            $taps = 0;
+            $sum = 0;
+            for ($i = 0; $i < $n; $i++) {
+                if ($kinds[$i] !== 'k') {
+                    $taps++;
+                    $sum += abs($off[$i]);
+                }
+            }
+            if ($taps > 0) {
+                $out['c'] = (int) round($sum / $taps);
+                if ($n >= self::JUDGE_FROM && $taps >= self::CENTRE_FROM && $sum / $taps < self::CENTRE_MAX * 100) {
+                    $out['f'][] = 'centre';
+                }
+            }
+        } elseif (!$details) {
+            $out['f'][] = 'no_details';
+        }
+        // The gap after touch j (0-based, j >= 1) flies at the speed band floor(j / 10): gravity steps up every 10 touches.
+        $bands = array();
+        for ($j = 1; $j < $n; $j++) {
+            $bands[intdiv($j, 10)][] = $times[$j] - $times[$j - 1];
+        }
+        $spreads = array();
+        foreach ($bands as $gaps) {
+            if (count($gaps) < 5) {
+                continue;
+            }
+            $mean = array_sum($gaps) / count($gaps);
+            $var = 0.0;
+            foreach ($gaps as $g) {
+                $var += ($g - $mean) * ($g - $mean);
+            }
+            $spreads[] = sqrt($var / count($gaps));
+        }
+        if ($spreads) {
+            sort($spreads);
+            $m = count($spreads);
+            $median = $m % 2 ? $spreads[intdiv($m, 2)] : ($spreads[$m / 2 - 1] + $spreads[$m / 2]) / 2;
+            $out['j'] = (int) round($median);
+            if ($n >= self::JUDGE_FROM && $median < self::STEADY_MS) {
+                array_unshift($out['f'], 'steady');
+            }
+        }
+        return $out;
+    }
+
+    /** run_stats() as stored in the row (compact JSON, at most 191 bytes). */
+    public static function stats_json(array $stats) {
+        $json = wp_json_encode($stats);
+        return (is_string($json) && strlen($json) <= 191) ? $json : null;
+    }
+
+    /** A row's stored run_stats, read back (null for a run saved before 1.98.4 or anything unreadable). */
+    public static function stats_of($json) {
+        if (!is_string($json) || $json === '') {
+            return null;
+        }
+        $s = json_decode($json, true);
+        if (!is_array($s) || !isset($s['v'], $s['n'])) {
+            return null;
+        }
+        $flags = array();
+        foreach (isset($s['f']) && is_array($s['f']) ? $s['f'] : array() as $f) {
+            if (is_string($f) && isset(self::FLAG_WORDS[$f])) {
+                $flags[] = $f;
+            }
+        }
+        return array(
+            'n' => intval($s['n']),
+            'k' => isset($s['k']) && is_numeric($s['k']) ? intval($s['k']) : null,
+            'c' => isset($s['c']) && is_numeric($s['c']) ? intval($s['c']) : null,
+            'j' => isset($s['j']) && is_numeric($s['j']) ? intval($s['j']) : null,
+            'f' => $flags,
+        );
+    }
+
+    /** The stats in words for the admin screen, e.g. "Keys 100%. Taps 1% off centre. Timing varies by 4 ms." ('' with nothing known). */
+    public static function stats_words($stats) {
+        if (!is_array($stats)) {
+            return '';
+        }
+        $parts = array();
+        if ($stats['k'] !== null) {
+            $parts[] = 'Keys ' . $stats['k'] . '%.';
+        }
+        if ($stats['c'] !== null) {
+            $parts[] = 'Taps ' . $stats['c'] . '% off centre.';
+        }
+        if ($stats['j'] !== null) {
+            $parts[] = 'Timing varies by ' . $stats['j'] . ' ms.';
+        }
+        return implode(' ', $parts);
+    }
+
     /** array(hash, started ms, state 'p'|'u') from RUN_META, or null. */
     private static function read_run($user_id) {
         $raw = (string) get_user_meta(intval($user_id), self::RUN_META, true);
@@ -867,6 +1125,10 @@ class TeamOversight_Keep_It_Up {
         $refused = self::member_check($user_id, $nonce);
         if ($refused) {
             return $refused;
+        }
+        if (self::is_kept_off($user_id)) {
+            // 1.98.4: the club's decision, not the player's.
+            return self::refuse(403, 'kept_off', 'The club has taken you off the leaderboard.');
         }
         $show = filter_var($show, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
         if ($show === null) {
@@ -978,6 +1240,8 @@ class TeamOversight_Keep_It_Up {
             'token' => $request->get_param('token'),
             'score' => $request->get_param('score'),
             'touches' => $request->get_param('touches'),
+            'kinds' => $request->get_param('kinds'),
+            'offs' => $request->get_param('offs'),
         )));
     }
 

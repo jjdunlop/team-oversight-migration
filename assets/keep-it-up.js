@@ -40,6 +40,8 @@
   var GRACE_TOUCH = 8;         // extra pixels around the ball for a finger (a mouse gets none)
   var COOLDOWN_MS = 180;       // touches closer than this count once (the site refuses under 120 ms)
   var REST = 0.78;             // the waiting ball's centre, as a share of the height
+  var KEPT_OFF = 'The club has taken you off the leaderboard.'; // 1.98.4: a player the club keeps off the leaderboard
+  var HIDDEN = 'You\'re hidden from the leaderboard.';
   var KEY_LOW = 0.6;           // Space or Enter hits only while the ball is falling below this share
   var KEY_LOCK_MS = 350;       // a second key press outside that window since the last hit locks the keys this long (longer than the window), so mashing loses the ball
   var LAG_MS = 100;            // a tap also counts on where the ball was drawn this recently (the screen and a finger lag the physics)
@@ -215,7 +217,10 @@
       if (cfg.viewer && typeof cfg.viewer.shown === 'boolean') {
         cfg.shown = cfg.viewer.shown;
         var box = root.querySelector('.murvc-kiu-show-box');
-        if (box) { box.checked = cfg.shown; }
+        if (box) {
+          box.checked = cfg.shown;
+          box.disabled = !!cfg.viewer.kept_off;
+        }
       }
       renderBoard(root, r.data);
       showBest(root);
@@ -243,6 +248,7 @@
   function meLine(viewer, which, rows) {
     if (!viewer) { return ''; }
     var place = viewer['place_' + which] || 0, best = viewer['best_' + which] || 0;
+    if (viewer.kept_off) { return KEPT_OFF; }
     if (!viewer.shown) {
       return place > 0 ? 'You\'re hidden from the leaderboard. You\'d be ' + ord(place) + ', with a best of ' + num(best) + '.' : 'You\'re hidden from the leaderboard.';
     }
@@ -461,7 +467,7 @@
     var bestLine = el('p', 'murvc-kiu-note');
     var savedLine = el('p', 'murvc-kiu-note');
     var placeLine = el('p', 'murvc-kiu-note');
-    var hiddenLine = el('p', 'murvc-kiu-note', 'You\'re hidden from the leaderboard.');
+    var hiddenLine = el('p', 'murvc-kiu-note', HIDDEN);
     var loginLine = el('p', 'murvc-kiu-note');
     var loginLink = el('a', '', 'Log in to get on the leaderboard');
     loginLine.appendChild(loginLink);
@@ -495,18 +501,24 @@
     };
     if (window.PointerEvent) {
       canvas.addEventListener('pointerdown', function (e) {
+        // 1.98.4: a tap made by a script (isTrusted false) never counts; a browser without isTrusted counts as before.
+        if (e.isTrusted === false) { return; }
         // Every finger counts (a second thumb, a resting palm): the cooldown stops one hit counting twice. A mouse: the main button only.
         if (e.pointerType === 'mouse' && e.button !== 0) { return; }
         down(e, e.pointerType === 'touch' ? 'touch' : 'mouse');
       });
     } else {
       canvas.addEventListener('touchstart', function (e) {
+        if (e.isTrusted === false) { return; }
         if (e.changedTouches && e.changedTouches[0]) {
           if (e.cancelable) { e.preventDefault(); }
           hitAt(e.changedTouches[0].clientX, e.changedTouches[0].clientY, 'touch');
         }
       }, { passive: false });
-      canvas.addEventListener('mousedown', function (e) { down(e, 'mouse'); });
+      canvas.addEventListener('mousedown', function (e) {
+        if (e.isTrusted === false) { return; }
+        down(e, 'mouse');
+      });
     }
     canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     layer.addEventListener('touchmove', function (e) {
@@ -517,7 +529,7 @@
       // The close button sits over the court: a tap there that is on the ball is a hit, and the click after it doesn't close.
       close.addEventListener('pointerdown', function (e) {
         g.closeOnBall = false;
-        if (e.pointerType === 'mouse' && e.button !== 0) { return; }
+        if (e.isTrusted === false || (e.pointerType === 'mouse' && e.button !== 0)) { return; }
         if (hitAt(e.clientX, e.clientY, e.pointerType === 'touch' ? 'touch' : 'mouse')) {
           g.closeOnBall = true;
           if (e.cancelable) { e.preventDefault(); }
@@ -669,6 +681,8 @@
     G.state = 'ready';
     G.score = 0;
     G.touches = [];
+    G.kinds = '';
+    G.offs = [];
     G.lastTouch = 0;
     G.level = 0;
     G.angle = G.pa = 0;
@@ -827,7 +841,7 @@
       if (d < nearD) { nearD = d; near = spots[j]; }
     }
     if (!near || nearD > reach * reach) { return false; }
-    touch(Math.max(-1, Math.min(1, (tx - near.x) / G.r)));
+    touch(Math.max(-1, Math.min(1, (tx - near.x) / G.r)), kind === 'touch' ? 't' : 'm');
     return true;
   }
 
@@ -840,7 +854,7 @@
    */
   function keyHit() {
     if (G.state === 'ready') {
-      touch(0);
+      touch(0, 'k');
       return;
     }
     if (G.state !== 'playing') { return; }
@@ -849,10 +863,10 @@
       if (G.keyMiss++ >= 1) { G.keyLock = now + KEY_LOCK_MS; }
       return;
     }
-    touch(0);
+    touch(0, 'k');
   }
 
-  function touch(off) {
+  function touch(off, kind) {
     var now = clock();
     if (G.lastTouch && now - G.lastTouch < COOLDOWN_MS) { return; }
     if (G.state === 'ready') {
@@ -870,6 +884,8 @@
     G.spin = G.vx / G.r * SPIN;
     G.score++;
     G.touches.push(Math.round(now - G.t0));
+    G.kinds += kind === 't' || kind === 'k' ? kind : 'm';
+    G.offs.push(kind === 'k' ? 0 : Math.round(off * 100));
     G.hud.textContent = String(G.score);
     var level = Math.floor(G.score / 10);
     if (level !== G.level) {
@@ -906,7 +922,8 @@
     var onButton = e.target && e.target.tagName && /^(BUTTON|A)$/.test(e.target.tagName);
     if ((k === ' ' || k === 'Spacebar' || k === 'Enter') && !onButton) {
       e.preventDefault();
-      if (e.repeat) { return; }
+      // 1.98.4: a key press made by a script never hits (nor resumes a paused game).
+      if (e.repeat || e.isTrusted === false) { return; }
       if (G.state === 'paused') { resume(); } else { keyHit(); }
     }
   }
@@ -985,7 +1002,7 @@
 
   function gameOver() {
     G.state = 'over';
-    var id = G.gameId, cfg = G.cfg, score = G.score, touches = G.touches.slice(), run = G.run, o = G.o;
+    var id = G.gameId, cfg = G.cfg, score = G.score, touches = G.touches.slice(), kinds = G.kinds, offs = G.offs.slice(), run = G.run, o = G.o;
     G.over.hidden = false;
     G.close.hidden = true;
     // On a short window the score at the top peeks out behind the panel, which has the score too.
@@ -1017,7 +1034,7 @@
       // The saved best only: a score joins it when the site says it was saved. No board (a timed-out login): no line.
       memberBest(o.best, cfg.viewer ? cfg.viewer.best_all || 0 : 0);
       o.saved.textContent = 'Saving...';
-      var pending = finish(cfg, run, score, touches);
+      var pending = finish(cfg, run, score, touches, kinds, offs);
       G.pendingFinish = pending;
       pending.then(function (res) {
         if (G.pendingFinish === pending) { G.pendingFinish = null; }
@@ -1042,6 +1059,7 @@
             o.place.textContent = 'This year: ' + ord(st.place_year) + '. All time: ' + ord(st.place_all) + '.';
             heard += ' ' + o.place.textContent;
           }
+          o.hidden.textContent = st.kept_off ? KEPT_OFF : HIDDEN;
           o.hidden.hidden = st.shown !== false;
         } else {
           memberBest(o.best, cfg.viewer ? cfg.viewer.best_all || 0 : 0);
@@ -1065,8 +1083,8 @@
     node.hidden = !(n > 0);
   }
 
-  /** Send a member's finished run: resolves {line, standing}. */
-  function finish(cfg, run, score, touches) {
+  /** Send a member's finished run (1.98.4: with each touch's kind and where it landed): resolves {line, standing}. */
+  function finish(cfg, run, score, touches, kinds, offs) {
     if (!run || !run.promise) {
       return Promise.resolve({ line: 'Not saved. The game didn\'t start on the site.' });
     }
@@ -1074,7 +1092,7 @@
       if (!run.token) {
         return { line: 'Not saved. ' + (run.error || 'The game didn\'t start on the site.') };
       }
-      return call(cfg, 'POST', cfg.finish, { token: run.token, score: score, touches: touches }).then(function (r) {
+      return call(cfg, 'POST', cfg.finish, { token: run.token, score: score, touches: touches, kinds: kinds, offs: offs }).then(function (r) {
         if (nonceExpired(r)) {
           forgetNonce();
           return { line: 'Not saved. Your login has timed out. Reload the page to save scores.' };
