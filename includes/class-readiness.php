@@ -879,24 +879,9 @@ class TeamOversight_Readiness {
             return $checklist === null ? '' : self::render_panel($season, $checklist);
         }
 
-        $accepted = array();
-        $locked = array();
-        foreach ($offers as $offer) {
-            $code = (string) $offer->team;
-            if ($offer->state === TeamOversight_Offers::ACCEPTED) {
-                if (!isset($accepted[$code])) {
-                    $accepted[$code] = $offer;
-                }
-            } elseif (!isset($locked[$code])) {
-                $locked[$code] = $offer;
-            }
-        }
-        $locked = array_diff_key($locked, $accepted);
+        list($accepted, $locked) = self::split_offers($offers);
         // 1.99.3: each offered team with the offer's role, so a Training Only offer counts as training.
-        $offer_teams = array();
-        foreach (array_merge(array_values($accepted), array_values($locked)) as $counted_offer) {
-            $offer_teams[(string) $counted_offer->team] = self::offer_role($counted_offer);
-        }
+        $offer_teams = self::offer_team_roles($accepted, $locked);
 
         $checklist = self::compute($user, $season, false, $offer_teams);
         if ($checklist === null) {
@@ -922,6 +907,53 @@ class TeamOversight_Readiness {
             'in_teams' => self::get_player_teams($user->ID, $user->user_email, $season),
             'coaching' => self::get_staff_teams($user->ID, $user->user_email, $season),
         ));
+    }
+
+    /**
+     * checklist_offers() as season_panel() counts them: the ACCEPTED offers
+     * (the first per team) and the LOCKED IN ones for any other team, each
+     * keyed by team code. array(accepted, locked). Pure.
+     */
+    private static function split_offers(array $offers) {
+        $accepted = array();
+        $locked = array();
+        foreach ($offers as $offer) {
+            $code = (string) $offer->team;
+            if ($offer->state === TeamOversight_Offers::ACCEPTED) {
+                if (!isset($accepted[$code])) {
+                    $accepted[$code] = $offer;
+                }
+            } elseif (!isset($locked[$code])) {
+                $locked[$code] = $offer;
+            }
+        }
+        return array($accepted, array_diff_key($locked, $accepted));
+    }
+
+    /** The counted offers' teams as code => the offer's role, for compute()'s $extra_teams (1.99.3). Pure. */
+    private static function offer_team_roles(array $accepted, array $locked) {
+        $offer_teams = array();
+        foreach (array_merge(array_values($accepted), array_values($locked)) as $counted_offer) {
+            $offer_teams[(string) $counted_offer->team] = self::offer_role($counted_offer);
+        }
+        return $offer_teams;
+    }
+
+    /**
+     * Is $user's Player Checklist for the season the Training Only one
+     * (1.99.3)? The count season_panel() makes: their active places and
+     * their accepted or locked-in, not yet placed offers, each with its role
+     * (is_training_only()). The offer page's accepted block asks it, so it
+     * never promises registration and kit to someone whose checklist has
+     * only the fees. False before 2027. A pure reader.
+     */
+    public static function checklist_training_only($user, $season) {
+        if (!is_object($user) || empty($user->ID)) {
+            return false;
+        }
+        $season = (string) $season;
+        list($accepted, $locked) = self::split_offers(self::checklist_offers($user, $season));
+        return self::is_training_only($user->ID, $user->user_email, $season, false, self::offer_team_roles($accepted, $locked));
     }
 
     /**

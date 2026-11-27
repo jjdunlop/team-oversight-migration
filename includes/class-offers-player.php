@@ -735,7 +735,9 @@ class TeamOversight_Offers_Player {
      * line and the deposit box sit at the top of the page since 1.96.6
      * (render_offer()). No read-only preview here (1.79.1): its "If you
      * accept" heading and "nothing to tick here" note are for an offer still
-     * to be answered.
+     * to be answered. 1.99.3: when the player's checklist is the Training Only
+     * one (TeamOversight_Readiness::checklist_training_only()) the line is
+     * the registry's _training version, which says it shows their fees.
      */
     private static function accepted_block($user, $offer, $name, $target, $status, $decline) {
         ob_start();
@@ -747,7 +749,12 @@ class TeamOversight_Offers_Player {
         echo '<details class="murvc-offer-more"><summary>' . esc_html(self::terms_summary($offer)) . '</summary><div class="murvc-offer-terms">' . self::terms_html($offer) . '</div></details>';
         echo self::training_html($offer);
         echo self::extras_html($offer);
-        echo '<div class="murvc-offer-checklist"><p class="murvc-offer-note">' . TeamOversight_Offer_Wording::html(TeamOversight_Offers::is_covered($offer) ? 'page_cover_accepted_checklist' : 'page_accepted_checklist') . '</p>'
+        // 1.99.3: a player whose Player Checklist is the Training Only one (fees only) isn't promised registration and kit.
+        $checklist_line = TeamOversight_Offers::is_covered($offer) ? 'page_cover_accepted_checklist' : 'page_accepted_checklist';
+        if (TeamOversight_Readiness::checklist_training_only($user, $offer->season)) {
+            $checklist_line .= '_training';
+        }
+        echo '<div class="murvc-offer-checklist"><p class="murvc-offer-note">' . TeamOversight_Offer_Wording::html($checklist_line) . '</p>'
             . '<p><a class="button" href="' . esc_url(TeamOversight_Readiness::checklist_url()) . '">' . TeamOversight_Offer_Wording::e(TeamOversight_Offers::wording('page_checklist_button')) . '</a></p></div>';
         return ob_get_clean();
     }

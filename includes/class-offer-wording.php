@@ -331,6 +331,10 @@ class TeamOversight_Offer_Wording {
         $c['page_accepted_checklist'] = self::item('page', 'After accepting: the Player Checklist is ready',
             'Under an accepted offer, above the Go to your Player Checklist button (in place of the preview a sent offer shows).',
             '**Your Player Checklist is ready now.** It lists what you need to do before the season, like your registration and your kit, and you can tick things off there as you go. Your place is confirmed once your deposit is paid.', array(), 3);
+        // 1.99.3 (club request, 27 Nov 2026): from 2027 a Training Only player's checklist has only the fees.
+        $c['page_accepted_checklist_training'] = self::item('page', 'After accepting a Training Only offer: the Player Checklist is ready',
+            'Under an accepted offer, in place of "After accepting: the Player Checklist is ready", when every place and offer the player has that season is Training Only (2027 on), so their Player Checklist has only the fees.',
+            '**Your Player Checklist is ready now.** It shows your fees, so you can keep on top of them through the season. Your place is confirmed once your deposit is paid.', array(), 3);
         $c['page_checklist_button'] = self::item('page', 'The Go to your Player Checklist button',
             'The button under an accepted or locked-in offer that opens the Player Checklist.',
             'Go to your Player Checklist', array(), 1);
@@ -728,6 +732,9 @@ class TeamOversight_Offer_Wording {
         $c['page_cover_accepted_checklist'] = self::item('page', 'Covered offer accepted: the Player Checklist is ready',
             'Under an accepted covered offer, above the Go to your Player Checklist button.',
             '**Your Player Checklist is ready now.** It lists what you need to do before the season, like your registration and your kit, and you can tick things off there as you go. Your place is confirmed once the supporter fee is paid.', array(), 3);
+        $c['page_cover_accepted_checklist_training'] = self::item('page', 'Covered Training Only offer accepted: the Player Checklist is ready',
+            'Under an accepted covered offer, in place of "Covered offer accepted: the Player Checklist is ready", when every place and offer the player has that season is Training Only (2027 on), so their Player Checklist has only the fees (1.99.3).',
+            '**Your Player Checklist is ready now.** It shows your fees, so you can keep on top of them through the season. Your place is confirmed once the supporter fee is paid.', array(), 3);
         $c['page_cover_late'] = self::item('page', 'Covered offer: the supporter fee date has passed',
             'The pay box of a covered offer when the date is behind.',
             'The supporter fee was due on {date}. Please pay it as soon as you can, or talk to your coach.', array('{date}' => 'the date it was due'), 2);
