@@ -25,7 +25,8 @@ class TeamOversight_Keep_It_Up_Public {
     const FOOTER_PRIORITY = 15;
     /** The footer link's name for screen readers and its tooltip (the link itself reads "Play"). */
     const FOOTER_NAME = 'Play Keep it up';
-    const HOW = 'Tap the ball to keep it up. Hit it in the middle to send it straight up. Don\'t let it touch the floor.';
+    /** 1.99.1: a hit counts only as the ball comes down, and no key plays. */
+    const HOW = 'Tap the ball as it comes down to keep it up. Hit it in the middle to send it up. Don\'t let it touch the floor.';
     /** 1.98.4: in place of the Show me box for a player the club keeps off the leaderboard (the game script says the same). */
     const KEPT_OFF_WORDS = 'The club has taken you off the leaderboard.';
     /** The note on an administrator's card while the game is off (they still see and play it). */
@@ -148,8 +149,7 @@ class TeamOversight_Keep_It_Up_Public {
             } else {
                 $html .= '<p class="murvc-kiu-small"><a href="' . esc_url($config['login']) . '">Log in</a> to get on the leaderboard.</p>';
             }
-            // Hidden on a touch-only device (styles()), where there is no keyboard to press.
-            $html .= '<p class="murvc-kiu-small murvc-kiu-keys">On a keyboard, Space or Enter hits the ball while it\'s falling low.</p>';
+            // 1.99.1: no keyboard tip (club request 27 Nov 2026: only a tap or a click plays).
         }
         $html .= $noscript . '</div></div>';
         $html .= '<div class="murvc-kiu-board" role="region" aria-label="' . esc_attr($compact ? 'Top 3 this year' : 'Leaderboard') . '">'
@@ -250,7 +250,6 @@ class TeamOversight_Keep_It_Up_Public {
         .murvc-kiu-sr{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
         @media (max-width:480px){.murvc-kiu-card{padding:14px;gap:12px;align-items:flex-start}.murvc-kiu-icon,.murvc-kiu--compact .murvc-kiu-icon{width:44px;height:44px}}
         @media (prefers-reduced-motion:reduce){.murvc-kiu-icon{animation:none}}
-        @media (hover:none) and (pointer:coarse){.murvc-kiu p.murvc-kiu-keys{display:none}}
         html.murvc-kiu-open,html.murvc-kiu-open body{overflow:hidden!important;overscroll-behavior:none}
         .murvc-kiu-layer{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147482000;background:linear-gradient(#e8eef8,#fdfdfb 70%);color:#0f2a52;touch-action:none;overscroll-behavior:contain;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;font-family:inherit;line-height:1.4}
         .murvc-kiu-layer:focus{outline:none}

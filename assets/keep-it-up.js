@@ -3,9 +3,12 @@
  *
  * The start card's Play button opens the game over the whole window: tap or
  * click the ball to keep it up; where you hit it decides where it goes (the
- * middle sends it straight up, off-centre sends it away from that side);
- * touching the bottom of the window ends the game. Space or Enter hits it
- * dead centre while it is falling in the lower part of the window.
+ * middle sends it up, off-centre sends it away from that side); touching
+ * the bottom of the window ends the game. Since 1.99.1 (club request 27 Nov
+ * 2026) only a tap or a click plays (no keys), a hit counts only while the
+ * ball is coming down (tapping it on the way up, over and over, locks the
+ * taps), the ball waits at a different spot each game and every hit drifts
+ * a little either way, so it never comes straight back to the same place.
  *
  * The leaderboard, a member's best and their places come from the routes of
  * TeamOversight_Keep_It_Up (murvc/v1/keep-it-up/...): GET board for anyone,
@@ -38,12 +41,13 @@
   var DRAG = 0.12;             // sideways speed lost each second
   var SPIN = 0.5;              // spin follows the sideways speed
   var GRACE_TOUCH = 8;         // extra pixels around the ball for a finger (a mouse gets none)
-  var COOLDOWN_MS = 180;       // touches closer than this count once (the site refuses under 120 ms)
+  var COOLDOWN_MS = 180;       // a second tap this soon after a hit is the same touch (a second finger): it neither counts nor locks
   var REST = 0.78;             // the waiting ball's centre, as a share of the height
+  var START_SPREAD = 0.15;     // 1.99.1: a new game's ball waits up to this share of the width either side of the middle
+  var WOBBLE = 0.08;           // 1.99.1: every hit also drifts sideways by up to this share of an edge hit's speed, either way
   var KEPT_OFF = 'The club has taken you off the leaderboard.'; // 1.98.4: a player the club keeps off the leaderboard
   var HIDDEN = 'You\'re hidden from the leaderboard.';
-  var KEY_LOW = 0.6;           // Space or Enter hits only while the ball is falling below this share
-  var KEY_LOCK_MS = 350;       // a second key press outside that window since the last hit locks the keys this long (longer than the window), so mashing loses the ball
+  var TAP_LOCK_MS = 400;       // 1.99.1: a second tap on the ball on its way up since the last hit, or any tap while locked, locks the taps this long, so tapping over and over loses the ball
   var LAG_MS = 100;            // a tap also counts on where the ball was drawn this recently (the screen and a finger lag the physics)
   var TRAIL = 16;              // drawn positions kept for that (100 ms at up to 160 frames a second)
   var START_WAIT_MS = 1500;    // a new game's start waits this long at most for the last game's save to land
@@ -421,7 +425,7 @@
       base: 30, r: 30, level: 0, g0: 1, g: 1, v0: 1, vside: 1,
       state: 'ready', resumeTo: 'playing', score: 0, touches: [], t0: 0, lastTouch: 0,
       raf: 0, last: null, acc: 0, gameId: 0, run: null,
-      drawX: 0, drawY: 0, trail: [], keyLock: 0, keyMiss: 0, pendingFinish: null, closeOnBall: false
+      drawX: 0, drawY: 0, trail: [], tapLock: 0, tapMiss: 0, startAt: 0.5, pendingFinish: null, closeOnBall: false
     };
     var layer = el('div', 'murvc-kiu-layer');
     layer.setAttribute('role', 'dialog');
@@ -429,7 +433,7 @@
     layer.setAttribute('aria-label', 'Keep it up');
     layer.setAttribute('aria-describedby', 'murvc-kiu-help');
     layer.tabIndex = -1;
-    var help = el('p', 'murvc-kiu-sr', 'Tap or click the ball to keep it up. Space or Enter hits it while it is falling low. Escape closes the game.');
+    var help = el('p', 'murvc-kiu-sr', 'Tap or click the ball as it comes down to keep it up. Escape closes the game.');
     help.id = 'murvc-kiu-help';
     var canvas = el('canvas');
     canvas.setAttribute('aria-hidden', 'true');
@@ -537,7 +541,7 @@
       });
     }
     close.addEventListener('click', function (e) {
-      // A click from the keyboard (detail 0) always closes. A swallowed click hands focus back to the court, so the next Space or Enter is a hit, not a close.
+      // A click from the keyboard (detail 0) always closes. A swallowed click hands focus back to the court, so a later Space or Enter doesn't close the game.
       if (g.closeOnBall && e.detail !== 0) {
         g.closeOnBall = false;
         if (document.activeElement === close) { focusLayer(); }
@@ -671,7 +675,7 @@
   }
 
   function rest() {
-    G.x = G.px = G.W / 2;
+    G.x = G.px = Math.max(G.r, Math.min(G.W - G.r, G.W * G.startAt));
     G.y = G.py = G.H * REST;
     G.vx = G.vy = 0;
   }
@@ -689,8 +693,9 @@
     G.spin = 0;
     G.run = null;
     G.trail = [];
-    G.keyLock = 0;
-    G.keyMiss = 0;
+    G.tapLock = 0;
+    G.tapMiss = 0;
+    G.startAt = 0.5 + (Math.random() * 2 - 1) * START_SPREAD;
     applyLevel();
     rest();
     G.hud.textContent = '0';
@@ -846,29 +851,20 @@
   }
 
   /**
-   * Space or Enter: a dead-centre hit, only while the ball waits or is
-   * falling in the lower part of the window. A press at any other moment
-   * does nothing, and the second such press since the last hit (or any
-   * press while locked) locks the keys for KEY_LOCK_MS, so one early press
-   * is forgiven but pressing over and over loses the ball: timing matters.
+   * A tap on the ball. While the game runs it counts only on the ball's way
+   * down (1.99.1): a tap on it on the way up does nothing, and the second
+   * such tap since the last hit (or any tap while locked) locks the taps for
+   * TAP_LOCK_MS, so one early tap is forgiven but tapping over and over is
+   * how you lose the ball. Every hit adds a small random sideways drift
+   * (WOBBLE), so a ball hit dead centre never comes straight back down.
    */
-  function keyHit() {
-    if (G.state === 'ready') {
-      touch(0, 'k');
-      return;
-    }
-    if (G.state !== 'playing') { return; }
-    var now = clock();
-    if (now < G.keyLock || !(G.vy > 0 && G.y > G.H * KEY_LOW)) {
-      if (G.keyMiss++ >= 1) { G.keyLock = now + KEY_LOCK_MS; }
-      return;
-    }
-    touch(0, 'k');
-  }
-
   function touch(off, kind) {
     var now = clock();
     if (G.lastTouch && now - G.lastTouch < COOLDOWN_MS) { return; }
+    if (G.state === 'playing' && (now < G.tapLock || !(G.vy > 0))) {
+      if (G.tapMiss++ >= 1) { G.tapLock = now + TAP_LOCK_MS; }
+      return;
+    }
     if (G.state === 'ready') {
       G.state = 'playing';
       G.tip.hidden = true;
@@ -877,15 +873,15 @@
       loop();
     }
     G.lastTouch = now;
-    G.keyMiss = 0;
+    G.tapMiss = 0;
     var side = Math.abs(off) <= DEAD ? 0 : (Math.abs(off) - DEAD) / (1 - DEAD);
-    G.vx = (off < 0 ? 1 : -1) * side * G.vside;
+    G.vx = ((off < 0 ? 1 : -1) * side + (Math.random() * 2 - 1) * WOBBLE) * G.vside;
     G.vy = -G.v0;
     G.spin = G.vx / G.r * SPIN;
     G.score++;
     G.touches.push(Math.round(now - G.t0));
-    G.kinds += kind === 't' || kind === 'k' ? kind : 'm';
-    G.offs.push(kind === 'k' ? 0 : Math.round(off * 100));
+    G.kinds += kind === 't' ? 't' : 'm';
+    G.offs.push(Math.round(off * 100));
     G.hud.textContent = String(G.score);
     var level = Math.floor(G.score / 10);
     if (level !== G.level) {
@@ -917,15 +913,8 @@
     }
     if (k === 'Tab') {
       trapTab(e);
-      return;
     }
-    var onButton = e.target && e.target.tagName && /^(BUTTON|A)$/.test(e.target.tagName);
-    if ((k === ' ' || k === 'Spacebar' || k === 'Enter') && !onButton) {
-      e.preventDefault();
-      // 1.98.4: a key press made by a script never hits (nor resumes a paused game).
-      if (e.repeat || e.isTrusted === false) { return; }
-      if (G.state === 'paused') { resume(); } else { keyHit(); }
-    }
+    // 1.99.1 (club request 27 Nov 2026): no key hits the ball; only a tap or a click plays.
   }
 
   function trapTab(e) {

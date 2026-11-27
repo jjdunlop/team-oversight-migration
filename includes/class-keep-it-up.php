@@ -94,8 +94,14 @@ class TeamOversight_Keep_It_Up {
     const START_GAP_MS = 1500;
     /** More starts than this in one day (the site's day) are refused (429). */
     const DAY_CAP = 400;
-    /** Touches closer together than this are refused. */
-    const MIN_GAP_MS = 120;
+    /**
+     * Touches closer together than this are refused. 1.99.1 (was 120): the
+     * game counts a hit only on the ball's way down, at least 480 ms after
+     * the last (APEX 0.72 s over the most gravity, x1.5), less up to one
+     * drawn frame (MAX_FRAME 100 ms) the physics can count before a hit, so
+     * it never sends a gap under about 370 ms.
+     */
+    const MIN_GAP_MS = 300;
     /** The last touch may be this much later than the server's elapsed time (network delay). */
     const NETWORK_SLACK_MS = 2000;
     /** A run longer than this is refused. */
@@ -871,7 +877,8 @@ class TeamOversight_Keep_It_Up {
      * this call whatever follows); the touch count equals the score; the
      * times go up by at least MIN_GAP_MS; the last touch is no later than the
      * server's elapsed time plus NETWORK_SLACK_MS; the run is at most
-     * MAX_RUN_MS; the score at most MAX_SCORE. A failed check stores nothing
+     * MAX_RUN_MS; the score at most MAX_SCORE; since 1.99.1 no touch is a
+     * key (kinds holding k: code keys). A failed check stores nothing
      * and answers 200 with saved false and a plain reason (fails quietly).
      * A score that beats the player's best this month is stored (kept for
      * the record, so a removal falls back to the other months' bests); only
@@ -943,6 +950,10 @@ class TeamOversight_Keep_It_Up {
         if ($prev > $elapsed + self::NETWORK_SLACK_MS) {
             return $quiet('elapsed', 'The game\'s timing doesn\'t match the site\'s clock.');
         }
+        // 1.99.1 (club request 27 Nov 2026): only a tap or a click plays, so a run with a key touch (a page opened before) isn't saved.
+        if (isset($params['kinds']) && is_string($params['kinds']) && strpos($params['kinds'], 'k') !== false) {
+            return $quiet('keys', 'The game no longer takes Space or Enter. Reload the page to play.');
+        }
 
         // The same clock reading for both, so the row's month always falls in the year it is judged against.
         $month = self::month_key($now);
@@ -988,7 +999,8 @@ class TeamOversight_Keep_It_Up {
      * A run's stats and Check flags, worked out from what finish() was sent.
      * Pure. $times: the touch times in ms (already checked by finish()).
      * $kinds: one letter a touch, m (mouse), t (finger) or k (Space or
-     * Enter), as the 1.98.4 game sends them; $offs: a whole number a touch,
+     * Enter, which the 1.98.4 game sent and finish() refuses since 1.99.1),
+     * as the game sends them; $offs: a whole number a touch,
      * -100 to 100, how far from the ball's middle the touch landed as a
      * share of its radius (0 for a key). Anything else in those two (a game
      * from before 1.98.4, or a request made without the game) leaves the
@@ -1098,7 +1110,8 @@ class TeamOversight_Keep_It_Up {
             return '';
         }
         $parts = array();
-        if ($stats['k'] !== null) {
+        // 1.99.1: no key plays the game any more, so Keys is said only for an older run that used them.
+        if ($stats['k'] !== null && $stats['k'] > 0) {
             $parts[] = 'Keys ' . $stats['k'] . '%.';
         }
         if ($stats['c'] !== null) {
