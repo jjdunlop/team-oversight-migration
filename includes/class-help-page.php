@@ -905,7 +905,7 @@ class TeamOversight_Help_Page {
                 array(self::admin_link('team-oversight-assignments', 'Team Assignments'), self::admin_link('club-membership-lookup', 'Member Lookup (Fee timeline card)'))),
             array('Fees and payments', 'The fee matrix and season settings, each person\'s season fee, when it falls due, online pay-any-amount payments, the payments ledger, payment arrangements and overdue reminder emails.',
                 array(self::admin_link('team-oversight-invoices', 'Payment Management'), self::admin_link('team-oversight-fees', 'Configuration'), self::admin_link('team-oversight-emails', 'Emails'), self::admin_link('team-oversight-logs', 'Logs'))),
-            array('Ready to Play', 'The pre-season checklist players see on the website ([ready_to_play]): VV registration, shirt, shorts and socks, fees with the pay box. Admins see everyone\'s progress.',
+            array('Ready to Play', 'The pre-season checklist players see on the website ([ready_to_play]): VV registration, shirt, shorts and socks, fees with the pay box. From 2027 a Training Only player has only the fees. Admins see everyone\'s progress.',
                 array(self::admin_link('team-oversight-readiness', 'Player Readiness'))),
             array('Coach portal', 'The coaches\' page on the website ([team_coach_portal]): the selection board, verdicts and notes, attendance, the team list with each player\'s fee standing, the roster export and the trial book.',
                 array(self::admin_link('team-oversight-committee', 'Committee Access'))),

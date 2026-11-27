@@ -32,6 +32,11 @@ if (!defined('ABSPATH')) {
  * The admin Player Readiness page shows the same computation for every
  * selected player in the season, coach Selected / Training Only verdicts
  * included, so the club can plan kit before Finalise.
+ *
+ * 1.99.3 (club request, 27 Nov 2026; 2027 on): someone who is Training Only
+ * on every team they are counted for (places, accepted offers) has only the
+ * fees step ("Get Ready to Train"); a coach who also trains keeps the coach's
+ * VV step. One playing place or offer anywhere means the full checklist.
  */
 class TeamOversight_Readiness {
 
@@ -188,7 +193,10 @@ class TeamOversight_Readiness {
      * team a coach has picked them for, whether or not an offer went out).
      * What a player sees about their own selection comes from assignments
      * and from an offer that has been sent to them, never from a verdict
-     * alone.
+     * alone. 1.99.3: an $extra_teams entry may also be code => role (the
+     * offer's role, playing_member or training_only); a plain list of codes
+     * still means playing_member (extra_team_roles()). Only the codes are
+     * returned here; is_training_only() reads the roles.
      */
     public static function get_player_teams($user_id, $email, $season, $include_verdicts = false, $extra_teams = array()) {
         global $wpdb;
@@ -202,13 +210,7 @@ class TeamOversight_Readiness {
                 AND (user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s))
         ", $season, $user_id, $email));
 
-        $extra = array();
-        foreach ((array) $extra_teams as $code) {
-            $code = is_scalar($code) ? trim(sanitize_text_field((string) $code)) : '';
-            if ($code !== '') {
-                $extra[] = $code;
-            }
-        }
+        $extra = array_map('strval', array_keys(self::extra_team_roles($extra_teams)));
 
         if (!$include_verdicts) {
             return array_values(array_unique(array_merge($assigned, $extra)));
@@ -224,6 +226,101 @@ class TeamOversight_Readiness {
         ", $season, $user_id));
 
         return array_values(array_unique(array_merge($assigned, $selected, $extra)));
+    }
+
+    /** The playing-side roles get_player_teams() counts (1.99.3). */
+    const PLAYER_ROLES = array('playing_member', 'training_only', 'team_manager');
+
+    /**
+     * $extra_teams as code => role, in the order given (1.99.3). An entry
+     * with a string key is code => role; any other entry is a bare code and
+     * means playing_member, so a plain list of codes reads as it always did
+     * (an all-digit code, which PHP keeps as an integer key, is code => role
+     * too when its value is a role). A role that isn't one of PLAYER_ROLES
+     * reads as playing_member, and a code given twice keeps playing over
+     * training_only.
+     */
+    private static function extra_team_roles($extra_teams) {
+        $out = array();
+        foreach ((array) $extra_teams as $key => $value) {
+            if (is_string($key) || (is_int($key) && is_string($value) && in_array($value, self::PLAYER_ROLES, true))) {
+                $code = $key;
+                $role = is_scalar($value) ? (string) $value : '';
+            } else {
+                $code = $value;
+                $role = 'playing_member';
+            }
+            $code = is_scalar($code) ? trim(sanitize_text_field((string) $code)) : '';
+            if ($code === '') {
+                continue;
+            }
+            if (!in_array($role, self::PLAYER_ROLES, true)) {
+                $role = 'playing_member';
+            }
+            if (!isset($out[$code]) || $role !== 'training_only') {
+                $out[$code] = $role;
+            }
+        }
+        return $out;
+    }
+
+    /** The role an offer is for: training_only, else playing_member (1.99.3). */
+    private static function offer_role($offer) {
+        return (is_object($offer) && isset($offer->role) && (string) $offer->role === 'training_only') ? 'training_only' : 'playing_member';
+    }
+
+    /** Does the Training Only checklist apply to this season? 2027 on, the offers seasons (1.99.3). */
+    private static function training_only_applies($season) {
+        return class_exists('TeamOversight_Offers') && TeamOversight_Offers::applies((string) $season);
+    }
+
+    /**
+     * Is this person TRAINING ONLY for the season (1.99.3, club request 27 Nov
+     * 2026)? True when every playing-side role they hold or are counted for
+     * is training_only: their active places of role playing_member,
+     * training_only or team_manager (the rows get_player_teams() counts),
+     * every $extra_teams entry (extra_team_roles()) and, with
+     * $include_verdicts, their Selected (playing) and Training Only verdicts.
+     * One playing_member or team_manager place, offer or Selected verdict
+     * makes them a player. False when nothing is counted, and for a season
+     * before 2027. Writes nothing.
+     */
+    public static function is_training_only($user_id, $email, $season, $include_verdicts = false, $extra_teams = array()) {
+        if (!self::training_only_applies($season)) {
+            return false;
+        }
+        global $wpdb;
+        $roles = $wpdb->get_col($wpdb->prepare("
+            SELECT DISTINCT role FROM {$wpdb->prefix}team_assignments
+            WHERE season = %s AND is_active = 1
+                AND role IN ('playing_member', 'training_only', 'team_manager')
+                AND (user_id = %d OR ((user_id IS NULL OR user_id = 0) AND email = %s))
+        ", $season, $user_id, $email));
+        foreach (self::extra_team_roles($extra_teams) as $role) {
+            $roles[] = $role;
+        }
+        if ($include_verdicts) {
+            $statuses = $wpdb->get_col($wpdb->prepare("
+                SELECT DISTINCT s.status
+                FROM {$wpdb->prefix}team_trial_selections s
+                JOIN {$wpdb->prefix}trial_applications a ON a.id = s.application_id
+                WHERE s.season = %s AND s.status IN ('selected', 'training_only')
+                    AND a.application_status IN ('pending', 'accepted')
+                    AND a.user_id = %d
+            ", $season, $user_id));
+            foreach ($statuses as $status) {
+                $roles[] = $status === 'training_only' ? 'training_only' : 'playing_member';
+            }
+        }
+        if (empty($roles)) {
+            return false;
+        }
+        foreach ($roles as $role) {
+            if ((string) $role !== 'training_only') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -363,6 +460,14 @@ class TeamOversight_Readiness {
      * player-facing panel. $extra_teams (1.76.0): bare team codes counted
      * as the player's teams as well (the offer page's read-only preview
      * passes the team an offer was sent for). Writes nothing.
+     *
+     * 1.99.3 (club request, 27 Nov 2026; 2027 on): $extra_teams may carry
+     * each team's role (code => role, a bare code is playing_member), and a
+     * person who is TRAINING ONLY for the season (is_training_only()) gets
+     * only the fees step: no VV, transfer, shirt or kit step. A coach or
+     * assistant coach who also trains keeps the coach's VV step, as a coach
+     * who doesn't train has it. The result's training_only flag says so, and
+     * coaching lists the teams they coach (array() otherwise).
      */
     public static function compute($user, $season, $include_verdicts = false, $extra_teams = array()) {
         $teams = self::get_player_teams($user->ID, $user->user_email, $season, $include_verdicts, $extra_teams);
@@ -379,6 +484,12 @@ class TeamOversight_Readiness {
             $is_staff_only = true;
         }
 
+        // 1.99.3: Training Only on every team they're counted for (2027 on): the fees step only, and the
+        // coach's VV step when they also coach. Everyone else keeps the steps they always had.
+        $is_training_only = !$is_staff_only && self::is_training_only($user->ID, $user->user_email, $season, $include_verdicts, $extra_teams);
+        $coaching = $is_training_only ? self::get_staff_teams($user->ID, $user->user_email, $season) : array();
+        $player_steps = !$is_staff_only && !$is_training_only;
+
         $database = new TeamOversight_Database();
         $teams_config = $database->get_teams_config($season);
 
@@ -394,23 +505,25 @@ class TeamOversight_Readiness {
         // 1. VV membership. 1.92.1 (club decision, 10 Nov 2026): done only once the club ticks it on Player
         // Readiness (vv_confirmed()); the player can't tick it. An earlier self-tick is kept as a hint for the club.
         $steps = array();
-        $steps['vv'] = array(
-            'title' => 'Register your Volleyball Victoria membership',
-            'done' => self::vv_confirmed($user->ID, $season) !== null,
-            'manual' => false,
-            'self_ticked' => in_array('vv', $manual, true),
-            'url' => get_option(self::VV_URL_OPTION),
-            'url_label' => 'Register with VV',
-            'detail' => $is_staff_only
-                ? 'Every coach needs a current VV membership before taking the bench. Register on the VV website; the club ticks this off once your registration comes through.'
-                : 'Every player needs a current VV membership before taking the court. Register on the VV website; the club ticks this off once your registration comes through.',
-        );
+        if (!$is_training_only || !empty($coaching)) {
+            $steps['vv'] = array(
+                'title' => 'Register your Volleyball Victoria membership',
+                'done' => self::vv_confirmed($user->ID, $season) !== null,
+                'manual' => false,
+                'self_ticked' => in_array('vv', $manual, true),
+                'url' => get_option(self::VV_URL_OPTION),
+                'url_label' => 'Register with VV',
+                'detail' => ($is_staff_only || $is_training_only)
+                    ? 'Every coach needs a current VV membership before taking the bench. Register on the VV website; the club ticks this off once your registration comes through.'
+                    : 'Every player needs a current VV membership before taking the court. Register on the VV website; the club ticks this off once your registration comes through.',
+            );
+        }
 
         // 1b. Transfer paperwork (1.93.1, club decision 11 Nov 2026): a club
         // transfer, free agent or ITC sees where theirs is up to. From 2027
         // only, players only. The club sets the status on Player Readiness;
         // the step is done once it is Completed, and orange while Pending.
-        if (!$is_staff_only && class_exists('TeamOversight_Transfer_Limits') && TeamOversight_Transfer_Limits::applies($season)) {
+        if ($player_steps && class_exists('TeamOversight_Transfer_Limits') && TeamOversight_Transfer_Limits::applies($season)) {
             $paperwork = TeamOversight_Transfer_Limits::player_step(self::season_application($user->ID, $season));
             if ($paperwork) {
                 $steps['transfer'] = array(
@@ -426,15 +539,16 @@ class TeamOversight_Readiness {
             }
         }
 
-        $purchased = $is_staff_only ? array('shirt' => 0, 'shorts' => 0, 'socks' => 0) : self::get_kit_purchases($user->ID, $season);
+        $purchased = $player_steps ? self::get_kit_purchases($user->ID, $season) : array('shirt' => 0, 'shorts' => 0, 'socks' => 0);
         $kit_products = self::get_kit_products();
 
         // 2. Playing shirt — a payment obligation, not a purchase decision.
         // The club issues the shirt regardless; it must be PAID for, once
         // ever (all-time purchases count, plus any admin-recorded credit for
         // payments made under a different account). No self-tick.
-        // Coaches don't play, so no shirt step for them.
-        if (!$is_staff_only && $shirts_required > 0) {
+        // Coaches don't play, so no shirt step for them (1.99.3: nor for
+        // a Training Only player).
+        if ($player_steps && $shirts_required > 0) {
             $credit = self::get_shirt_credit($user->ID);
             $shirts_paid = $purchased['shirt'] + $credit['qty'];
             $shirt_done = !empty($kit_products['shirt']) && $shirts_paid >= $shirts_required;
@@ -463,8 +577,9 @@ class TeamOversight_Readiness {
         }
 
         // 3. Shorts & socks — regular products, only issued once purchased.
-        // Coaches don't need kit either.
-        if (!$is_staff_only) {
+        // Coaches don't need kit either (1.99.3: nor does a Training Only
+        // player).
+        if ($player_steps) {
             $required = array('shorts' => 1, 'socks' => 1);
             $labels = array('shorts' => 'Playing shorts', 'socks' => 'Club socks');
             $items = array();
@@ -654,7 +769,11 @@ class TeamOversight_Readiness {
         return array(
             'teams' => $teams,
             'staff_only' => $is_staff_only,
-            'shirts_required' => $shirts_required,
+            // 1.99.3: Training Only on every team counted (2027 on): fees only, plus the VV step for a coach.
+            'training_only' => $is_training_only,
+            // 1.99.3: the teams a Training Only person coaches (the panel names them); array() otherwise.
+            'coaching' => $coaching,
+            'shirts_required' => $is_training_only ? 0 : $shirts_required,
             'steps' => $steps,
             'ready' => $ready,
         );
@@ -744,7 +863,10 @@ class TeamOversight_Readiness {
      * shows with its own pay box, as it always has). A sent offer, a coach
      * verdict alone and every ended offer count for nothing; a season before
      * 2027, a player with no such offer and a locked-in player who is placed
-     * get exactly the panel they always got. A pure reader.
+     * get exactly the panel they always got. 1.99.3: each offered team is
+     * counted with the offer's role, so a player whose every place and offer
+     * is Training Only gets the training checklist (the deposit step, or the
+     * fees step, only). A pure reader.
      */
     public static function season_panel($user, $season) {
         if (!is_object($user) || empty($user->ID)) {
@@ -770,9 +892,13 @@ class TeamOversight_Readiness {
             }
         }
         $locked = array_diff_key($locked, $accepted);
-        $offer_codes = array_merge(array_keys($accepted), array_keys($locked));
+        // 1.99.3: each offered team with the offer's role, so a Training Only offer counts as training.
+        $offer_teams = array();
+        foreach (array_merge(array_values($accepted), array_values($locked)) as $counted_offer) {
+            $offer_teams[(string) $counted_offer->team] = self::offer_role($counted_offer);
+        }
 
-        $checklist = self::compute($user, $season, false, $offer_codes);
+        $checklist = self::compute($user, $season, false, $offer_teams);
         if ($checklist === null) {
             return '';
         }
@@ -992,15 +1118,29 @@ class TeamOversight_Readiness {
      * $position, the offer page's TeamOversight_Offers::deposit_position()
      * (null: as before), so the fees step never asks a player whose money
      * this season already covers the deposit to pay one, and asks one who
-     * paid part of it only for the rest. Returns HTML ('' when nothing can be
-     * computed).
+     * paid part of it only for the rest. 1.99.3: a Training Only offer is
+     * counted with its role, so it previews the training checklist (fees
+     * only) unless the player already holds a playing place this season.
+     * Returns HTML ('' when nothing can be computed).
      */
     public static function render_offer_preview($user, $offer, $target = null, $position = null) {
         if (!$user || !$offer) {
             return '';
         }
         $season = (string) $offer->season;
-        $checklist = self::compute($user, $season, false, array($offer->team));
+        // 1.99.3: a Training Only offer previews the training checklist (fees only), unless the player already
+        // holds a playing place this season: an active one (compute() counts it) or an accepted or locked-in
+        // playing offer, which their Player Checklist counts once they accept (season_panel()).
+        $role = self::offer_role($offer);
+        if ($role === 'training_only') {
+            foreach (self::checklist_offers($user, $season) as $held) {
+                if ((int) $held->id !== (int) $offer->id && self::offer_role($held) !== 'training_only') {
+                    $role = 'playing_member';
+                    break;
+                }
+            }
+        }
+        $checklist = self::compute($user, $season, false, array((string) $offer->team => $role));
         if ($checklist === null) {
             return '';
         }
@@ -1070,7 +1210,10 @@ class TeamOversight_Readiness {
      * committee shows Where your fees go for the panel's season
      * (TeamOversight_Fee_Breakdown::for_checklist()), its block ends the fees
      * step, or the deposit step when there is no fees step; once per panel,
-     * read-only panels included.
+     * read-only panels included. 1.99.3: a checklist whose training_only flag
+     * is set reads "Get Ready to Train" and "You're training with:" (the
+     * preview: "If you accept, you'll be training with:"), and the plain panel
+     * adds "You're coaching:" for the teams in its coaching list.
      */
     public static function render_panel($season, $checklist, $options = array()) {
         $read_only = !empty($options['read_only']);
@@ -1084,17 +1227,23 @@ class TeamOversight_Readiness {
         $team_names = array_map($name_of, $shown_codes);
         $in_names = $offer_lines && !empty($options['in_teams']) ? array_map($name_of, array_values(array_unique((array) $options['in_teams']))) : array();
         $coach_names = $offer_lines && !empty($options['coaching']) ? array_map($name_of, array_values(array_unique((array) $options['coaching']))) : array();
+        // 1.99.3: a Training Only checklist reads "Get Ready to Train" and "You're training with", and still names
+        // the teams they coach. '' for every other checklist, so their markup is unchanged.
+        $training = !empty($checklist['training_only']);
+        $train_coaching = ($training && !$read_only && !$offer_lines && !empty($checklist['coaching']))
+            ? "\n            <p class=\"rtp-teams\">You're coaching: <strong>" . esc_html(implode(', ', array_map($name_of, array_values(array_unique((array) $checklist['coaching']))))) . '</strong></p>'
+            : '';
 
         ob_start();
         ?>
         <div class="rtp-panel">
             <?php if ($read_only): ?>
             <h3>What you'll need to do — <?php echo esc_html($season); ?></h3>
-            <p class="rtp-teams">If you accept, you'll be in: <strong><?php echo esc_html(implode(', ', $team_names)); ?></strong></p>
+            <p class="rtp-teams">If you accept, you'll be <?php echo $training ? 'training with' : 'in'; ?>: <strong><?php echo esc_html(implode(', ', $team_names)); ?></strong></p>
             <?php elseif ($offer_lines): ?>
-            <h3>Get Ready to Play — <?php echo esc_html($season); ?></h3>
+            <h3>Get Ready to <?php echo $training ? 'Train' : 'Play'; ?> — <?php echo esc_html($season); ?></h3>
             <?php if ($in_names): ?>
-            <p class="rtp-teams">You're in: <strong><?php echo esc_html(implode(', ', $in_names)); ?></strong></p>
+            <p class="rtp-teams"><?php echo $training ? "You're training with:" : "You're in:"; ?> <strong><?php echo esc_html(implode(', ', $in_names)); ?></strong></p>
             <?php endif; ?>
             <?php foreach ($offer_lines as $offer_line): ?>
             <p class="rtp-teams rtp-offer-place" style="background:#e8f1fb;border:1px solid #b7d3ef;border-radius:4px;color:#134e85;padding:8px 12px;"><?php echo $offer_line; ?></p>
@@ -1103,8 +1252,8 @@ class TeamOversight_Readiness {
             <p class="rtp-teams">You're coaching: <strong><?php echo esc_html(implode(', ', $coach_names)); ?></strong></p>
             <?php endif; ?>
             <?php else: ?>
-            <h3>Get Ready to <?php echo !empty($checklist['staff_only']) ? 'Coach' : 'Play'; ?> — <?php echo esc_html($season); ?></h3>
-            <p class="rtp-teams"><?php echo !empty($checklist['staff_only']) ? "You're coaching:" : "You're in:"; ?> <strong><?php echo esc_html(implode(', ', $team_names)); ?></strong></p>
+            <h3>Get Ready to <?php echo !empty($checklist['staff_only']) ? 'Coach' : ($training ? 'Train' : 'Play'); ?> — <?php echo esc_html($season); ?></h3>
+            <p class="rtp-teams"><?php echo !empty($checklist['staff_only']) ? "You're coaching:" : ($training ? "You're training with:" : "You're in:"); ?> <strong><?php echo esc_html(implode(', ', $team_names)); ?></strong></p><?php echo $train_coaching, "\n"; ?>
             <?php endif; ?>
 
             <?php
@@ -1419,6 +1568,9 @@ class TeamOversight_Readiness {
      * decision, 10 Nov 2026), never for a coach's verdict alone; before 2027
      * the verdicts still count, as they did. A Transfer column tracks a club
      * transfer's or ITC's paperwork (Not Submitted, Pending, Completed).
+     * 1.99.3: a Training Only row (2027 on) is marked Training only, its VV,
+     * shirt and kit cells read Not required (training only) (VV stays for one
+     * who also coaches), it has no Transfer form, and Ready follows its fees.
      */
     public function render_admin_page($season, $seasons = array()) {
         if (isset($_POST['action']) && $_POST['action'] === 'save_readiness_settings') {
@@ -1545,6 +1697,7 @@ class TeamOversight_Readiness {
             <p><strong><?php echo count($user_ids); ?></strong> players for <?php echo esc_html($season); ?>.
                 <?php if ($offers_season): ?>
                     A player appears here once they have accepted their offer or hold a place on a team.
+                    A Training Only player needs only their fees (and their VV registration if they also coach).
                 <?php else: ?>
                     Everyone on a team, or Selected or Training Only by a coach.
                 <?php endif; ?>
@@ -1574,7 +1727,12 @@ class TeamOversight_Readiness {
                             $my_offers = isset($offer_teams[$player_id]) ? $offer_teams[$player_id] : array();
                             // 2027 on: the accepted (or locked-in, not yet placed) offers' teams count, as on the player's own
                             // checklist (season_panel()); never a bare verdict. Before 2027: the verdicts, as before.
-                            $checklist = $offers_season ? self::compute($player, $player_season, false, array_keys($my_offers)) : self::compute($player, $player_season, true);
+                            // 1.99.3: each with the offer's role, so a Training Only offer counts as training.
+                            $my_offer_roles = array();
+                            foreach ($my_offers as $code => $offer) {
+                                $my_offer_roles[(string) $code] = self::offer_role($offer);
+                            }
+                            $checklist = $offers_season ? self::compute($player, $player_season, false, $my_offer_roles) : self::compute($player, $player_season, true);
                             if ($checklist === null) {
                                 continue;
                             }
@@ -1593,8 +1751,12 @@ class TeamOversight_Readiness {
                             }
                             $player_app = isset($applications[$player_id]) ? $applications[$player_id] : null;
                             $staff_only = !empty($checklist['staff_only']);
-                            // The Transfer column is for players (a coach who also applied has no transfer to track here).
-                            $needs_transfer = $track_transfers && !$staff_only && $player_app && TeamOversight_Transfer_Limits::needs_paperwork($player_app);
+                            // 1.99.3: Training Only (2027 on): fees only (and VV for one who also coaches), no transfer.
+                            $training_only = !empty($checklist['training_only']);
+                            $vv_step = isset($checklist['steps']['vv']) ? $checklist['steps']['vv'] : null;
+                            // The Transfer column is for players (a coach who also applied has no transfer to track here,
+                            // nor, since 1.99.3, a Training Only player).
+                            $needs_transfer = $track_transfers && !$staff_only && !$training_only && $player_app && TeamOversight_Transfer_Limits::needs_paperwork($player_app);
                             $tstatus = $needs_transfer ? TeamOversight_Transfer_Limits::transfer_status($player_app) : '';
                             // 1.92.1 (club decision, 10 Nov 2026): a player with paperwork isn't Ready until it is Completed.
                             // 1.93.1: that is the checklist's own transfer step (2027 on), which the player sees too, so
@@ -1610,7 +1772,7 @@ class TeamOversight_Readiness {
                             ?>
                             <tr>
                                 <td data-sort="<?php echo esc_attr(strtolower($player->display_name)); ?>"><a href="<?php echo esc_url(get_edit_user_link($player_id)); ?>"><?php echo esc_html($player->display_name); ?></a><br><small><?php echo esc_html($player->user_email); ?></small></td>
-                                <td data-sort="<?php echo esc_attr(strtolower(implode(', ', $checklist['teams']))); ?>"><?php echo esc_html(implode(', ', $checklist['teams'])); ?><?php echo $staff_only ? '<br><small style="color:#666;">Coach, not playing</small>' : ''; ?><?php foreach ($offer_words as $w): ?><br><small style="color:#996800;"><?php echo esc_html($w); ?></small><?php endforeach; ?></td>
+                                <td data-sort="<?php echo esc_attr(strtolower(implode(', ', $checklist['teams']))); ?>"><?php echo esc_html(implode(', ', $checklist['teams'])); ?><?php echo $staff_only ? '<br><small style="color:#666;">Coach, not playing</small>' : ($training_only ? '<br><small style="color:#666;">Training only</small>' : ''); ?><?php foreach ($offer_words as $w): ?><br><small style="color:#996800;"><?php echo esc_html($w); ?></small><?php endforeach; ?></td>
                                 <?php if ($track_transfers): ?>
                                     <td style="font-size: 12px;" data-sort="<?php echo $needs_transfer ? intval(array_search($tstatus, array_keys(TeamOversight_Transfer_Limits::TRANSFER_STATUSES), true)) : '-1'; ?>">
                                         <?php if ($needs_transfer): ?>
@@ -1631,6 +1793,9 @@ class TeamOversight_Readiness {
                                     </td>
                                 <?php endif; ?>
                                 <?php $vv_conf = self::vv_confirmed($player_id, $player_season); ?>
+                                <?php if ($vv_step === null): ?>
+                                <td style="font-size: 12px;" data-sort="1"><span style="color: #666;">Not required (training only)</span></td>
+                                <?php else: ?>
                                 <td style="font-size: 12px;" data-sort="<?php echo $vv_conf !== null ? '1' : '0'; ?>">
                                     <form method="post">
                                         <input type="hidden" name="action" value="save_vv_registration">
@@ -1644,13 +1809,14 @@ class TeamOversight_Readiness {
                                     <?php if ($vv_conf !== null): ?>
                                         <?php $vv_by = get_userdata(isset($vv_conf['by']) ? intval($vv_conf['by']) : 0); ?>
                                         <small>Ticked<?php echo $vv_by ? ' by ' . esc_html($vv_by->display_name) : ''; ?><?php echo !empty($vv_conf['at']) ? ', ' . esc_html(mysql2date('j M Y', (string) $vv_conf['at'])) : ''; ?></small>
-                                    <?php elseif (!empty($checklist['steps']['vv']['self_ticked'])): ?>
+                                    <?php elseif (!empty($vv_step['self_ticked'])): ?>
                                         <small style="color:#996800;">The player ticked this themselves earlier. Check VV before confirming.</small>
                                     <?php endif; ?>
                                 </td>
+                                <?php endif; ?>
                                 <td style="font-size: 12px;" data-sort="<?php echo $shirt_step === null ? '1' : esc_attr(number_format(min(1, intval($shirt_step['shirt_required']) > 0 ? intval($shirt_step['shirt_paid']) / intval($shirt_step['shirt_required']) : 1), 2, '.', '')); ?>">
                                     <?php if ($shirt_step === null): ?>
-                                        <span style="color: #666;"><?php echo $staff_only ? 'Not required (coach)' : 'Not required (supplied)'; ?></span>
+                                        <span style="color: #666;"><?php echo $staff_only ? 'Not required (coach)' : ($training_only ? 'Not required (training only)' : 'Not required (supplied)'); ?></span>
                                     <?php else: ?>
                                         <?php if ($shirt_step['done']): ?>
                                             <span style="color:#1a7a2e;">✔ Paid <?php echo intval($shirt_step['shirt_paid']); ?>/<?php echo intval($shirt_step['shirt_required']); ?></span>
@@ -1675,7 +1841,7 @@ class TeamOversight_Readiness {
                                 </td>
                                 <td style="font-size: 12px;" data-sort="<?php echo (!$kit_step || $kit_step['done']) ? '1' : '0'; ?>">
                                     <?php if (!$kit_step): ?>
-                                        <span style="color: #666;">Not required (coach)</span>
+                                        <span style="color: #666;"><?php echo $training_only ? 'Not required (training only)' : 'Not required (coach)'; ?></span>
                                     <?php else: ?>
                                         <?php echo $kit_step['done'] ? '<span style="color:#1a7a2e;">✔' . (empty($kit_step['auto_done']) ? ' (player ticked)' : ' (purchased)') . '</span><br>' : ''; ?>
                                         <?php echo esc_html(implode(' · ', $kit_summary)); ?>
