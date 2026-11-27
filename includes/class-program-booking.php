@@ -974,11 +974,12 @@ class TeamOversight_Program_Booking {
         $out .= '<p class="murvc-book-cutoff">' . esc_html(TeamOversight_Program_Sessions::cutoff_words($setup)) . '</p>';
         $ladder = self::ladder($tiers, $price, $unit);
         if (!empty($ladder)) {
-            $out .= '<details class="murvc-book-ladder"><summary>Prices when you book more</summary><ul>';
+            // 1.99.2 (club request 27 Nov 2026): always shown, never a dropdown, so the cheaper prices are seen.
+            $out .= '<div class="murvc-book-ladder"><p class="murvc-book-ladder-title">Prices when you book more</p><ul>';
             foreach ($ladder as $line) {
                 $out .= '<li>' . esc_html($line) . '</li>';
             }
-            $out .= '</ul></details>';
+            $out .= '</ul></div>';
         }
 
         if (!$selling) {
@@ -1477,6 +1478,10 @@ class TeamOversight_Program_Booking {
         .murvc-book legend { font-weight: 600; margin-bottom: 4px; }
         .murvc-book .murvc-book-pick { display: inline-block; margin: 0 14px 6px 0; }
         .murvc-book .murvc-book-note, .murvc-book .murvc-book-cutoff { color: var(--mb-muted); }
+        .murvc-book .murvc-book-ladder { background: var(--mb-tint); border-left: 3px solid var(--mb-good); padding: 8px 12px; margin: 10px 0 14px; }
+        .murvc-book .murvc-book-ladder-title { font-weight: 700; margin: 0 0 4px; }
+        .murvc-book .murvc-book-ladder ul { margin: 0 0 0 1.2em; padding: 0; }
+        .murvc-book .murvc-book-ladder li { margin: 0 0 2px; }
         .murvc-book .murvc-book-shortcuts .button { margin: 0 6px 6px 0; }
         .murvc-book .murvc-book-shortcuts .is-current { font-weight: 700; }
         .murvc-book .murvc-book-list { list-style: none; margin: 10px 0; padding: 0; border-top: 1px solid var(--mb-line); }
